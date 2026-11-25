@@ -27,6 +27,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
 )
@@ -145,9 +147,10 @@ func NewMCPServer(
 
 	// The address index is the IndexerDB's: a ledger's database has no
 	// metadata store to page from, and get_utxos then reads the live UTxO set.
-	var addressLookup utxoAddressLookup
+	var reads indexerReads
 	if deps.Database != nil && deps.Database.Metadata() != nil {
-		addressLookup = deps.Database.UtxosByAddressPage
+		reads.addressLookup = deps.Database.UtxosByAddressPage
+		reads.epochBlocks = indexerEpochBlocks(deps.Database)
 	}
 
 	// Register tools, resources & prompts
@@ -164,7 +167,7 @@ func NewMCPServer(
 		deps.Network,
 		cfg.QueryTimeout,
 		limits,
-		addressLookup,
+		reads,
 	)
 	resourceLogger := deps.Logger
 	if resourceLogger == nil {
@@ -183,4 +186,23 @@ func NewMCPServer(
 	RegisterPrompts(server, db, deps.LedgerState, deps.Network)
 
 	return server, openedDB, nil
+}
+
+// indexerEpochBlocks counts blocks from the IndexerDB's block nonces, which it
+// keeps for every block it indexes, or is nil when its store has no slot-range
+// statistics.
+func indexerEpochBlocks(db *database.Database) epochBlockCounter {
+	slotRanges, ok := db.Metadata().(metadata.SlotRangeStore)
+	if !ok {
+		return nil
+	}
+	return func(ctx context.Context, start, end uint64) (int, error) {
+		txn := db.Transaction(ctx, false)
+		defer txn.Release()
+		stats, err := slotRanges.GetBlockSlotRangeStats(start, end, txn.Metadata())
+		if err != nil {
+			return 0, err
+		}
+		return stats.Count, nil
+	}
 }

@@ -71,7 +71,10 @@ func TestResolveDatumOrScriptResolvesStoredOffsets(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1.0"}, nil)
 	limits := newReadLimits()
 	limits.payloads = fixedPayloads{payload: datumCbor}
-	registerCardanoTools(server, db, nil, nil, "preview", 5*time.Second, limits)
+	registerCardanoTools(
+		server, db, nil, nil, "preview", 5*time.Second, limits,
+		indexerReads{},
+	)
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

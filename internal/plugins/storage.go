@@ -76,10 +76,12 @@ type StorageDependencies struct {
 	// MigrateReleased, when set, is run by OpenDatabase before it opens a
 	// ledger database: it moves the ledger state of a v0.94.2 database out of
 	// the metadata store openMetadata opens (see nodestorage.ReleasedMigration).
+	// The resolved stores include the provider needed by existing ImmutableDB
+	// markers; their lifecycle remains owned by the host.
 	// Without it, a v0.94.2 database fails to open.
 	MigrateReleased func(
 		ctx context.Context,
-		blobStore blob.BlobStore,
+		stores database.Stores,
 		openMetadata func(context.Context) (metadata.MetadataStore, func() error, error),
 	) error
 }
@@ -399,7 +401,7 @@ func OpenDatabase(
 	}
 	if deps.MigrateReleased != nil && dbConfig != nil && dbConfig.Role == "" {
 		if err := deps.MigrateReleased(
-			ctx, stores.Blob, ReleasedMetadataOpener(selections, deps),
+			ctx, stores, ReleasedMetadataOpener(selections, deps),
 		); err != nil {
 			return nil, errors.Join(
 				fmt.Errorf("migrate the v0.94.2 ledger state: %w", err),

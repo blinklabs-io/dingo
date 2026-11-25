@@ -713,7 +713,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to reopen storage: %w", err)
 	}
-	if err := n.migrateReleasedLedger(ctx, stores.Blob, deps); err != nil {
+	if err := n.migrateReleasedLedger(ctx, stores, deps); err != nil {
 		return fmt.Errorf("migrate the v0.94.2 ledger state: %w", err)
 	}
 	db, err := database.New(ctx, n.databaseConfig(), stores)
@@ -1223,7 +1223,7 @@ func (n *Node) reinitializeAPIServers() error {
 			mesh.ProviderDependencies{
 				Listen:             n.config.apiListenerFactory,
 				Logger:             n.config.logger,
-				LedgerState:        n.meshLedgerState(),
+				LedgerState:        n.ledgerState,
 				Database:           n.meshDatabase(),
 				Chain:              n.meshChain(),
 				Ready:              n.apiReadiness(),

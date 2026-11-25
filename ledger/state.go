@@ -43,7 +43,6 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
@@ -1338,6 +1337,12 @@ type EndorserBlockValidationFunc func(
 // ctx bounds the whole fetch, including its per-connection failover. The caller
 // owns the budget: block application waits for this fetch, so an implementation
 // must not outlive the context it was handed.
+//
+// A connection already serving another fetch is skipped rather than waited
+// for, so a background prefetch fails over or gives up promptly. When ctx is
+// marked with WithRequiredEndorserBlockFetch and every usable connection is
+// busy, the implementation instead waits for one to become free, bounded by
+// ctx, because the caller cannot make progress without the endorser block.
 type EndorserBlockFetcherFunc func(
 	ctx context.Context,
 	ebSlot uint64,
@@ -1351,6 +1356,23 @@ type EndorserBlockFetcherFunc func(
 var ErrEndorserBlockFetchNoPeer = errors.New(
 	"no leios-fetch connection available",
 )
+
+type requiredEndorserBlockFetchKey struct{}
+
+// WithRequiredEndorserBlockFetch marks ctx as carrying a mandatory fetch: the
+// certified closure of a ranking block that block application is waiting for.
+// An EndorserBlockFetcherFunc handed such a context waits, within ctx, for a
+// busy leios-fetch connection instead of returning at once with a busy error.
+func WithRequiredEndorserBlockFetch(ctx context.Context) context.Context {
+	return context.WithValue(ctx, requiredEndorserBlockFetchKey{}, true)
+}
+
+// IsRequiredEndorserBlockFetch reports whether ctx was marked by
+// WithRequiredEndorserBlockFetch.
+func IsRequiredEndorserBlockFetch(ctx context.Context) bool {
+	required, _ := ctx.Value(requiredEndorserBlockFetchKey{}).(bool)
+	return required
+}
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a
 // blockfetch request for a range of blocks. It returns the request ID the
@@ -3528,16 +3550,6 @@ func (ls *LedgerState) LatestOpCertSequence(
 	return ls.ledgerDB().LatestPoolOpCertSequence(
 		context.Background(), pkh, nil,
 	)
-}
-
-// Datums looks up datums by hash in one read transaction for
-// query.ReadData. The result is aligned with hashes; an entry is nil when
-// that datum is not stored.
-func (ls *LedgerState) Datums(
-	ctx context.Context,
-	hashes [][]byte,
-) ([]*models.Datum, error) {
-	return ls.indexerDB().GetDatums(ctx, hashes)
 }
 
 // CloseDBWorkerPoolShutdownTimeout, CloseProcessBlocksDrainTimeout, and
@@ -15300,191 +15312,6 @@ func (ls *LedgerState) UtxosByRefsBounded(
 	return utxos, nil
 }
 
-// UtxosByAddress returns all UTxOs that belong to any of the specified addresses
-func (ls *LedgerState) UtxosByAddress(
-	ctx context.Context,
-	addrs []ledger.Address,
-) ([]models.Utxo, error) {
-	utxos, err := ls.utxosByAddress(
-		addrs,
-		0,
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	ret := make([]models.Utxo, 0, len(utxos))
-	ret = append(ret, utxos...)
-	return ret, nil
-}
-
-// ScanUtxosByAddress visits every UTxO matching q's exact address patterns
-// one bounded page at a time from a single database snapshot and returns the
-// tip stored in that snapshot. See database.Database.ScanUtxosByAddress.
-func (ls *LedgerState) ScanUtxosByAddress(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-	visit func([]models.UtxoWithOrdering) error,
-) (ochainsync.Tip, error) {
-	return ls.indexerDB().
-		ScanUtxosByAddress(ctx, q, maxCandidates, maxBytes, visit)
-}
-
-// UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
-// bounding candidate work and retained CBOR.
-func (ls *LedgerState) UtxosByAddressBoundedPage(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-) (models.UtxoAddressPage, error) {
-	return ls.indexerDB().UtxosByAddressBoundedPage(
-		ctx,
-		q,
-		maxCandidates,
-		maxBytes,
-	)
-}
-
-// UtxoBalanceByAddressAtSlot aggregates a historical address balance without
-// materializing its UTxO set.
-func (ls *LedgerState) UtxoBalanceByAddressAtSlot(
-	ctx context.Context,
-	addr lcommon.Address,
-	slot uint64,
-) (models.AddressBalance, error) {
-	txn := database.NewTxnContext(ctx, ls.db, false)
-	defer txn.Release()
-	return ls.indexerDB().
-		UtxoBalanceByAddressAtSlot(ctx, addr, slot, dbadapter.Txn(txn))
-}
-
-// UtxoByRefIncludingSpent returns a UTxO by reference, including
-// spent outputs. This is needed for APIs that must resolve consumed
-// inputs to display source address and amount.
-func (ls *LedgerState) UtxoByRefIncludingSpent(
-	txId []byte,
-	outputIdx uint32,
-) (*models.Utxo, error) {
-	return ls.utxoIncludingSpent(context.Background(), nil, txId, outputIdx)
-}
-
-// GetTransactionsByBlockHash returns all transactions for a given
-// block hash.
-func (ls *LedgerState) GetTransactionsByBlockHash(
-	blockHash []byte,
-) ([]models.Transaction, error) {
-	return ls.indexerDB().GetTransactionsByBlockHash(
-		context.Background(),
-		blockHash,
-		nil,
-	)
-}
-
-// GetTransactionsByHashes returns transactions for the provided hashes.
-func (ls *LedgerState) GetTransactionsByHashes(
-	hashes [][]byte,
-) ([]models.Transaction, error) {
-	txs, err := ls.ledgerDB().
-		GetTransactionsByHashes(context.Background(), hashes, nil)
-	if err != nil {
-		return nil, fmt.Errorf("get transactions by hashes: %w", err)
-	}
-	return txs, nil
-}
-
-// GetTransactionsByAddress returns transactions involving the given
-// address.
-func (ls *LedgerState) GetTransactionsByAddress(
-	addr lcommon.Address,
-	limit int,
-	offset int,
-) ([]models.Transaction, error) {
-	return ls.indexerDB().GetTransactionsByAddress(
-		context.Background(),
-		addr,
-		limit,
-		offset,
-		nil,
-	)
-}
-
-// GetTransactionsByAddressWithOrder returns transactions
-// involving the given address with explicit ordering.
-func (ls *LedgerState) GetTransactionsByAddressWithOrder(
-	ctx context.Context,
-	addr lcommon.Address,
-	limit int,
-	offset int,
-	order string,
-	from *models.AddressTransactionPosition,
-	to *models.AddressTransactionPosition,
-) ([]models.Transaction, error) {
-	txs, err := ls.indexerDB().GetTransactionsByAddressWithOrder(
-		ctx,
-		addr,
-		limit,
-		offset,
-		order,
-		from,
-		to,
-		nil,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"get transactions by address (limit=%d offset=%d order=%s): %w",
-			limit,
-			offset,
-			order,
-			err,
-		)
-	}
-	return txs, nil
-}
-
-// CountTransactionsByAddress returns the total number of
-// transactions involving the given address.
-func (ls *LedgerState) CountTransactionsByAddress(
-	ctx context.Context,
-	addr lcommon.Address,
-	from *models.AddressTransactionPosition,
-	to *models.AddressTransactionPosition,
-) (int, error) {
-	count, err := ls.indexerDB().CountTransactionsByAddress(
-		ctx,
-		addr,
-		from,
-		to,
-		nil,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("count transactions by address: %w", err)
-	}
-	return count, nil
-}
-
-// CountTransactionsByMetadataLabel returns the total number of transactions
-// that include metadata for the requested label.
-func (ls *LedgerState) CountTransactionsByMetadataLabel(
-	label uint64,
-) (int, error) {
-	count, err := ls.indexerDB().CountTransactionsByMetadataLabel(
-		context.Background(),
-		label,
-		nil,
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"count transactions by metadata label %d: %w",
-			label,
-			err,
-		)
-	}
-	return count, nil
-}
-
 // resolveBlockValidationEra returns the era that validates a transaction from
 // a block. Historical block application can cross a hard-fork boundary, so the
 // immediately previous era remains valid there.
@@ -17408,11 +17235,6 @@ func (ls *LedgerState) BlockfetchRangeExpectedBytes(
 		return 0
 	}
 	return size
-}
-
-// indexerDB returns the IndexerDB queries ledger state forwards for the APIs.
-func (ls *LedgerState) indexerDB() indexerdb.Reader {
-	return dbadapter.New(ls.db)
 }
 
 // ledgerDB returns the LedgerDB consensus reads and writes through: the one

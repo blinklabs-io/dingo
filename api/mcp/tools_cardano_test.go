@@ -459,7 +459,7 @@ func TestCardanoToolsWithMetadataSchema(t *testing.T) {
 	for _, args := range []map[string]any{{"epoch": 9}, {}} {
 		summary = callTool(t, cs, "get_epoch_summary", args, false)
 		require.Contains(t, summary, "bbbb")
-		require.Contains(t, summary, "Recorded Blocks**: 2")
+		require.Contains(t, summary, "Recorded Blocks**: 2\n")
 	}
 	_, err = db.Exec("DROP TABLE utxo")
 	require.NoError(t, err)

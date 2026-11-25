@@ -298,3 +298,52 @@ func TestSQLiteToolsQueryTheIndexerDB(t *testing.T) {
 		}
 	}
 }
+
+// get_epoch_summary on a node built as NewMCPServer builds it counts the
+// IndexerDB's blocks, with no retained-window caveat, beside a ledger that
+// holds the epochs.
+func TestEpochSummaryServerCountsIndexerBlocks(t *testing.T) {
+	t.Parallel()
+	c := newCoreLedger(t)
+	require.NoError(t, c.set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
+		Epochs: []models.Epoch{
+			{
+				EpochId: 5, StartSlot: 1000, LengthInSlots: 100,
+				SlotLength: 1000, EraId: 6, Nonce: bytes.Repeat([]byte{0xa5}, 32),
+			},
+			{
+				EpochId: 6, StartSlot: 1100, LengthInSlots: 100,
+				SlotLength: 1000, EraId: 6, Nonce: bytes.Repeat([]byte{0xa6}, 32),
+			},
+		},
+	}))
+	idx, err := dbtest.NewIndexerDatabase(t, c.db, dbtest.IndexerOptions{})
+	require.NoError(t, err)
+	for i, slot := range []uint64{1000, 1010, 1050, 1099, 1100} {
+		h := bytes.Repeat([]byte{byte(0x70 + i)}, 32)
+		require.NoError(t, idx.SetBlockNonce(h, slot, h, false, nil))
+	}
+	server, _, err := NewMCPServer(
+		t.Context(),
+		DefaultProviderConfig(),
+		ProviderDependencies{
+			Database:    idx,
+			LedgerState: c.ls,
+			Network:     "preview",
+		},
+	)
+	require.NoError(t, err)
+	ct, st := mcp.NewInMemoryTransports()
+	ss, err := server.Connect(t.Context(), st, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ss.Close() })
+	cs, err := mcp.NewClient(
+		&mcp.Implementation{Name: "test", Version: "1"}, nil,
+	).Connect(t.Context(), ct, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	got := callTool(t, cs, "get_epoch_summary", map[string]any{"epoch": 5}, false)
+	require.Contains(t, got, "- **Recorded Blocks**: 4\n")
+	require.NotContains(t, got, retainedWindowNote)
+}

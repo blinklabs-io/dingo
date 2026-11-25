@@ -42,7 +42,7 @@ func (s *Server) handleAccountBalance(
 		return
 	}
 
-	// Resolve the point before touching the ledger: a balance pinned
+	// Resolve the point before reading any UTxO: a balance pinned
 	// to a block the node cannot resolve must fail rather than fall
 	// back to another point.
 	point, meshErr := s.resolveBalancePoint(r.Context(),
@@ -63,7 +63,7 @@ func (s *Server) handleAccountBalance(
 
 	var balances []*Amount
 	if point.historical {
-		historical, err := s.config.LedgerState.
+		historical, err := s.config.Database.
 			UtxoBalanceByAddressAtSlot(r.Context(), addr, point.slot)
 		if err != nil {
 			s.writeAccountBalanceError(w, r, req, point, err)
@@ -71,7 +71,7 @@ func (s *Server) handleAccountBalance(
 		}
 		balances = aggregateAddressBalance(historical)
 	} else {
-		utxos, err := s.config.LedgerState.UtxosByAddress(
+		utxos, err := s.config.Database.UtxosByAddress(
 			r.Context(),
 			[]ledger.Address{addr},
 		)
