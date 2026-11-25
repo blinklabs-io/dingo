@@ -384,9 +384,9 @@ func validateProposalDomains(
 // dropped at its own slot, so no later boundary expires, refunds or ratifies
 // it again.
 //
-// pp and validated have the meaning they have for ProcessProposals: a
-// ParameterChange the era's proposal rule refuses is rejected before anything
-// is stored.
+// It applies none of the era's proposal rules: a replayed block was validated
+// when the ledger adopted it, so a rule that refused one of its proposals
+// here would stall replay on a block the chain accepted.
 func ProcessHistoricalProposals(
 	ctx context.Context,
 	tx lcommon.Transaction,
@@ -394,19 +394,9 @@ func ProcessHistoricalProposals(
 	txIndex uint32,
 	currentEpoch uint64,
 	govActionLifetime uint64,
-	pp lcommon.ProtocolParameters,
 	db ledgerdb.LedgerDB,
 	txn ledgerdb.Txn,
-	validated *bool,
 ) error {
-	if err := validateCostModelLanguageIDs(tx); err != nil {
-		return err
-	}
-	if err := validateProposalDomains(
-		tx, point, currentEpoch, pp, validated,
-	); err != nil {
-		return err
-	}
 	return persistGovernanceProposals(
 		ctx,
 		tx,
@@ -575,12 +565,10 @@ func ProcessHistoricalTransactionEffects(
 	govActionLifetime uint64,
 	db ledgerdb.LedgerDB,
 	txn ledgerdb.Txn,
-	pp lcommon.ProtocolParameters,
-	validated *bool,
 ) error {
 	if len(tx.ProposalProcedures()) > 0 {
 		if err := ProcessHistoricalProposals(
-			ctx, tx, point, txIndex, currentEpoch, govActionLifetime, pp, db, txn, validated,
+			ctx, tx, point, txIndex, currentEpoch, govActionLifetime, db, txn,
 		); err != nil {
 			return fmt.Errorf("process governance proposals: %w", err)
 		}
