@@ -1978,9 +1978,9 @@ dingo/
 │   ├── hot_cache.go     # Hot cache for frequently accessed data
 │   ├── block_lru_cache.go # Block-level LRU cache
 │   ├── immutable/       # ImmutableDB chunk reader
-│   ├── indexerdb/       # IndexerDB role: API history and address queries
+│   ├── indexerdb/       # IndexerDB tip and readiness store
 │   ├── ledgerdb/        # LedgerDB role: ledger state consensus reads and writes
-│   │   └── dbadapter/   # LedgerDB and IndexerDB over *database.Database
+│   │   └── dbadapter/   # LedgerDB over *database.Database
 │   ├── lifecycle/       # Snapshot, restore, and truncation library
 │   ├── models/          # Database models
 │   ├── types/           # Database types
@@ -3250,10 +3250,13 @@ and `ChainStore`, plus `Applier` for the block-apply write path. `LedgerDB`
 composes them with its own `Txn`. Two further roles mark what the LedgerDB
 must not keep: `TxHistory` lists the consensus paths that still read
 transaction history, and `LeiosStore` holds endorser blocks until they move to
-their own store. `database/indexerdb.Reader` holds the history and address
-queries that ledger state forwards for the APIs; validation does not use it.
+their own store. The ledger holds no IndexerDB handle: validation never reads
+the IndexerDB, and the `ledger` package does not import `database/indexerdb`
+(`internal/architecture`'s import boundaries enforce it). The APIs read their
+history and address queries from the IndexerDB themselves, in the API layer or
+the node wiring.
 
-`database/ledgerdb/dbadapter` implements both over `*database.Database`, so
+`database/ledgerdb/dbadapter` implements the LedgerDB over `*database.Database`, so
 every role is served by today's metadata and blob stores. Its transactions are
 `*database.Txn` values, which satisfy `ledgerdb.Txn`; a nil `Txn` runs a call
 in its own transaction, as before. Savepoints cover the metadata store only.
@@ -3319,8 +3322,6 @@ snapshot manager and calculator, and the governance package read and write
 ledger state through it, and carry a `ledgerdb.Txn` rather than a
 `*database.Txn`. Transactions open with `Begin`, or with `BeginLedgerOnly`
 when they never read block bytes, and `Run` replaces `(*database.Txn).Do`.
-API history and address queries that ledger state forwards go through
-`LedgerState.indexerDB()`.
 
 A nil `*database.Txn` converted to `ledgerdb.Txn` is a non-nil interface, so
 callers that may hold a nil transaction convert it with `dbadapter.Txn`, which
@@ -3680,8 +3681,7 @@ in this mode: point and batch lookups (the state's wrappers, the mempool's
 resolution, LocalStateQuery's current-tip `GetUTxOByTxIn`, replay recovery,
 the continuation audit) go through the validation read path; the AVVM scan,
 the Byron reserves sum and address lookups iterate the set with the open
-transaction's staged changes over it; and a spent input (Leios dedup,
-`UtxoByRefIncludingSpent`) is read from the body of the transaction that
+transaction's staged changes over it; and a spent input (Leios dedup) is read from the body of the transaction that
 produced it, as the metadata store records outputs: a valid transaction's
 outputs, or an invalid one's collateral return. LocalStateQuery UTxO queries
 (`GetUTxOByAddress`, `GetUTxOByTxIn`, `GetUTxOWhole`) pinned to a point are
@@ -4059,9 +4059,13 @@ reads transactions, address history, pending reward credit
 (`ledger.PendingRewardCreditIn`) and the rows behind every list from
 `db()`; the one fact only the ledger store holds, whether a snapshot's stake
 inputs are still being written, is read from its committed state
-(`RewardStakeInputsIncompleteCommitted`). Mesh's account endpoints read UTxOs
-through `Node.meshLedgerState`, which answers them from the IndexerDB and
-leaves slot-time and parameter reads to the ledger state.
+(`RewardStakeInputsIncompleteCommitted`). Mesh reads blocks, transactions and
+its account UTxOs through `MeshDatabase`, which `Node.meshDatabase` builds over
+the IndexerDB; only slot-time and parameter reads go to the ledger state. MCP
+is both an API and a node-state tool: it reads ledger state through the
+ledger's LedgerDB, and on a node with an IndexerDB it takes address UTxO pages
+and `get_epoch_summary`'s block count from the IndexerDB, since the ledger
+keeps block nonces only for a retained window of recent epochs.
 
 ## Ledger/chain reconciliation
 
@@ -4270,7 +4274,7 @@ unbounded. `MidnightState` calls run with no server deadline and no
 concurrency limit. The RPC context is also attached to every metadata read
 transaction, so client cancellation stops database work.
 
-`Config.Database` (set to `midnightserver.NewDatabase(n.db)` — `adapter.go`'s
+`Config.Database` (set to `midnightserver.NewDatabase(n.indexerDB)` — `adapter.go`'s
 `databaseAdapter`, which bridges the package-level
 `database.BlockByHash`/`BlocksRecent`/`BlockBeforeSlot`/`BlockByNumber`
 functions into `MidnightDatabase` interface methods, mirroring `api/mesh`'s `meshDatabaseAdapter`/`MeshDatabase`) and
@@ -17293,9 +17297,12 @@ size.
 The tools that read epoch, constitution, committee, DRep and governance
 proposal and vote state (`get_epoch_summary`, `get_governance_state`,
 `get_governance_proposal`) read it through the ledger's `LedgerDB` when the
-server has a ledger state (`api/mcp/ledger_reads.go`), so they see what
-consensus sees in every mode and need no SQLite connection; with no ledger
-state they read the SQLite database as before. `get_account` reads the
+server has a ledger state (`api/mcp/ledger_reads.go`) and need no SQLite
+connection; with no ledger state they read the SQLite database. The one
+exception is `get_epoch_summary`'s block count: on a node with an IndexerDB it
+is counted from the IndexerDB, which can lag consensus, and without one from
+the block nonces the ledger retains, with a note that it covers only that
+window. `get_account` reads the
 account from the ledger and takes only its IndexerDB row references from the
 IndexerDB. `get_pool_performance` reads the IndexerDB's reward rows, which
 keep every epoch, and without an IndexerDB the epochs the ledger state keeps.
@@ -18007,7 +18014,8 @@ above.
 `/account/coins` returns every coin of the exact address in one response. The
 request and response expose no pagination, cursor, limit, offset or truncation
 state because a Mesh client treats omitted coins as absent, and neither an
-account nor concurrent reads are refused for their size or number. The handler reads through `LedgerState.ScanUtxosByAddress`, which
+account nor concurrent reads are refused for their size or number. The handler reads through `MeshDatabase.ScanUtxosByAddress`, the IndexerDB's
+`database.ScanUtxosByAddress`, which
 holds one database read transaction for the whole request and visits the
 matching outputs in ascending ledger order in internal pages of at most 500
 matches, 5,000 scanned candidates and 1 MiB of output CBOR (a page size, not a
@@ -18053,8 +18061,8 @@ The server depends on four narrow interfaces (`api/mesh/node_interface.go`) —
 `MeshChain`, `MeshDatabase`, `MeshLedgerState`, and `MeshMempool` — rather than
 on the concrete chain, database, ledger, and mempool types, so the handlers stay
 free of storage-layer concerns and are testable without a node.
-`meshDatabaseAdapter` (`api/mesh/adapter.go`) is the only binding between those
-interfaces and real storage.
+`meshDatabaseAdapter` (`api/mesh/adapter.go`) binds `MeshDatabase` to a
+`*database.Database`.
 
 Two contracts follow from that boundary:
 
@@ -18072,7 +18080,7 @@ Two contracts follow from that boundary:
   `/account/balance` honors it. A request carrying a `block_identifier`
   resolves that block through the same lookup `/block` uses, aggregates the
   address balance at the block's slot via
-  `MeshLedgerState.UtxoBalanceByAddressAtSlot` (UTxOs added at or before the
+  `MeshDatabase.UtxoBalanceByAddressAtSlot` (UTxOs added at or before the
   slot and not spent until after it, summed in metadata storage without
   materializing them), and echoes the resolved block back as the response's
   `block_identifier` — never the tip. The balance is summed over every
@@ -18160,12 +18168,12 @@ its database page scan, so cancellation and a configured cap stop CBOR hydration
 before a full page is retained; a capped page returns a resumption token.
 `ReadData` looks each distinct
 datum hash up once, in first-seen order, so repeated hashes in a request yield
-one value, and resolves them through `LedgerState.Datums` /
+one value, and resolves them through `QueryDatabase.Datums`, the IndexerDB's
 `Database.GetDatums`: one metadata read transaction per request, bound to the
 request context and checked before each lookup, so a cancelled caller stops the
 batch instead of opening a transaction per hash. `ReadUtxos` resolves exactly
 the requested (tx hash, output index) references and loads their CBOR through
-`LedgerState.UtxosByRefsBounded` / `Database.UtxosByRefsBounded`, which counts
+`QueryDatabase.UtxosByRefsBounded` / `Database.UtxosByRefsBounded`, which counts
 bytes as each output is read and stops with `ErrUtxoBytesExceeded` (mapped to
 `ResourceExhausted`) once the running total passes a configured `MaxResponseBytes`, so a
 request holds at most the limit plus one output; it also observes the request

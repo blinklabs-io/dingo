@@ -1933,7 +1933,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			mesh.ProviderDependencies{
 				Listen:             n.config.apiListenerFactory,
 				Logger:             n.config.logger,
-				LedgerState:        n.meshLedgerState(),
+				LedgerState:        n.ledgerState,
 				Database:           n.meshDatabase(),
 				Chain:              n.meshChain(),
 				Ready:              n.apiReadiness(),
