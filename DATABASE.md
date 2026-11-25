@@ -8441,8 +8441,11 @@ older than the ledger stability window:
   IndexerDB's rows name only blocks at or below its tip, so no block a row
   names expires before the writer has indexed it. The pruner also skips, and
   records as held, a block a payload in use still names (`Held`, see [Payload
-  columns](#payload-columns)); once a block has expired, the payloads its rows
-  name read back as `types.ErrHistoryExpired` unless a live output holds them.
+  columns](#payload-columns)), and before it expires a block it moves the
+  `datum` and `script` rows naming it to another carrier or marks them
+  expired (`BeforeExpire`, `Database.PrepareBlockExpiry`); once a block has
+  expired, the payloads its rows name read back as `types.ErrHistoryExpired`
+  unless a live output holds them.
 - A node with `historyExpiry.enabled` runs no ImmutableDB: block bodies stay
   in the blob store and are never promoted, Mithril chunk adoption is skipped
   so bootstrap copies bodies, and a database written by v0.94.2 with expiry on

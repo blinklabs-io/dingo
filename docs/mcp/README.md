@@ -888,12 +888,15 @@ Provides historical staking and rewards analytics for any stake pool:
 #### `resolve_datum_or_script`
 Resolves 28-byte script hashes or 32-byte datum hashes stored on-chain:
 - For **Datums**: Decodes raw Plutus CBOR data into structured JSON, displaying
-  constructor tags, fields, and the slot it was added.
+  constructor tags, fields, and the slot of the block its bytes are read
+  from: the first block that carried it, or a later carrier once that block
+  expired.
   The `datum.raw_datum` and `script.content` columns hold a 52-byte block
   offset, not the bytes; this tool reads the bytes from the block stores, and a
   payload whose block expired with no archive returns an error.
 - For **Scripts**: Identifies script type (`Native / MultiSig`, `PlutusV1`,
-  `PlutusV2`, `PlutusV3`), size in bytes, and slot created.
+  `PlutusV2`, `PlutusV3`), size in bytes, and the slot of the block its
+  bytes are read from, as for datums.
 - **Coverage**: Core mode does not populate the API-mode datum, script, or
   redeemer detail indexes. API mode indexes details from transactions it
   processes; available and retained history still limits results. Dingo rejects
