@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
@@ -101,9 +102,19 @@ VALUES (?, ?, 0, 5, ?, 0, 0)`,
 		`INSERT INTO midnight_deregistrations
 (full_datum, tx_hash, utxo_tx_hash, utxo_index, block_number, block_hash, tx_index, block_timestamp_ms)
 VALUES (?, ?, ?, 0, 6, ?, 0, 0)`,
-		[]byte{0x04}, bytes.Repeat([]byte{0x12}, 32), txID, blockHash,
+		(&types.CborOffset{
+			BlockSlot: slot + 100, BlockHash: [32]byte(otherHash), ByteLength: 1,
+		}).Encode(),
+		bytes.Repeat([]byte{0x12}, 32), txID, blockHash,
 	)
-	require.False(t, held(slot+100, otherHash), "the registration was spent")
+	require.True(t, held(slot+100, otherHash),
+		"a rollback of the spend must restore the datum, so the block stays")
+	exec(
+		"INSERT INTO tip (hash, slot, block_number) VALUES (?, 9000, ?)",
+		bytes.Repeat([]byte{0x15}, 32), 6+metadata.MidnightRollbackDepth,
+	)
+	require.False(t, held(slot+100, otherHash), "the spend is past the rollback window")
+	exec("DELETE FROM tip")
 
 	// The latest Midnight Ariadne parameters and the current governance datum
 	// of a type name their block; earlier rows are history.
@@ -174,4 +185,66 @@ func TestActivePayloadQueriesUseIndexes(t *testing.T) {
 		require.NoError(t, rows.Close())
 		require.Contains(t, plan, index, "%s is planned without its index:\n%s", name, plan)
 	}
+}
+
+// A rollback restores the datum a spend or a journal row names, so the block
+// that datum is read from stays while the rollback can still happen: for a
+// deregistration, until the IndexerDB tip is past the rollback window, and for
+// a journal row, until the journal prunes it.
+func TestBlockHoldsPayloadsARollbackRestores(t *testing.T) {
+	t.Parallel()
+	store, db := newManagementTestStoreWithRawDB(t)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		_, err := db.Exec(query, args...)
+		require.NoError(t, err, query)
+	}
+	held := func(hash []byte) bool {
+		t.Helper()
+		got, err := store.BlockHoldsActivePayloads(t.Context(), 7, hash, 0)
+		require.NoError(t, err)
+		return got
+	}
+	offsetOf := func(hash []byte) []byte {
+		var h [32]byte
+		copy(h[:], hash)
+		return (&types.CborOffset{BlockSlot: 7, BlockHash: h, ByteLength: 1}).Encode()
+	}
+	regBlock := bytes.Repeat([]byte{0xa1}, 32)
+	removalBlock := bytes.Repeat([]byte{0xa2}, 32)
+	ariadneBlock := bytes.Repeat([]byte{0xa3}, 32)
+	other := bytes.Repeat([]byte{0xa4}, 32)
+
+	exec(
+		`INSERT INTO midnight_deregistrations
+(full_datum, tx_hash, utxo_tx_hash, utxo_index, block_number, block_hash, tx_index, block_timestamp_ms)
+VALUES (?, ?, ?, 0, 100, ?, 0, 0)`,
+		offsetOf(regBlock), bytes.Repeat([]byte{0x12}, 32),
+		bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x13}, 32),
+	)
+	exec(
+		`INSERT INTO midnight_candidate_removals (block_number, tx_hash, output_index, datum)
+VALUES (100, ?, 0, ?)`,
+		bytes.Repeat([]byte{0x14}, 32), offsetOf(removalBlock),
+	)
+	exec(
+		`INSERT INTO midnight_ariadne_rollbacks (block_number, epoch, previous_exists, previous_datum)
+VALUES (100, 1, 1, ?)`,
+		offsetOf(ariadneBlock),
+	)
+	require.True(t, held(regBlock), "the spend can still be rolled back")
+	require.True(t, held(removalBlock), "the candidate spend journal names it")
+	require.True(t, held(ariadneBlock), "the Ariadne journal names it")
+	require.False(t, held(other))
+
+	// The IndexerDB tip passes the rollback window of the spend.
+	exec(
+		"INSERT INTO tip (hash, slot, block_number) VALUES (?, 9000, ?)",
+		bytes.Repeat([]byte{0x15}, 32), 100+metadata.MidnightRollbackDepth,
+	)
+	require.False(t, held(regBlock), "the spend is past the rollback window")
+	exec("DELETE FROM midnight_candidate_removals")
+	exec("DELETE FROM midnight_ariadne_rollbacks")
+	require.False(t, held(removalBlock), "the journal row was pruned")
+	require.False(t, held(ariadneBlock), "the journal row was pruned")
 }

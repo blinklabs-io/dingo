@@ -4039,7 +4039,9 @@ an unspent Midnight registration, or the latest Midnight Ariadne parameters or
 current governance datum. A held block is skipped and recorded in the
 `history_expiry_held` chain state; the cursor moves past it, each later round
 checks the recorded blocks first and expires one once nothing uses it, and later
-blocks still expire. A rollback deletes the `datum` and `script` rows added above
+blocks still expire. A block a Midnight rollback could still restore a datum from is held too (a
+spend, or a rollback journal row, within the rollback depth of the IndexerDB
+tip), so a rollback never reads an expired block. A rollback deletes the `datum` and `script` rows added above
 its point, because those rows keep the block that first carried the content.
 The split-layout migration (`storageadopt.MigrateToSplit`, `AdoptStagedAPI`)
 takes the archive-backed blob store constructor as a parameter: `internal/node`,

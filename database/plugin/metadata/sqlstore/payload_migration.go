@@ -216,6 +216,11 @@ func locatePayloadAt(
 		return nil, nil, fmt.Errorf("no block locator at slot %d", slot)
 	}
 	offset, err := locator.LocatePayload(payload)
+	if expired, ok := errors.AsType[*types.HistoryExpiredError](err); ok {
+		// A locator over an expired block's live outputs found none that
+		// holds the payload.
+		return nil, expired, nil
+	}
 	return offset, nil, err
 }
 

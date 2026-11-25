@@ -886,6 +886,9 @@ Provides historical staking and rewards analytics for any stake pool:
 Resolves 28-byte script hashes or 32-byte datum hashes stored on-chain:
 - For **Datums**: Decodes raw Plutus CBOR data into structured JSON, displaying
   constructor tags, fields, and the slot it was added.
+  The `datum.raw_datum` and `script.content` columns hold a 52-byte block
+  offset, not the bytes; this tool reads the bytes from the block stores, and a
+  payload whose block expired with no archive returns an error.
 - For **Scripts**: Identifies script type (`Native / MultiSig`, `PlutusV1`,
   `PlutusV2`, `PlutusV3`), size in bytes, and slot created.
 - **Coverage**: Core mode does not populate the API-mode datum, script, or

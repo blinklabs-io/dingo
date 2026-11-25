@@ -17,6 +17,7 @@ package database
 import (
 	"bytes"
 	"context"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"sync"
 	"testing"
 
@@ -133,4 +134,68 @@ func TestExpiredBlockReadsLiveOutputFromLiveSet(t *testing.T) {
 	require.ErrorIs(t, err, types.ErrHistoryExpired)
 	_, err = db.ResolvePayload(EncodeUtxoOffset(&datumOffset))
 	require.ErrorIs(t, err, types.ErrHistoryExpired)
+}
+
+// A row whose block expired before the migration, with no archive, names its
+// bytes inside the live output that carries them instead of becoming an
+// expired-payload marker, so the payload of an active output stays readable.
+func TestMigratePayloadOffsetsLocatesPayloadInLiveOutputOfExpiredBlock(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	const slot = uint64(100)
+	blockHash := bytes.Repeat([]byte{0xbb}, 32)
+	var blockHashArr [32]byte
+	copy(blockHashArr[:], blockHash)
+	txID := bytes.Repeat([]byte{0xa1}, 32)
+	datum := []byte("INLINE-DATUM")
+	output := append([]byte("output-cbor-with-"), datum...)
+	output = append(output, []byte("-inside")...)
+	block := append([]byte("header-"), output...)
+	outOffset := CborOffset{
+		BlockSlot: slot, BlockHash: blockHashArr,
+		ByteOffset: uint32(len("header-")), ByteLength: uint32(len(output)),
+	}
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: slot, Hash: blockHash, Number: 1, Type: 1, Cbor: block,
+	}, nil))
+	blobTxn := db.BlobTxn(true)
+	require.NoError(t, blobTxn.Do(func(txn *Txn) error {
+		return db.Blob().SetUtxo(
+			txn.Blob(), txID, 0, EncodeUtxoOffset(&outOffset),
+		)
+	}))
+	mdTxn := db.MetadataTxn(context.Background(), true)
+	require.NoError(t, mdTxn.Do(func(txn *Txn) error {
+		return db.Metadata().CreateUtxo(txn.Metadata(), &models.Utxo{
+			TxId: txID, Address: []byte{0xa, 0xb},
+			PaymentKey: bytes.Repeat([]byte{0x11}, 28),
+			AddedSlot:  slot, Amount: types.Uint64(1),
+		})
+	}))
+	db.SetLiveOutputs(&fakeLiveOutputs{live: map[string][]byte{
+		liveKey(txID, 0): output,
+	}})
+	expire := db.BlockBlobTxn()
+	require.NoError(t, db.tombstoneBlockTxn(expire, slot, blockHash))
+	require.NoError(t, expire.Commit())
+	expire.Release()
+
+	raw := rawSQLiteMetadataFixture(t, db)
+	datumHash := lcommon.Blake2b256Hash(datum)
+	_, err := raw.Exec(
+		"INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, ?)",
+		datumHash.Bytes(), datum, slot,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, db.MigratePayloadOffsets(t.Context()))
+
+	var column []byte
+	require.NoError(t, raw.QueryRow("SELECT raw_datum FROM datum").Scan(&column))
+	require.False(t, types.IsExpiredPayload(column), "an active payload was dropped")
+	got, err := db.GetDatum(t.Context(), datumHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, datum, got.RawDatum)
 }

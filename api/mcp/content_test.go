@@ -386,7 +386,7 @@ VALUES (zeroblob(32), X'182A', 123);`)
 			require.Equal(t, "222", rows[0]["reward_lovelace"])
 		case strings.Contains(query, "FROM datum"):
 			require.Len(t, rows, 1)
-			require.Equal(t, "182A", rows[0]["datum_cbor_hex"])
+			require.Equal(t, "182A", rows[0]["datum_offset_hex"])
 		default:
 			t.Fatalf("example needs semantic assertions: %s", query)
 		}

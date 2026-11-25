@@ -2509,6 +2509,8 @@ expired, and the cursor moves past it: the pruner records it in the
 pairs) and checks each recorded block at the start of every round, expiring it
 once nothing uses it. A round therefore costs the newly eligible blocks plus one
 check per held block, not a re-scan of the chain after the first held block.
+The held blocks are saved before the cursor moves past them, and a failed save
+leaves the cursor where it was, so no block is passed without being recorded.
 Both rollback entry points drop the held blocks above the rollback point with
 the cursor; a held block that is already expired or no longer stored is dropped
 from the record.
@@ -4550,7 +4552,9 @@ cache, then the block stores, which serve the VolatileDB within k of the tip
 and the ImmutableDB below it, and finally the retained body of a block a
 rollback removed from the chain. Every store reader returns the bytes the
 column named before, so the API responses are unchanged; only SQL read
-directly from the IndexerDB sees offsets.
+directly from the IndexerDB sees offsets. The MCP `sqlite_query` tool is such SQL: it returns the offset
+bytes, and the db-sync cheatsheet resource says so; `resolve_datum_or_script`
+reads the datum or script bytes through the resolver.
 
 When an offset names a block whose history has expired, an active output is
 still readable: the node installs the ledger's live UTxO set on the IndexerDB's
@@ -4573,7 +4577,13 @@ after its target, `selectClassicPParamUpdate`), an unspent
 `midnight_registrations` row carries its `block_hash`, or the latest
 `midnight_ariadne_params` row or the newest `midnight_governance_datums` row of
 a type holds an offset naming it (bytes 13 to 44 of the stored offset are the
-block hash). A rollback deletes the `datum` rows added and the `script` rows
+block hash). A block is also held while a rollback could need its bytes: a
+`midnight_deregistrations` row within `metadata.MidnightRollbackDepth` blocks of
+the IndexerDB tip names it (rolling back the spending block restores the
+registration's datum from the registration's block), and so does any
+`midnight_candidate_removals` or `midnight_ariadne_rollbacks` row, which the
+indexer prunes once older than that depth. A rollback therefore never reads an
+expired block. A rollback deletes the `datum` rows added and the `script` rows
 created above its point, in the transaction that deletes the transactions: the
 insert keeps the first block that carried the content, so a row left behind
 would name an abandoned block and, once that body is released, make the content

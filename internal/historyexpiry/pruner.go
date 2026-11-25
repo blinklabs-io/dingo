@@ -60,6 +60,9 @@ type Pruner struct {
 	db          *database.Database
 	// expire is a seam so a test can inject a per-block failure.
 	expire func(context.Context, *database.BlobBlockResult) error
+	// persistHeld is a seam so a test can inject a failed write of the held
+	// blocks.
+	persistHeld func([]database.HeldBlock) error
 
 	wg     sync.WaitGroup
 	cancel context.CancelFunc
@@ -76,6 +79,7 @@ func NewPruner(cfg PrunerConfig) *Pruner {
 		db:          cfg.DB,
 	}
 	p.expire = p.pruneBlock
+	p.persistHeld = p.db.SetHistoryExpiryHeld
 	return p
 }
 
@@ -191,10 +195,13 @@ func (p *Pruner) recheckHeld(
 	return kept, true
 }
 
-func (p *Pruner) saveHeld(held []database.HeldBlock) {
-	if err := p.db.SetHistoryExpiryHeld(held); err != nil {
+// saveHeld records the held blocks and reports whether it did.
+func (p *Pruner) saveHeld(held []database.HeldBlock) bool {
+	if err := p.persistHeld(held); err != nil {
 		p.logger.Error("history expiry: failed to save held blocks", "error", err)
+		return false
 	}
+	return true
 }
 
 func (p *Pruner) prune(ctx context.Context) {
@@ -256,8 +263,8 @@ func (p *Pruner) prune(ctx context.Context) {
 	defer func() {
 		// The held blocks are saved before the cursor passes them, so a failed
 		// save leaves the cursor behind and the blocks inside the next scan.
-		if heldChanged || len(held) != heldBefore {
-			p.saveHeld(held)
+		if (heldChanged || len(held) != heldBefore) && !p.saveHeld(held) {
+			return
 		}
 		if cursor > start {
 			p.saveCursor(cursor)

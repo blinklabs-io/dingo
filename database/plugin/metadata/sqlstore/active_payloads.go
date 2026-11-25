@@ -16,7 +16,11 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 )
 
 var activePayloadQueries = []struct {
@@ -26,6 +30,9 @@ var activePayloadQueries = []struct {
 	bySlot bool
 	// epoch is set when the query also takes the current epoch.
 	epoch bool
+	// floor is set when the query takes, before the hash, the lowest block
+	// number whose rows a rollback can still restore.
+	floor bool
 }{
 	{
 		// A datum row names the block that first carried the datum. A live
@@ -69,6 +76,27 @@ WHERE g.block_number = (SELECT MAX(g2.block_number)
 FROM midnight_governance_datums g2 WHERE g2.datum_type = g.datum_type)
 AND SUBSTR(g.datum, 13, 32) = ?)`,
 	},
+	{
+		// A rollback of the spending block restores the registration's datum
+		// from the block the deregistration row names, so that block stays
+		// until the spend is past the rollback window.
+		name: "spend a rollback can restore",
+		query: `SELECT EXISTS (SELECT 1 FROM midnight_deregistrations g
+WHERE g.block_number > ? AND SUBSTR(g.full_datum, 13, 32) = ?)`,
+		floor: true,
+	},
+	{
+		// The journals a rollback restores from exist for exactly the
+		// rollback window; the indexer prunes older rows.
+		name: "candidate spend journal",
+		query: `SELECT EXISTS (SELECT 1 FROM midnight_candidate_removals r
+WHERE SUBSTR(r.datum, 13, 32) = ?)`,
+	},
+	{
+		name: "Ariadne rollback journal",
+		query: `SELECT EXISTS (SELECT 1 FROM midnight_ariadne_rollbacks r
+WHERE SUBSTR(r.previous_datum, 13, 32) = ?)`,
+	},
 }
 
 // BlockHoldsActivePayloads reports whether a payload column that is still in
@@ -95,8 +123,15 @@ func (s *Store) BlockHoldsActivePayloads(
 	if err != nil {
 		return false, err
 	}
+	floor, err := s.rollbackFloor(ctx)
+	if err != nil {
+		return false, err
+	}
 	for _, q := range activePayloadQueries {
 		args := []any{hash}
+		if q.floor {
+			args = []any{floor, hash}
+		}
 		if q.bySlot {
 			args = []any{sqlSlot}
 			if q.epoch {
@@ -114,4 +149,22 @@ func (s *Store) BlockHoldsActivePayloads(
 		}
 	}
 	return false, nil
+}
+
+// rollbackFloor returns the lowest block number a rollback can still restore:
+// the tip's block number less the rollback depth, or 0 when the store has no
+// tip.
+func (s *Store) rollbackFloor(ctx context.Context) (int64, error) {
+	var tip sql.NullInt64
+	err := s.readDB.QueryRowContext(
+		ctx, "SELECT block_number FROM tip ORDER BY id DESC LIMIT 1",
+	).Scan(&tip)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("read the tip for the rollback window: %w", err)
+	}
+	if !tip.Valid || tip.Int64 < 0 ||
+		uint64(tip.Int64) <= metadata.MidnightRollbackDepth {
+		return 0, nil
+	}
+	return tip.Int64 - int64(metadata.MidnightRollbackDepth), nil // #nosec G115 -- depth is small
 }

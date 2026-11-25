@@ -57,7 +57,7 @@ const (
 // candidateRollbackDepth is the Cardano security parameter k: the maximum
 // number of blocks that Ouroboros can roll back. Rollback journal rows older
 // than this depth are pruned after each block to bound their size.
-const candidateRollbackDepth uint64 = 2160
+const candidateRollbackDepth = metadata.MidnightRollbackDepth
 
 // SlotTimer converts a slot number to a wall-clock time.
 type SlotTimer interface {

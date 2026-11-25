@@ -27,7 +27,7 @@ func (w fixedLedgerWindow) StabilityWindow() uint64      { return w.window }
 
 // The registration datum is read through the database's real payload
 // resolver. The block it names is kept while the registration is unspent, so a
-// restart restores it, and expires once the registration is spent.
+// restart restores it, and while its spend can be rolled back.
 func TestRestartRestoresRegistrationWhoseBlockIsOld(t *testing.T) {
 	t.Parallel()
 	consensus, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -110,10 +110,19 @@ func TestRestartRestoresRegistrationWhoseBlockIsOld(t *testing.T) {
 			[]lcommon.TransactionInput{buildInput(t, regTx, 0)},
 			[]lcommon.TransactionOutput{anyOutput(t)}),
 	}, 2_000))
-	testutil.WaitForCondition(
-		t, expired, 5*time.Second,
-		"the block expires once the registration is spent",
-	)
+	// The spend can still be rolled back, which restores the registration's
+	// datum from its block, so the block stays while the spend is inside the
+	// rollback window.
+	testutil.RequireReceive(t, checks, 5*time.Second, "round after the spend")
+	testutil.RequireReceive(t, checks, 5*time.Second, "second round after the spend")
+	require.False(t, expired(), "the block stays while the spend can be rolled back")
+	require.NoError(t, restarted.rollbackBlock(spendBlock),
+		"rolling back the spend reads the registration's block")
+	restarted.mu.RLock()
+	restored, ok := restarted.regUTxOs[utxoKey{TxHash: regTx, Index: 0}]
+	restarted.mu.RUnlock()
+	require.True(t, ok, "the rollback restores the registration")
+	require.Equal(t, datum, restored.FullDatum)
 	_, err = New(cfg)
 	require.NoError(t, err, "startup never reads an expired payload")
 }

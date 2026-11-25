@@ -17,6 +17,8 @@ package mcp
 import (
 	"errors"
 	"fmt"
+
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 var errReadsBusy = errors.New("too many concurrent SQLite queries")
@@ -35,6 +37,9 @@ type readLimits struct {
 	// maxOffset is the largest OFFSET a paginated tool accepts; zero means
 	// unlimited.
 	maxOffset int
+	// payloads resolves the offsets the payload columns hold into the bytes
+	// they name; nil when the server has no block source.
+	payloads types.PayloadResolver
 }
 
 func newReadLimits() *readLimits {
@@ -117,4 +122,21 @@ func (l *readLimits) assetScanLimit() int {
 		return -1
 	}
 	return l.maxAssetRows + 1
+}
+
+// payloadColumn returns the bytes a payload column holds. The columns hold the
+// offset of their bytes in the block that carried them, which the resolver
+// reads from the block stores; a column holding the bytes themselves is
+// returned as it is.
+func (l *readLimits) payloadColumn(column []byte) ([]byte, error) {
+	if _, err := types.DecodeCborOffset(column); err != nil &&
+		!types.IsEndorserOffset(column) && !types.IsExpiredPayload(column) {
+		return column, nil
+	}
+	if l == nil || l.payloads == nil {
+		return nil, errors.New(
+			"the payload is stored as a block offset and this server has no block source to read it from",
+		)
+	}
+	return l.payloads.ResolvePayload(column)
 }

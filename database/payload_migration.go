@@ -15,6 +15,7 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -80,6 +81,13 @@ func (s *slotPayloadSource) LocatorAtSlot(
 		)
 		return err
 	})
+	if expired, ok := errors.AsType[*types.HistoryExpiredError](err); ok &&
+		s.db.liveOutputs.Load() != nil {
+		// The block is gone, but an active output of it is still in the
+		// ledger's live set, and a payload inside that output is named by
+		// its position in the block.
+		return &liveBlockLocator{db: s.db, ctx: ctx, expired: expired}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -210,4 +218,61 @@ func (s *slotPayloadSource) transactions(
 		return nil, err
 	}
 	return block.Transactions(), nil
+}
+
+// liveBlockLocator locates a payload in an expired block through the live
+// outputs of that block: the offset it returns is the position of the payload
+// in the block, inside the output that carries it, which the resolver reads
+// back from the live set. A payload no live output holds is inactive history,
+// reported as the block's expiry.
+type liveBlockLocator struct {
+	db      *Database
+	ctx     context.Context
+	expired *types.HistoryExpiredError
+}
+
+func (l *liveBlockLocator) LocatePayload(payload []byte) ([]byte, error) {
+	if len(payload) == 0 {
+		return nil, errors.New("locate payload: empty payload")
+	}
+	d := l.db
+	mdTxn := d.MetadataTxn(l.ctx, false)
+	refs, err := d.utxoStore().GetUtxosBySlot(l.expired.Slot, mdTxn.Metadata())
+	mdTxn.Release()
+	if err != nil {
+		return nil, fmt.Errorf("list the outputs of the expired block: %w", err)
+	}
+	store, release := d.PinBlob()
+	defer release()
+	if store == nil {
+		return nil, types.ErrBlobStoreUnavailable
+	}
+	blobTxn := store.NewTransaction(false)
+	defer blobTxn.Rollback() //nolint:errcheck
+	for _, ref := range refs {
+		data, err := store.GetUtxo(blobTxn, ref.Hash, ref.Idx)
+		if err != nil || !IsUtxoOffsetStorage(data) {
+			continue
+		}
+		out, err := DecodeUtxoOffset(data)
+		if err != nil || !bytes.Equal(out.BlockHash[:], l.expired.Hash) {
+			continue
+		}
+		cbor, ok, err := d.liveOutput(ref.Hash, ref.Idx)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || uint32(len(cbor)) != out.ByteLength { // #nosec G115 -- output size
+			continue
+		}
+		if at := bytes.Index(cbor, payload); at >= 0 {
+			return (&CborOffset{
+				BlockSlot:  l.expired.Slot,
+				BlockHash:  out.BlockHash,
+				ByteOffset: out.ByteOffset + uint32(at), // #nosec G115 -- inside the output
+				ByteLength: uint32(len(payload)),        // #nosec G115 -- inside the output
+			}).Encode(), nil
+		}
+	}
+	return nil, l.expired
 }

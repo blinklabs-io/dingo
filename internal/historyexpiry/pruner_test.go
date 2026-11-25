@@ -554,3 +554,42 @@ func TestPrunerDropsHeldBlockThatIsGone(t *testing.T) {
 	assert.True(t, blockIsExpired(t, db, 9, freeHash),
 		"blocks after the missing one still expire")
 }
+
+// A failed write of the held blocks leaves the cursor where it was, so the
+// blocks that were not recorded stay inside the next round's scan instead of
+// being passed and never rechecked.
+func TestPrunerKeepsCursorWhenHeldBlocksAreNotSaved(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	heldHash := insertTestBlock(t, db, 8, 0x08)
+	insertTestBlock(t, db, 9, 0x09)
+	var failWrites atomic.Bool
+	failWrites.Store(true)
+	pruner := NewPruner(PrunerConfig{
+		LedgerState: testLedgerWindow{currentSlot: 20, stabilityWindow: 5},
+		DB:          db,
+		Frequency:   time.Hour,
+		Held: func(_ context.Context, slot uint64, _ []byte) (bool, error) {
+			return slot == 8, nil
+		},
+	})
+	realPersist := pruner.persistHeld
+	pruner.persistHeld = func(held []database.HeldBlock) error {
+		if failWrites.Load() {
+			return errors.New("injected")
+		}
+		return realPersist(held)
+	}
+
+	pruner.prune(context.Background())
+	assert.Zero(t, pruner.loadCursor(),
+		"the cursor passed a block that was never recorded as held")
+
+	failWrites.Store(false)
+	pruner.prune(context.Background())
+	held, err := db.HistoryExpiryHeld()
+	require.NoError(t, err)
+	require.Len(t, held, 1, "the block is recorded once the write succeeds")
+	assert.False(t, blockIsExpired(t, db, 8, heldHash))
+	assert.GreaterOrEqual(t, pruner.loadCursor(), uint64(8))
+}

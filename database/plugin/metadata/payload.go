@@ -30,6 +30,11 @@ type PayloadBlockSource interface {
 	LocatorAtSlot(ctx context.Context, slot uint64) (types.PayloadLocator, error)
 }
 
+// MidnightRollbackDepth is the number of blocks a Midnight rollback can reach
+// back: the Cardano security parameter k. The rows a rollback restores stay
+// until the tip is this far past the block that wrote them.
+const MidnightRollbackDepth uint64 = 2160
+
 // ContentKey names a datum or script by the hash its table is keyed on.
 type ContentKey struct {
 	// Table is "datum" or "script".
