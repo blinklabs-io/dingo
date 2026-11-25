@@ -852,6 +852,13 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 	ret := []txsubmission.TxIdAndSize{}
 	consumer := o.mempool.FindConsumer(connId)
 	if consumer == nil {
+		// The consumer is gone once the connection closes or the mempool
+		// stops. A blocking request is then answered as a stop is: with
+		// MsgDone, since an error here is reported as the connection's
+		// protocol error.
+		if blocking {
+			return nil, txsubmission.ErrStopServerProcess
+		}
 		return nil, fmt.Errorf(
 			"no mempool consumer for connection: %s",
 			connId.String(),
@@ -877,7 +884,12 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 			// Wait until we see a TX
 			tmpTx := consumer.NextTx(true)
 			if tmpTx == nil {
-				break
+				// The wait ended without a transaction: the protocol, the
+				// connection's consumer or the mempool is stopping. A
+				// blocking request may not be answered with no IDs, and
+				// gOuroboros refuses such a reply as a protocol violation.
+				// The reference ends this wait with MsgDone.
+				return nil, txsubmission.ErrStopServerProcess
 			}
 			tmpTxs = append(tmpTxs, tmpTx)
 		} else {

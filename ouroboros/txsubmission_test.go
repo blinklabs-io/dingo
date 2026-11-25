@@ -1831,6 +1831,49 @@ func TestTxSubmissionServerInitExitsCleanlyOnPeerDisconnect(t *testing.T) {
 	)
 }
 
+// TestTxSubmissionClientEndsBlockingWaitWithDoneWhenMempoolStops stops node
+// B's mempool, as node shutdown does before it drains connections, while
+// node A's server asks B for transaction IDs. A blocking request may not be
+// answered with an empty list: the reference client answers a stop with
+// MsgDone, and gOuroboros refuses the empty list as a protocol violation,
+// which closes B's connection with a protocol error.
+func TestTxSubmissionClientEndsBlockingWaitWithDoneWhenMempoolStops(t *testing.T) {
+	t.Parallel()
+
+	h := newTxSubmissionRelayHarness(t)
+	defer h.close(t)
+
+	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
+	require.NoError(t, err)
+	require.NoError(t, h.mB.AddTransaction(context.Background(), txsubmissionRelayTestEraId, txBytes))
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+	require.Eventually(
+		t,
+		func() bool { return len(h.mA.Transactions()) == 1 },
+		5*time.Second,
+		10*time.Millisecond,
+		"expected node B's transaction to be relayed",
+	)
+
+	require.NoError(t, h.mB.Stop(context.Background()))
+
+	client := h.connB.TxSubmission().Client.ProtocolInstance()
+	require.Eventually(
+		t,
+		client.IsInTerminalOrIdleState,
+		5*time.Second,
+		10*time.Millisecond,
+		"expected node B's client to end the protocol",
+	)
+	require.Never(
+		t,
+		func() bool { return h.cmB.GetConnectionById(h.connB.Id()) == nil },
+		time.Second,
+		20*time.Millisecond,
+		"node B closed its connection: it refused its own empty reply to a blocking request",
+	)
+}
+
 // TestTxSubmissionClientRequestTxsExpiredTransactionNotServed verifies that
 // a transaction the mempool's own TTL has already expired -- before this
 // peer ever advertised it via RequestTxIds -- is handled the same as an
