@@ -373,13 +373,13 @@ func (ls *LedgerState) stagePoolBoundary(
 	}
 	pools, err := ls.poolKeys(r, txn)
 	if err != nil {
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 		return
 	}
 	for _, p := range pools {
 		st, err := ls.poolView(r, txn, p)
 		if err != nil {
-			ls.failAccountStaging(err)
+			ls.failAccountStaging(txn, err)
 			return
 		}
 		if st == nil {

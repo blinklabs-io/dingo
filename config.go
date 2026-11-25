@@ -92,10 +92,9 @@ type ImmutableDBConfig struct {
 // observer. When Enabled, Run() subscribes an observer to the
 // node's own EventBus (event.EpochTransitionEventType) that validates each
 // newly closed epoch's committed reward state directly against Koios
-// reference data as the node advances — see internal/koiosparity and
-// ARCHITECTURE.md's "Koios Parity Tracker" section. This is a one-off
-// validation aid, not a permanent subsystem; leave Enabled false for normal
-// node operation.
+// reference data as the node advances — see internal/koiosparity/README.md.
+// This is a one-off validation aid, not a permanent subsystem; leave Enabled
+// false for normal node operation.
 type KoiosParityConfig struct {
 	// Enabled subscribes the observer to epoch.transition when true.
 	Enabled bool

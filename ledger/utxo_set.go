@@ -282,6 +282,15 @@ type utxoSetBatch struct {
 	// changes apply.
 	rollbackTo *ocommon.Point
 	changes    []UtxoEvent
+	// validationOnly keeps speculative fork validation from stopping the
+	// live set when its private overlay cannot be prepared.
+	validationOnly bool
+	// consensus is the consensus view of the fork candidate a validation-only
+	// batch stages. The live view does not hold an epoch the candidate opens
+	// or its parameters, so every rule that reads the epoch cache, epoch or
+	// parameters while txn validates reads this one.
+	consensus     *consensusSnapshot
+	validationErr error
 	// nonces are the block nonces txn wrote, and pruneNoncesBefore the
 	// slot its nonce prune reached, for a set that keeps nonces.
 	nonces            []models.BlockNonce
@@ -421,6 +430,9 @@ func (ls *LedgerState) stageUtxoSet(
 	})
 	if r, readable := ls.config.UtxoSet.(UtxoSetReader); readable {
 		if err := ls.stageUtxoOverlay(r, txn, batch, changes); err != nil {
+			if ls.recordValidationFailure(txn, err) {
+				return
+			}
 			slot := uint64(0)
 			if tip != nil {
 				slot = tip.Slot
@@ -1139,6 +1151,9 @@ func (ls *LedgerState) stageUtxoSetRollback(
 		return
 	}
 	if err := ls.stageUtxoSetRollbackChecked(txn, point); err != nil {
+		if ls.recordValidationFailure(txn, err) {
+			return
+		}
 		ls.failUtxoSet(
 			point.Slot,
 			"live UTxO set rollback preview failed; it stops following the ledger until startup resumes it",
@@ -1177,6 +1192,90 @@ func (ls *LedgerState) stageUtxoSetRollbackChecked(
 		err = ls.stageUtxoOverlay(r, txn, b, []UtxoEvent{preview})
 	}
 	return err
+}
+
+// stageUtxoSetRollbackForValidation prepares a rollback overlay that is
+// discarded with txn. A preview failure rejects the candidate without
+// changing the live set's failure state.
+func (ls *LedgerState) stageUtxoSetRollbackForValidation(
+	txn ledgerdb.Txn,
+	point ocommon.Point,
+) error {
+	ls.utxoSetBatchForTxn(txn, func(b *utxoSetBatch) {
+		b.validationOnly = true
+	})
+	ls.stageUtxoSetRollback(txn, point)
+	return ls.utxoSetValidationError(txn)
+}
+
+// setForkValidationConsensus gives txn's validation-only batch the consensus
+// view of the fork candidate it validates.
+func (ls *LedgerState) setForkValidationConsensus(
+	txn ledgerdb.Txn,
+	snapshot *consensusSnapshot,
+) {
+	ls.utxoSetBatchForTxn(txn, func(b *utxoSetBatch) {
+		b.consensus = snapshot
+	})
+}
+
+// forkValidationConsensus returns the consensus view of the fork candidate
+// txn validates, nil when txn is not a fork validation.
+func (ls *LedgerState) forkValidationConsensus(
+	txn ledgerdb.Txn,
+) *consensusSnapshot {
+	if txn == nil {
+		return nil
+	}
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	if batch := ls.utxoSetBatches[txn]; batch != nil && batch.validationOnly {
+		return batch.consensus
+	}
+	return nil
+}
+
+// stagingEpoch is the epoch txn stages against: the candidate's while txn
+// validates a fork candidate, the live one otherwise.
+func (ls *LedgerState) stagingEpoch(txn ledgerdb.Txn) uint64 {
+	if snapshot := ls.forkValidationConsensus(txn); snapshot != nil {
+		return snapshot.currentEpoch.EpochId
+	}
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.currentEpoch.EpochId
+}
+
+// recordValidationFailure keeps err on txn's batch and reports true when txn
+// only validates a fork candidate. Its staging is discarded with txn, so a
+// failure rejects the candidate and must not stop the live set.
+func (ls *LedgerState) recordValidationFailure(
+	txn ledgerdb.Txn,
+	err error,
+) bool {
+	if txn == nil {
+		return false
+	}
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	batch := ls.utxoSetBatches[txn]
+	if batch == nil || !batch.validationOnly {
+		return false
+	}
+	if batch.validationErr == nil {
+		batch.validationErr = err
+	}
+	return true
+}
+
+func (ls *LedgerState) utxoSetValidationError(txn ledgerdb.Txn) error {
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	batch := ls.utxoSetBatches[txn]
+	if batch == nil {
+		return nil
+	}
+	return batch.validationErr
 }
 
 // LiveUtxoStake implements types.LiveUtxoSource: the lovelace in live

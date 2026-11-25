@@ -494,7 +494,7 @@ func requireOneBatchFeePersisted(t *testing.T, c feeProdCase) {
 		require.NoError(t, err)
 		require.NotNil(t, stored, "level %s", level.Hash())
 	}
-	epoch, ok, err := ls.rewardEpochOfSlot(c.block.SlotNumber())
+	epoch, ok, err := ls.rewardEpochOfSlot(nil, c.block.SlotNumber())
 	require.NoError(t, err)
 	require.True(t, ok)
 	reader := ls.rewardBlocksReader(nil)
