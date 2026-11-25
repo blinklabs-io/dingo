@@ -1449,8 +1449,8 @@ WHERE `+scopedWhere("account")+`account.created_slot <= ?`+
 // account_withdrawal_witness inserts are separately elided when
 // DelegatorInactivityEnabled is off, which is the same
 // network-wide setting this function's caller already requires to match, so
-// it introduces no new divergence. See ARCHITECTURE.md's CIP-0163 section
-// before adding any other deletion path for these tables.
+// it introduces no new divergence. A new deletion path must preserve that
+// network-wide witness history or rollback can change the reward result.
 func historicalExpirationSQL(
 	ctx context.Context,
 	db queryer,
