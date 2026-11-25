@@ -120,7 +120,9 @@ type ChainsyncJumpingConfig struct {
 	// advances. Optional.
 	LocalProgress func() uint64
 	// Held reports whether the selector holds the connection's header stream
-	// on purpose (the Limit on Eagerness or the catch-up band). Optional.
+	// on purpose (the Limit on Eagerness or the catch-up band). A held dynamo
+	// is not recycled for its silence once it has delivered a header since
+	// its election. Optional.
 	Held func(ouroboros.ConnectionId) bool
 }
 
@@ -186,6 +188,10 @@ type chainsyncJumping struct {
 	progressAt   time.Time
 	progressMark uint64
 	markSeen     bool
+	// dynamoDelivered records that the dynamo has delivered a header since
+	// its election. Only then can a hold of its stream be the node's own
+	// wait on that header rather than the peer's silence.
+	dynamoDelivered bool
 
 	now func() time.Time
 
@@ -412,6 +418,7 @@ func (j *chainsyncJumping) setDynamoLocked(connId ouroboros.ConnectionId) {
 	j.restartBlock = 0
 	j.streamPoint = ocommon.Point{}
 	j.progressAt = j.now()
+	j.dynamoDelivered = false
 	delete(j.streamers, connId)
 	delete(j.jumpers, connId)
 }
@@ -808,6 +815,7 @@ func (o *Ouroboros) csjObserveDelivery(
 	isDynamo := j.hasDynamo && j.dynamo == connId
 	if isDynamo {
 		j.progressAt = j.now()
+		j.dynamoDelivered = true
 		// A different header at or below the last one starts a new
 		// stream; the last header delivered again does not.
 		sameHeader := point.Slot == j.streamPoint.Slot &&
@@ -1346,7 +1354,12 @@ func (o *Ouroboros) csjCheckDynamoStall(now time.Time) {
 		j.mu.Unlock()
 		return
 	}
-	if held || (j.markSeen && mark != j.progressMark) {
+	// A hold excuses the dynamo only once it has delivered a header: the
+	// reference pauses the Limit on Patience only while the node itself is
+	// busy with a header the peer sent, and leaves a peer that has sent
+	// none to the timeouts. A hold before any delivery would otherwise keep
+	// a silent dynamo, and every jumper waiting on it, in place for good.
+	if (held && j.dynamoDelivered) || (j.markSeen && mark != j.progressMark) {
 		j.progressAt = now
 	}
 	j.markSeen = true

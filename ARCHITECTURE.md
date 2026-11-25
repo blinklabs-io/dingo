@@ -10505,7 +10505,8 @@ otherwise the callback would wait for a ledger snapshot publication or
 `catchUpBandWaitTimeout`. A dynamo that delivers no header (`DynamoStallTimeout`,
 30 seconds by default) while the local chain makes no progress
 (`LocalProgress`), and that the selector does not hold at the Limit on
-Eagerness or in the catch-up band (`Held`), is recycled with reason
+Eagerness or in the catch-up band (`Held`) after delivering a header since its
+election, is recycled with reason
 `chainsync_jumping_dynamo_stall`: the node's stall recycler skips observers and
 extends its grace during catch-up, so it does not bound a dynamo that stops
 delivering. When no jumper can be

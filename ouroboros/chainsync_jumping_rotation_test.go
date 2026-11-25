@@ -253,6 +253,30 @@ func TestChainsyncJumpingDynamoStallCheck(t *testing.T) {
 		h.o.csjCheckDynamoStall(at(clock, 2*timeout+2*time.Second))
 		requireStallRecycle(t, recycles, dynamo.connId)
 	})
+	t.Run("a held dynamo that delivered nothing is recycled", func(t *testing.T) {
+		t.Parallel()
+		h, dynamo, clock, recycles := setup(t, func(c *ChainsyncJumpingConfig) {
+			c.Held = func(ouroboros.ConnectionId) bool { return true }
+		})
+		h.o.csjCheckDynamoStall(at(clock, timeout-time.Second))
+		h.o.csjCheckDynamoStall(at(clock, timeout+time.Second))
+		requireStallRecycle(t, recycles, dynamo.connId)
+	})
+	t.Run("a delivery by a replaced dynamo does not excuse its successor", func(t *testing.T) {
+		t.Parallel()
+		h, dynamo, clock, recycles := setup(t, func(c *ChainsyncJumpingConfig) {
+			c.Held = func(ouroboros.ConnectionId) bool { return true }
+		})
+		h.deliver(dynamo.connId, 1)
+		h.closeConn(dynamo.connId)
+		next := h.addPeer("next", 100)
+		h.promote(next)
+		next.requireStreams(t, "new dynamo")
+		require.True(t, h.o.csjIsDynamo(next.connId))
+		h.o.csjCheckDynamoStall(at(clock, timeout-time.Second))
+		h.o.csjCheckDynamoStall(at(clock, timeout+time.Second))
+		requireStallRecycle(t, recycles, next.connId)
+	})
 	t.Run("a held dynamo is left alone", func(t *testing.T) {
 		t.Parallel()
 		var held atomic.Bool
@@ -260,6 +284,7 @@ func TestChainsyncJumpingDynamoStallCheck(t *testing.T) {
 		h, dynamo, clock, recycles := setup(t, func(c *ChainsyncJumpingConfig) {
 			c.Held = func(ouroboros.ConnectionId) bool { return held.Load() }
 		})
+		h.deliver(dynamo.connId, 1)
 		h.o.csjCheckDynamoStall(at(clock, 3*timeout))
 		testutil.RequireNoReceive(t, recycles, 50*time.Millisecond,
 			"a dynamo held at the Limit on Eagerness was recycled")
