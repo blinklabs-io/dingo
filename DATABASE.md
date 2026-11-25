@@ -4308,7 +4308,21 @@ between any two leaves a node that starts and continues:
    row is deleted only when every canonical block was read and none carries it. A canonical witness or
    reference script whose block lacks the bytes fails the migration with the
    row named, so a carried row is never dropped. A block that expired
-   locally is handled by whether an archive is configured (`barkBaseUrl`). With
+   locally is handled first by the live outputs, because the ledger's live UTxO
+   set does not exist yet when this migration runs. The released store
+   rewrote each output of an expired block as raw CBOR in its entry, so an
+   output the `utxo` table still holds unspent keeps its bytes there; a payload
+   inside such an output is named by a `DLOF` live-output offset (the
+   transaction hash, output index and the payload's byte range inside the
+   output's CBOR, 52 bytes like a block offset), which the resolver reads from
+   the ledger's live set (`Database.SetLiveOutputs`) once the node starts. An
+   output whose entry is still an offset into the expired block, with the live
+   set installed, takes a block offset instead. A `datum` or `script` row whose
+   own block expired is also re-pointed to a later canonical transaction whose
+   block or live output holds the bytes, its slot following. A live output
+   that is spent later takes its payload with it, and a read then reports
+   expired history. Only a payload no live output holds is dropped, as follows:
+   it depends on whether an archive is configured (`barkBaseUrl`). With
    one, the migration fetches the block through the archive's block-store
    fallback to compute the offset, and a later read of the row proxies the same
    fetch. Without one, the payload is not kept: the column holds a `DEXP`

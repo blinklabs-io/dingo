@@ -70,7 +70,7 @@ var contentPayloadColumns = []contentPayloadColumn{
 func isPayloadOffset(value []byte) bool {
 	_, err := types.DecodeCborOffset(value)
 	return err == nil || types.IsEndorserOffset(value) ||
-		types.IsExpiredPayload(value)
+		types.IsExpiredPayload(value) || types.IsLiveOutputOffset(value)
 }
 
 // MigratePayloadColumns implements metadata.PayloadColumnMigrator.
@@ -169,6 +169,20 @@ func (s *Store) migrateSlotPayloadColumn(
 							"%s %d at slot %d: %w",
 							c.table, row.key, row.slot, err,
 						)
+					}
+					if expired != nil && contentColumn(c) {
+						moved, err := s.relocateExpiredContent(
+							ctx, db, blocks, c, row,
+						)
+						if err != nil {
+							return fmt.Errorf(
+								"%s %d at slot %d: %w",
+								c.table, row.key, row.slot, err,
+							)
+						}
+						if moved {
+							continue
+						}
 					}
 					if expired != nil {
 						// The block is gone and no archive has it: the
@@ -286,43 +300,30 @@ func (s *Store) resolveOrphanedContent(
 	c slotPayloadColumn,
 	row payloadRow,
 ) (*unresolvedOrphan, error) {
-	var hash []byte
-	if err := db.QueryRowContext(
-		ctx,
-		fmt.Sprintf("SELECT hash FROM %s WHERE %s = ?", c.table, c.key),
-		row.key,
-	).Scan(&hash); err != nil {
+	hash, carriers, err := contentCarriers(ctx, db, c, row)
+	if err != nil {
 		return nil, err
 	}
-	var carriers []payloadCarrier
-	for _, q := range carrierQueries[c.table] {
-		arg := hash
-		if c.table == "datum" && q.required {
-			arg = row.value
-		}
-		slots, err := carrierSlots(ctx, db, q.query, arg)
-		if err != nil {
-			return nil, err
-		}
-		for _, slot := range slots {
-			carriers = append(carriers, payloadCarrier{
-				slot: slot, required: q.required,
-			})
-		}
-	}
-	slices.SortStableFunc(carriers, func(a, b payloadCarrier) int {
-		return cmp.Compare(a.slot, b.slot)
-	})
 	update := fmt.Sprintf(
 		"UPDATE %s SET %s = ?, %s = ? WHERE %s = ?",
 		c.table, c.column, c.slot, c.key,
+	)
+	// A carrier whose block expired is kept as a fallback: a later carrier,
+	// such as a live output, may still hold the bytes.
+	var (
+		fallback     []byte
+		fallbackSlot uint64
 	)
 	for _, carrier := range carriers {
 		offset, expired, err := locatePayloadAt(
 			ctx, blocks, carrier.slot, row.value,
 		)
 		if expired != nil {
-			offset = types.EncodeExpiredPayload(expired.Slot, expired.Hash)
+			if fallback == nil {
+				fallback = types.EncodeExpiredPayload(expired.Slot, expired.Hash)
+				fallbackSlot = carrier.slot
+			}
+			continue
 		} else if err != nil && !carrier.required && isOrphaned(err) {
 			continue
 		} else if err != nil {
@@ -334,7 +335,86 @@ func (s *Store) resolveOrphanedContent(
 		_, err = db.ExecContext(ctx, update, offset, carrier.slot, row.key)
 		return nil, err
 	}
+	if fallback != nil {
+		_, err = db.ExecContext(ctx, update, fallback, fallbackSlot, row.key)
+		return nil, err
+	}
 	return &unresolvedOrphan{row: row, hash: hash}, nil
+}
+
+// contentCarriers returns the hash of a datum or script row and the canonical
+// transactions, in ascending slot order, that the indexed tables name as
+// carrying it.
+func contentCarriers(
+	ctx context.Context,
+	db queryer,
+	c slotPayloadColumn,
+	row payloadRow,
+) ([]byte, []payloadCarrier, error) {
+	var hash []byte
+	if err := db.QueryRowContext(
+		ctx,
+		fmt.Sprintf("SELECT hash FROM %s WHERE %s = ?", c.table, c.key),
+		row.key,
+	).Scan(&hash); err != nil {
+		return nil, nil, err
+	}
+	var carriers []payloadCarrier
+	for _, q := range carrierQueries[c.table] {
+		arg := hash
+		if c.table == "datum" && q.required {
+			arg = row.value
+		}
+		slots, err := carrierSlots(ctx, db, q.query, arg)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, slot := range slots {
+			carriers = append(carriers, payloadCarrier{
+				slot: slot, required: q.required,
+			})
+		}
+	}
+	slices.SortStableFunc(carriers, func(a, b payloadCarrier) int {
+		return cmp.Compare(a.slot, b.slot)
+	})
+	return hash, carriers, nil
+}
+
+// relocateExpiredContent looks for another canonical transaction whose block
+// still holds the bytes of a datum or script row whose own block expired: a
+// live output of a later block that names the datum or carries the script. It
+// re-points the row there and reports whether it did.
+func (s *Store) relocateExpiredContent(
+	ctx context.Context,
+	db queryer,
+	blocks metadata.PayloadBlockSource,
+	c slotPayloadColumn,
+	row payloadRow,
+) (bool, error) {
+	_, carriers, err := contentCarriers(ctx, db, c, row)
+	if err != nil {
+		return false, err
+	}
+	for _, carrier := range carriers {
+		if carrier.slot == row.slot {
+			continue
+		}
+		offset, expired, err := locatePayloadAt(
+			ctx, blocks, carrier.slot, row.value,
+		)
+		if err != nil || expired != nil {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf(
+			"UPDATE %s SET %s = ?, %s = ? WHERE %s = ?",
+			c.table, c.column, c.slot, c.key,
+		), offset, carrier.slot, row.key); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // unresolvedOrphan is an orphaned content row no indexed table accounts for.

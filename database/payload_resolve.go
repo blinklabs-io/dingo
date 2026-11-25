@@ -41,6 +41,9 @@ func (d *Database) ResolvePayload(encoded []byte) ([]byte, error) {
 	if types.IsEndorserOffset(encoded) {
 		return d.resolveEndorserPayload(encoded)
 	}
+	if types.IsLiveOutputOffset(encoded) {
+		return d.resolveLiveOutputPayload(encoded)
+	}
 	offset, err := DecodeCborOffset(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("decode payload offset: %w", err)
@@ -128,4 +131,26 @@ func (d *Database) resolveEndorserPayload(encoded []byte) ([]byte, error) {
 		)
 	}
 	return append([]byte(nil), backing[offset.ByteOffset:end]...), nil
+}
+
+// resolveLiveOutputPayload reads the bytes a live-output offset names from the
+// output in the ledger's live UTxO set. An output that is no longer live took
+// its payload out of the active data, so the read reports expired history.
+func (d *Database) resolveLiveOutputPayload(encoded []byte) ([]byte, error) {
+	offset, err := types.DecodeLiveOutputOffset(encoded)
+	if err != nil {
+		return nil, err
+	}
+	cbor, ok, err := d.liveOutput(offset.TxHash[:], offset.OutputIndex)
+	if err != nil {
+		return nil, err
+	}
+	end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
+	if !ok || end > uint64(len(cbor)) {
+		return nil, fmt.Errorf(
+			"the live output %x#%d that held the payload is spent: %w",
+			offset.TxHash, offset.OutputIndex, types.ErrHistoryExpired,
+		)
+	}
+	return append([]byte(nil), cbor[offset.ByteOffset:end]...), nil
 }

@@ -130,7 +130,8 @@ func (l *readLimits) assetScanLimit() int {
 // returned as it is.
 func (l *readLimits) payloadColumn(column []byte) ([]byte, error) {
 	if _, err := types.DecodeCborOffset(column); err != nil &&
-		!types.IsEndorserOffset(column) && !types.IsExpiredPayload(column) {
+		!types.IsEndorserOffset(column) && !types.IsExpiredPayload(column) &&
+		!types.IsLiveOutputOffset(column) {
 		return column, nil
 	}
 	if l == nil || l.payloads == nil {

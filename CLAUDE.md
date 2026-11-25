@@ -86,7 +86,8 @@ make govulncheck  # reachable Go vulnerabilities; needs network
   (datums, scripts, metadata) store 52-byte `CborOffset` refs (magic `"DOFF"`
   + slot + hash + offset + length), not full CBOR. `"DLEB"` names an endorser
   block's transaction list in the LeiosDB; `"DEXP"` marks a payload whose
-  block expired with no archive configured. Resolved via `TieredCborCache`
+  block expired with no archive configured; `"DLOF"` names bytes inside a live
+  output whose block expired before the migration. Resolved via `TieredCborCache`
   (hot → block LRU → cold blob extract). See `database/cbor_offset.go`,
   `database/types/cbor_offset.go`, `database/cbor_cache.go`,
   `database/block_indexer.go`.

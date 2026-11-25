@@ -81,11 +81,9 @@ func (s *slotPayloadSource) LocatorAtSlot(
 		)
 		return err
 	})
-	if expired, ok := errors.AsType[*types.HistoryExpiredError](err); ok &&
-		s.db.liveOutputs.Load() != nil {
-		// The block is gone, but an active output of it is still in the
-		// ledger's live set, and a payload inside that output is named by
-		// its position in the block.
+	if expired, ok := errors.AsType[*types.HistoryExpiredError](err); ok {
+		// The block is gone, but an active output of it may still hold the
+		// payload.
 		return &liveBlockLocator{db: s.db, ctx: ctx, expired: expired}, nil
 	}
 	if err != nil {
@@ -220,11 +218,15 @@ func (s *slotPayloadSource) transactions(
 	return block.Transactions(), nil
 }
 
-// liveBlockLocator locates a payload in an expired block through the live
-// outputs of that block: the offset it returns is the position of the payload
-// in the block, inside the output that carries it, which the resolver reads
-// back from the live set. A payload no live output holds is inactive history,
-// reported as the block's expiry.
+// liveBlockLocator locates a payload of an expired block inside the live
+// outputs of that block, so a payload of active data stays reachable. An output
+// whose entry is still an offset into the block is read from the ledger's live
+// set, when one is installed, and the payload is named by its position in the
+// block. An output whose entry was materialized as raw CBOR when the block
+// expired has lost its position in the block, so the payload is named by its
+// position inside that output (types.LiveOutputOffset), which the live set
+// reads back. A payload no live output holds is inactive history, reported as
+// the block's expiry.
 type liveBlockLocator struct {
 	db      *Database
 	ctx     context.Context
@@ -237,8 +239,8 @@ func (l *liveBlockLocator) LocatePayload(payload []byte) ([]byte, error) {
 	}
 	d := l.db
 	mdTxn := d.MetadataTxn(l.ctx, false)
+	defer mdTxn.Release()
 	refs, err := d.utxoStore().GetUtxosBySlot(l.expired.Slot, mdTxn.Metadata())
-	mdTxn.Release()
 	if err != nil {
 		return nil, fmt.Errorf("list the outputs of the expired block: %w", err)
 	}
@@ -251,7 +253,25 @@ func (l *liveBlockLocator) LocatePayload(payload []byte) ([]byte, error) {
 	defer blobTxn.Rollback() //nolint:errcheck
 	for _, ref := range refs {
 		data, err := store.GetUtxo(blobTxn, ref.Hash, ref.Idx)
-		if err != nil || !IsUtxoOffsetStorage(data) {
+		if err != nil {
+			continue
+		}
+		if !IsUtxoOffsetStorage(data) {
+			// Raw CBOR: the output is live while the metadata store holds it
+			// unspent.
+			if live, err := d.utxoStore().GetUtxo(
+				ref.Hash, ref.Idx, mdTxn.Metadata(),
+			); err != nil || live == nil {
+				continue
+			}
+			if at := bytes.Index(data, payload); at >= 0 {
+				return (&types.LiveOutputOffset{
+					TxHash:      [32]byte(ref.Hash),
+					OutputIndex: ref.Idx,
+					ByteOffset:  uint32(at),           // #nosec G115 -- inside the output
+					ByteLength:  uint32(len(payload)), // #nosec G115 -- inside the output
+				}).Encode(), nil
+			}
 			continue
 		}
 		out, err := DecodeUtxoOffset(data)

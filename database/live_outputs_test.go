@@ -199,3 +199,192 @@ func TestMigratePayloadOffsetsLocatesPayloadInLiveOutputOfExpiredBlock(
 	require.NoError(t, err)
 	require.Equal(t, datum, got.RawDatum)
 }
+
+// seedMaterializedLiveOutput stores a block holding one unspent output whose
+// block then expires through PruneBlock, as a released API store left it: the
+// output's entry is raw CBOR and its position in the block is lost. It returns
+// the output's CBOR.
+func seedMaterializedLiveOutput(
+	t *testing.T,
+	db *Database,
+	slot uint64,
+	txID, datumHash, output []byte,
+) {
+	t.Helper()
+	blockHash := bytes.Repeat([]byte{0xbc}, 32)
+	var blockHashArr [32]byte
+	copy(blockHashArr[:], blockHash)
+	block := append([]byte("header-"), output...)
+	block = append(block, []byte("-trailer")...)
+	outOffset := CborOffset{
+		BlockSlot: slot, BlockHash: blockHashArr,
+		ByteOffset: uint32(len("header-")), ByteLength: uint32(len(output)),
+	}
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: slot, Hash: blockHash, Number: 1, Type: 1, Cbor: block,
+	}, nil))
+	blobTxn := db.BlobTxn(true)
+	require.NoError(t, blobTxn.Do(func(txn *Txn) error {
+		return db.Blob().SetUtxo(
+			txn.Blob(), txID, 0, EncodeUtxoOffset(&outOffset),
+		)
+	}))
+	mdTxn := db.MetadataTxn(context.Background(), true)
+	require.NoError(t, mdTxn.Do(func(txn *Txn) error {
+		return db.Metadata().CreateUtxo(txn.Metadata(), &models.Utxo{
+			TxId: txID, Address: []byte{0xa, 0xb}, DatumHash: datumHash,
+			PaymentKey: bytes.Repeat([]byte{0x11}, 28),
+			AddedSlot:  slot, Amount: types.Uint64(1),
+		})
+	}))
+	_, err := db.PruneBlock(t.Context(), slot, blockHash)
+	require.NoError(t, err)
+	blobRead := db.Blob().NewTransaction(false)
+	defer blobRead.Rollback() //nolint:errcheck
+	entry, err := db.Blob().GetUtxo(blobRead, txID, 0)
+	require.NoError(t, err)
+	require.Equal(t, output, entry, "PruneBlock materialized the output")
+}
+
+// An output of a block that expired before the migration, whose entry is raw
+// CBOR, holds its payload: the column names the payload by its position inside
+// the live output, and the payload still reads.
+func TestMigratePayloadOffsetsLocatesPayloadInRawLiveOutput(t *testing.T) {
+	t.Parallel()
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	txID := bytes.Repeat([]byte{0xa2}, 32)
+	datum := []byte("INLINE-DATUM")
+	output := append([]byte("output-cbor-with-"), datum...)
+	datumHash := lcommon.Blake2b256Hash(datum)
+	seedMaterializedLiveOutput(t, db, 100, txID, datumHash.Bytes(), output)
+	db.SetLiveOutputs(&fakeLiveOutputs{live: map[string][]byte{
+		liveKey(txID, 0): output,
+	}})
+	raw := rawSQLiteMetadataFixture(t, db)
+	_, err := raw.Exec(
+		"INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, 100)",
+		datumHash.Bytes(), datum,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, db.MigratePayloadOffsets(t.Context()))
+
+	var column []byte
+	require.NoError(t, raw.QueryRow("SELECT raw_datum FROM datum").Scan(&column))
+	require.True(t, types.IsLiveOutputOffset(column), "an active payload was dropped")
+	got, err := db.GetDatum(t.Context(), datumHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, datum, got.RawDatum)
+}
+
+// An orphaned datum row whose only carrier is a live output of an expired
+// block resolves through that output, not through an expired-payload marker.
+func TestMigratePayloadOffsetsResolvesAnOrphanThroughALiveOutput(t *testing.T) {
+	t.Parallel()
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	txID := bytes.Repeat([]byte{0xa3}, 32)
+	datum := []byte("INLINE-DATUM")
+	output := append([]byte("output-cbor-with-"), datum...)
+	datumHash := lcommon.Blake2b256Hash(datum)
+	seedMaterializedLiveOutput(t, db, 100, txID, datumHash.Bytes(), output)
+	db.SetLiveOutputs(&fakeLiveOutputs{live: map[string][]byte{
+		liveKey(txID, 0): output,
+	}})
+	// The row names a slot of a block a rollback abandoned. The applied
+	// transaction that produced the live output is the canonical carrier.
+	raw := rawSQLiteMetadataFixture(t, db)
+	_, err := raw.Exec(
+		"INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, 999)",
+		datumHash.Bytes(), datum,
+	)
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO applied_transaction
+(tx_id, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid)
+SELECT id, ?, 100, 0, '0', '0', '0', 0, 1 FROM "transaction" WHERE hash = ?`,
+		bytes.Repeat([]byte{0xbc}, 32), txID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.MigratePayloadOffsets(t.Context()))
+
+	var column []byte
+	require.NoError(t, raw.QueryRow("SELECT raw_datum FROM datum").Scan(&column))
+	require.False(t, types.IsExpiredPayload(column), "an active payload was dropped")
+	got, err := db.GetDatum(t.Context(), datumHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, datum, got.RawDatum)
+}
+
+// A live-output offset reads its bytes from the output in the live set, and an
+// output that has been spent is inactive history.
+func TestResolvePayloadReadsLiveOutputOffset(t *testing.T) {
+	t.Parallel()
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	txID := bytes.Repeat([]byte{0xa4}, 32)
+	output := []byte("output-cbor-with-INLINE-DATUM")
+	live := &fakeLiveOutputs{live: map[string][]byte{liveKey(txID, 0): output}}
+	db.SetLiveOutputs(live)
+	offset := (&types.LiveOutputOffset{
+		TxHash: [32]byte(txID), ByteOffset: uint32(bytes.Index(output, []byte("INLINE"))),
+		ByteLength: 12,
+	}).Encode()
+
+	got, err := db.ResolvePayload(offset)
+	require.NoError(t, err)
+	require.Equal(t, []byte("INLINE-DATUM"), got)
+
+	live.spend(txID, 0)
+	_, err = db.ResolvePayload(offset)
+	require.ErrorIs(t, err, types.ErrHistoryExpired)
+}
+
+// A datum row names the block that first carried the datum, which expired,
+// while a later output that is still live carries the same datum inline. The
+// payload is active, so the row is re-pointed to the live output and not
+// marked expired.
+func TestMigratePayloadOffsetsRelocatesAnExpiredRowToALaterLiveOutput(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	txID := bytes.Repeat([]byte{0xa5}, 32)
+	datum := []byte("INLINE-DATUM")
+	output := append([]byte("output-cbor-with-"), datum...)
+	datumHash := lcommon.Blake2b256Hash(datum)
+	seedMaterializedLiveOutput(t, db, 200, txID, datumHash.Bytes(), output)
+	db.SetLiveOutputs(&fakeLiveOutputs{live: map[string][]byte{
+		liveKey(txID, 0): output,
+	}})
+	// The block that first carried the datum, as a witness, expired.
+	firstHash := bytes.Repeat([]byte{0xbd}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID: 50, Slot: 100, Hash: firstHash, Number: 0, Type: 1,
+		Cbor: append([]byte("witness-"), datum...),
+	}, nil))
+	_, err := db.PruneBlock(t.Context(), 100, firstHash)
+	require.NoError(t, err)
+
+	raw := rawSQLiteMetadataFixture(t, db)
+	_, err = raw.Exec(
+		"INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, 100)",
+		datumHash.Bytes(), datum,
+	)
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO applied_transaction
+(tx_id, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid)
+SELECT id, ?, 200, 0, '0', '0', '0', 0, 1 FROM "transaction" WHERE hash = ?`,
+		bytes.Repeat([]byte{0xbc}, 32), txID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.MigratePayloadOffsets(t.Context()))
+
+	var column []byte
+	var added uint64
+	require.NoError(t, raw.QueryRow(
+		"SELECT raw_datum, added_slot FROM datum",
+	).Scan(&column, &added))
+	require.False(t, types.IsExpiredPayload(column), "an active payload was dropped")
+	require.EqualValues(t, 200, added)
+	got, err := db.GetDatum(t.Context(), datumHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, datum, got.RawDatum)
+}

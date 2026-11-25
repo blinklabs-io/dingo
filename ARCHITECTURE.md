@@ -4858,11 +4858,15 @@ Each CBOR reference is a fixed 52-byte `CborOffset` struct with magic prefix:
 
 | Field | Size | Purpose |
 |-------|------|---------|
-| Magic | 4 bytes | "DOFF" for a block, "DLEB" for an endorser block's transaction list in the LeiosDB, "DEXP" for a payload whose block expired with no archive configured (slot and hash only) |
+| Magic | 4 bytes | "DOFF" for a block, "DLEB" for an endorser block's transaction list in the LeiosDB, "DEXP" for a payload whose block expired with no archive configured (slot and hash only), "DLOF" for a payload inside an unspent output whose block expired before the offset was computed (transaction hash, output index and the byte range inside the output, read from the live UTxO set) |
 | BlockSlot | 8 bytes | Block slot number |
 | BlockHash | 32 bytes | Block hash |
 | ByteOffset | 4 bytes | Offset within block CBOR |
 | ByteLength | 4 bytes | Length of CBOR data |
+
+A "DLOF" reference lays the same 52 bytes out differently: the transaction hash
+(bytes 4-35), the output index, then the byte offset and length inside that
+output's CBOR, and four zero bytes (`types.LiveOutputOffset`).
 
 ### Plugin System
 
