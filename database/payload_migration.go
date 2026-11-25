@@ -243,29 +243,33 @@ func (l *liveBlockLocator) LocatePayload(payload []byte) ([]byte, error) {
 		return nil, errors.New("locate payload: empty payload")
 	}
 	d := l.db
-	mdTxn := d.MetadataTxn(l.ctx, false)
-	defer mdTxn.Release()
-	refs, err := d.utxoStore().GetUtxosBySlot(l.expired.Slot, mdTxn.Metadata())
-	if err != nil {
-		return nil, fmt.Errorf("list the outputs of the expired block: %w", err)
-	}
-	store, release := d.PinBlob()
-	defer release()
+	// One read transaction serves the rows and the entries: an IndexerDB
+	// keeps its entries in its metadata store, and an entry read outside the
+	// held transaction would wait for a second connection the pool may not
+	// have.
+	txn := d.Transaction(l.ctx, false)
+	defer txn.Release()
+	store := txn.BlobStore()
 	if store == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
-	blobTxn := store.NewTransaction(false)
-	defer blobTxn.Rollback() //nolint:errcheck
+	refs, err := d.utxoStore().GetUtxosBySlot(l.expired.Slot, txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("list the outputs of the expired block: %w", err)
+	}
 	for _, ref := range refs {
-		data, err := store.GetUtxo(blobTxn, ref.Hash, ref.Idx)
-		if err != nil {
+		data, err := store.GetUtxo(txn.Blob(), ref.Hash, ref.Idx)
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
 			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read the entry of an expired block's output: %w", err)
 		}
 		if !IsUtxoOffsetStorage(data) {
 			// Raw CBOR: the output is live while the metadata store holds it
 			// unspent.
 			if live, err := d.utxoStore().GetUtxo(
-				ref.Hash, ref.Idx, mdTxn.Metadata(),
+				ref.Hash, ref.Idx, txn.Metadata(),
 			); err != nil || live == nil {
 				continue
 			}
