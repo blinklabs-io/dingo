@@ -26,8 +26,9 @@ import (
 	"github.com/blinklabs-io/dingo/internal/node"
 )
 
-// healthProbeServer is the liveness/readiness listener an operation outside
-// `serve` keeps up.
+// healthProbeServer is the liveness/readiness listener an operation that does
+// not follow the chain keeps up: `dingo mithril sync`, and the `serve`
+// preflight before node.Run starts its own.
 //
 // The bootstrap case is why it exists. `dingo mithril sync` runs as its own
 // process, ahead of serve, and on mainnet it runs for hours; the shipped
@@ -60,9 +61,9 @@ type boundHealthProbe struct {
 // bindHealthProbe binds cfg's health address, returning a nil probe when
 // healthPort is 0 and the operator has disabled it.
 //
-// The tip gap is deliberately nil: nothing outside `serve` follows the chain,
-// so the probe reports live and not ready, which is exactly the state an
-// operator and an orchestrator should see during a bootstrap. Liveness is
+// The tip gap is deliberately nil: neither a bootstrap nor the `serve`
+// preflight follows the chain, so the probe reports live and not ready, which
+// is exactly the state an operator and an orchestrator should see then. Liveness is
 // what keeps the container alive; readiness is what keeps it out of a load
 // balancer.
 func bindHealthProbe(cfg *config.Config) (*boundHealthProbe, error) {

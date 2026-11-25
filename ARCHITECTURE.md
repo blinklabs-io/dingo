@@ -3789,9 +3789,11 @@ configured data directory (`dingo load`, the `serve` preflight, the offline
 lifecycle service) passes `StorageDependencies.MigrateReleased`
 (`nodestorage.MigrateReleased`). `mithril sync` and `leios-db-bench` pass none
 and refuse such a block store. The phase opens the configured metadata
-provider on a plugin host of its own, opens the v0.94.2 database over it and
-the block store as `database.RoleReleased` (the role storage adoption also
-opens it with), reverts it to the block `k` blocks below its tip
+provider on a plugin host of its own, opens the v0.94.2 database over it,
+the block store and the ImmutableDB provider the opener already resolved
+(creating no ImmutableDB, so blocks already promoted stay readable) as
+`database.RoleReleased` (the role storage adoption also opens it with),
+reverts it to the block `k` blocks below its tip
 (`lifecycle.RewindMetadata`), rebuilds partial reward stake inputs
 (`ledger.ResolveReleasedRewardStakeInputs`), copies the UTxO set and every
 ledger-state family into the live UTxO set, checks the set holds them at the
