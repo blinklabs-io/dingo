@@ -153,7 +153,6 @@ func (b *Backfill) indexClosure(
 			)
 		}
 		expanded += childCount
-		var proposalsValidated bool
 		for levelIndex, level := range txLevels {
 			b.indexedTxs++
 			storageIndex := uint32(base) + uint32(levelIndex) //nolint:gosec
@@ -179,7 +178,6 @@ func (b *Backfill) indexClosure(
 			}
 			if err := b.processBlockGovernanceLevel(
 				ctx, level, point, storageIndex, epochId, pp, txn,
-				&proposalsValidated,
 			); err != nil {
 				return fmt.Errorf(
 					"governance of endorser transaction %d body %d: %w",
