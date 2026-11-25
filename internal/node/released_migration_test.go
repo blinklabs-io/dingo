@@ -237,9 +237,11 @@ func TestReleasedMigrationReadsPromotedBlocks(t *testing.T) {
 	want, err := rt.Database.BlockByIndex(1, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, want.Cbor)
-	promoted, err := rt.Database.PromoteThrough(t.Context(), 10)
+	promoted, err := rt.Database.PromoteThrough(t.Context(), 1<<20)
 	require.NoError(t, err)
-	require.Positive(t, promoted.Promoted)
+	// Past the rewind target (SecurityParam blocks below the tip), so the
+	// migration resolves a promoted marker on its rewind read.
+	require.Greater(t, promoted.Promoted, 432)
 	require.NoError(t, rt.Close(context.Background()))
 	dbConfig.Role = ""
 	dbConfig.Immutable = database.ImmutableConfig{}
