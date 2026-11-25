@@ -6566,7 +6566,7 @@ this is a correctness requirement, not just an optimization: `prune` opens the
 single SQLite write connection (`SetMaxOpenConns(1)`) via `Transaction(ctx,
 true)`, and block apply holds that connection *before* taking
 `deferredHeaderValidationMu` (`ledgerProcessBlock` →
-`verifyDeferredBlockHeaderState` → `consumeDeferredHeaderValidation`, all inside
+`verifyDeferredBlockHeaderState` → `deferredHeaderValidationRequiredWithMode`, all inside
 its write txn). Holding the mutex across `prune` would invert the lock order —
 `mutex → write-conn` in the guard vs. `write-conn → mutex` on apply — and
 **deadlock the node on the single write connection**. The same applies to the

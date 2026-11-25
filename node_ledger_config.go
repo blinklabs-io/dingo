@@ -275,6 +275,9 @@ func (n *Node) ledgerStateConfigBase() ledger.LedgerStateConfig {
 			start ocommon.Point,
 			end ocommon.Point,
 		) (uint64, error) {
+			if override := n.blockfetchRangeOverride.Load(); override != nil {
+				return (*override)(connId, start, end)
+			}
 			o := n.ouroboros()
 			if o == nil {
 				return 0, errOuroborosNotStarted
