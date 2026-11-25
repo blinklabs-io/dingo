@@ -192,6 +192,12 @@ func seedLedgerEpochsForLoadedBlocks(
 	if hold != nil {
 		hold()
 	}
+	// A ledger that applied any loaded block moved off the origin; the epoch
+	// row count alone would miss blocks that stay within the genesis epoch.
+	require.Equal(
+		t, uint64(0), seedLedger.Tip().Point.Slot,
+		"seed ledger applied a loaded block before Close",
+	)
 	require.NoError(t, seedLedger.Close())
 	epochs, err := set.Epochs()
 	require.NoError(t, err)
