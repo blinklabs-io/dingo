@@ -381,6 +381,23 @@ func loadDRepVotingState(
 	activeProposalEpoch uint64,
 	delegatorInactivityOn bool,
 ) (*DRepVotingState, error) {
+	return loadDRepVotingStateWithExpiries(
+		ctx, db, txn, currentEpoch, activeProposalEpoch,
+		delegatorInactivityOn, nil,
+	)
+}
+
+// loadDRepVotingStateWithExpiries is loadDRepVotingState with stored DRep
+// expiries replaced by expiryOverride where it holds the DRep.
+func loadDRepVotingStateWithExpiries(
+	ctx context.Context,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
+	currentEpoch uint64,
+	activeProposalEpoch uint64,
+	delegatorInactivityOn bool,
+	expiryOverride map[string]uint64,
+) (*DRepVotingState, error) {
 	if db == nil {
 		return nil, errors.New("nil database")
 	}
@@ -403,7 +420,7 @@ func loadDRepVotingState(
 	// never had activity recorded and is treated as unexpired.
 	dreps := make([]*models.Drep, 0, len(allDreps))
 	for _, drep := range allDreps {
-		if !drepActiveAtEpoch(drep, currentEpoch) {
+		if !drepActiveAtEpoch(drep, currentEpoch, expiryOverride) {
 			continue
 		}
 		dreps = append(dreps, drep)
