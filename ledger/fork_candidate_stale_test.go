@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -211,29 +212,37 @@ func TestFinishForkCandidateSkipsSwitchAfterGenerationChangeDuringValidation(
 	require.NotContains(t, f.logs.String(), switchUnavailableLog)
 }
 
-// The primary tip can move after the candidate validates and before the
-// switch takes the chain lock. The switch is then skipped before it reaches
-// the rollback.
-func TestFinishForkCandidateSkipsSwitchAfterTipMoveDuringValidation(
+// The primary tip can move after finishForkCandidate has passed its own tip
+// check and entered the rollback, where only the rollback preflight can still
+// refuse the switch. A forged block lands without chainsyncMutex, so no
+// earlier check sees it.
+func TestFinishForkCandidateRefusesSwitchAfterTipMoveInsideRollback(
 	t *testing.T,
 ) {
 	t.Parallel()
 	f := newStaleForkFixture(t)
-	validated := make(chan struct{})
-	f.db.onSetTip = func() { close(validated) }
 
-	f.ls.chainsyncMutex.Lock()
+	// The rollback takes blockPipelineGatherMutex after rollbackMutex and
+	// before the preflight, so holding it parks the switch inside the
+	// rollback with the tip check already passed.
+	f.ls.blockPipelineGatherMutex.Lock()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		f.ls.finishForkCandidate(f.candidate)
 	}()
-	<-validated
+	require.Eventually(t, func() bool {
+		if f.ls.rollbackMutex.TryLock() {
+			f.ls.rollbackMutex.Unlock()
+			return false
+		}
+		return true
+	}, 10*time.Second, time.Millisecond, "the switch must enter the rollback")
 	moved := f.extendPrimaryChain(t)
-	f.ls.chainsyncMutex.Unlock()
+	f.ls.blockPipelineGatherMutex.Unlock()
 	<-done
 
 	require.Positive(t, f.db.begins.Load(), "the candidate must have validated")
 	f.requireUnchanged(t, moved)
-	require.NotContains(t, f.logs.String(), switchUnavailableLog)
+	require.Contains(t, f.logs.String(), switchUnavailableLog)
 }
