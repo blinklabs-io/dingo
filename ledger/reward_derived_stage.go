@@ -233,8 +233,8 @@ func (s stagingLedgerDB) cursorWrite(
 	})
 }
 
-// claimPendingFromSet is ClaimPendingRewardCreditsForCredential for a drained
-// family: the credential's unfolded credits in credited rounds come from the
+// claimPendingFromSet is ClaimPendingRewardCreditsForCredential on the set:
+// the credential's unfolded credits in credited rounds come from the
 // set and are staged as folded.
 func (s stagingLedgerDB) claimPendingFromSet(
 	txn ledgerdb.Txn,

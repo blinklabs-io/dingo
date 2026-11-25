@@ -27,9 +27,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
-// setGovernanceReader returns the set's governance reader for a drained
-// family. The metadata store holds nothing to fall back to, so a set that is
-// not following the ledger or does not hold every row is an error.
+// setGovernanceReader returns the set's governance reader. No other store
+// holds the family, so a set that is not following the ledger or does not
+// hold every row is an error.
 func (ls *LedgerState) setGovernanceReader(
 	txn ledgerdb.Txn,
 ) (GovernanceReader, error) {

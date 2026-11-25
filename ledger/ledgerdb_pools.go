@@ -38,8 +38,7 @@ func setPoolRead[T any](
 	return v, err
 }
 
-// ListPoolKeyHashes reads from the set when the pools-history family is
-// drained.
+// ListPoolKeyHashes reads from the set.
 func (s stagingLedgerDB) ListPoolKeyHashes(
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
@@ -64,8 +63,7 @@ func (s stagingLedgerDB) GetPools(
 	})
 }
 
-// GetPoolByVrfKeyHash reads from the set when the pools-history family is
-// drained.
+// GetPoolByVrfKeyHash reads from the set.
 func (s stagingLedgerDB) GetPoolByVrfKeyHash(
 	ctx context.Context,
 	vrfKeyHash []byte,
@@ -77,8 +75,7 @@ func (s stagingLedgerDB) GetPoolByVrfKeyHash(
 	})
 }
 
-// GetFuturePoolByVrfKeyHash reads from the set when the pools-history family
-// is drained.
+// GetFuturePoolByVrfKeyHash reads from the set.
 func (s stagingLedgerDB) GetFuturePoolByVrfKeyHash(
 	ctx context.Context,
 	vrfKeyHash []byte,
@@ -90,8 +87,7 @@ func (s stagingLedgerDB) GetFuturePoolByVrfKeyHash(
 	})
 }
 
-// GetPoolByLeiosKey reads from the set when the pools-history family is
-// drained.
+// GetPoolByLeiosKey reads from the set.
 func (s stagingLedgerDB) GetPoolByLeiosKey(
 	ctx context.Context,
 	publicKey []byte,
@@ -103,8 +99,7 @@ func (s stagingLedgerDB) GetPoolByLeiosKey(
 	})
 }
 
-// GetFuturePoolByLeiosKey reads from the set when the pools-history family is
-// drained.
+// GetFuturePoolByLeiosKey reads from the set.
 func (s stagingLedgerDB) GetFuturePoolByLeiosKey(
 	ctx context.Context,
 	publicKey []byte,
@@ -116,8 +111,7 @@ func (s stagingLedgerDB) GetFuturePoolByLeiosKey(
 	})
 }
 
-// GetActivePoolRelays reads from the set when the pools-history family is
-// drained.
+// GetActivePoolRelays reads from the set.
 func (s stagingLedgerDB) GetActivePoolRelays(
 	ctx context.Context,
 	txn ledgerdb.Txn,
@@ -127,8 +121,8 @@ func (s stagingLedgerDB) GetActivePoolRelays(
 	})
 }
 
-// GetPoolDepositsHeld reads from the set when the pools-history family is
-// drained: the deposit each registered pool holds now.
+// GetPoolDepositsHeld reads from the set: the deposit each registered pool
+// holds now.
 func (s stagingLedgerDB) GetPoolDepositsHeld(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
@@ -138,8 +132,7 @@ func (s stagingLedgerDB) GetPoolDepositsHeld(
 	})
 }
 
-// GetRetiringPools reads from the set when the pools-history family is
-// drained.
+// GetRetiringPools reads from the set.
 func (s stagingLedgerDB) GetRetiringPools(
 	currentEpoch uint64,
 	txn ledgerdb.Txn,

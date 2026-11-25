@@ -70,7 +70,7 @@ func (f Family) String() string {
 	return "family-" + strconv.Itoa(int(f))
 }
 
-// Families returns every family this binary knows, in bit order.
+// Families returns every family this binary knows, in declaration order.
 func Families() []Family {
 	out := make([]Family, 0, familyEnd)
 	for f := range familyEnd {

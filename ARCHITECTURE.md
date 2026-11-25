@@ -3374,8 +3374,8 @@ row moves into the set and from the set itself after it is reconciled (see
 DATABASE.md, "Zero-coin Byron genesis outputs"). A set behind the ledger is
 resumed by
 `LedgerState.ResumeUtxoSetFrom`, which rolls the ledger back to the set's
-tip so the blocks after it are applied again, or rebuilt from the metadata
-store when that rollback is not possible. With the set as the only copy, the
+tip so the blocks after it are applied again; when that rollback is not
+possible the set recovers through its journal. With the set as the only copy, the
 startup `reward_live_stake` consistency check and rebuild run after this
 reconcile rather than before it, since a rebuild reads UTxO stake from the
 set. The set closes after the ledger in
@@ -3642,14 +3642,13 @@ A failed update is not read around: `failUtxoSet` marks the set failed, records 
 through `ledger.UtxoSetFailureMarker`, and calls `FatalErrorFunc`, and
 validation reads of the set report it unavailable. `utxoset.Set.Reconcile` rewinds a marked set from its journal
 and resumes the ledger from there, rolls a set that is ahead of the ledger tip
-back to the tip when the journal holds it, and otherwise, for a set the
-metadata store cannot rebuild, walks the journal's restorable points newest
-first (`recoverFromJournal`), rolling the set back to each and asking the
-ledger to resume from it, until the ledger accepts one. When no point is
-accepted it stops with an error naming the journal floor. It rebuilds the
-set from the metadata store's `utxo` rows only for a ledger at origin or a
-database whose metadata store still holds its UTxO set, before or during its
-one-time move into the set. An existing database that holds its UTxO
+back to the tip when the journal holds it, and otherwise walks the journal's
+restorable points newest first (`recoverFromJournal`), rolling the set back to
+each and asking the ledger to resume from it, until the ledger accepts one.
+When no point is accepted it stops with an error naming the journal floor.
+While the ledger stands at origin the set starts empty. Only the one-time move
+of a v0.94.2 database's UTxO set into the set rebuilds it from the metadata
+store's `utxo` rows (`Set.ReconcileReleased`). An existing database that holds its UTxO
 set in the metadata store is moved into the set at startup
 (`utxoset.Set.MigrateFromSQL`). `database/lifecycle` snapshots, restores and
 truncates the set with the databases (`WithUtxoSetBackup`,
@@ -3968,7 +3967,7 @@ last row served (the large tables seek to it in the set; `ledger.ErrFactCursorLo
 writer writes one `pool_opcert_sequence` row per block from the header
 (`ledger.BlockOpCertCounter`); the counters a snapshot import certified are
 read when the anchor is recorded (`metadata.AnchorOpCertSource`, which
-`ledger.LedgerState` serves from its metadata store or from the set). Stake
+`ledger.LedgerState` serves from the set). Stake
 inputs the ledger is still writing are deferred and copied once finished. The
 `BlockIndexer`
 is `node.Backfill` (`IndexBlocks`, `RollbackTo`), run over the IndexerDB; an
@@ -17134,7 +17133,7 @@ write transaction's row-batch statement cache, and, when Prometheus metrics
 are configured, a statement issued through the instrumented queryer, runs in
 one `dingo.sql.<name>` region named by its `-- name:` comment, or by its
 operation when it has none. Statements run on the raw `writeDB` or `readDB`
-pool, such as planner statistics, core copy and row drain, record no region.
+pool, such as planner statistics and core copy, record no region.
 `setTransactionWithAccumulator` marks its phases as `dingo.sqlstore.tx.*`
 regions. With no trace running these cost one atomic load and allocate
 nothing.

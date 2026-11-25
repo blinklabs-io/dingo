@@ -73,8 +73,8 @@ func (ls *LedgerState) AnchorStateReady(ctx context.Context) error {
 }
 
 // anchorView is where an anchor read takes its rows from. The live view reads
-// the ledger as it moves, one lock hold per call; a pinned view reads a fixed
-// point and decides once whether the accounts are in the set or the store.
+// the ledger as it moves, one lock hold per call; a pinned view reads a set
+// snapshot of one point.
 type anchorView struct {
 	ls *LedgerState
 	// pinned is set for a view over one point, whose source never changes
@@ -106,8 +106,7 @@ func (v *anchorView) lock() func() {
 	return v.ls.utxoSetApplyMu.RUnlock
 }
 
-// AnchorStateView implements metadata.AnchorStateViewer. Accounts in the
-// metadata store are read in one read transaction; accounts in the set are
+// AnchorStateView implements metadata.AnchorStateViewer. The accounts are
 // read from a set snapshot taken under the apply lock, so the reward records
 // and the balances are of the same applied block.
 func (ls *LedgerState) AnchorStateView(

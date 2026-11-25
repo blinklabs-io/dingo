@@ -34,8 +34,8 @@ var ErrLedgerStateUnserved = errors.New(
 )
 
 // ErrUtxoSetUnserved reports a read that a configured live UTxO set cannot
-// answer. An attached set is authoritative, so the read does not fall back
-// to the metadata store.
+// answer. No other store holds the set, so the read fails rather than fall
+// back.
 var ErrUtxoSetUnserved = errors.New(
 	"live UTxO set cannot serve ledger-state family",
 )
@@ -66,8 +66,7 @@ func (s stagingLedgerDB) GetBlockNonce(
 	return s.ls.blockNonce(point, txn)
 }
 
-// GetBlockNoncesInSlotRange reads from the set when the nonces family is
-// drained.
+// GetBlockNoncesInSlotRange reads from the set.
 func (s stagingLedgerDB) GetBlockNoncesInSlotRange(
 	start, end uint64,
 	txn ledgerdb.Txn,

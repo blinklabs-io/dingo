@@ -3624,7 +3624,7 @@ snapshot is missing, or retention pruned the reward basis its rollover reads.
 ### Live UTxO set as the only copy
 
 Every on-disk node runs this way. A database written by a release that
-kept its UTxO set in the metadata store moves it into the live set at startup, before the ledger starts (`Node.migrateUtxoRows`,
+kept its UTxO set in the metadata store moves it into the live set at startup, before the ledger starts (`nodestorage.MigrateUtxoRows`,
 `utxoset.Set.MigrateFromSQL`). The move runs at the tip the metadata store
 holds, which the node first reverts below the released tip (see "Reverting a
 released database below its tip"):
@@ -3742,7 +3742,7 @@ state moved out of SQL no earlier copy of it would remain to restart from.
 The metadata store of a released database can be reverted: its rows carry the
 slots they were added and deleted at. So the first start reverts it, before
 anything moves, to the block `k` blocks below `T`
-(`nodestorage.Reconcile.rewindMetadataLedger`,
+(`nodestorage.ReleasedMigration.rewindMetadataLedger`,
 `lifecycle.RewindMetadata`), with the sweep an operator truncate of such a
 database runs (`Database.RevertStoredLedgerAfterSlot` and the account-expiry
 and cost-model recomputation around it) and without deleting a block. The UTxO rows and the
@@ -3894,8 +3894,9 @@ one. The reward output rows (`O`, `F`, `W`, `X`) load without a journal entry:
 an entry that marked each row absent before its capture slot would drop the
 rows a rolled-back block created, but a row the metadata store folded after the
 target is not loaded at all, so a rollback below the load could not bring it
-back. A rollback below a load accepts these families as they are loaded; the
-metadata store's own rollback restores them when the set is rebuilt from it.
+back. A rollback below a load accepts these families as they are loaded: the
+only load is the v0.94.2 migration's (`Set.ReconcileReleased`), and no store
+keeps an earlier value of them to restore.
 
 `Store.RefuseLoads` makes a `Load*` fail with `ErrLoadsRefused` before it
 drops a row of a family that holds rows; `Set.Reconcile` sets it, since
@@ -4360,7 +4361,7 @@ work done.
    before the build is recorded. It checks free space for the set and refuses
    with the figure otherwise. The phase leaves the rows in place: nothing
    reopens the metadata store after the migration.
-4. Each ledger-state family from SQL into the set (`utxoset.Set.Reconcile`
+4. Each ledger-state family from SQL into the set (`utxoset.Set.ReconcileReleased`
    over the v0.94.2 database), then a check that the set holds every family
    and stands at the metadata store's tip.
 5. Block bodies from Badger into the ImmutableDB chunk files, in batches with
@@ -4411,7 +4412,7 @@ reads the row to refuse it.
 The order is chosen so no step needs what a later one produces: the IndexerDB
 copy needs the API rows the ledger still owns, the set needs core mode (the
 consensus store is core once the IndexerDB exists), the revert needs the rows
-the set and the drain take, the drain needs the set,
+the set and the family move take, the family move needs the set,
 and promotion is bounded by the ledger's immutable point, which the set
 anchors. Progress is logged by each step, and the promotion step publishes
 `database.immutable_tip_advanced`.
@@ -4781,7 +4782,7 @@ moves its ledger state into the LedgerDB.
 - `snapshot` backs up the IndexerDB before the ledger and refuses a
   directory without an IndexerDB or a backup whose tip is past the ledger.
 - `restore` validates both stores before publishing them and requires the
-  IndexerDB payload when restoring a IndexerDB snapshot.
+  IndexerDB payload when restoring an IndexerDB snapshot.
 - `truncate` rolls the IndexerDB back first through the writer, over the ledger
   database that still stores the blocks, and truncates the Midnight journals
   it holds, then truncates the ledger. A data
@@ -5371,10 +5372,11 @@ No `bool`-derived gate lives in `phase1GateValues` at all, and
 `database.Config` correspondingly has no field for one: a `bool` has no
 "unknown" state distinct from its zero value, so a caller that never sets
 the underlying setting cannot express "I don't know" the way an empty
-string or a zero magic can. `mithril/sync.go:1200` and
-`database/lifecycle/restore.go:609` both reopen an existing database with
-only `DataDir`/`Logger`/`StorageMode`/`Network` set, so any bool-driven gate
-would compute its zero value on those two paths and could collide with a
+string or a zero magic can. `mithril/sync.go`'s `openDatabase` and the
+restored-database validation in `database/lifecycle/restore.go` both reopen
+an existing database without the node's full configuration, so any
+bool-driven gate would compute its zero value on those two paths and could
+collide with a
 database that legitimately has the setting on. This ruled out
 `history_expiry_active` (`LatchBool`) and both validation taints
 (`historical_validation_relaxed`/`strict_utxo_validation_relaxed`, `Taint`)
