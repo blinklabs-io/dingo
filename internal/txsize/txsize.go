@@ -22,10 +22,17 @@ import (
 )
 
 // FromCBOR returns the Cardano ledger size of a transaction from its exact
-// CBOR bytes. Malformed or unrecognized envelopes retain their full size.
+// CBOR bytes. Shelley through Dijkstra are measured from their components, so
+// the outer array framing does not contribute. Malformed or unrecognized
+// envelopes retain their full size.
 func FromCBOR(txType uint, data []byte) uint64 {
 	fullSize := uint64(len(data))
 	switch {
+	case txType >= uint(ledger.TxTypeShelley) &&
+		txType <= uint(ledger.TxTypeMary):
+		if size, ok := shelleyFamily(data); ok {
+			return size
+		}
 	case txType >= uint(ledger.TxTypeAlonzo) &&
 		txType <= uint(ledger.TxTypeConway):
 		if size, ok := alonzoFamily(data); ok {
@@ -37,6 +44,20 @@ func FromCBOR(txType uint, data []byte) uint64 {
 		}
 	}
 	return fullSize
+}
+
+// shelleyFamily measures a Shelley, Allegra or Mary transaction as
+// toCBORForSizeComputation encodes it (cardano-ledger Shelley/Tx.hs,
+// sizeShelleyTxF; Allegra and Mary set sizeTxF to it): a one-byte array
+// header, the body, the witness set and the auxiliary data, which is one null
+// byte when absent. The received outer framing does not contribute. It reports
+// false unless data is exactly one three-component array.
+func shelleyFamily(data []byte) (uint64, bool) {
+	components, ok := decodeComponents(data)
+	if !ok || len(components) != 3 {
+		return 0, false
+	}
+	return canonicalSize(components...), true
 }
 
 func alonzoFamily(data []byte) (uint64, bool) {

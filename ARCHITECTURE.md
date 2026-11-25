@@ -2490,15 +2490,19 @@ transaction, taking `mutationMutex`, or running ledger rules. A historical
 Shelley-family submission is decoded and injected first, then checked against
 the current-era limit before it can reach the mutation gate. No limit is
 reported for an era whose validation is skipped or parameters that are not the
-type its validation requires. From Alonzo through Conway, the ledger's fee and
-maximum size rules measure a canonical three-element transaction envelope while
-preserving the exact received body, witness-set and auxiliary-data bytes; the
-third element of a four-element envelope is the IsValid field and is omitted.
+type its validation requires. From Shelley through Conway, the transaction size
+is a canonical three-element transaction envelope that preserves the exact
+received body, witness-set and auxiliary-data bytes, so the
+received outer array framing (indefinite-length or a wider definite header) does
+not contribute; the third element of a four-element Alonzo-or-later envelope is
+the IsValid field and is omitted. Shelley, Allegra and Mary input that is not
+exactly three components keeps its full received size.
 Dijkstra keeps the same canonical three-component measure for its current
 mempool envelope, its legacy mempool envelope with a `true` validity flag before
 auxiliary data, and its block envelope with the validity flag last. An unrecognized or
 ambiguous envelope keeps its full received size. The raw admission guard and
-decoded ledger rules use the same sizing primitive. The limit comes from the
+decoded ledger rules use the same sizing primitive, except that Mary's decoded
+fee and maximum size rules are gouroboros's own. The limit comes from the
 optional `mempool.TxSizeLimitProvider` implemented by `LedgerState`, and the
 rejection is the ledger's own `shelley.MaxTxSizeUtxoError`, so every submit path
 reports it as an ordinary transaction rejection.
