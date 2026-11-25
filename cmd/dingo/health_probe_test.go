@@ -404,3 +404,18 @@ func TestListenerServersCloseListenerOnImmediateShutdown(t *testing.T) {
 		assertClosed(t, ln)
 	})
 }
+
+// A shutdown signal that cancels the context during a preflight step is a
+// requested shutdown, not a startup failure.
+func TestServePreflightReportsShutdownWhenContextCancelled(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Network:      "preview",
+		DatabasePath: t.TempDir(),
+		Plugins:      testStoragePlugins(),
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := runServePreflight(ctx, cfg, slog.New(slog.DiscardHandler), nil)
+	require.ErrorIs(t, err, errShutdownRequested)
+}
