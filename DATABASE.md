@@ -4312,8 +4312,8 @@ between any two leaves a node that starts and continues:
       a time. The copy carries every table of the schema except the API-only
       tables (`address_transaction`, `address_transaction_rebuild_source`,
       `asset_holding`, `asset_identity`, `redeemer_script`,
-      `transaction_metadata_label`) and any table whose foreign keys
-      reference one of those. Core mode writes no asset holdings, so the
+      `transaction_metadata_label`, `transaction_offset`, `utxo_offset`) and
+      any table whose foreign keys reference one of those. Core mode writes no asset holdings, so the
       namespace holds none, as the store of a node that ran in core mode from
       its first block holds none. That includes the `utxo` rows and
       the tables and `sync_state` keys of the ledger-state families: the
@@ -4823,8 +4823,9 @@ A node that starts over an existing SQLite API-mode database, with no
 consensus store; no resync or command is needed.
 The metadata store is copied (`VACUUM INTO`) through
 `<databasePath>/.indexer-migrate-*`; the copy gets the ledger tip as its tip
-and checkpoint plus the `indexer_layout` latch, and a rename publishes it as
-`<databasePath>/indexer`. The consensus store then latches `indexer_layout` and
+and checkpoint, the released store's UTxO and transaction offset entries in its
+`utxo_offset` and `transaction_offset` tables, and the `indexer_layout` latch,
+and a rename publishes it as `<databasePath>/indexer`. The consensus store then latches `indexer_layout` and
 moves from API to core, the one direction `storage_mode` allows. Its API rows
 stay on disk and are never read or written again. Progress is logged.
 
@@ -5469,7 +5470,7 @@ the stored blocks as they age past the window, as it does on any node.
 | `utxo` | `id`, `tx_id`, `output_idx`, `collateral_return_for_tx_id`, `spent_at_tx_id`, `payment_key`, `staking_key`, `credential_tag`, `datum_hash`, `amount`, `payment_script`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_id, output_idx)` (`idx_utxo_tx_id_output_idx`); unique `collateral_return_for_tx_id` (`idx_utxo_collateral_return_for_tx_id`, partial except on MySQL); `idx_utxo_spent_at_tx_id` (partial, non-NULL rows only, except on MySQL), `payment_key`, `staking_key` (partial), `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`; spent rows only, `WHERE deleted_slot > 0`, on MySQL `deleted_slot` alone), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | `tx_id` is `NOT NULL` and names the producing transaction for every output, a collateral return included, as `tx_id -> transaction.id`; `collateral_return_for_tx_id -> transaction.id` (equal to `tx_id`) marks the collateral return, so readers of regular outputs filter `collateral_return_for_tx_id IS NULL`. The spender is `spent_at_tx_id -> transaction.id`; reference and collateral inputs are rows of `utxo_reference_edge` and `utxo_collateral_edge` keyed by `(utxo_id, tx_id)`. The foreign keys carry no `ON DELETE` action: rollback deletes outputs explicitly. An imported output names its producer's identity row, which has no `applied_transaction` row until the producer is applied. The producer's and spender's hashes are not stored on the row; readers project them from `transaction`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `utxo_collateral_edge` | `utxo_id`, `tx_id` | PK `(utxo_id, tx_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_collateral_edge_tx_id` (`tx_id`) | Authoritative many-to-many collateral relationship, keyed by the naming transaction's row id. Apply and rollback maintain edges independently; rollback deletes by transaction id. |
 | `utxo_reference_edge` | `utxo_id`, `tx_id` | PK `(utxo_id, tx_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_edge_tx_id` (`tx_id`) | Authoritative many-to-many reference-input relationship, same shape as the collateral edge table. |
-| `utxo_offset` | `tx_id`, `output_idx`, `data` | PK `(tx_id, output_idx)` (`WITHOUT ROWID` on SQLite) | IndexerDB only. The CBOR entry of each output the IndexerDB indexed: a 52-byte `DOFF` offset into a block of the ledger's blob store, or the output's raw CBOR once history expiry materialized it. Keyed by identity, as `utxo` rows are looked up; written and removed in the IndexerDB transaction that writes or removes the `utxo` row. Not carried into a consensus namespace. |
+| `utxo_offset` | `tx_id`, `output_idx`, `data` | PK `(tx_id, output_idx)` (`WITHOUT ROWID` on SQLite) | IndexerDB only. The CBOR entry of each output the IndexerDB indexed: a 52-byte `DOFF` offset into a block or endorser block the ledger stored, or the output's raw CBOR once history expiry materialized it. Keyed by identity, as `utxo` rows are looked up; written and removed in the IndexerDB transaction that writes or removes the `utxo` row. Not carried into a consensus namespace. |
 | `transaction_offset` | `hash`, `data` | PK `hash` (`WITHOUT ROWID` on SQLite) | IndexerDB only. The `DOFF` or `DTXP` CBOR offset of each transaction the IndexerDB indexed, keyed by transaction hash; written and removed in the IndexerDB transaction that writes or removes the transaction rows. Not carried into a consensus namespace. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
 | `utxo_reference_script` | `utxo_id`, `script_hash` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_script_hash` (`script_hash`) | API-mode index of the script an output carries as a reference script, written when the output is created from its decoded `script_ref`, and when it is imported from a ledger-state snapshot, recovered as a consumed input, or created through `CreateUtxo`. The script is a property of the output, so re-applying it overwrites the row. Spent outputs keep their row; listings join `utxo` and keep `deleted_slot = 0`. The cascade is how rollback reaches these rows. Outputs created before migration `v45` have no row. |
@@ -7959,7 +7960,11 @@ UTxO and transaction deletion removes the blob object first and the metadata
 row that names it second (`deleteUtxoBlobs`, `deleteTxBlobs`, called from
 `UtxosDeleteRolledback` and `TransactionsDeleteRolledback`). Metadata is the source of truth, so the order
 cannot be reversed and a blob failure cannot abort the metadata delete: a
-rolled-back UTxO must not stay in the live set because its blob is stuck.
+rolled-back UTxO must not stay in the live set because its blob is stuck. On
+an IndexerDB the entries are rows of its `utxo_offset` and `transaction_offset`
+tables, deleted through the same metadata transaction as the rows that name
+them (`indexerEntryWriter`); a failed entry delete there leaves an unnamed row
+and is counted the same way.
 
 The consequence is that a failed blob delete strands an object permanently. It
 is not the same orphan the durability contract above describes: those sit

@@ -39,8 +39,9 @@ type IndexerOptions struct {
 
 // NewIndexerDatabase composes an IndexerDB over consensus for a test, as a
 // node does: its own API-mode SQLite metadata store, in a directory of its
-// own so RawSQLiteMetadata reaches it, over the indexer view of the consensus
-// database's blob store.
+// own so RawSQLiteMetadata reaches it, which also keeps its UTxO and
+// transaction CBOR entries, reading blocks from the consensus database's blob
+// store.
 //
 // Call it after consensus is built: the IndexerDB is closed during tb's
 // cleanup, which must run before the consensus database closes the blob store
