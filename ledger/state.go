@@ -3530,16 +3530,6 @@ func (ls *LedgerState) LatestOpCertSequence(
 	)
 }
 
-// Datums looks up datums by hash in one read transaction for
-// query.ReadData. The result is aligned with hashes; an entry is nil when
-// that datum is not stored.
-func (ls *LedgerState) Datums(
-	ctx context.Context,
-	hashes [][]byte,
-) ([]*models.Datum, error) {
-	return ls.indexerDB().GetDatums(ctx, hashes)
-}
-
 // CloseDBWorkerPoolShutdownTimeout, CloseProcessBlocksDrainTimeout, and
 // CloseBlockfetchDrainTimeout bound the corresponding waits in Close()
 // below. Exported (not local consts) so tests — including cross-package

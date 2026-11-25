@@ -2459,15 +2459,15 @@ When `Node.Run()` is called, components are initialized in this order:
     Wiring below for how the apparent cycle is resolved.
 17. ConnectionManager listener start
 18. Chainsync stall recycler (`internal/chainsyncrecycler.Recycler.Start`)
-19. UTxO RPC server (if its core-tier feature and port are configured)
+19. UTxO RPC server (if port configured; it declares the `core` tier)
 20. Bark C2/archive server (if port configured)
-21. Midnight gRPC server (if its API-tier feature and
+21. Midnight gRPC server (if API storage mode and
     `midnight.serverEnabled`, with a non-zero port)
-22. Blockfrost API (if its API-tier feature and port are configured)
-23. Kupo API (if its API-tier feature and port are configured)
-24. Mesh API (if its API-tier feature and port are configured)
-25. Off-chain metadata fetcher (if its API-tier feature is enabled)
-26. CIP-26 token registry sync (if its API-tier feature and tokenRegistry.enabled)
+22. Blockfrost API (if API storage mode and port configured)
+23. Kupo API (if API storage mode and port configured)
+24. Mesh API (if API storage mode and port configured)
+25. Off-chain metadata fetcher (if API storage mode)
+26. CIP-26 token registry sync (if API storage mode and tokenRegistry.enabled)
 27. Block forger + leader election (if block producer mode)
 28. Node-managed Mithril coordinator (if `mithril.enabled` and the caller
     supplied `WithMithrilCatchUp`; see Node-managed Mithril)
@@ -4056,8 +4056,8 @@ it over the IndexerDB in API mode and over the ledger in core mode
 (`utxorpc.NewLedgerQueryDatabase`). The API-mode service answers
 `Unavailable` while the IndexerDB is not ready and reports its tip. The
 core-mode service is immediately ready, reports the ledger tip and reads
-live outputs from the ledger's UTxO set, which the ledger store's empty `utxo`
-table cannot serve: `ReadUtxos` by reference, `SearchUtxos` by address through
+live outputs from the ledger's UTxO set, which the ledger's database, keeping
+no metadata store, cannot serve: `ReadUtxos` by reference, `SearchUtxos` by address through
 `LedgerState.UtxosByAddressBoundedPage`, and `ReadData` for inline datums
 through `LedgerState.InlineDatums`. An address read walks the set's output
 index (see DATABASE.md, "Live UTxO set"), so its work follows the outputs the
@@ -4237,19 +4237,26 @@ Dingo supports two storage modes, configured via `storageMode`:
 - `api`: Extended storage with transaction indexes, address lookups, and asset
   tracking.
 
-The operator still chooses `storageMode`; consumers do not promote it. API
-providers, indexers and hooks declare an ordered minimum tier (`core` or `api`)
-and named storage features. Startup aggregates all enabled declarations and
-refuses an insufficient tier before opening storage. UTxO RPC declares `core`.
-The Midnight indexer and server, CIP-26 registry, and off-chain metadata
-fetcher declare `api`. Selecting `api` enables every feature known to the
-composed plugin host, including disabled consumers, so the storage shape does
-not depend on which listener starts first. In `core`, only enabled consumers'
-features enter the registry. The registry is composition state passed into the
-database alongside the selected mode; it is derived again on startup and adds
-no persisted gate or database-format contract. The existing `storage_mode`
-latch remains authoritative and still refuses a core database reopening as
-api. Bark remains a separate Dingo-to-Dingo protocol.
+The operator chooses `storageMode`; consumers do not promote it. Plugin
+providers (`plugin.Descriptor.Storage`) and the built-in Bark, Midnight,
+CIP-26 and off-chain metadata consumers (`builtinStorageConsumers`) declare an
+ordered minimum tier (`core` or `api`) and named storage features.
+`plugin.Register` rejects an `api.*` provider that declares no tier, and any
+declaration with an unknown tier, no feature, or an empty or duplicated
+feature. `Node.New` (`Node.storagePlan`) aggregates the enabled declarations,
+including extra plugin selections that declare a tier, and refuses an
+insufficient tier before opening storage. UTxO RPC, MCP and Bark declare
+`core`; Blockfrost, Kupo, Mesh, the Midnight indexer and server, the CIP-26
+registry and the off-chain metadata fetcher declare `api`. In `core`, a
+built-in API-tier provider left at its default port counts as disabled, so the
+default configuration starts; a changed port or provider enables it and is
+refused. Selecting `api` enables every feature any registered provider or
+built-in consumer declares, including disabled consumers, so the storage shape
+does not depend on which listener starts first. In `core`, only enabled
+consumers' features enter the registry. The registry is node composition state,
+derived again on every startup; it is not passed to the database and adds no
+persisted gate or database-format contract. The `storage_mode` latch refuses a
+core database reopening as api. Bark is a separate Dingo-to-Dingo protocol.
 
 The ledger keeps its UTxO set in the live UTxO set and writes no `utxo` row
 to its metadata store, so it runs no spent-row cleanup there. The set prunes
@@ -4373,9 +4380,9 @@ to `127.0.0.1:50051`; an explicitly empty host is normalized to that loopback
 default before validation. Plaintext and TLS are both supported; TLS is
 enabled when the shared certificate/key pair is configured. Dingo does not
 add authentication to this Acropolis-compatible native gRPC surface.
-Storage declaration validation rejects `serverEnabled` outside its API tier;
-`Config.Validate` rejects a zero port while enabled and
-`reflectionEnabled` without the server. When the server is
+The storage plan (`Node.storagePlan`) refuses `serverEnabled` with a non-zero
+port outside API storage mode. `Config.Validate` rejects a zero port while
+enabled under API storage mode, and `reflectionEnabled` without the server. When the server is
 disabled, its host and port are inactive and do not participate in port
 validation or listener collision checks.
 
@@ -17138,8 +17145,8 @@ port configuration. UTxO RPC declares the `core` storage tier; Blockfrost,
 Kupo, and Mesh declare `api`. Bark is different: it is Dingo's
 own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose
 application API. The health probes below are not an application API at all: they
-are operational surface for a container runtime or orchestrator, and are the one
-HTTP interface here that is available in every storage mode.
+are operational surface for a container runtime or orchestrator, and are
+available in every storage mode.
 
 ### Health probes (`internal/health`)
 
@@ -17176,10 +17183,10 @@ pool, such as planner statistics, core copy and row drain, record no region.
 regions. With no trace running these cost one atomic load and allocate
 nothing.
 
-The health listener is **not** gated on storage mode. Application listeners
-start only when their declared storage feature is enabled, so a probe wired to
-an API-tier feature would be inert in the default `core` mode — the mode the shipped
-image runs. It binds `bindAddr`, the address the relay/NtN
+The health listener is **not** gated on storage mode. The Blockfrost, Kupo
+and Mesh listeners declare the `api` tier and start only in `api` storage
+mode, so a probe wired the same way would be inert in the default `core`
+mode — the mode the shipped image runs. It binds `bindAddr`, the address the relay/NtN
 listener already uses, rather than the API listeners' own
 loopback-by-default address: a Docker `HEALTHCHECK` runs inside the
 container and would be satisfied by loopback, but a Kubernetes kubelet probe
@@ -17336,9 +17343,11 @@ state they read the SQLite database as before. `get_account` reads the
 account from the ledger and takes only its IndexerDB row references from the
 IndexerDB. `get_pool_performance` reads the IndexerDB's reward rows, which
 keep every epoch, and without an IndexerDB the epochs the ledger state keeps.
-`get_utxos` reads the IndexerDB's address index and `utxo` rows, and without
-an IndexerDB the ledger's live UTxO set (`LedgerState.IterateLiveUtxos`),
-paged by offset. The transaction, block, asset, datum and script tools, the
+`get_utxos` reads the IndexerDB's address index and `utxo` rows. Without an
+IndexerDB a full address pages the live UTxO set's output index by cursor
+(`Node.mcpAddressLookup` over `LedgerState.UtxosByAddressBoundedPage`); a
+server given neither an address lookup nor a database reads the live set
+(`LedgerState.IterateLiveUtxos`), paged by offset. The transaction, block, asset, datum and script tools, the
 `sqlite_*` tools and the schema catalog read only the IndexerDB's SQLite; on a
 node without an IndexerDB the API-index tools say they need one.
 
@@ -18192,15 +18201,16 @@ which has its own page byte cap described below. When set, item-oriented
 responses keep the first item so cursor-based operations can make progress, and
 `ReadState`, `ReadUtxos`, `ReadData` and `FetchBlock`, which have no cursor,
 reject an oversized response with `ResourceExhausted`. `SearchUtxos` passes the
-request context, any configured response-byte cap, and no candidate-row cap into
-its database page scan, so cancellation and a configured cap stop CBOR hydration
+request context, any configured response-byte cap, and a candidate-row cap of
+`MaxHistoryItems` plus one into its database page scan, so cancellation and a configured cap stop CBOR hydration
 before a full page is retained; a capped page returns a resumption token.
 `ReadData` looks each distinct
 datum hash up once, in first-seen order, so repeated hashes in a request yield
-one value, and resolves them through `LedgerState.Datums` /
-`Database.GetDatums`: one metadata read transaction per request, bound to the
-request context and checked before each lookup, so a cancelled caller stops the
-batch instead of opening a transaction per hash. `ReadUtxos` resolves exactly
+one value, and resolves them through `QueryDatabase.Datums`. On an API node
+that is `Database.GetDatums`: one metadata read transaction per request, bound
+to the request context and checked before each lookup, so a cancelled caller
+stops the batch instead of opening a transaction per hash. On a core node it is
+`LedgerState.InlineDatums`, which checks the context before each hash. `ReadUtxos` resolves exactly
 the requested (tx hash, output index) references and loads their CBOR through
 `LedgerState.UtxosByRefsBounded` / `Database.UtxosByRefsBounded`, which counts
 bytes as each output is read and stops with `ErrUtxoBytesExceeded` (mapped to
@@ -22240,11 +22250,11 @@ independently of the public `bindAddr` and private `privateBindAddr`. A wildcard
 pprof listener therefore requires an explicit override of the dedicated setting;
 both serving modes and Mithril snapshot sync use the same resolved address. Port
 checks apply only to the listeners a given invocation actually starts, derived
-from the *effective* run mode plus declared storage features: the serving modes
-start the relay, metrics, debug, bark, and core-tier UTxORPC listeners, plus the
-private TCP listener only when `privatePort` is non-zero (and, under `api`
-storage or a configured `dev` run mode — which forces `api` storage — the
-Blockfrost/Mesh listeners and an explicitly enabled Midnight listener);
+from the *effective* run mode plus the storage mode: the serving modes start
+the relay, metrics, debug, bark, MCP and UTxORPC listeners, plus the private
+TCP listener only when `privatePort` is non-zero (and, under `api` storage or
+a configured `dev` run mode — which forces `api` storage — the
+Blockfrost/Kupo/Mesh listeners and an explicitly enabled Midnight listener);
 the Mithril snapshot sync (`dingo sync --mithril` or `dingo mithril sync`)
 starts only the metrics and debug listeners; `mithril serve` starts only the
 artifact server, and only that command validates the `mithril.server` port,

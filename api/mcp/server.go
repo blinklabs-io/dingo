@@ -143,8 +143,9 @@ func NewMCPServer(
 		Version: "0.1.0",
 	}, opts)
 
-	// The address index is the IndexerDB's: a ledger's database has no
-	// metadata store to page from, and get_utxos then reads the live UTxO set.
+	// A node whose database holds no UTxO rows supplies AddressLookup over its
+	// live UTxO set; otherwise the IndexerDB's address index pages addresses.
+	// With neither and no database, get_utxos reads the live UTxO set itself.
 	var addressLookup utxoAddressLookup
 	switch {
 	case deps.AddressLookup != nil:

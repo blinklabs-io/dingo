@@ -1337,8 +1337,8 @@ type Config struct {
 	// (UTxOs, certs, pools, pparams).
 	// "api" additionally stores witnesses, scripts,
 	// datums, redeemers, and tx metadata.
-	// APIs (blockfrost, kupo, utxorpc, mesh) require
-	// "api" mode.
+	// Blockfrost, Kupo and Mesh require "api" mode;
+	// UTxO RPC and MCP serve either mode.
 	StorageMode string `yaml:"storageMode" envconfig:"DINGO_STORAGE_MODE"`
 
 	// Mithril snapshot bootstrap configuration

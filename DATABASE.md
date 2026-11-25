@@ -2871,9 +2871,9 @@ they never change. The set keeps an output index under the marker namespace
 credential), a stake credential body (`s` + 28 bytes) and an inline datum hash
 body (`d` + 32 bytes), each derived from the output's CBOR by
 `ledger.UtxoIndexBodies`. Every write of an output row writes or deletes its
-index rows in the same Badger transaction (apply, remove, rollback replay and
-bootstrap), so the index follows the journal and a bootstrap drops it with the
-outputs. A reader loads the output an index row names and never trusts the row
+index rows in the same Badger transaction (apply, remove and rollback replay),
+and a bootstrap writes them in the write batch that writes the outputs, so the
+index follows the journal and a bootstrap drops it with the outputs. A reader loads the output an index row names and never trusts the row
 alone. A set from before the index is indexed when it opens, before the ledger
 follows the chain: transactions of 500 outputs each write their rows and the
 last output indexed (`mxaiafter`), a stopped build resumes after it, and

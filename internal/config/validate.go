@@ -757,7 +757,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	//     that port for the hours the bootstrap takes and a refused probe
 	//     has the container replaced mid-download;
 	//   - bark: serving modes only (not storage-gated);
-	//   - UTxORPC, Blockfrost, Kupo, Mesh, Midnight: serving modes under API
+	//   - MCP, UTxORPC: serving modes (not storage-gated);
+	//   - Blockfrost, Kupo, Mesh, Midnight: serving modes under API
 	//     storage. ApplyRunModeOverrides forces API storage for a serving
 	//     dev-mode config before validation; `dingo serve` with runMode "dev"
 	//     still runs dev, so the configured mode is consulted alongside the
