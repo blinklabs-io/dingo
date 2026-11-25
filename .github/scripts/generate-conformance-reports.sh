@@ -3,6 +3,9 @@
 # Generate the CBOR, ledger-rules, UPLC conformance and UPLC turbo reports for
 # a release tag.
 #
+# Each report is written by a go test in the package that builds it, selected
+# with -run and configured through DINGO_CONFORMANCE_* variables.
+#
 # Reporting never stops a release. A generator exits non-zero when it records
 # failures, and that is fine: the report file is what counts. When a generator
 # crashes or its inputs cannot be prepared, an error report naming the scenario
@@ -35,6 +38,18 @@ DIST_DIR="${DIST_DIR:-dist}"
 CONFORMANCE_DIR="${CONFORMANCE_DIR:-.conformance}"
 TURBO_SAMPLES="${TURBO_SAMPLES:-50}"
 TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-0}"
+
+# go test runs each test binary in its package directory, so every path handed
+# to a generator must be absolute.
+absolute_path() {
+  case "$1" in
+  /*) printf '%s\n' "$1" ;;
+  *) printf '%s/%s\n' "$PWD" "$1" ;;
+  esac
+}
+DIST_DIR="$(absolute_path "$DIST_DIR")"
+CONFORMANCE_DIR="$(absolute_path "$CONFORMANCE_DIR")"
+CBOR_DATASET_DIR="$(absolute_path "$CBOR_DATASET_DIR")"
 
 # The report step has a 60-minute limit. Generator budgets total 43 minutes;
 # corpus preparation is capped at six minutes, leaving 11 minutes for gzip.
@@ -156,7 +171,8 @@ run_generator() {
   rm -f "$report"
   local log status=0
   log="$(mktemp)"
-  timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$@" 2>"$log" || status=$?
+  # go test reports a failing test on stdout, so the log keeps both streams.
+  timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$@" >"$log" 2>&1 || status=$?
   redact_log <"$log" >&2
   if [ "$status" -eq 124 ]; then
     write_error_report "$report" "$scenario" \
@@ -206,10 +222,10 @@ if ! dataset_revision="$(git -C "$CBOR_DATASET_DIR" rev-parse HEAD 2>"$dataset_l
     "cannot read the CBOR dataset revision: $(log_excerpt "$dataset_log")"
 elif [ "$dataset_revision" = "$CBOR_DATASET_REVISION" ]; then
   run_generator "${prefix}-cbor-conformance.json" cbor-decoding "$CBOR_GENERATOR_TIMEOUT_SECONDS" \
-    go run ./internal/cborconformance/cmd \
-    -dataset "${CBOR_DATASET_DIR}/dataset/conway" \
-    -corpus-revision "$dataset_revision" \
-    -output "${prefix}-cbor-conformance.json"
+    env DINGO_CONFORMANCE_INPUT="${CBOR_DATASET_DIR}/dataset/conway" \
+    DINGO_CONFORMANCE_REVISION="$dataset_revision" \
+    DINGO_CONFORMANCE_OUTPUT="${prefix}-cbor-conformance.json" \
+    go test -count=1 -run '^TestWriteConformanceReport$' ./internal/cborconformance
 else
   write_error_report "${prefix}-cbor-conformance.json" cbor-decoding \
     "CBOR dataset checkout does not match the pinned revision ${CBOR_DATASET_REVISION}"
@@ -217,9 +233,9 @@ fi
 rm -f "$dataset_log"
 
 run_generator "${prefix}-ledger-rules.json" ledger-rules "$LEDGER_GENERATOR_TIMEOUT_SECONDS" \
-  go run ./internal/ledgerrulesconformance/cmd \
-  -fixtures "${CONFORMANCE_DIR}/node-diversity-conformance/scenarios/ledger-rules/fixtures" \
-  -output "${prefix}-ledger-rules.json"
+  env DINGO_CONFORMANCE_INPUT="${CONFORMANCE_DIR}/node-diversity-conformance/scenarios/ledger-rules/fixtures" \
+  DINGO_CONFORMANCE_OUTPUT="${prefix}-ledger-rules.json" \
+  go test -count=1 -run '^TestWriteConformanceReport$' ./internal/ledgerrulesconformance
 
 uplc_dir="$(mktemp -d)"
 turbo_dir="$(mktemp -d)"
@@ -228,9 +244,9 @@ if prepare_ndc_corpus "$uplc_dir" uplc-conformance.tar.zst "$UPLC_CORPUS_SHA256"
   "$UPLC_CORPUS_TIMEOUT_SECONDS" \
   2>"${uplc_dir}/prepare.log"; then
   run_generator "${prefix}-uplc-conformance.json" uplc-conformance "$UPLC_GENERATOR_TIMEOUT_SECONDS" \
-    go run ./internal/uplcconformance/cmd \
-    -corpus "${uplc_dir}/corpus" \
-    -output "${prefix}-uplc-conformance.json"
+    env DINGO_CONFORMANCE_INPUT="${uplc_dir}/corpus" \
+    DINGO_CONFORMANCE_OUTPUT="${prefix}-uplc-conformance.json" \
+    go test -count=1 -run '^TestWriteConformanceReport$' ./internal/uplcconformance
 else
   prepare_status=$?
   if [ "$prepare_status" -eq 124 ] || [ "$prepare_status" -eq 137 ]; then
@@ -246,11 +262,12 @@ if prepare_ndc_corpus "$turbo_dir" turbo.tar.zst "$TURBO_CORPUS_SHA256" \
   "$TURBO_CORPUS_TIMEOUT_SECONDS" \
   2>"${turbo_dir}/prepare.log"; then
   run_generator "${prefix}-uplc-turbo.json" uplc-turbo "$TURBO_GENERATOR_TIMEOUT_SECONDS" \
-    go run ./internal/uplcconformance/turbocmd \
-    -corpus "${turbo_dir}/corpus" \
-    -samples "$TURBO_SAMPLES" \
-    -max-programs "$TURBO_MAX_PROGRAMS" \
-    -output "${prefix}-uplc-turbo.json"
+    env DINGO_CONFORMANCE_INPUT="${turbo_dir}/corpus" \
+    DINGO_CONFORMANCE_SAMPLES="$TURBO_SAMPLES" \
+    DINGO_CONFORMANCE_MAX_PROGRAMS="$TURBO_MAX_PROGRAMS" \
+    DINGO_CONFORMANCE_OUTPUT="${prefix}-uplc-turbo.json" \
+    go test -count=1 -timeout "${TURBO_GENERATOR_TIMEOUT_SECONDS}s" \
+    -run '^TestWriteTurboReport$' ./internal/uplcconformance
 else
   prepare_status=$?
   if [ "$prepare_status" -eq 124 ] || [ "$prepare_status" -eq 137 ]; then

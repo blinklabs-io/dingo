@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/stretchr/testify/require"
@@ -42,19 +43,19 @@ func markRewardStakeInputsPending(
 	epoch uint64,
 	boundarySlot uint64,
 ) error {
-	pending, err := loadRewardStakeInputsPending(meta, metaTxn)
+	pending, err := epochengine.LoadRewardStakeInputsPending(meta, metaTxn)
 	if err != nil {
 		return err
 	}
 	entry := RewardStakeInputsPendingEntry{
 		Epoch: epoch, BoundarySlot: boundarySlot,
 	}
-	if i := pending.find(epoch); i >= 0 {
+	if i := pending.Find(epoch); i >= 0 {
 		pending.Entries[i] = entry
 	} else {
 		pending.Entries = append(pending.Entries, entry)
 	}
-	return saveRewardStakeInputsPending(meta, metaTxn, pending)
+	return epochengine.SaveRewardStakeInputsPending(meta, metaTxn, pending)
 }
 
 // A v0.94.2 database can stop with a snapshot's reward_stake_input rows
@@ -93,7 +94,7 @@ func TestMigratedPartialRewardStakeInputsStayIncomplete(t *testing.T) {
 			}}, nil,
 		))
 		require.NoError(t, meta.SetSyncState(
-			rewardStakeInputsPendingKey,
+			epochengine.RewardStakeInputsPendingKey,
 			`{"entries":[{"epoch":7,"boundary_slot":700}]}`, nil,
 		))
 	})
@@ -126,8 +127,8 @@ func TestMigratedPartialRewardStakeInputsStayIncomplete(t *testing.T) {
 	defer read.Release()
 	require.ErrorIs(
 		t,
-		ls.ensureRewardStakeInputsReady(read, epoch),
-		errRewardStakeInputsNotReady,
+		ls.engine().EnsureRewardStakeInputsReady(read, epoch),
+		epochengine.ErrRewardStakeInputsNotReady,
 	)
 }
 
@@ -204,7 +205,7 @@ func seedPartialSQLRewardStakeInputs(
 	require.NoError(t, err)
 	require.NoError(t, raw.Close())
 	require.NoError(t, db.Metadata().SetSyncState(
-		rewardStakeInputsPendingKey,
+		epochengine.RewardStakeInputsPendingKey,
 		`{"entries":[{"epoch":1,"boundary_slot":100}]}`, nil,
 	))
 	fxStoreUtxoRowBodies(t, db)
@@ -241,7 +242,7 @@ func TestMigratedPartialRewardStakeInputsAreRebuilt(t *testing.T) {
 	require.True(t, incomplete)
 
 	tx := db.Transaction(ctx, true)
-	require.NoError(t, ls.ensureRewardStakeInputsReady(tx, epoch))
+	require.NoError(t, ls.engine().EnsureRewardStakeInputsReady(tx, epoch))
 	require.NoError(t, tx.Commit())
 
 	rebuilt, err := ls.ledgerDB().GetRewardStakeInputs(epoch, nil)
@@ -294,7 +295,7 @@ func TestResolveReleasedRewardStakeInputsRebuildsFromMetadataHistory(
 		rows, err := sql.GetRewardStakeInputs(epoch, nil)
 		require.NoError(t, err)
 		require.Len(t, rows, len(whole))
-		pending, err := loadRewardStakeInputsPending(sql, nil)
+		pending, err := epochengine.LoadRewardStakeInputsPending(sql, nil)
 		require.NoError(t, err)
 		require.Empty(t, pending.Entries)
 	})

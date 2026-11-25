@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -700,7 +701,7 @@ func TestRollbackDiscardsPendingRewardStakeInputsOfRewoundBoundary(
 
 	h.rollbackBeforeBoundary()
 
-	pending, err := loadRewardStakeInputsPending(h.ls.ledgerDB(), nil)
+	pending, err := epochengine.LoadRewardStakeInputsPending(h.ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.Empty(t, pending.Entries,
 		"the rollback deleted the snapshot the entry describes")

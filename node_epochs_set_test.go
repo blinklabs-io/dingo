@@ -76,7 +76,9 @@ func bootSetNode(
 		UtxoSet:           set,
 	})
 	require.NoError(t, err)
-	n = &Node{db: db, utxoSet: set, ledgerState: ls, chainManager: cm}
+	n = &Node{
+		db: db, utxoSet: set, ledgerState: ls, chainManager: cm, eventBus: bus,
+	}
 	n.config.logger = logger
 	n.config.dataDir = dir
 	n.config.cardanoNodeConfig = nodeCfg

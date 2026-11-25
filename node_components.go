@@ -276,16 +276,6 @@ func (n *Node) configureSnapshotManager() error {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
-	// When the Koios parity observer is enabled, retain reward_account_output
-	// without bound in CORE storage mode too: the observer only
-	// validates a closed epoch after fetching and comparing against Koios over
-	// the network, which can fall arbitrarily far behind chain progression
-	// during a from-genesis or catch-up sync, well past the fixed 4-epoch
-	// window cleanupOldSnapshots otherwise prunes reward_account_output to.
-	// Configure this before capture or startup locks the settings.
-	n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
-		n.config.koiosParity.Enabled,
-	)
 	// Prune pool snapshots through the deferred-header retention guard, so a
 	// snapshot a queued/deferred header still needs for leader validation is
 	// never pruned out from under it and misread as pool absence, and the

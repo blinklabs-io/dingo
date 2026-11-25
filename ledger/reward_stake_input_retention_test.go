@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 )
 
 func TestPendingRewardInputWriteRejectsMalformedRecord(t *testing.T) {
@@ -34,13 +36,24 @@ func TestPendingRewardInputWriteRejectsMalformedRecord(t *testing.T) {
 			defer txn.Release()
 			require.NoError(
 				t,
-				ldb.SetSyncState(rewardStakeInputsPendingKey, valid, txn),
+				ldb.SetSyncState(
+					epochengine.RewardStakeInputsPendingKey,
+					valid,
+					txn,
+				),
 			)
 			require.Error(
 				t,
-				ldb.SetSyncState(rewardStakeInputsPendingKey, invalid, txn),
+				ldb.SetSyncState(
+					epochengine.RewardStakeInputsPendingKey,
+					invalid,
+					txn,
+				),
 			)
-			got, err := ldb.GetSyncState(rewardStakeInputsPendingKey, txn)
+			got, err := ldb.GetSyncState(
+				epochengine.RewardStakeInputsPendingKey,
+				txn,
+			)
 			require.NoError(t, err)
 			require.Equal(
 				t,
