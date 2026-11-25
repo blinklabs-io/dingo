@@ -633,12 +633,11 @@ INSERT INTO redeemer (
 	require.NoError(t, err)
 	require.True(t, pending)
 
-	// The critical rebuild is the last step before the node serves API
-	// writes, so it restores the retained set too. Drop it again to reach the
+	// The rebuild restores the retained set too. Drop it again to reach the
 	// state a cycle interrupted by an older binary leaves behind.
 	_, err = db.Exec(dialect.DropIndexSQL(retained.Name, retained.Table))
 	require.NoError(t, err)
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
+	require.NoError(t, store.BuildDeferredIndexes())
 	exists, err = store.deferredIndexExists(t.Context(), catalog, retained)
 	require.NoError(t, err)
 	require.True(

@@ -5522,8 +5522,9 @@ PostgreSQL and MySQL retain the single-transaction rebuild path.
 The batched API import path skips replay-cleanup deletes when a transaction
 hash inserts a fresh transaction row: its generated ID cannot yet have detail
 rows. Replays still run the deletes to preserve idempotency. Transaction-detail
-query-only API indexes are deferred during bulk import; critical indexes
-are rebuilt before API or rollback traffic. The transaction-id indexes used by
+query-only API indexes are deferred during bulk import; the IndexerDB writer
+rebuilds the whole manifest before the IndexerDB serves the API. The
+transaction-id indexes used by
 per-transaction cleanup remain resident, as do unique indexes used by
 `ON CONFLICT`. `idx_utxo_staking_deleted_amount` also remains
 resident because every API backfill batch uses it to refresh live stake;
@@ -5578,7 +5579,8 @@ identity delete look up `utxo` by transaction id, which the unique
 `(tx_id, output_idx)` index serves; it is never deferred, so no rollback scans
 the whole `utxo` table. Every column that names a transaction row id is
 indexed for the same reason, and `TestTransactionForeignKeyChildColumnsAreIndexed`
-checks it after the deferred-index drop and the critical rebuild.
+checks that the critical manifest entries cover it after the deferred-index
+drop.
 InnoDB requires an index on every
 foreign-key child column and refuses to drop it, so only the SQLite (and
 PostgreSQL) dialects can reach the state where it is missing.

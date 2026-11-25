@@ -31,7 +31,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -356,20 +355,15 @@ func TestSplitMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 	require.NoError(t, err)
 	require.False(t, ready, "not ready before the anchor")
 
-	// A restart replays to the anchor, then is stopped part-way through the
-	// index build, after the critical subset and before the rest.
+	// A restart replays to the anchor, then is stopped in the index phase,
+	// after the drop and before the build.
 	w, store = f.writer(t, f.cappedAtAnchor(), 7)
 	w.WithDeferredIndexes(
 		func(ctx context.Context) error {
 			NewDeferredIndexRebuilder(ctx, f.indexerDB, f.deps.Logger).Drop()
 			return nil
 		},
-		func(ctx context.Context) error {
-			builder, ok := f.indexerDB.Metadata().(metadata.ContextCriticalDeferredIndexBuilder)
-			require.True(t, ok)
-			if err := builder.BuildCriticalDeferredIndexesContext(ctx); err != nil {
-				return err
-			}
+		func(context.Context) error {
 			return errStopped
 		},
 	)

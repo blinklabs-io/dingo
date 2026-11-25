@@ -712,9 +712,6 @@ DELETE FROM reward_account_output WHERE captured_slot > ?;
 -- name: DeleteRewardStakeInputsBeforeEpoch :exec
 DELETE FROM reward_stake_input WHERE epoch < ?;
 
--- name: DeleteRewardAccountOutputsBeforeEpoch :exec
-DELETE FROM reward_account_output WHERE epoch < ?;
-
 -- name: CreateMidnightAssetCreate :one
 INSERT INTO midnight_asset_creates (
     address, quantity, tx_hash, output_index, block_number, block_hash,
