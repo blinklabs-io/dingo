@@ -721,6 +721,21 @@ func TestTxSubmissionClientRequestCallbacksMissingConsumer(t *testing.T) {
 	require.Nil(t, bodies)
 }
 
+// TestTxSubmissionClientBlockingRequestMissingConsumerStops verifies that a
+// blocking RequestTxIds with no mempool consumer, as after the connection
+// closes or the mempool stops, ends the protocol with MsgDone rather than
+// failing the connection.
+func TestTxSubmissionClientBlockingRequestMissingConsumerStops(t *testing.T) {
+	t.Parallel()
+
+	o, connId := newTxSubmissionTestOuroboros(t)
+	ctx := txsubmission.CallbackContext{ConnectionId: connId}
+
+	ids, err := o.txsubmissionClientRequestTxIds(ctx, true, 0, 1)
+	require.ErrorIs(t, err, txsubmission.ErrStopServerProcess)
+	require.Nil(t, ids)
+}
+
 // TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance verifies a
 // zero-count peer request leaves the consumer positioned on the next tx.
 func TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance(t *testing.T) {
