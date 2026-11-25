@@ -209,14 +209,17 @@ func submitToNode(
 		t, os.WriteFile(filepath.Join(env.cfgDir, name), raw, 0o600),
 	)
 	out, err := exec.Command(
-		"docker", "exec", env.container,
-		"/opt/bin/dmq-submit", "/data/dmq.sock",
-		fmt.Sprint(dmqNetworkMagic), "/etc/dmq/"+name,
+		"docker", "exec",
+		"-e", submitEnvSocket+"=/data/dmq.sock",
+		"-e", submitEnvMagic+"="+fmt.Sprint(dmqNetworkMagic),
+		"-e", submitEnvFile+"=/etc/dmq/"+name,
+		env.container,
+		"/opt/bin/dmqinterop.test", "-test.run", "^TestSubmitHelper$",
 	).CombinedOutput()
 	if err != nil {
-		t.Logf("dmq-submit: %v", err)
+		t.Logf("submit helper: %v\n%s", err, out)
 	}
-	return strings.TrimSpace(string(out))
+	return verdictFrom(out)
 }
 
 // submitUntilAccepted signs a fresh message and submits it until dmq-node

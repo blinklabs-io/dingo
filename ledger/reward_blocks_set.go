@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -229,7 +230,7 @@ func (ls *LedgerState) rewardBlocksView(
 	return view, nil
 }
 
-// rewardBlockCountsFromSet answers rewardBlockCounts from the set. The
+// rewardBlockCountsFromSet answers RewardBlockCounts from the set. The
 // totals count every block of the epoch, the pools only the ones asked for,
 // as the metadata store does. ok is false when the set holds no counts for
 // the epoch.
@@ -262,7 +263,7 @@ func sameCounts(a, b map[string]uint64) bool {
 	return true
 }
 
-// rewardEpochFeesFor is rewardEpochFees answered from the set when the set
+// rewardEpochFeesFor is epochengine.RewardEpochFees answered from the set when the set
 // serves reward block rows.
 func (ls *LedgerState) rewardEpochFeesFor(
 	txn ledgerdb.Txn,
@@ -323,7 +324,8 @@ func (ls *LedgerState) stageBlockMinted(
 	overlay := false
 	if pparams := ls.ProtocolParamsForSlot(slot); pparams != nil {
 		d := decentralizationParamRat(pparams)
-		overlay = d != nil && rewardIsOverlaySlot(epoch.StartSlot, d, slot)
+		overlay = d != nil &&
+			epochengine.RewardIsOverlaySlot(epoch.StartSlot, d, slot)
 	}
 	ls.stageLedgerChanges(
 		txn,
@@ -548,7 +550,7 @@ func rewardEpochBlocksFromStore(
 		allTotal++
 		allCounts[string(i.PoolKeyHash)]++
 		allNext = max(allNext, i.Slot+1)
-		if rewardIsOverlaySlot(start, d, i.Slot) {
+		if epochengine.RewardIsOverlaySlot(start, d, i.Slot) {
 			continue
 		}
 		total++
@@ -607,7 +609,7 @@ func rewardEpochBlocksFromStore(
 			}
 		}
 	}
-	fees, err := rewardEpochFees(ldb, txn, epoch)
+	fees, err := epochengine.RewardEpochFees(ldb, txn, epoch)
 	if err != nil {
 		return row, fmt.Errorf("sum fees: %w", err)
 	}

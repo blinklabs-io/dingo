@@ -3380,13 +3380,6 @@ type MetadataStore interface {
 	// rewardstate.DeleteStateBeforeEpoch for the full rationale.
 	DeleteRewardStateBeforeEpoch(context.Context, uint64, types.Txn) error
 
-	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
-	// older than the retained snapshot window, leaving reward_account_output
-	// intact. This is the Koios-parity pruning path, used so the observer
-	// can read reward_account_output behind the tip. API storage mode prunes
-	// neither table. See rewardstate.DeleteStakeInputBeforeEpoch.
-	DeleteRewardStakeInputBeforeEpoch(context.Context, uint64, types.Txn) error
-
 	// Network state methods
 
 	// SetNetworkState stores the treasury and reserves balances.
