@@ -1,0 +1,220 @@
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkRealBlockProcessing-4                   	   51940	     25114 ns/op	   22349 B/op	     154 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     240	   5156410 ns/op	       100.0 blocks_processed	 2574228 B/op	   21197 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   43918	     27713 ns/op	     36084 blocks/sec	   15038 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   72547	     15071 ns/op	     66353 blocks/sec	    5020 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   74312	     14499 ns/op	     68972 blocks/sec	    5018 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkReadParamsRequest-4   	   14824	     80772 ns/op	   17458 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkRealBlockProcessing-4                   	   56427	     24429 ns/op	   22154 B/op	     155 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     247	   5000202 ns/op	       100.0 blocks_processed	 2563953 B/op	   21214 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   44725	     26084 ns/op	     38338 blocks/sec	   15037 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   74385	     14683 ns/op	     68104 blocks/sec	    5018 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   74136	     14837 ns/op	     67398 blocks/sec	    5018 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkReadParamsRequest-4   	   14448	     82192 ns/op	   18339 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkRealBlockProcessing-4                   	   53450	     24860 ns/op	   22285 B/op	     154 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     241	   5138140 ns/op	       100.0 blocks_processed	 2572610 B/op	   21199 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   44384	     26129 ns/op	     38271 blocks/sec	   15037 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   74715	     14873 ns/op	     67237 blocks/sec	    5018 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   75103	     14848 ns/op	     67349 blocks/sec	    5017 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkReadParamsRequest-4   	   14464	     82196 ns/op	   18339 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkRealBlockProcessing-4                   	   54865	     25272 ns/op	   22217 B/op	     155 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     243	   5162424 ns/op	       100.0 blocks_processed	 2569937 B/op	   21206 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   44856	     26119 ns/op	     38286 blocks/sec	   15037 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   70476	     15123 ns/op	     66125 blocks/sec	    5019 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   71840	     14936 ns/op	     66952 blocks/sec	    5019 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkReadParamsRequest-4   	   14284	     83321 ns/op	   17621 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkRealBlockProcessing-4                   	   52944	     25343 ns/op	   22306 B/op	     154 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     235	   5278584 ns/op	       100.0 blocks_processed	 2582122 B/op	   21185 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   43005	     26705 ns/op	     37446 blocks/sec	   15037 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   72306	     15043 ns/op	     66474 blocks/sec	    5018 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   73767	     14994 ns/op	     66693 blocks/sec	    5018 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkReadParamsRequest-4   	   14254	     82940 ns/op	   18234 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkRealBlockProcessing-4                   	   53283	     25252 ns/op	   22286 B/op	     154 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     248	   5092440 ns/op	       100.0 blocks_processed	 2561898 B/op	   21213 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   44750	     26255 ns/op	     38088 blocks/sec	   15037 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   71256	     15062 ns/op	     66391 blocks/sec	    5019 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   69948	     15157 ns/op	     65974 blocks/sec	    5019 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkReadParamsRequest-4   	   14308	     82540 ns/op	   17914 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkRealBlockProcessing-4                   	   53623	     25297 ns/op	   22272 B/op	     154 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     240	   5263155 ns/op	       100.0 blocks_processed	 2574698 B/op	   21198 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   44533	     26837 ns/op	     37261 blocks/sec	   15037 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   73809	     15038 ns/op	     66497 blocks/sec	    5018 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   73147	     14841 ns/op	     67383 blocks/sec	    5018 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkReadParamsRequest-4   	   14698	     80882 ns/op	   17537 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkRealBlockProcessing-4                   	   52874	     24856 ns/op	   22313 B/op	     154 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     248	   5030437 ns/op	       100.0 blocks_processed	 2563031 B/op	   21219 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   43870	     25805 ns/op	     38752 blocks/sec	   15038 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   75634	     14908 ns/op	     67077 blocks/sec	    5017 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   73401	     14975 ns/op	     66776 blocks/sec	    5018 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkReadParamsRequest-4   	   14734	     80926 ns/op	   17593 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkRealBlockProcessing-4                   	   53967	     25191 ns/op	   22255 B/op	     154 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     247	   5033470 ns/op	       100.0 blocks_processed	 2564244 B/op	   21215 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   45261	     25711 ns/op	     38894 blocks/sec	   15037 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   75210	     14558 ns/op	     68692 blocks/sec	    5018 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   76874	     14740 ns/op	     67845 blocks/sec	    5017 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkReadParamsRequest-4   	   14738	     80753 ns/op	   17925 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkRealBlockProcessing-4                   	   53750	     25139 ns/op	   22269 B/op	     154 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     238	   5239956 ns/op	       100.0 blocks_processed	 2577391 B/op	   21192 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   44553	     26892 ns/op	     37186 blocks/sec	   15037 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   74510	     15045 ns/op	     66468 blocks/sec	    5017 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   76114	     14543 ns/op	     68760 blocks/sec	    5017 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: AMD EPYC 9V45 96-Core Processor                
+BenchmarkReadParamsRequest-4   	   14836	     80410 ns/op	   17491 B/op	     169 allocs/op
+PASS
