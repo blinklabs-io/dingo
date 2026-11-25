@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -173,8 +174,7 @@ func (s *Store) survivingCarrierMarker(
 	if err != nil {
 		return nil, err
 	}
-	for i := len(carriers) - 1; i >= 0; i-- {
-		carrier := carriers[i]
+	for _, carrier := range slices.Backward(carriers) {
 		if !carrier.required || carrier.slot >= row.slot {
 			continue
 		}
