@@ -15289,46 +15289,6 @@ func (ls *LedgerState) UtxosByRefsBounded(
 	return utxos, nil
 }
 
-// UtxosByAddress returns all UTxOs that belong to any of the specified addresses
-func (ls *LedgerState) UtxosByAddress(
-	ctx context.Context,
-	addrs []ledger.Address,
-) ([]models.Utxo, error) {
-	utxos, err := ls.utxosByAddress(
-		addrs,
-		0,
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	ret := make([]models.Utxo, 0, len(utxos))
-	ret = append(ret, utxos...)
-	return ret, nil
-}
-
-// UtxoByRefIncludingSpent returns a UTxO by reference, including
-// spent outputs. This is needed for APIs that must resolve consumed
-// inputs to display source address and amount.
-func (ls *LedgerState) UtxoByRefIncludingSpent(
-	txId []byte,
-	outputIdx uint32,
-) (*models.Utxo, error) {
-	return ls.utxoIncludingSpent(context.Background(), nil, txId, outputIdx)
-}
-
-// GetTransactionsByHashes returns transactions for the provided hashes.
-func (ls *LedgerState) GetTransactionsByHashes(
-	hashes [][]byte,
-) ([]models.Transaction, error) {
-	txs, err := ls.ledgerDB().
-		GetTransactionsByHashes(context.Background(), hashes, nil)
-	if err != nil {
-		return nil, fmt.Errorf("get transactions by hashes: %w", err)
-	}
-	return txs, nil
-}
-
 // resolveBlockValidationEra returns the era that validates a transaction from
 // a block. Historical block application can cross a hard-fork boundary, so the
 // immediately previous era remains valid there.

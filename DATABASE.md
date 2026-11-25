@@ -8878,14 +8878,13 @@ arbitrary-precision parsing. Step and inverse operations share those rules.
 SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`. The
 coordinated `Database.UtxosByAddress` builds one exact-address pattern per input
 address and applies the same exact-address CBOR filtering as the single-address
-case. This backs the Ouroboros local-state-query `GetUTxOByAddress` handler
-(`ledger.queryShelleyUtxoByAddress`), whose wire request already carries a set
-of addresses.
+case. Mesh's current-tip `/account/balance` reads it from the IndexerDB
+through `MeshDatabase.UtxosByAddress`.
 
-`GetUtxosByAddress` (and `Database.UtxosByAddress`) require an explicit,
-positive `maxResults` bound: a broad pattern set, or a single address with an
-unusually large UTxO set, would otherwise force the database layer to
-materialize an unbounded result. Every SQL chunk is queried with the same
+`GetUtxosByAddress` (and `Database.UtxosByAddress`) take an optional
+`maxResults` bound for a caller that cannot afford an unbounded result: a
+broad pattern set, or a single address with an unusually large UTxO set,
+would otherwise force the database layer to materialize all of it. Every SQL chunk is queried with the same
 fixed `LIMIT maxResults+1`, deliberately not shrunk by the deduplicated
 count already collected: a physical UTxO can be matched by more than one
 chunk's OR-expression, so a shrinking limit could let a chunk full of

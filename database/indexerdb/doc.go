@@ -16,6 +16,7 @@
 // asset projections that serve the APIs. It is not consulted by validation.
 //
 // The node opens it as its own *database.Database, which the APIs read
-// directly; Store records its tip and readiness. The ledger holds no handle to
-// it.
+// directly. It follows the ledger on its own schedule, and Store records its
+// tip, committed in the same transaction as the rows that tip covers, and its
+// readiness. The ledger holds no handle to it.
 package indexerdb

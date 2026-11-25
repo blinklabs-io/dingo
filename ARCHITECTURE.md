@@ -1978,9 +1978,9 @@ dingo/
 │   ├── hot_cache.go     # Hot cache for frequently accessed data
 │   ├── block_lru_cache.go # Block-level LRU cache
 │   ├── immutable/       # ImmutableDB chunk reader
-│   ├── indexerdb/       # IndexerDB role: API history and address queries
+│   ├── indexerdb/       # IndexerDB tip and readiness store
 │   ├── ledgerdb/        # LedgerDB role: ledger state consensus reads and writes
-│   │   └── dbadapter/   # LedgerDB and IndexerDB over *database.Database
+│   │   └── dbadapter/   # LedgerDB over *database.Database
 │   ├── lifecycle/       # Snapshot, restore, and truncation library
 │   ├── models/          # Database models
 │   ├── types/           # Database types
@@ -3681,8 +3681,7 @@ in this mode: point and batch lookups (the state's wrappers, the mempool's
 resolution, LocalStateQuery's current-tip `GetUTxOByTxIn`, replay recovery,
 the continuation audit) go through the validation read path; the AVVM scan,
 the Byron reserves sum and address lookups iterate the set with the open
-transaction's staged changes over it; and a spent input (Leios dedup,
-`UtxoByRefIncludingSpent`) is read from the body of the transaction that
+transaction's staged changes over it; and a spent input (Leios dedup) is read from the body of the transaction that
 produced it, as the metadata store records outputs: a valid transaction's
 outputs, or an invalid one's collateral return. LocalStateQuery UTxO queries
 (`GetUTxOByAddress`, `GetUTxOByTxIn`, `GetUTxOWhole`) pinned to a point are
@@ -4275,7 +4274,7 @@ unbounded. `MidnightState` calls run with no server deadline and no
 concurrency limit. The RPC context is also attached to every metadata read
 transaction, so client cancellation stops database work.
 
-`Config.Database` (set to `midnightserver.NewDatabase(n.db)` — `adapter.go`'s
+`Config.Database` (set to `midnightserver.NewDatabase(n.indexerDB)` — `adapter.go`'s
 `databaseAdapter`, which bridges the package-level
 `database.BlockByHash`/`BlocksRecent`/`BlockBeforeSlot`/`BlockByNumber`
 functions into `MidnightDatabase` interface methods, mirroring `api/mesh`'s `meshDatabaseAdapter`/`MeshDatabase`) and
@@ -18062,8 +18061,8 @@ The server depends on four narrow interfaces (`api/mesh/node_interface.go`) —
 `MeshChain`, `MeshDatabase`, `MeshLedgerState`, and `MeshMempool` — rather than
 on the concrete chain, database, ledger, and mempool types, so the handlers stay
 free of storage-layer concerns and are testable without a node.
-`meshDatabaseAdapter` (`api/mesh/adapter.go`) is the only binding between those
-interfaces and real storage.
+`meshDatabaseAdapter` (`api/mesh/adapter.go`) binds `MeshDatabase` to a
+`*database.Database`.
 
 Two contracts follow from that boundary:
 
@@ -18174,7 +18173,7 @@ one value, and resolves them through `QueryDatabase.Datums`, the IndexerDB's
 request context and checked before each lookup, so a cancelled caller stops the
 batch instead of opening a transaction per hash. `ReadUtxos` resolves exactly
 the requested (tx hash, output index) references and loads their CBOR through
-`LedgerState.UtxosByRefsBounded` / `Database.UtxosByRefsBounded`, which counts
+`QueryDatabase.UtxosByRefsBounded` / `Database.UtxosByRefsBounded`, which counts
 bytes as each output is read and stops with `ErrUtxoBytesExceeded` (mapped to
 `ResourceExhausted`) once the running total passes a configured `MaxResponseBytes`, so a
 request holds at most the limit plus one output; it also observes the request
