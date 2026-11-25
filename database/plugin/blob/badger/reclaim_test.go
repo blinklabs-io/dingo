@@ -15,6 +15,8 @@
 package badger
 
 import (
+	"bytes"
+	"crypto/rand"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -163,4 +165,172 @@ func TestReclaimSpaceNeverFailsConcurrentCommits(t *testing.T) {
 	wg.Wait()
 	require.Nil(t, failed.Load(), "a commit raced a reclaim")
 	require.Positive(t, commits.Load())
+}
+
+// staleBytes sums every version of every key except the newest, which is what
+// a compaction that covers all of a key's versions would free.
+func staleBytes(t *testing.T, store *BlobStoreBadger) int {
+	t.Helper()
+	total := 0
+	require.NoError(t, store.DB().View(func(txn *badgerdb.Txn) error {
+		opts := badgerdb.DefaultIteratorOptions
+		opts.AllVersions = true
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		var last []byte
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			if last != nil && bytes.Equal(item.Key(), last) {
+				total += int(item.ValueSize())
+				continue
+			}
+			last = item.KeyCopy(last[:0])
+		}
+		return nil
+	}))
+	return total
+}
+
+// bottomTables returns the IDs of the tables in the store's last level.
+func bottomTables(t *testing.T, store *BlobStoreBadger) map[uint64]struct{} {
+	t.Helper()
+	db := store.DB()
+	last := db.Opts().MaxLevels - 1
+	ids := make(map[uint64]struct{})
+	for _, ti := range db.Tables() {
+		if ti.Level == last {
+			ids[ti.ID] = struct{}{}
+		}
+	}
+	return ids
+}
+
+// flushMemtable flushes the store's memtable the way ReclaimSpace does,
+// which also compacts L0 into the base level.
+func flushMemtable(t *testing.T, store *BlobStoreBadger) {
+	t.Helper()
+	flush := []byte("\xff\xfftest-flush")
+	require.NoError(t, store.DB().Update(func(txn *badgerdb.Txn) error {
+		return txn.Set(flush, []byte{1})
+	}))
+	require.NoError(t, store.DB().DropPrefix(flush))
+}
+
+// bottomBodies stores reclaimBodies bodies and compacts them to the bottom
+// level, as on a node that has run for a while, and returns the body. The
+// body does not compress, so the bottom level outgrows badger's base level
+// size and later memtable flushes land in an upper level rather than in it.
+func bottomBodies(t *testing.T, store *BlobStoreBadger) []byte {
+	t.Helper()
+	body := make([]byte, reclaimBodySize)
+	_, err := rand.Read(body)
+	require.NoError(t, err)
+	for start := 0; start < reclaimBodies; start += 100 {
+		txn := store.NewTransaction(true)
+		for i := start; i < start+100; i++ {
+			require.NoError(t, store.Set(txn, reclaimKey(i), body))
+		}
+		require.NoError(t, txn.Commit())
+	}
+	flushMemtable(t, store)
+	require.NoError(t, store.DB().Flatten(1))
+	return body
+}
+
+// TestReclaimSpaceLeavesBottomLevelAtTip covers a reclaim at the chain tip:
+// the replaced bodies are recent, so they sit in an upper level, and the same
+// window wrote keys across the whole key space. The reclaim must drop the
+// replaced bodies without rewriting the bottom level, whose tables hold
+// nothing superseded. Rewriting it replaces every bottom table under the
+// level's write lock, which blocks every read of the store.
+func TestReclaimSpaceLeavesBottomLevelAtTip(t *testing.T) {
+	t.Parallel()
+	store := newReclaimStore(t)
+	body := bottomBodies(t, store)
+
+	// Recent bodies, flushed out of the memtable into an upper level.
+	const recent = 50
+	recentKey := func(i int) []byte {
+		return []byte(fmt.Sprintf("bq%08d", i))
+	}
+	txn := store.NewTransaction(true)
+	for i := range recent {
+		require.NoError(t, store.Set(txn, recentKey(i), body))
+	}
+	require.NoError(t, txn.Commit())
+	flushMemtable(t, store)
+
+	before := bottomTables(t, store)
+	require.Greater(t, len(before), 1, "setup must leave several bottom tables")
+
+	// Promotion replaces the recent bodies with markers while the node keeps
+	// writing keys at both ends of the key space.
+	txn = store.NewTransaction(true)
+	for i := range recent {
+		require.NoError(t, store.Set(txn, recentKey(i), []byte("marker")))
+	}
+	require.NoError(t, store.Set(txn, []byte("a-tip"), []byte{1}))
+	require.NoError(t, store.Set(txn, []byte("u-tip"), []byte{1}))
+	require.NoError(t, txn.Commit())
+	require.Equal(
+		t, recent*reclaimBodySize, staleBytes(t, store),
+		"setup must leave every replaced body in place",
+	)
+
+	require.NoError(t, store.ReclaimSpace())
+
+	require.Zero(
+		t, staleBytes(t, store),
+		"replaced bodies still occupy the store after ReclaimSpace",
+	)
+	after := bottomTables(t, store)
+	for id := range before {
+		_, ok := after[id]
+		require.True(
+			t, ok,
+			"ReclaimSpace rewrote bottom table %d, which held nothing superseded", id,
+		)
+	}
+	rtxn := store.NewTransaction(false)
+	defer func() { require.NoError(t, rtxn.Rollback()) }()
+	v, err := store.Get(rtxn, reclaimKey(reclaimBodies/2))
+	require.NoError(t, err)
+	require.Equal(t, body, v)
+	v, err = store.Get(rtxn, recentKey(recent/2))
+	require.NoError(t, err)
+	require.Equal(t, []byte("marker"), v)
+}
+
+// TestReclaimSpaceCompactsBottomLevelBacklog covers a whole-history
+// promotion: every body already sits in the bottom level when it is
+// replaced, so only a rewrite of that level frees it, and the replaced bodies
+// are most of the store.
+func TestReclaimSpaceCompactsBottomLevelBacklog(t *testing.T) {
+	t.Parallel()
+	store := newReclaimStore(t)
+	bottomBodies(t, store)
+	for start := 0; start < reclaimBodies; start += 100 {
+		txn := store.NewTransaction(true)
+		for i := start; i < start+100; i++ {
+			require.NoError(t, store.Set(txn, reclaimKey(i), []byte("marker")))
+		}
+		require.NoError(t, txn.Commit())
+	}
+	require.Equal(
+		t, reclaimBodies*reclaimBodySize, staleBytes(t, store),
+		"setup must leave every replaced body in place",
+	)
+
+	require.NoError(t, store.ReclaimSpace())
+
+	require.Zero(
+		t, staleBytes(t, store),
+		"replaced bodies still occupy the store after ReclaimSpace",
+	)
+	txn := store.NewTransaction(false)
+	defer func() { require.NoError(t, txn.Rollback()) }()
+	v, err := store.Get(txn, reclaimKey(reclaimBodies/2))
+	require.NoError(t, err)
+	require.Equal(t, []byte("marker"), v)
 }

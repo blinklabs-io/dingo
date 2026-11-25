@@ -8109,8 +8109,14 @@ written.
   in the LSM tree and value-log GC has nothing to rewrite: a body replaced by a
   marker stays on disk until a compaction covers both versions, and a node at
   the chain tip writes too little for that to happen for weeks. The promoter
-  therefore calls `Database.ReclaimBlobSpace` (badger: flush the memtable, then
-  `Flatten`) after promoting, at most once every five minutes (`Config.ReclaimInterval`).
+  therefore calls `Database.ReclaimBlobSpace` after promoting, at most once
+  every five minutes (`Config.ReclaimInterval`). Badger flushes the memtable,
+  which compacts L0 into the base level and drops the recent bodies replaced at
+  the chain tip; older ones go with badger's leveled compaction. It runs
+  `Flatten`, which rewrites the whole tree and holds each level's write lock
+  (and so every read) while it swaps that level's tables, only when the
+  superseded versions written since the last reclaim are at least a quarter of
+  the tree, as after promoting a whole history.
   Commits are held back for the memtable flush, which badger otherwise fails
   with `ErrBlockedWrites`.
 - **Migration.** An existing database promotes from the oldest block, in

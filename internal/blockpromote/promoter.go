@@ -53,7 +53,7 @@ func CeilingFromTip(appliedTipIndex, securityParam uint64) (uint64, bool) {
 }
 
 // DefaultReclaimInterval is the least time between two space reclaims. A
-// reclaim flushes the blob store's memtable and compacts its tree, so it is
+// reclaim flushes the blob store's memtable and compacts it, so it is
 // batched rather than run after every promoted block.
 const DefaultReclaimInterval = 5 * time.Minute
 
