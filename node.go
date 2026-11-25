@@ -1011,7 +1011,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to resolve storage plugins: %w", err)
 	}
 
-	if err := n.migrateReleasedLedger(n.ctx, stores.Blob, deps); err != nil {
+	if err := n.migrateReleasedLedger(n.ctx, stores, deps); err != nil {
 		return fmt.Errorf("migrate the v0.94.2 ledger state: %w", err)
 	}
 	// Load database
