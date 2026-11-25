@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -248,7 +249,11 @@ func TestPeerHeaderFrozenCandidateUsesStoredPrefix(t *testing.T) {
 				eras.BabbageEraDesc.Id,
 			)
 			require.NoError(t, err)
-			targetNonce, err := assembleEpochNonce(candidate, nil, extra)
+			targetNonce, err := epochengine.AssembleEpochNonce(
+				candidate,
+				nil,
+				extra,
+			)
 			require.NoError(t, err)
 			n++
 			target := createTestBlockWithNonceAtSlotsAndBlockNumber(

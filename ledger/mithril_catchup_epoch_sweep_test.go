@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/prometheus/client_golang/prometheus"
@@ -37,7 +38,7 @@ import (
 // second import followed by a second rollover of the same boundary (the
 // node re-crossing it after a repeated catch-up) collides with
 // the first round's surviving reward_credit_round marker and hard-fails
-// saveStakeRewardOutputs's credited-round guard instead of recomputing the
+// epochengine.SaveStakeRewardOutputs's credited-round guard instead of recomputing the
 // round.
 //
 // This drives the real rollover twice through ImportLedgerState and
@@ -173,7 +174,10 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 		require.NoError(t, err)
 		pending, err := ls.PendingRewardCredit(nil, credentialTag, stakingKey)
 		require.NoError(t, err)
-		total, overflow := addRewardUint64(uint64(account.Reward), pending)
+		total, overflow := epochengine.AddRewardUint64(
+			uint64(account.Reward),
+			pending,
+		)
 		require.False(t, overflow, "effective balance overflow")
 		return total
 	}
@@ -222,7 +226,7 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 	// Round 1: a second catch-up import re-crosses the same
 	// boundary. The widened sweep must clear round 0's reward-credit round
 	// and reward-state residue above the anchor so this rollover recomputes
-	// cleanly instead of hitting saveStakeRewardOutputs's credited-round
+	// cleanly instead of hitting epochengine.SaveStakeRewardOutputs's credited-round
 	// guard.
 	importAndRollOver()
 

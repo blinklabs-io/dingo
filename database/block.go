@@ -431,29 +431,12 @@ func (d *Database) tombstoneBlockTxn(
 	return nil
 }
 
-// blockReadContextErr refuses a block read for a cancelled caller. A
-// transaction observes cancellation through its metadata reads, and the
-// ledger's database has no metadata store, so a read of its block store alone
-// checks the context itself.
-func blockReadContextErr(ctx context.Context) error {
-	ctx = nonNilContext(ctx)
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		return nil
-	}
-}
-
 func BlockByPoint(
 	ctx context.Context,
 	db *Database,
 	point ocommon.Point,
 ) (models.Block, error) {
 	var ret models.Block
-	if err := blockReadContextErr(ctx); err != nil {
-		return ret, err
-	}
 	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
@@ -1093,9 +1076,6 @@ func BlockBySlot(
 	slot uint64,
 ) (models.Block, error) {
 	var ret models.Block
-	if err := blockReadContextErr(ctx); err != nil {
-		return ret, err
-	}
 	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
@@ -1164,9 +1144,6 @@ func ResolveBlockNumberBoundBudgeted(
 	reserve func() bool,
 ) (BlockNumberBound, error) {
 	var ret BlockNumberBound
-	if err := blockReadContextErr(ctx); err != nil {
-		return ret, err
-	}
 	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
@@ -2135,9 +2112,6 @@ func BlocksRecent(
 	count int,
 ) ([]models.Block, error) {
 	var ret []models.Block
-	if err := blockReadContextErr(ctx); err != nil {
-		return ret, err
-	}
 	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
@@ -2210,9 +2184,6 @@ func BlockBeforeSlot(
 	slotNumber uint64,
 ) (models.Block, error) {
 	var ret models.Block
-	if err := blockReadContextErr(ctx); err != nil {
-		return ret, err
-	}
 	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error

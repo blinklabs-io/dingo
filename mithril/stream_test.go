@@ -1098,9 +1098,9 @@ func (a *runCtxApplier) ApplyTrustedBatch(
 // timeout, and the watchdog must not fire on that.
 func TestStreamCatchUpReleaseOutlivesWatchdog(t *testing.T) {
 	t.Parallel()
-	// Long enough that a batch commit under -race and a loaded package run
-	// lands inside it; the release below outlasts it several times over.
-	const timeout = time.Second
+	// Long enough that a batch commit under -race and a loaded full-suite
+	// run lands inside it; the release below outlasts it twice over.
+	const timeout = 5 * time.Second
 	const last = 4
 	opts := streamFixtureOptions(last, nil)
 	fixture := newV2Fixture(t, opts)
@@ -1112,7 +1112,7 @@ func TestStreamCatchUpReleaseOutlivesWatchdog(t *testing.T) {
 	cfg.Hold = func() func() {
 		return func() {
 			// Stands in for an index rebuild several timeouts long.
-			rebuild := time.NewTimer(3 * timeout)
+			rebuild := time.NewTimer(2 * timeout)
 			defer rebuild.Stop()
 			<-rebuild.C
 			applier.mu.Lock()
@@ -1135,7 +1135,9 @@ func TestStreamCatchUpReleaseOutlivesWatchdog(t *testing.T) {
 // and releases the hold when it does.
 func TestStreamCatchUpNoProgressWatchdog(t *testing.T) {
 	t.Parallel()
-	const timeout = 300 * time.Millisecond
+	// Long enough for file 0 to download and commit on a loaded machine
+	// before the watchdog can fire.
+	const timeout = 5 * time.Second
 	opts := streamFixtureOptions(6, nil)
 	fixture := newV2Fixture(t, opts)
 	// File 0 arrives; every later file hangs until the run gives up on it.

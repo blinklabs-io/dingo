@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -2864,7 +2865,7 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 		if !ok {
 			continue
 		}
-		balance, overflow := addRewardUint64(
+		balance, overflow := epochengine.AddRewardUint64(
 			uint64(account.Reward), pending[mapKey],
 		)
 		if overflow {

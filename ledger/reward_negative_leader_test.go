@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -200,7 +201,7 @@ func TestApplyStakeRewardsNegativeLeaderRewardUnregisteredAccount(t *testing.T) 
 	for range 2 {
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.applyStakeRewards(context.Background(),
+			return ls.engine().ApplyStakeRewards(context.Background(),
 				txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 				false,
 			)
@@ -238,7 +239,7 @@ func TestApplyStakeRewardsNegativeLeaderRewardRegisteredAccountStops(t *testing.
 	}
 	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(),
+		return ls.engine().ApplyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 			false,
 		)
@@ -275,7 +276,7 @@ func TestPrecomputeStakeRewardsSkipsNegativeLeaderReward(t *testing.T) {
 	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.precomputeStakeRewards(
+		return ls.precomputeStakeRewardsForTest(
 			txn, negativeLeaderNewEpoch, 300, negativeLeaderBoundarySlot,
 		)
 	}))
@@ -330,7 +331,7 @@ func TestNegativeLeaderRewardExpiredRewardAccountIsGuarded(t *testing.T) {
 	}}})
 	applyTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, applyTxn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(),
+		return ls.engine().ApplyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 			false,
 		)
@@ -353,7 +354,7 @@ func TestApplyStakeRewardsPersistsNegativeLeaderRewardDeficit(t *testing.T) {
 	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(),
+		return ls.engine().ApplyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 			false,
 		)
@@ -381,7 +382,7 @@ func TestSuppressBootstrapStakeRewardsClearsNegativeLeaderRewards(t *testing.T) 
 		},
 		UnspendableDeficit: 20,
 	}
-	suppressBootstrapStakeRewards(result)
+	epochengine.SuppressBootstrapStakeRewards(result)
 	require.NoError(t, result.NegativeLeaderRewardError())
 	require.Zero(t, result.UnspendableDeficit)
 	require.Equal(t, uint64(1_000), result.Undistributed)

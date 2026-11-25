@@ -20,12 +20,14 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/governance"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 )
 
 // RewardParitySource is the read-only view of Dingo's committed reward state
@@ -61,8 +63,7 @@ type RewardParitySource interface {
 	GetLatestEpoch(ctx context.Context) (uint64, error)
 	// GetEpochData returns epoch-level aggregates for the given epoch, or
 	// nil, nil when Dingo has not yet recorded a ready epoch_summary row for
-	// it (including when the row was pruned — see DatabaseSource's doc
-	// comment on core-mode retention).
+	// it.
 	GetEpochData(ctx context.Context, epoch uint64) (*DingoEpochData, error)
 	// GetPoolEpochDataMap returns per-pool reward data assembled for Koios
 	// reporting epoch koiosEpoch — see DingoDB.GetPoolEpochDataMap's doc
@@ -192,35 +193,32 @@ var (
 // populate at every epoch boundary. It opens no second database connection,
 // requires no export step, and adds no new table.
 //
-// Retention: ledger/snapshot/rotation.go's cleanupOldSnapshots prunes
-// reward_account_output to the current epoch and the three that precede it
-// (a rolling 4-epoch window) only in core storage mode with the in-process
-// observer disabled. It is retained without bound in API storage mode
-// and whenever the observer is enabled, because
-// the observer validates a closed epoch only after fetching and comparing
-// against Koios over the network and can fall arbitrarily far behind chain
-// progression during a from-genesis or catch-up sync — process-level timing
-// alone does not keep its reads inside the window. reward_pool_input,
-// reward_pool_output, epoch_summary and reward_ada_pots are retained for the
-// life of the database in every mode; pool_stake_snapshot and
-// reward_stake_input are pruned to the window in every mode. DatabaseSource
-// does not race that pruning in any special way — it just reads whatever is
-// currently committed, the same as DingoDB would against a separately synced
-// copy. A GetEpochData or GetPoolEpochDataMap call made after an epoch's data
-// has aged out of the window reads back as absent (nil / *Present == false) —
-// the same signal DingoDB already reports for "not yet computed" — not as an
-// error.
+// Retention: the LedgerDB keeps reward_pool_output, reward_account_output,
+// reward_stake_input and pool_stake_snapshot only for the window
+// snapshot.RewardStateRetainedFrom names. Reward history older than that is
+// API data, held by the IndexerDB. A source built with WithIndexerDB reads
+// the reward state from the IndexerDB and can compare any epoch. A source
+// reading the ledger alone reports the window through RewardStateRetainedFrom,
+// and the check records an epoch whose stake epoch lies below it as
+// NOT_CHECKED rather than reading the absent rows as a mismatch.
 type DatabaseSource struct {
 	db *database.Database
 	// ldb is the LedgerDB the ledger state reads go through, so they see
 	// what the ledger sees: the live UTxO set's answer in set mode.
 	ldb ledgerdb.LedgerDB
+	// rewards is what the reward state reads go through: ldb, or the
+	// IndexerDB set by WithIndexerDB.
+	rewards ledgerdb.LedgerDB
 	// history is the database the transaction sample reads: db itself, or
-	// the IndexerDB set by WithTransactionHistory.
+	// the IndexerDB set by WithIndexerDB.
 	history *database.Database
-	// historyTrails records that history is filled behind db, so a closed
-	// epoch is sampled only once history's tip covers it.
+	// historyTrails records that history and rewards are filled behind db,
+	// so a closed epoch is read only once history's tip covers it.
 	historyTrails bool
+	// retainedFrom is the highest LedgerDB retention floor read so far. A
+	// rollback can move the tip back across a boundary, but it restores no
+	// pruned rows, so the floor never moves down.
+	retainedFrom atomic.Uint64
 }
 
 // NewDatabaseSource wraps an already-open, in-process *database.Database as
@@ -246,24 +244,115 @@ func NewDatabaseSourceWithLedgerDB(
 			"koiosparity: DatabaseSource requires a non-nil database and LedgerDB",
 		)
 	}
-	return &DatabaseSource{db: db, ldb: ldb, history: db}, nil
+	return &DatabaseSource{db: db, ldb: ldb, rewards: ldb, history: db}, nil
 }
 
-// WithTransactionHistory makes the transaction sample read history, the
-// IndexerDB of an API node, whose consensus database runs in core mode and
-// holds no transaction history. The reward state is still read from the
-// consensus database. The IndexerDB is filled asynchronously, so a sample of
-// an epoch its tip has not passed is ErrTransactionHistoryPending. A nil
-// history leaves the source unchanged.
-func (s *DatabaseSource) WithTransactionHistory(
-	history *database.Database,
+// WithIndexerDB makes the reward state and transaction sample reads go to
+// indexer, the IndexerDB of an API node, which holds them for every epoch;
+// the LedgerDB keeps the reward state only for its own window and holds no
+// transaction history. Reads of current ledger state (tip, epochs, protocol
+// parameters, pool certificates, governance) stay on the ledger. The
+// IndexerDB is filled asynchronously, so a read of an epoch its tip has not
+// passed is ErrRewardHistoryPending or ErrTransactionHistoryPending. A nil
+// indexer leaves the source unchanged.
+func (s *DatabaseSource) WithIndexerDB(
+	indexer *database.Database,
 ) *DatabaseSource {
-	if history == nil {
+	if indexer == nil {
 		return s
 	}
-	s.history = history
+	s.history = indexer
+	s.rewards = dbadapter.New(indexer)
 	s.historyTrails = true
 	return s
+}
+
+// ErrRewardHistoryPending reports that the IndexerDB the reward state reads
+// has not applied the boundary that closes the epoch yet. The observer defers
+// the epoch (Observer.deferForHistory) rather than failing it.
+var ErrRewardHistoryPending = errors.New(
+	"koiosparity: reward history has not reached the end of the epoch",
+)
+
+// RewardStateRetainedFrom returns the first stake epoch whose reward outputs
+// the source still holds. bounded is false for a source reading the
+// IndexerDB, which holds every epoch. Otherwise the floor follows the
+// ledger's tip, which is never behind the boundary the LedgerDB last pruned
+// at, so every epoch at or above the floor is still held.
+func (s *DatabaseSource) RewardStateRetainedFrom(
+	ctx context.Context,
+) (epoch uint64, bounded bool, err error) {
+	if s.historyTrails {
+		return 0, false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	txn := s.ldb.Begin(ctx, false)
+	defer txn.Release()
+	tip, err := s.ldb.GetTip(txn)
+	if err != nil {
+		return 0, false, fmt.Errorf("tip lookup: %w", err)
+	}
+	if len(tip.Point.Hash) > 0 {
+		tipEpoch, err := s.ldb.GetEpochBySlot(tip.Point.Slot, txn)
+		if err != nil {
+			return 0, false, fmt.Errorf(
+				"epoch for tip slot %d: %w", tip.Point.Slot, err,
+			)
+		}
+		if tipEpoch != nil {
+			floor := snapshot.RewardStateRetainedFrom(tipEpoch.EpochId)
+			for {
+				prev := s.retainedFrom.Load()
+				if floor <= prev ||
+					s.retainedFrom.CompareAndSwap(prev, floor) {
+					break
+				}
+			}
+		}
+	}
+	return s.retainedFrom.Load(), true, nil
+}
+
+// rewardHistoryReady returns ErrRewardHistoryPending until the IndexerDB the
+// reward state reads has applied the boundary into the epoch after epoch:
+// the reward inputs a check of epoch reads are captured there.
+func (s *DatabaseSource) rewardHistoryReady(
+	ctx context.Context,
+	epoch uint64,
+) error {
+	if !s.historyTrails {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ltxn := s.ldb.Begin(ctx, false)
+	defer ltxn.Release()
+	next, err := s.ldb.GetEpoch(epoch+1, ltxn)
+	if err != nil {
+		return fmt.Errorf("epoch lookup %d: %w", epoch+1, err)
+	}
+	if next == nil {
+		return fmt.Errorf(
+			"%w: epoch %d has not closed", ErrRewardHistoryPending, epoch,
+		)
+	}
+	txn := s.history.Transaction(ctx, false)
+	defer txn.Release()
+	tip, err := s.history.GetTip(txn)
+	if err != nil {
+		return fmt.Errorf("epoch %d reward history tip: %w", epoch, err)
+	}
+	if len(tip.Point.Hash) == 0 || tip.Point.Slot < next.StartSlot {
+		return fmt.Errorf(
+			"%w: epoch %d closes at slot %d, reward history tip is at slot %d",
+			ErrRewardHistoryPending,
+			epoch, next.StartSlot, tip.Point.Slot,
+		)
+	}
+	return nil
 }
 
 // GetLatestEpoch returns the highest epoch number Dingo has committed an
@@ -431,10 +520,10 @@ func (s *DatabaseSource) GetEpochData(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.ldb.Begin(ctx, false)
+	txn := s.rewards.Begin(ctx, false)
 	defer txn.Release()
 
-	summary, err := s.ldb.GetEpochSummary(epoch, txn)
+	summary, err := s.rewards.GetEpochSummary(epoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf("epoch_summary epoch %d: %w", epoch, err)
 	}
@@ -454,7 +543,7 @@ func (s *DatabaseSource) GetEpochData(
 		BoundarySlot:   summary.BoundarySlot,
 	}
 
-	pots, err := s.ldb.GetRewardAdaPots(epoch, txn)
+	pots, err := s.rewards.GetRewardAdaPots(epoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf("reward_ada_pots epoch %d: %w", epoch, err)
 	}
@@ -484,9 +573,9 @@ func (s *DatabaseSource) GetPoolStakeSnapshotMembers(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.ldb.Begin(ctx, false)
+	txn := s.rewards.Begin(ctx, false)
 	defer txn.Release()
-	rows, err := s.ldb.GetPoolStakeSnapshotsByEpoch(
+	rows, err := s.rewards.GetPoolStakeSnapshotsByEpoch(
 		epoch,
 		snapshotTypeMark,
 		txn,
@@ -558,9 +647,9 @@ func (s *DatabaseSource) GetRewardSnapshot(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.ldb.Begin(ctx, false)
+	txn := s.rewards.Begin(ctx, false)
 	defer txn.Release()
-	snapshot, err := s.ldb.GetRewardSnapshot(
+	row, err := s.rewards.GetRewardSnapshot(
 		epoch,
 		snapshotTypeMark,
 		txn,
@@ -568,14 +657,14 @@ func (s *DatabaseSource) GetRewardSnapshot(
 	if err != nil {
 		return nil, fmt.Errorf("reward_snapshot epoch %d: %w", epoch, err)
 	}
-	if snapshot == nil {
+	if row == nil {
 		return nil, nil
 	}
 	out := &DingoRewardSnapshotSummary{
-		TotalPoolCount: snapshot.TotalPoolCount,
+		TotalPoolCount: row.TotalPoolCount,
 	}
-	if snapshot.ExcludedActiveStake != nil {
-		out.ExcludedActiveStake = uint64(*snapshot.ExcludedActiveStake)
+	if row.ExcludedActiveStake != nil {
+		out.ExcludedActiveStake = uint64(*row.ExcludedActiveStake)
 		out.ExcludedActiveStakeKnown = true
 	}
 	return out, nil
@@ -591,7 +680,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.ldb.Begin(ctx, false)
+	txn := s.rewards.Begin(ctx, false)
 	defer txn.Release()
 
 	// The tip decides whether this stake epoch's rewards have been applied
@@ -601,7 +690,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	// incomplete metadata.
 	var tipSlot uint64
 	tipKnown := false
-	tip, tipErr := s.ldb.GetTip(txn)
+	tip, tipErr := s.rewards.GetTip(txn)
 	if tipErr != nil {
 		return nil, fmt.Errorf("tip lookup: %w", tipErr)
 	}
@@ -615,7 +704,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 
 	epochRewardsPending := false
 	if tipKnown {
-		applyEpoch, err := s.ldb.GetEpoch(stakeEpoch+3, txn)
+		applyEpoch, err := s.rewards.GetEpoch(stakeEpoch+3, txn)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"epoch lookup %d: %w", stakeEpoch+3, err,
@@ -628,7 +717,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 		}
 	}
 
-	stakeInputs, err := s.ldb.GetRewardPoolInputs(stakeEpoch, txn)
+	stakeInputs, err := s.rewards.GetRewardPoolInputs(stakeEpoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"reward_pool_input stake epoch %d: %w",
@@ -650,7 +739,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 		m[hex.EncodeToString(inp.PoolKeyHash)] = data
 	}
 
-	paramInputs, err := s.ldb.GetRewardPoolInputs(paramEpoch, txn)
+	paramInputs, err := s.rewards.GetRewardPoolInputs(paramEpoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"reward_pool_input param epoch %d: %w",
@@ -671,7 +760,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 		}
 	}
 
-	outputs, err := s.ldb.GetRewardPoolOutputs(stakeEpoch, txn)
+	outputs, err := s.rewards.GetRewardPoolOutputs(stakeEpoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"reward_pool_output epoch %d: %w",
@@ -699,7 +788,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	// forms it — see DingoDB.addSpendableMemberRewards for why
 	// reward_pool_output.member_reward_total is not it, and why presence is
 	// established epoch-wide rather than per pool.
-	accountOutputs, err := s.ldb.GetRewardAccountOutputs(
+	accountOutputs, err := s.rewards.GetRewardAccountOutputs(
 		stakeEpoch,
 		txn,
 	)
@@ -716,7 +805,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			if out == nil || out.RewardType != rewardTypeMember {
 				continue
 			}
-			// applyStakeRewards credits a reward only when it is spendable
+			// ApplyStakeRewards credits a reward only when it is spendable
 			// and not guarded by CIP-0163 expiry; anything else was computed
 			// and withheld, and Koios never reports it.
 			if !out.Spendable || out.Guarded {
@@ -828,9 +917,9 @@ func (s *DatabaseSource) GetRewardAccountOutputs(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.ldb.Begin(ctx, false)
+	txn := s.rewards.Begin(ctx, false)
 	defer txn.Release()
-	rows, err := s.ldb.GetRewardAccountOutputs(epoch, txn)
+	rows, err := s.rewards.GetRewardAccountOutputs(epoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf("reward_account_output epoch %d: %w", epoch, err)
 	}
