@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/go-scls"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -82,6 +83,79 @@ func TestExportSCLSReleasesTheSetAndPublishesAVerifiedFile(t *testing.T) {
 	again, err := badgerutxo.Open(badgerutxo.DirFor(dataDir))
 	require.NoError(t, err)
 	require.NoError(t, again.Close())
+}
+
+func TestDatabaseSnapshotSCLSRoutesToExporter(t *testing.T) {
+	t.Parallel()
+	out := filepath.Join(t.TempDir(), "state.scls")
+	cmd := databaseSnapshotCommand()
+	cmd.SetContext(t.Context())
+	require.NoError(t, cmd.Flags().Set("scls", out))
+	err := runDatabaseSnapshot(
+		cmd,
+		&config.Config{DatabasePath: t.TempDir()},
+		nil,
+		"",
+		out,
+	)
+	require.ErrorContains(t, err, "snapshot SCLS: no live UTxO set")
+}
+
+func TestDatabaseSnapshotRequiresExactlyOneOutput(t *testing.T) {
+	t.Parallel()
+
+	cmd := databaseSnapshotCommand()
+	require.NotNil(t, cmd.Flags().Lookup("dir"))
+	require.NotNil(t, cmd.Flags().Lookup("scls"))
+
+	for _, test := range []struct {
+		name string
+		args []string
+		err  string
+	}{
+		{
+			name: "no output",
+			err:  "at least one of the flags in the group [dir scls] is required",
+		},
+		{
+			name: "both outputs",
+			args: []string{"--dir", "snapshot", "--scls", "state.scls"},
+			err:  "if any flags in the group [dir scls] are set none of the others can be",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := databaseSnapshotCommand()
+			cmd.SetArgs(test.args)
+			require.ErrorContains(t, cmd.Execute(), test.err)
+		})
+	}
+}
+
+func TestDatabaseSnapshotRejectsEmptyOutputBeforeOpeningTheDatabase(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, flag := range []string{"dir", "scls"} {
+		t.Run(flag, func(t *testing.T) {
+			t.Parallel()
+			dataDir := t.TempDir()
+			cmd := databaseSnapshotCommand()
+			cmd.SetContext(config.WithContext(
+				t.Context(),
+				&config.Config{DatabasePath: dataDir},
+			))
+			cmd.SetArgs([]string{"--" + flag, ""})
+			require.ErrorContains(
+				t,
+				cmd.Execute(),
+				"--"+flag+" must not be empty",
+			)
+			entries, err := os.ReadDir(dataDir)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+		})
+	}
 }
 
 func TestExportSCLSRefusesADataDirWithoutASet(t *testing.T) {

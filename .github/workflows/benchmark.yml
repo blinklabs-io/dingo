@@ -147,10 +147,18 @@ jobs:
             echo "baseline_file has an unexpected path: ${BASELINE_FILE}" >&2
             exit 1
           fi
-          go run ./internal/benchci/cmd/benchcheck \
-            "${BASELINE_FILE}" \
-            "${RUN_FILE}" \
-            report.md | tee -a "$GITHUB_OUTPUT"
+          # go test runs in the package directory, so every path is absolute.
+          BENCHCI_OLD_FILE="$PWD/${BASELINE_FILE}" \
+            BENCHCI_NEW_FILE="$PWD/${RUN_FILE}" \
+            BENCHCI_REPORT="$PWD/report.md" \
+            BENCHCI_OUTPUT="$GITHUB_OUTPUT" \
+            go test ./internal/benchci -run '^TestCheckFiles$' -count=1 -v
+          # A skipped test (inputs unset, -run matching nothing) exits 0
+          # without a report or a regression line; that must not pass.
+          if [[ ! -f report.md ]]; then
+            echo "TestCheckFiles wrote no report.md" >&2
+            exit 1
+          fi
 
       - name: write-step-summary
         shell: bash

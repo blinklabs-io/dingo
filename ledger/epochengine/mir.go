@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package epochengine
 
 import (
 	"context"
@@ -28,15 +28,15 @@ import (
 )
 
 const (
-	// mirPotReserves is the on-chain CBOR encoding of the reserves pot (0).
-	mirPotReserves = uint(0)
-	// mirPotTreasury is the on-chain CBOR encoding of the treasury pot (1).
-	mirPotTreasury = uint(1)
+	// MIRPotReserves is the on-chain CBOR encoding of the reserves pot (0).
+	MIRPotReserves = uint(0)
+	// MIRPotTreasury is the on-chain CBOR encoding of the treasury pot (1).
+	MIRPotTreasury = uint(1)
 
 	mirRewardSourcePrefix = "dingo:mir:"
 )
 
-// applyMIRCerts applies all MIR (Move Instantaneous Rewards) certificate
+// ApplyMIRCerts applies all MIR (Move Instantaneous Rewards) certificate
 // effects accumulated during the ended epoch at the given boundary slot. This
 // implements the Shelley-era INSTANT rule, which runs at each epoch boundary
 // for Shelley through Babbage. In Conway and later, MIR certificates are not
@@ -104,13 +104,13 @@ const (
 // certificate is discarded rather than retried. Failing the boundary instead
 // would wedge the node, since the stored certificates are re-read and re-fail
 // on every deterministic retry.
-func (ls *LedgerState) applyMIRCerts(ctx context.Context,
+func (e *Engine) ApplyMIRCerts(ctx context.Context,
 	txn ledgerdb.Txn,
 	epochStartSlot uint64,
 	boundarySlot uint64,
 	epochEraID uint,
 ) error {
-	effects, err := ls.ledgerDB().GetMIRCertsInSlotRange(
+	effects, err := e.ledgerDB().GetMIRCertsInSlotRange(
 		ctx,
 		epochStartSlot, boundarySlot, txn,
 	)
@@ -120,37 +120,37 @@ func (ls *LedgerState) applyMIRCerts(ctx context.Context,
 	if len(effects) == 0 {
 		return nil
 	}
-	boundary, err := ls.collectMIRBoundary(ctx, txn, effects, epochEraID)
+	boundary, err := e.collectMIRBoundary(ctx, txn, effects, epochEraID)
 	if err != nil {
 		return err
 	}
 	if boundary.discard != "" {
-		ls.discardMIRBoundary(boundarySlot, boundary.discard)
+		e.discardMIRBoundary(boundarySlot, boundary.discard)
 		return nil
 	}
 	if boundary.isEmpty() {
 		return nil
 	}
-	treasury, reserves, err := ls.readNetworkState(txn)
+	treasury, reserves, err := e.ReadNetworkState(txn)
 	if err != nil {
 		return fmt.Errorf("apply MIR certs: %w", err)
 	}
 	availableReserves, reservesOk := boundary.availablePot(
-		mirPotReserves,
+		MIRPotReserves,
 		reserves,
 	)
 	availableTreasury, treasuryOk := boundary.availablePot(
-		mirPotTreasury,
+		MIRPotTreasury,
 		treasury,
 	)
 	if boundary.discard != "" {
-		ls.discardMIRBoundary(boundarySlot, boundary.discard)
+		e.discardMIRBoundary(boundarySlot, boundary.discard)
 		return nil
 	}
 	if !reservesOk || !treasuryOk ||
 		boundary.totalReserves > availableReserves ||
 		boundary.totalTreasury > availableTreasury {
-		ls.config.Logger.Warn(
+		e.config.Logger.Warn(
 			"skipping over-budget MIR at epoch boundary",
 			"slot", boundarySlot,
 			"reserves", reserves,
@@ -161,7 +161,7 @@ func (ls *LedgerState) applyMIRCerts(ctx context.Context,
 		)
 		return nil
 	}
-	appliedReserves, appliedTreasury, err := ls.applyMIRCredits(ctx,
+	appliedReserves, appliedTreasury, err := e.applyMIRCredits(ctx,
 		txn, boundary.credits, boundarySlot,
 	)
 	if err != nil {
@@ -172,15 +172,15 @@ func (ls *LedgerState) applyMIRCerts(ctx context.Context,
 	if newReserves == reserves && newTreasury == treasury {
 		return nil
 	}
-	return ls.ledgerDB().
+	return e.ledgerDB().
 		SetNetworkState(newTreasury, newReserves, boundarySlot, txn)
 }
 
 // discardMIRBoundary logs why a folded MIR boundary cannot be credited at
 // all, the shared log line for every boundary.discard reason regardless of
 // which step set it.
-func (ls *LedgerState) discardMIRBoundary(boundarySlot uint64, reason string) {
-	ls.config.Logger.Warn(
+func (e *Engine) discardMIRBoundary(boundarySlot uint64, reason string) {
+	e.config.Logger.Warn(
 		"discarding uncreditable MIR at epoch boundary",
 		"slot", boundarySlot,
 		"reason", reason,
@@ -198,14 +198,14 @@ type mirCredit struct {
 	amount        uint64
 }
 
-// mirPendingKey identifies one entry of the accumulated InstantaneousRewards
+// MIRPendingKey identifies one entry of the accumulated InstantaneousRewards
 // map. The pot is part of the key because cardano-ledger keeps `iRReserves`
 // and `iRTreasury` as two maps, so the same credential can hold an independent
 // pending amount in each.
-type mirPendingKey struct {
-	pot        uint
-	tag        uint8
-	credential string
+type MIRPendingKey struct {
+	Pot        uint
+	Tag        uint8
+	Credential string
 }
 
 // mirBoundary is the aggregate of every MIR certificate in one ended epoch,
@@ -248,7 +248,7 @@ func (b *mirBoundary) isEmpty() bool {
 // the stored certificates are re-read and re-fail on every retry.
 func (b *mirBoundary) addCredit(credit mirCredit) {
 	total := &b.totalReserves
-	if credit.pot == mirPotTreasury {
+	if credit.pot == MIRPotTreasury {
 		total = &b.totalTreasury
 	}
 	if credit.amount > ^uint64(0)-*total {
@@ -275,9 +275,9 @@ func (b *mirBoundary) addCredit(credit mirCredit) {
 func (b *mirBoundary) addTransfer(sourcePot uint, amount uint64) {
 	var out, in *uint64
 	switch sourcePot {
-	case mirPotReserves:
+	case MIRPotReserves:
 		out, in = &b.reservesOut, &b.treasuryIn
-	case mirPotTreasury:
+	case MIRPotTreasury:
 		out, in = &b.treasuryOut, &b.reservesIn
 	default:
 		b.discard = fmt.Sprintf("unknown MIR source pot %d", sourcePot)
@@ -310,20 +310,20 @@ func (b *mirBoundary) addTransfer(sourcePot uint, amount uint64) {
 // running total: additively for era >= Alonzo, matching `Map.unionWith (<>)`,
 // or replaced by the latest certificate's amount below Alonzo, matching
 // `Map.union`'s left bias on the newer entry. See the era discussion on
-// applyMIRCerts.
-func (ls *LedgerState) collectMIRBoundary(ctx context.Context,
+// ApplyMIRCerts.
+func (e *Engine) collectMIRBoundary(ctx context.Context,
 	txn ledgerdb.Txn,
 	effects []models.MIREffect,
 	epochEraID uint,
 ) (*mirBoundary, error) {
-	registered, err := ls.registeredMIRAccounts(ctx, txn, effects)
+	registered, err := e.registeredMIRAccounts(ctx, txn, effects)
 	if err != nil {
 		return nil, err
 	}
 	additive := epochEraID >= alonzo.EraIdAlonzo
 	boundary := &mirBoundary{}
-	pending := make(map[mirPendingKey]*big.Int)
-	order := make([]mirPendingKey, 0, len(effects))
+	pending := make(map[MIRPendingKey]*big.Int)
+	order := make([]MIRPendingKey, 0, len(effects))
 	for _, effect := range effects {
 		if effect.OtherPot > 0 {
 			boundary.addTransfer(effect.Pot, effect.OtherPot)
@@ -332,7 +332,7 @@ func (ls *LedgerState) collectMIRBoundary(ctx context.Context,
 			}
 			continue
 		}
-		if effect.Pot != mirPotReserves && effect.Pot != mirPotTreasury {
+		if effect.Pot != MIRPotReserves && effect.Pot != MIRPotTreasury {
 			boundary.discard = fmt.Sprintf(
 				"unknown MIR source pot %d", effect.Pot,
 			)
@@ -352,10 +352,10 @@ func (ls *LedgerState) collectMIRBoundary(ctx context.Context,
 					reward.Credential,
 				)
 			}
-			key := mirPendingKey{
-				pot:        effect.Pot,
-				tag:        reward.CredentialTag,
-				credential: string(reward.Credential),
+			key := MIRPendingKey{
+				Pot:        effect.Pot,
+				Tag:        reward.CredentialTag,
+				Credential: string(reward.Credential),
 			}
 			total, ok := pending[key]
 			if !ok {
@@ -379,8 +379,8 @@ func (ls *LedgerState) collectMIRBoundary(ctx context.Context,
 			boundary.discard = fmt.Sprintf(
 				"MIR deltas for pot %d credential %x net to %s, "+
 					"which no reward account can carry",
-				key.pot,
-				key.credential,
+				key.Pot,
+				key.Credential,
 				net,
 			)
 			return boundary, nil
@@ -388,16 +388,16 @@ func (ls *LedgerState) collectMIRBoundary(ctx context.Context,
 		if !net.IsUint64() {
 			boundary.discard = fmt.Sprintf(
 				"MIR deltas for pot %d credential %x net to %s, which exceeds any Ada pot",
-				key.pot,
-				key.credential,
+				key.Pot,
+				key.Credential,
 				net,
 			)
 			return boundary, nil
 		}
 		boundary.addCredit(mirCredit{
-			pot:           key.pot,
-			credentialTag: key.tag,
-			credential:    []byte(key.credential),
+			pot:           key.Pot,
+			credentialTag: key.Tag,
+			credential:    []byte(key.Credential),
 			amount:        net.Uint64(),
 		})
 		if boundary.discard != "" {
@@ -412,7 +412,7 @@ func (ls *LedgerState) collectMIRBoundary(ctx context.Context,
 // is the read-only equivalent of the account lookup the credit path performs,
 // and it establishes the same registered-vs-skipped split before any pot is
 // debited.
-func (ls *LedgerState) registeredMIRAccounts(ctx context.Context,
+func (e *Engine) registeredMIRAccounts(ctx context.Context,
 	txn ledgerdb.Txn,
 	effects []models.MIREffect,
 ) (map[string]bool, error) {
@@ -436,7 +436,7 @@ func (ls *LedgerState) registeredMIRAccounts(ctx context.Context,
 	if len(refs) == 0 {
 		return nil, nil
 	}
-	accounts, err := ls.ledgerDB().GetAccountsByCredential(
+	accounts, err := e.ledgerDB().GetAccountsByCredential(
 		ctx,
 		refs,
 		false,
@@ -458,7 +458,7 @@ func (ls *LedgerState) registeredMIRAccounts(ctx context.Context,
 // actually applied per source pot. The totals are re-derived here rather than
 // reused from the capacity check so the pot debit can never exceed what was
 // credited.
-func (ls *LedgerState) applyMIRCredits(ctx context.Context,
+func (e *Engine) applyMIRCredits(ctx context.Context,
 	txn ledgerdb.Txn,
 	credits []mirCredit,
 	boundarySlot uint64,
@@ -466,7 +466,7 @@ func (ls *LedgerState) applyMIRCredits(ctx context.Context,
 	for _, credit := range credits {
 		credited, err := governance.CreditRegisteredRewardAccountBeforeSnapshot(
 			ctx,
-			ls.ledgerDB(),
+			e.ledgerDB(),
 			txn,
 			credit.credentialTag,
 			credit.credential,
@@ -490,12 +490,12 @@ func (ls *LedgerState) applyMIRCredits(ctx context.Context,
 		if !credited {
 			continue
 		}
-		if credit.pot == mirPotTreasury {
+		if credit.pot == MIRPotTreasury {
 			appliedTreasury += credit.amount
 		} else {
 			appliedReserves += credit.amount
 		}
-		ls.config.Logger.Debug(
+		e.config.Logger.Debug(
 			"applied MIR reward",
 			"credential", hex.EncodeToString(credit.credential),
 			"amount", credit.amount,
@@ -506,7 +506,7 @@ func (ls *LedgerState) applyMIRCredits(ctx context.Context,
 	return appliedReserves, appliedTreasury, nil
 }
 
-// availablePot resolves pot's (mirPotReserves or mirPotTreasury) balance
+// availablePot resolves pot's (MIRPotReserves or MIRPotTreasury) balance
 // after folding the boundary's pot-to-pot transfers. It selects on the same
 // uint pot addTransfer and addCredit switch on, rather than a separate string
 // representation, so an unhandled value is a default-branch discard here too
@@ -515,7 +515,7 @@ func (ls *LedgerState) applyMIRCredits(ctx context.Context,
 // cardano-ledger computes `reserves + deltaReserves` over unbounded Coin, so
 // a net outflow larger than the available balance yields a negative one and
 // the rule takes its no-op branch; ok=false reports that case, logged by the
-// capacity check's own "skipping over-budget MIR" line in applyMIRCerts.
+// capacity check's own "skipping over-budget MIR" line in ApplyMIRCerts.
 //
 // A uint64 overflow on the inbound side has no cardano-ledger analogue
 // either, since real chain balances never approach it. Unlike the capacity
@@ -530,9 +530,9 @@ func (b *mirBoundary) availablePot(
 	var name string
 	var in, out uint64
 	switch pot {
-	case mirPotReserves:
+	case MIRPotReserves:
 		name, in, out = "reserves", b.reservesIn, b.reservesOut
-	case mirPotTreasury:
+	case MIRPotTreasury:
 		name, in, out = "treasury", b.treasuryIn, b.treasuryOut
 	default:
 		b.discard = fmt.Sprintf("unknown MIR pot %d", pot)
@@ -562,12 +562,12 @@ func mirRewardSourceHash(pot uint) []byte {
 	return out
 }
 
-// readNetworkState returns the current treasury and reserves from the most
+// ReadNetworkState returns the current treasury and reserves from the most
 // recent NetworkState row, returning (0, 0) if none exists yet.
-func (ls *LedgerState) readNetworkState(
+func (e *Engine) ReadNetworkState(
 	txn ledgerdb.Txn,
 ) (treasury, reserves uint64, err error) {
-	state, err := ls.ledgerDB().GetNetworkState(txn)
+	state, err := e.ledgerDB().GetNetworkState(txn)
 	if err != nil {
 		return 0, 0, fmt.Errorf("get network state: %w", err)
 	}

@@ -70,7 +70,7 @@ type rewardInputBundle struct {
 //
 // Everything here is derived rather than assumed, and the result is only
 // worth persisting if it reconciles: see the caller, which puts the ledger's
-// own validateRewardCalculatorInputs between this and the database. Rewards
+// own ValidateRewardCalculatorInputs between this and the database. Rewards
 // computed from a subtly wrong basis would be credited at the wrong amount
 // rather than visibly not credited, and a silently wrong reward is worse than
 // an absent one.

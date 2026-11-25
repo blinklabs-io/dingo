@@ -7862,7 +7862,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 			}); err != nil {
 				return err
 			}
-			if err := ls.applyEpochDonations(
+			if err := ls.engine().ApplyEpochDonations(
 				txn,
 				endedEpoch,
 				boundarySlot,

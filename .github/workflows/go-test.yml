@@ -132,11 +132,13 @@ jobs:
           key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-build-
-      # These three run on documentation-only changes too.
+      # These four run on documentation-only changes too.
       - name: docs-parity
         run: make docs-parity
       - name: test-change-selection
         run: python3 .github/scripts/test-ci-changes.py
+      - name: test-conformance-reports
+        run: python3 .github/scripts/test-conformance-reports.py
       - name: test-makefile-pgo
         run: python3 .github/scripts/test-makefile-pgo.py
       # One step per Go module.

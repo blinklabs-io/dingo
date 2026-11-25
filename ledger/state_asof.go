@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -575,7 +576,10 @@ func (ls *LedgerState) accountsAt(
 		if err != nil {
 			return nil, err
 		}
-		reward, overflow := addRewardUint64(uint64(a.Reward), pending)
+		reward, overflow := epochengine.AddRewardUint64(
+			uint64(a.Reward),
+			pending,
+		)
 		if overflow {
 			return nil, fmt.Errorf(
 				"reward account balance overflow for %x", ref.Key,
