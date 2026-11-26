@@ -676,8 +676,8 @@ func TestRollbackAcrossEpochBoundaryRestoresEveryTable(t *testing.T) {
 // A snapshot whose reward_stake_input rows are marked incomplete keeps the
 // mark through a rollback that keeps its boundary and loses it with one that
 // rewinds the boundary: the rollback deletes the snapshot, so nothing remains
-// for the mark to describe and RewardStakeInputsIncomplete would report the
-// epoch as unfinished.
+// for the mark to describe and the incomplete check would report the epoch as
+// unfinished.
 func TestRollbackDiscardsPendingRewardStakeInputsOfRewoundBoundary(
 	t *testing.T,
 ) {

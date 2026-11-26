@@ -3755,8 +3755,8 @@ the amount is zero, so no `reward_live_stake` row or stake sum includes them.
 `TestReconcileRemovesGenesisFromAStoreWithoutUtxoRows` pin the store shapes,
 `TestReconcileRemovesLegacyZeroValueByronGenesis` and
 `TestReconcileResumesInterruptedGenesisRepair` the live set and the resume,
-`TestIndexerServiceRepairLetsALegacyReplayPassTheAnchor` the anchor check of a
-repaired IndexerDB, `TestReconcileKeepsOutputAtSharedZeroByronReference` and
+`TestIndexerServiceRemovesLegacyZeroValueByronGenesis` the IndexerDB cleanup,
+`TestReconcileKeepsOutputAtSharedZeroByronReference` and
 `TestIndexerServiceKeepsOutputAtSharedZeroByronReference` a shared reference,
 and `TestRemoveOutputsLeavesNoJournalRecord` the journal. The PostgreSQL and MySQL
 statements are the dialect-neutral SQL of `genesis_remove.go`; the tests above
