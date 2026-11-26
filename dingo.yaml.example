@@ -65,6 +65,16 @@
         # VACUUM, which pauses SQLite writers for the whole rewrite; later
         # runs release free pages in short steps.
         # vacuumIntervalSeconds: 86400
+    # immutable:
+      # provider: "chunkfile"
+      # config:
+        # How chunks the ImmutableDB completes are kept: "none" (default) as
+        # plain chunk files, or "mithril" as one zstd-compressed tar per chunk
+        # in the Mithril immutable archive layout. Existing chunks keep their
+        # form; both are read. Not supported by the s3 and gcs providers.
+        # compression: "none"
+        # MiB of decompressed archived chunks kept in memory for block reads.
+        # archiveCacheMb: 256
     # PostgreSQL metadata alternative (replace the metadata block above):
     # metadata:
     #   provider: "postgres"

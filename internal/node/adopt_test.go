@@ -1209,3 +1209,43 @@ func TestMoveChunkFileAcrossFileSystemsSyncsBeforeRemove(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 }
+
+// TestAdoptImmutableChunksArchivesWhenCompressing adopts Mithril chunks into
+// an ImmutableDB that compresses: every adopted chunk but the highest, which
+// may still be appended to, ends archived, and every block still reads.
+func TestAdoptImmutableChunksArchivesWhenCompressing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const chunks = 3
+	dir, digests := adoptSource(t, chunks)
+	blocks := fixtureBlocks(t, dir)
+	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
+		Config: &database.Config{
+			DataDir:     t.TempDir(),
+			Logger:      slog.New(slog.DiscardHandler),
+			StorageMode: datatypes.StorageModeCore,
+			Immutable:   adoptGeometry(t),
+		},
+		ImmutableConfig: map[string]any{"compression": "mithril"},
+	})
+	require.NoError(t, err)
+	_, err = adopt(t, ctx, db, dir, digests, nil)
+	require.NoError(t, err)
+
+	immDir := db.ImmutableDir()
+	for n := range uint64(chunks - 1) {
+		_, err := os.Stat(filepath.Join(immDir, immutable.ArchiveName(n)))
+		require.NoError(t, err, "chunk %d archive", n)
+		_, err = os.Stat(filepath.Join(immDir, immutable.ChunkName(n)+".chunk"))
+		require.ErrorIs(t, err, os.ErrNotExist, "chunk %d plain", n)
+	}
+	_, err = os.Stat(filepath.Join(immDir, immutable.ChunkName(chunks-1)+".chunk"))
+	require.NoError(t, err)
+	for i, b := range blocks {
+		blk, err := database.BlockByPoint(
+			ctx, db, ocommon.NewPoint(b.Slot, b.Hash),
+		)
+		require.NoError(t, err, "block %d", i)
+		require.Equal(t, b.Cbor, blk.Cbor, "block %d", i)
+	}
+}

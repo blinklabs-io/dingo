@@ -760,6 +760,9 @@ func finishAdoptedGroup(
 		if err := db.ReleaseImmutableChunk(num); err != nil {
 			return fmt.Errorf("releasing local chunk %d: %w", num, err)
 		}
+		if err := db.ArchiveImmutableChunk(num); err != nil {
+			return fmt.Errorf("archiving adopted chunk %d: %w", num, err)
+		}
 		removeChunkFiles(cfg.SourceDir, num)
 	}
 	if cfg.OnChunkCommitted != nil {
