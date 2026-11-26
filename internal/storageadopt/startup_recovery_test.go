@@ -51,7 +51,7 @@ func TestNodeMigrateToIndexerDBBuildsTheConfiguredArchiveStore(t *testing.T) {
 	require.NoError(t, node.MigrateToIndexerDB(
 		t.Context(), cfg, storageadopt.MigrateTestLogger(),
 	))
-	storageadopt.RequireSplitStores(t, cfg, tip, 5)
+	storageadopt.RequireIndexerDBStores(t, cfg, tip, 5)
 }
 
 func TestRestoreAdoptsLegacySQLiteAPIStore(t *testing.T) {

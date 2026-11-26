@@ -53,7 +53,7 @@ func TestNodeKeepsRolledBackBodiesUntilTheIndexerRollsBackPastThem(
 ) {
 	t.Parallel()
 	ctx := context.Background()
-	n, points, writers := newSplitLifecycleTestNode(t, 6, nil)
+	n, points, writers := newIndexerLifecycleTestNode(t, 6, nil)
 	moved := writers.all()[0].deps.Moved
 	require.NotNil(t, moved, "the writer is handed a Moved callback")
 	released := func() {
