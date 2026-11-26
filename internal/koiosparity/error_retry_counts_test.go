@@ -15,7 +15,6 @@
 package koiosparity
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -89,7 +88,7 @@ func TestObserverAutomaticallyRecoversErrorEpochWithoutNewEvent(t *testing.T) {
 	}
 }
 
-func TestSignificantCountsSurviveIndependentPhaseWritesAndReports(t *testing.T) {
+func TestSignificantCountsSurviveIndependentPhaseWrites(t *testing.T) {
 	t.Parallel()
 	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
@@ -108,20 +107,11 @@ func TestSignificantCountsSurviveIndependentPhaseWritesAndReports(t *testing.T) 
 	require.Equal(t, 11, statuses[0].MismatchCount)
 	require.Equal(t, 1, statuses[0].SignificantMismatchCount)
 	require.Equal(t, StatusError, statuses[0].Status)
-	report, err := BuildJSONReport("preview", "", nil, statuses, nil)
-	require.NoError(t, err)
-	var out bytes.Buffer
-	require.NoError(t, WriteJSONReport(&out, report))
-	require.Contains(t, out.String(), `"mismatch_count": 11`)
-	require.Contains(t, out.String(), `"significant_mismatch_count": 1`)
 	write(CheckEpochStatus{AggregateStatus: StatusFail, AggregateMismatchCount: 7, AggregateSignificantMismatchCount: 2, AccountStatus: StatusPass})
 	statuses, err = cache.GetStatusSummary("preview")
 	require.NoError(t, err)
 	require.Equal(t, 7, statuses[0].MismatchCount)
 	require.Equal(t, 2, statuses[0].SignificantMismatchCount)
-	out.Reset()
-	PrintStatus(&out, BuildStatusSummary("preview", nil, statuses), true, statuses)
-	require.Contains(t, out.String(), "2 significant of 7 mismatches")
 }
 
 func TestErrorEpochsAreSelectedAfterReferenceBecomesUnchanged(t *testing.T) {

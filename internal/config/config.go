@@ -464,10 +464,10 @@ func DefaultIndexerConfig() IndexerConfig {
 // When enabled, Dingo subscribes an epoch-boundary observer to
 // its own EventBus (event.EpochTransitionEventType) and validates each newly
 // closed epoch's committed reward state directly against Koios reference
-// data as the node advances, instead of requiring a separate koios-parity
-// CLI process polling a second, independently synced copy of the metadata
-// database. See internal/koiosparity/README.md. This is a one-off validation
-// aid, not a permanent subsystem — leave it disabled for normal node operation.
+// data as the node advances, with no separate process or second,
+// independently synced copy of the metadata database. See
+// internal/koiosparity/README.md. This is a one-off validation aid, not a
+// permanent subsystem — leave it disabled for normal node operation.
 type KoiosParityConfig struct {
 	// Enabled subscribes the observer to epoch.transition when true.
 	Enabled bool `yaml:"enabled"               envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
@@ -476,8 +476,7 @@ type KoiosParityConfig struct {
 	// Network.
 	Network string `yaml:"network"               envconfig:"DINGO_KOIOS_PARITY_NETWORK"`
 	// CachePath is the Koios reference cache.db path. Empty defaults to
-	// {DatabasePath}/.koios/cache.db, matching cmd/koios-parity's own
-	// default cache location.
+	// {DatabasePath}/.koios/cache.db.
 	CachePath string `yaml:"cachePath"             envconfig:"DINGO_KOIOS_PARITY_CACHE_PATH"`
 	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
 	// uses Koios's unauthenticated rate limit.
@@ -529,11 +528,7 @@ type KoiosParityConfig struct {
 	// Accounts additionally runs the per-account exact-parity fetch+check
 	// phase for every epoch the observer processes, alongside the existing
 	// epoch-aggregate/pool phases. Defaults to true (see
-	// DefaultKoiosParityConfig): the in-process observer is the
-	// operationally-real, continuously-driven path the observer exists to make
-	// possible, unlike the standalone koios-parity CLI's `--accounts` flag,
-	// which stays opt-in-only for cost/compatibility reasons (see
-	// cmd/koios-parity's addAccountsFlag). Set false explicitly to keep the
+	// DefaultKoiosParityConfig). Set false explicitly to keep the
 	// observer pool-level-only, e.g. to bound Koios request volume on a
 	// resource-constrained deployment.
 	Accounts bool `yaml:"accounts"              envconfig:"DINGO_KOIOS_PARITY_ACCOUNTS"`
@@ -926,6 +921,12 @@ type Config struct {
 	// BarkEventMaxSubscribersPerClient bounds concurrent EventService streams
 	// from one caller address. Zero or unset means unlimited.
 	BarkEventMaxSubscribersPerClient int `yaml:"barkEventMaxSubscribersPerClient" envconfig:"DINGO_BARK_EVENT_MAX_SUBSCRIBERS_PER_CLIENT"`
+	// BarkEventSources lists other nodes whose Bark EventService this node
+	// follows. Each event received is republished on this node's EventBus
+	// as a bark.remote_event carrying the source name. It is set in YAML or
+	// with dingo.WithBarkEventSources, is not read from the environment,
+	// and defaults to none.
+	BarkEventSources []BarkEventSource `yaml:"barkEventSources" ignored:"true"`
 	// BarkLifecycleOperatorCertificateFingerprints is a legacy configuration input with no effect.
 	// Dingo APIs do not authenticate or authorize callers.
 	BarkLifecycleOperatorCertificateFingerprints []string `yaml:"barkLifecycleOperatorCertificateFingerprints" envconfig:"DINGO_BARK_LIFECYCLE_OPERATOR_CERTIFICATE_FINGERPRINTS"`
@@ -2347,6 +2348,12 @@ func cloneConfig(cfg *Config) *Config {
 		cfg.BarkLifecycleOperatorCertificateFingerprints...,
 	)
 	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
+	clone.BarkEventSources = nil
+	for _, src := range cfg.BarkEventSources {
+		src.EventTypes = append([]string(nil), src.EventTypes...)
+		src.OriginNodeIDs = append([]string(nil), src.OriginNodeIDs...)
+		clone.BarkEventSources = append(clone.BarkEventSources, src)
+	}
 	clone.BlockProducerPools = append(
 		[]BlockProducerPool(nil),
 		cfg.BlockProducerPools...,
@@ -2964,6 +2971,21 @@ func applyTokenRegistryHeaderSecretsEnvironment(cfg *Config) error {
 	}
 	cfg.TokenRegistry.HeaderSecrets = headers
 	return nil
+}
+
+// BarkEventSource names one node whose Bark EventService this node follows.
+type BarkEventSource struct {
+	// Name labels the source on republished events and in logs. It must be
+	// unique among sources.
+	Name string `yaml:"name"`
+	// URL is the base URL of the remote node's Bark server.
+	URL string `yaml:"url"`
+	// EventTypes selects event type names or category patterns such as
+	// "peergov.*". Empty selects every type the remote node serves.
+	EventTypes []string `yaml:"eventTypes"`
+	// OriginNodeIDs limits events to those created on the named nodes.
+	// Empty selects every origin.
+	OriginNodeIDs []string `yaml:"originNodeIds"`
 }
 
 // BlockProducerPool is one pool a block producer forges for: its VRF key,

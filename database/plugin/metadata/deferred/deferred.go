@@ -85,10 +85,10 @@ type Index struct {
 	// in the manifest test failure message when the
 	// classification is questioned.
 	Notes string
-	// Critical marks indexes that must be present before the API
-	// can serve traffic. Critical indexes are rebuilt first so
-	// that the node can accept queries while the remaining lazy
-	// indexes finish in the background.
+	// Critical marks indexes that a live API query or the rollback
+	// path filters on, so serving degrades while one is missing.
+	// The MCP maintenance status reports a missing critical index
+	// apart from the lazy remainder.
 	//
 	// Criteria for Critical=true:
 	//   - Any WHERE predicate on the index column used by a live
@@ -108,19 +108,6 @@ type Index struct {
 	// depends on, other witness/redeemer secondary indexes, and any
 	// column that is only SELECTed or SET but never filtered.
 	Critical bool
-}
-
-// CriticalManifest returns the subset of Manifest entries that are
-// marked Critical=true. These are the indexes that must be present
-// before the API can serve traffic.
-func CriticalManifest() []Index {
-	var out []Index
-	for _, idx := range Manifest {
-		if idx.Critical {
-			out = append(out, idx)
-		}
-	}
-	return out
 }
 
 // SyncStateKey is the sync_state row that marks an in-flight (or

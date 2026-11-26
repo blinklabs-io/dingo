@@ -71,9 +71,9 @@ func TestRequireNetwork(t *testing.T) {
 
 // TestRequireAddrs covers --dingo-addr/--cardano-addr's validation: both
 // must be supplied explicitly, in any combination of missing, since this
-// tool never guesses a default address for either node (unlike
-// cmd/koios-parity, it does not manage node lifecycle, so there is no
-// "the node it's running against" to default to).
+// tool never guesses a default address for either node (it does not
+// manage node lifecycle, so there is no "the node it's running against" to
+// default to).
 func TestRequireAddrs(t *testing.T) {
 	t.Run("both set", func(t *testing.T) {
 		withGlobalFlags(t, "", "/tmp/dingo.socket", "/tmp/cardano.socket")

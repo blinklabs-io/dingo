@@ -467,6 +467,11 @@ func TestNewInvalidConfigPreservesMetricsRegistry(t *testing.T) {
 		{"margin", WithMinPoolMargin(10001), "min pool margin"},
 		{"leverage", WithPledgeLeverage(true, 0), "pledge leverage"},
 		{
+			"bark event source",
+			WithBarkEventSources(BarkEventSource{Name: "a", URL: "ftp://x"}),
+			"barkEventSources[0]",
+		},
+		{
 			"bark event limit",
 			WithBarkEventService(true, false, 0, -1, 0),
 			"barkEventMaxSubscribers",
