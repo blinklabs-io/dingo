@@ -238,3 +238,63 @@ func TestArchiveCompletedChunk(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 }
+
+// TestArchiveCacheEvictsToItsBound fills a cache sized for one of two
+// archived chunks: reading the second evicts the first, the bytes held never
+// exceed the bound, and an archive larger than the bound is not kept.
+func TestArchiveCacheEvictsToItsBound(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, _ := openFilledStore(t, dir, true, archivedStoreBlocks(t))
+	require.NoError(t, s.Close())
+	paths := []string{
+		filepath.Join(dir, ArchiveName(0)),
+		filepath.Join(dir, ArchiveName(1)),
+	}
+	sizes := make([]int64, len(paths))
+	for i, p := range paths {
+		files, err := readChunkArchive(p, uint64(i)) // #nosec G115
+		require.NoError(t, err)
+		sizes[i] = files.size()
+	}
+
+	c := newArchiveCache(max(sizes[0], sizes[1]))
+	for i, p := range paths {
+		_, err := c.get(p, uint64(i)) // #nosec G115
+		require.NoError(t, err)
+		require.LessOrEqual(t, c.used, c.maxBytes)
+	}
+	require.Len(t, c.entries, 1)
+	require.Equal(t, sizes[1], c.used)
+	for key := range c.entries {
+		require.Equal(t, paths[1], key.path)
+	}
+
+	small := newArchiveCache(min(sizes[0], sizes[1]) - 1)
+	files, err := small.get(paths[0], 0)
+	require.NoError(t, err)
+	require.NotNil(t, files)
+	require.Empty(t, small.entries)
+	require.Zero(t, small.used)
+}
+
+// TestSetArchiveCacheBytesBoundsReads sets the shared cache's bound below
+// one archived chunk: reads still succeed and the cache keeps nothing.
+//
+// Not t.Parallel: it changes the process-wide archive cache bound.
+func TestSetArchiveCacheBytesBoundsReads(t *testing.T) {
+	SetArchiveCacheBytes(1)
+	t.Cleanup(func() { SetArchiveCacheBytes(DefaultArchiveCacheBytes) })
+	blocks := archivedStoreBlocks(t)
+	dir := t.TempDir()
+	s, locs := openFilledStore(t, dir, true, blocks)
+	t.Cleanup(func() { _ = s.Close() })
+
+	_, inner, err := ReadBlockAt(dir, locs[0])
+	require.NoError(t, err)
+	require.Equal(t, blocks[0].Cbor, inner)
+	c := sharedArchiveCache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	require.LessOrEqual(t, c.used, int64(1))
+}
