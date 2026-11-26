@@ -121,13 +121,21 @@ func TestRewardEpochWipeStoppedBetweenTransactionsIsFinishedByTheReplay(t *testi
 		}
 	}
 	stop := errors.New("stopped between transactions")
-	s.SetAfterChunkForTest(func(int) error { return stop })
+	// The first transaction holds only the batch's rollback, so the stop
+	// comes after the second, the first that deletes rows.
+	s.SetAfterChunkForTest(func(done int) error {
+		if done >= 2 {
+			return stop
+		}
+		return nil
+	})
 	tip := point(slot, byte(slot))
 	_, err := s.ApplyLedgerBatch(&tip, batch())
 	require.ErrorIs(t, err, stop)
-	partial, _ := countRewardRows(t, s, 5)
+	partial, partialIndex := countRewardRows(t, s, 5)
 	require.Positive(t, partial)
-	require.Less(t, partial, wipeOutputs+1)
+	require.Less(t, partial, wipeOutputs, "part of the wipe committed")
+	require.Equal(t, partial, partialIndex)
 
 	s.SetAfterChunkForTest(nil)
 	require.NoError(t, s.ClearFailed())
