@@ -117,11 +117,18 @@ func recvEvent(
 	case r := <-ch:
 		require.NoError(t, r.err)
 		return r.ev
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventTestWait):
 		t.Fatal("timed out waiting for an event")
 		return nil
 	}
 }
+
+// eventTestWait bounds every wait for a server-side transition in these tests.
+// Each transition crosses several goroutine hand-offs (handler, send guard,
+// HTTP/2 serve loop, client). When the package's other tests keep every
+// processor busy, each hand-off waits for a turn, so a few seconds is not
+// enough. The bound only turns a real hang into a failure.
+const eventTestWait = 60 * time.Second
 
 // subStream wraps a server stream whose Subscribe call returns only once the
 // server sends its first message, so the call runs on its own goroutine.
@@ -135,7 +142,7 @@ func (s *subStream) wait(t *testing.T) {
 	t.Helper()
 	select {
 	case <-s.ready:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventTestWait):
 		t.Fatal("subscribe never returned")
 	}
 	require.NoError(t, s.err)
@@ -191,7 +198,7 @@ func openSubscribe(
 		f.hub.mu.Lock()
 		defer f.hub.mu.Unlock()
 		return f.hub.active > 0
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 	return s
 }
 
@@ -488,7 +495,7 @@ func waitActive(t *testing.T, f *eventFixture, n int) {
 		f.hub.mu.Lock()
 		defer f.hub.mu.Unlock()
 		return f.hub.active == n
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 }
 
 // The acknowledged position survives a dropped stream: reconnecting with it
