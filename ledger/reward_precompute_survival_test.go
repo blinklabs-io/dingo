@@ -56,7 +56,7 @@ func requirePrecomputeReusable(t *testing.T, ls *LedgerState) {
 	t.Helper()
 	txn := ls.db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, ok, err := ls.precomputedStakeRewardApplication(
+		_, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 			context.Background(),
 			txn, survivalNewEpoch, survivalBoundarySlot,
 		)
@@ -74,17 +74,18 @@ func TestRewardPrecomputeSurvivesRollbackAboveCapturedSlot(t *testing.T) {
 	t.Parallel()
 	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 7, 4, 7)
 	ls.rewardPrecomputeChunkPoolsOverride = 2
+	target := fxPoint(survivalCapturedSlot + 300)
+	fxTip(t, ls, target)
 	require.NoError(t, ls.runChunkedStakeRewardPrecompute(
 		survivalNewEpoch, survivalCapturedSlot, survivalBoundarySlot,
 	))
 	poolIDs, accountIDs := rewardOutputIDs(t, db)
 	require.Len(t, poolIDs, 7)
+	fxTip(t, ls, fxPoint(survivalCapturedSlot+400))
 
 	// A rollback into the epoch the round is applied at, below its
 	// application boundary.
-	require.NoError(t, db.DeleteRewardStateAfterSlot(
-		survivalCapturedSlot+300, nil,
-	))
+	fxRollback(t, ls, target)
 	ls.rewardInputGeneration.Add(2)
 	gotPools, gotAccounts := rewardOutputIDs(t, db)
 	require.Equal(t, poolIDs, gotPools, "the rollback must keep pool outputs")

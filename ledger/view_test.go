@@ -248,27 +248,9 @@ func seedCommitteeCredentialAuthorization(
 	slot uint64,
 ) {
 	t.Helper()
-	if seedLedgerOf(db) != nil {
-		committeeSeedAuthorization(
-			t, db, coldCredential, hotCredential, uint(certificateID), slot,
-		)
-		return
-	}
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO auth_committee_hot (
-    cold_credential_tag, cold_credential, hot_credential_tag,
-    host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?, ?, ?)`,
-		coldCredential.CredType,
-		coldCredential.Credential[:],
-		hotCredential.CredType,
-		hotCredential.Credential[:],
-		certificateID,
-		slot,
+	committeeSeedAuthorization(
+		t, db, coldCredential, hotCredential, uint(certificateID), slot,
 	)
-	require.NoError(t, err)
 }
 
 func seedCommitteeResignation(
@@ -298,24 +280,9 @@ func seedCommitteeCredentialResignation(
 	slot uint64,
 ) {
 	t.Helper()
-	if seedLedgerOf(db) != nil {
-		committeeSeedResignation(
-			t, db, coldCredential, uint(certificateID), slot,
-		)
-		return
-	}
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO resign_committee_cold (
-    cold_credential_tag, cold_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)`,
-		coldCredential.CredType,
-		coldCredential.Credential[:],
-		certificateID,
-		slot,
+	committeeSeedResignation(
+		t, db, coldCredential, uint(certificateID), slot,
 	)
-	require.NoError(t, err)
 }
 
 func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(
@@ -3619,11 +3586,6 @@ func TestWithTxValidationSessionKeepsUnavailableUtxoCborRetryable(
 	t.Parallel()
 	db := newStorageFaultTestDB(t)
 	input := shelley.MustNewShelleyTransactionInput(strings.Repeat("a9", 32), 0)
-	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
-		TxId:      input.Id().Bytes(),
-		OutputIdx: input.Index(),
-		AddedSlot: 1,
-	}))
 	ls := newFakeEraLedgerState(db, func(
 		_ lcommon.Transaction,
 		_ uint64,
@@ -4259,7 +4221,7 @@ func runProposalSetBoundary(
 	boundarySlot uint64,
 ) *governance.EpochOutput {
 	t.Helper()
-	txn := db.MetadataTxn(context.Background(), true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	out, err := governance.ProcessEpoch(context.Background(), &governance.EpochInput{
 		DB:           seedDB(t, db),
@@ -6674,7 +6636,7 @@ func TestLedgerViewDRepDelegationRejectsMalformedStoredState(t *testing.T) {
 			require.Error(t, err)
 			require.ErrorIs(t, err, ErrLedgerViewStorageFault)
 			require.NotErrorIs(
-				t, err, ErrDrainedFamilyUnserved,
+				t, err, ErrLedgerStateUnserved,
 				"the fault must be the malformed row, not a set that is not open",
 			)
 			var semanticErr *semanticTxValidationError
@@ -6763,7 +6725,7 @@ func TestWithTxValidationSessionKeepsMalformedVrfPoolKeyRetryable(
 
 	require.ErrorIs(t, err, ErrLedgerViewStorageFault)
 	require.NotErrorIs(
-		t, err, ErrDrainedFamilyUnserved,
+		t, err, ErrLedgerStateUnserved,
 		"the fault must be the malformed row, not a set that is not open",
 	)
 	var semanticErr *semanticTxValidationError
@@ -6878,28 +6840,7 @@ func seedImportedDrep(
 	active bool,
 ) {
 	t.Helper()
-	if seedLedgerOf(db) != nil {
-		drepSeedRegistered(t, db, cred, &deposit, slot, active)
-		return
-	}
-	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
-	require.NoError(t, err)
-	hash := append([]byte(nil), cred.Credential[:]...)
-	require.NoError(t, db.Metadata().ImportDrep(
-		&models.Drep{
-			CredentialTag: tag,
-			Credential:    hash,
-			AddedSlot:     slot,
-			Active:        active,
-		},
-		&models.RegistrationDrep{
-			CredentialTag:  tag,
-			DrepCredential: hash,
-			AddedSlot:      slot,
-			DepositAmount:  types.Uint64(deposit),
-		},
-		nil,
-	))
+	drepSeedRegistered(t, db, cred, &deposit, slot, active)
 }
 
 // TestDRepDeregistrationRefundsRecordedDeposit is the regression test for the
@@ -7715,13 +7656,12 @@ func newTreasuryRolloverFixture(
 		AddedSlot:    1,
 	}}, nil))
 	require.NoError(t, seedDB(t, db).SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil))
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO auth_committee_hot (
-    cold_credential, host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)`, coldCredential, hotCredential, 1, 1)
-	require.NoError(t, err)
+	committeeSeedAuthorization(
+		t, db,
+		lcommon.Credential{Credential: lcommon.NewBlake2b224(coldCredential)},
+		lcommon.Credential{Credential: lcommon.NewBlake2b224(hotCredential)},
+		1, 1,
+	)
 
 	ls := &LedgerState{
 		db:             db,
@@ -7922,7 +7862,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 			}); err != nil {
 				return err
 			}
-			if err := ls.applyEpochDonations(
+			if err := ls.engine().ApplyEpochDonations(
 				txn,
 				endedEpoch,
 				boundarySlot,
@@ -8285,22 +8225,12 @@ func seedStakeRegistration(
 	if deposit != nil {
 		certDeposits[0] = *deposit
 	}
-	if seedLedgerOf(db) != nil {
-		fxApplyTx(
-			t, db, tx,
-			ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 2}, 32)),
-			0,
-			certDeposits,
-		)
-		return
-	}
-	require.NoError(t, db.SetTransactionMetadataOnly(context.Background(),
-		tx,
+	fxApplyTx(
+		t, db, tx,
 		ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 2}, 32)),
 		0,
 		certDeposits,
-		nil, 0,
-	))
+	)
 }
 
 // newStakeRefundTestView returns a *LedgerView over a real database, built

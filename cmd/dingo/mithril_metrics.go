@@ -38,7 +38,6 @@ const (
 	mithrilSyncPhaseLedgerImport  = "ledger_import"
 	mithrilSyncPhaseImmutableCopy = "immutable_copy"
 	mithrilSyncPhasePostLedger    = "post_ledger_state"
-	mithrilSyncPhaseIndexRebuild  = "index_rebuild"
 	mithrilSyncPhaseComplete      = "complete"
 )
 
@@ -130,8 +129,6 @@ type mithrilSyncMetrics struct {
 	immutableTipSlot      prometheus.Gauge
 	immutablePercent      prometheus.Gauge
 	immutableBlocksPerSec prometheus.Gauge
-
-	indexRebuildDuration prometheus.Gauge
 
 	// pipeline records the immutable chunk downloads, under the same names
 	// node-managed Mithril uses.
@@ -240,10 +237,6 @@ func newMithrilSyncMetrics(reg prometheus.Registerer) *mithrilSyncMetrics {
 			Name: "dingo_mithril_sync_immutable_blocks_per_second",
 			Help: "ImmutableDB block copy rate during Mithril sync.",
 		}),
-		indexRebuildDuration: factory.NewGauge(prometheus.GaugeOpts{
-			Name: "dingo_mithril_sync_index_rebuild_duration_seconds",
-			Help: "Duration spent rebuilding critical deferred metadata indexes during Mithril sync.",
-		}),
 	}
 	m.startedAt.SetToCurrentTime()
 	// The registry is this command's own and fresh, so registration cannot
@@ -348,16 +341,6 @@ func (m *mithrilSyncMetrics) recordImmutableProgress(
 	m.immutableTipSlot.Set(float64(p.TipSlot))
 	m.immutablePercent.Set(p.Percent)
 	m.immutableBlocksPerSec.Set(p.BlocksPerSecond)
-}
-
-// recordIndexRebuildDuration records the elapsed time for deferred-index rebuild.
-func (m *mithrilSyncMetrics) recordIndexRebuildDuration(
-	duration time.Duration,
-) {
-	if m == nil {
-		return
-	}
-	m.indexRebuildDuration.Set(duration.Seconds())
 }
 
 func (m *mithrilSyncMetrics) markComplete() {

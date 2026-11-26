@@ -112,6 +112,8 @@ type LedgerChanges struct {
 	// PostSnapshotCredits are the credits a boundary applied after its SNAP
 	// point, in order.
 	PostSnapshotCredits []PostSnapshotCredit
+	// TxIndex are the transactions the commit applied, in order.
+	TxIndex []TxIndexEntry
 	// OpCerts are the commit's op-cert counter changes, in order.
 	OpCerts []OpCertChange
 	// RewardBlocks are the commit's changes to the per-epoch block counts
@@ -145,6 +147,9 @@ type LedgerChanges struct {
 	// Witnesses are the slots the commit's certificates and withdrawals
 	// witnessed credentials at, in order.
 	Witnesses []WitnessChange
+	// GovernanceBoundaries are the Conway epoch boundary snapshots the
+	// commit wrote, each journaled at its boundary slot.
+	GovernanceBoundaries []models.GovernanceBoundarySnapshot
 }
 
 // SyncMarkerChange sets the protocol parameter sync marker Name, one of the
@@ -275,6 +280,11 @@ type BlockNonceReader interface {
 // returns the net change as a rollback UtxoEvent.
 type UtxoSetRollbacker interface {
 	RollbackUtxoSet(point ocommon.Point) (UtxoEvent, error)
+	// JournalReaches reports whether the set's history reaches back to
+	// point: false when RollbackUtxoSet(point) would be refused because
+	// point is older than the history kept. A point off the set's lineage,
+	// or ahead of its tip, is not one the history is too short for.
+	JournalReaches(point ocommon.Point) (bool, error)
 	// PreviewUtxoSetRollback returns the change RollbackUtxoSet(point)
 	// would make, without making it.
 	PreviewUtxoSetRollback(point ocommon.Point) (UtxoEvent, error)
@@ -305,6 +315,15 @@ type utxoSetBatch struct {
 	// changes apply.
 	rollbackTo *ocommon.Point
 	changes    []UtxoEvent
+	// validationOnly keeps speculative fork validation from stopping the
+	// live set when its private overlay cannot be prepared.
+	validationOnly bool
+	// consensus is the consensus view of the fork candidate a validation-only
+	// batch stages. The live view does not hold an epoch the candidate opens
+	// or its parameters, so every rule that reads the epoch cache, epoch or
+	// parameters while txn validates reads this one.
+	consensus     *consensusSnapshot
+	validationErr error
 	// nonces are the block nonces txn wrote, and pruneNoncesBefore the
 	// slot its nonce prune reached, for a set that keeps nonces.
 	nonces            []models.BlockNonce
@@ -346,10 +365,16 @@ type utxoSetBatch struct {
 	pparamUpdates []PParamUpdateChange
 	syncMarkers   []SyncMarkerChange
 	stateMarks    []StateMarkChange
+	// txIndex are the transactions txn applied, in order, and txIndexAt the
+	// position of each hash's last entry in it.
+	txIndex   []TxIndexEntry
+	txIndexAt map[string]int
 	// importBaselines and witnesses are the account import baselines and
 	// witness slots txn wrote, for a set that keeps accounts.
 	importBaselines []ImportBaselineChange
 	witnesses       []WitnessChange
+	// governanceBoundaries are the boundary snapshots txn wrote.
+	governanceBoundaries []models.GovernanceBoundarySnapshot
 	// overlay is each changed output's last staged state, and stake each
 	// stake sum's staged change, for reads in the same transaction.
 	overlay map[utxoref.Key]utxoSetOverlayEntry
@@ -377,9 +402,9 @@ func (b *utxoSetBatch) hasWrites() bool {
 		len(b.committee) > 0 ||
 		len(b.proposals) > 0 || len(b.votes) > 0 ||
 		len(b.pparamUpdates) > 0 || len(b.syncMarkers) > 0 ||
-		len(b.stateMarks) > 0 ||
+		len(b.stateMarks) > 0 || len(b.txIndex) > 0 ||
 		len(b.importBaselines) > 0 ||
-		len(b.witnesses) > 0
+		len(b.witnesses) > 0 || len(b.governanceBoundaries) > 0
 }
 
 // failUtxoSet stops the live UTxO set following the ledger, records the
@@ -439,6 +464,9 @@ func (ls *LedgerState) stageUtxoSet(
 	})
 	if r, readable := ls.config.UtxoSet.(UtxoSetReader); readable {
 		if err := ls.stageUtxoOverlay(r, txn, batch, changes); err != nil {
+			if ls.recordValidationFailure(txn, err) {
+				return
+			}
 			slot := uint64(0)
 			if tip != nil {
 				slot = tip.Slot
@@ -734,6 +762,7 @@ func (ls *LedgerState) applyUtxoSetLocked(batch *utxoSetBatch) *UtxoEvent {
 			RewardRounds:        batch.rewardRounds,
 			PostSnapshotCredits: batch.postSnapshot,
 			OpCerts:             batch.opCerts,
+			TxIndex:             batch.txIndex,
 			RewardBlocks:        batch.rewardBlocks,
 			RewardInputs:        batch.rewardInputs,
 			RewardDerived:       batch.rewardDerived,
@@ -745,6 +774,8 @@ func (ls *LedgerState) applyUtxoSetLocked(batch *utxoSetBatch) *UtxoEvent {
 			StateMarks:          batch.stateMarks,
 			ImportBaselines:     batch.importBaselines,
 			Witnesses:           batch.witnesses,
+
+			GovernanceBoundaries: batch.governanceBoundaries,
 		})
 	} else {
 		err = w.ApplyUtxoChanges(batch.tip, batch.changes)
@@ -787,8 +818,7 @@ func ResumeCheckOnly(ctx context.Context) bool {
 //
 // It reports false, changing nothing, when point is not an applied block on
 // the primary chain below the ledger tip, or when the rollback would cross the
-// Mithril trust boundary or the consumed-UTxO prune floor; the caller then
-// rebuilds the set instead. Call it before the ledger starts.
+// Mithril trust boundary; the caller then rebuilds the set instead. Call it before the ledger starts.
 func (ls *LedgerState) ResumeUtxoSetFrom(
 	ctx context.Context,
 	point ocommon.Point,
@@ -817,13 +847,6 @@ func (ls *LedgerState) ResumeUtxoSetFrom(
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
-		return false, nil
-	}
-	below, _, err := ls.rollbackBelowConsumedUtxoPruneFloor(point)
-	if err != nil {
-		return false, fmt.Errorf("determine consumed UTxO prune floor: %w", err)
-	}
-	if below {
 		return false, nil
 	}
 	if ResumeCheckOnly(ctx) {
@@ -1152,7 +1175,8 @@ func (ls *LedgerState) utxoSetBatchFor(meta types.Txn) *utxoSetBatch {
 }
 
 // stageUtxoSetRollback makes txn's batch roll the live UTxO set back to point
-// from its journal once txn commits, and record point as its tip.
+// from its journal once txn commits, and record point as its tip. A preview
+// the journal cannot serve stops the set following the ledger.
 func (ls *LedgerState) stageUtxoSetRollback(
 	txn ledgerdb.Txn,
 	point ocommon.Point,
@@ -1161,6 +1185,26 @@ func (ls *LedgerState) stageUtxoSetRollback(
 		ls.applyUtxoSet(&utxoSetBatch{rollbackTo: &point, tip: &point})
 		return
 	}
+	if err := ls.stageUtxoSetRollbackChecked(txn, point); err != nil {
+		if ls.recordValidationFailure(txn, err) {
+			return
+		}
+		ls.failUtxoSet(
+			point.Slot,
+			"live UTxO set rollback preview failed; it stops following the ledger until startup resumes it",
+			err,
+		)
+	}
+}
+
+// stageUtxoSetRollbackChecked is stageUtxoSetRollback for a write
+// transaction, returning the error of a preview the journal cannot serve
+// instead of failing the set. A caller that returns the error must roll txn
+// back so the staged batch is dropped.
+func (ls *LedgerState) stageUtxoSetRollbackChecked(
+	txn ledgerdb.Txn,
+	point ocommon.Point,
+) error {
 	// The batch's tip is applied after the rollback, so its journal record
 	// lands after the records the rollback undoes.
 	ls.stageUtxoSet(txn, &point)
@@ -1176,19 +1220,97 @@ func (ls *LedgerState) stageUtxoSetRollback(
 	rb, ok := ls.config.UtxoSet.(UtxoSetRollbacker)
 	r, readable := ls.config.UtxoSet.(UtxoSetReader)
 	if b == nil || !ok || !readable {
-		return
+		return nil
 	}
 	preview, err := rb.PreviewUtxoSetRollback(point)
 	if err == nil {
 		err = ls.stageUtxoOverlay(r, txn, b, []UtxoEvent{preview})
 	}
-	if err != nil {
-		ls.failUtxoSet(
-			point.Slot,
-			"live UTxO set rollback preview failed; it stops following the ledger until startup resumes it",
-			err,
-		)
+	return err
+}
+
+// stageUtxoSetRollbackForValidation prepares a rollback overlay that is
+// discarded with txn. A preview failure rejects the candidate without
+// changing the live set's failure state.
+func (ls *LedgerState) stageUtxoSetRollbackForValidation(
+	txn ledgerdb.Txn,
+	point ocommon.Point,
+) error {
+	ls.utxoSetBatchForTxn(txn, func(b *utxoSetBatch) {
+		b.validationOnly = true
+	})
+	ls.stageUtxoSetRollback(txn, point)
+	return ls.utxoSetValidationError(txn)
+}
+
+// setForkValidationConsensus gives txn's validation-only batch the consensus
+// view of the fork candidate it validates.
+func (ls *LedgerState) setForkValidationConsensus(
+	txn ledgerdb.Txn,
+	snapshot *consensusSnapshot,
+) {
+	ls.utxoSetBatchForTxn(txn, func(b *utxoSetBatch) {
+		b.consensus = snapshot
+	})
+}
+
+// forkValidationConsensus returns the consensus view of the fork candidate
+// txn validates, nil when txn is not a fork validation.
+func (ls *LedgerState) forkValidationConsensus(
+	txn ledgerdb.Txn,
+) *consensusSnapshot {
+	if txn == nil {
+		return nil
 	}
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	if batch := ls.utxoSetBatches[txn]; batch != nil && batch.validationOnly {
+		return batch.consensus
+	}
+	return nil
+}
+
+// stagingEpoch is the epoch txn stages against: the candidate's while txn
+// validates a fork candidate, the live one otherwise.
+func (ls *LedgerState) stagingEpoch(txn ledgerdb.Txn) uint64 {
+	if snapshot := ls.forkValidationConsensus(txn); snapshot != nil {
+		return snapshot.currentEpoch.EpochId
+	}
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.currentEpoch.EpochId
+}
+
+// recordValidationFailure keeps err on txn's batch and reports true when txn
+// only validates a fork candidate. Its staging is discarded with txn, so a
+// failure rejects the candidate and must not stop the live set.
+func (ls *LedgerState) recordValidationFailure(
+	txn ledgerdb.Txn,
+	err error,
+) bool {
+	if txn == nil {
+		return false
+	}
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	batch := ls.utxoSetBatches[txn]
+	if batch == nil || !batch.validationOnly {
+		return false
+	}
+	if batch.validationErr == nil {
+		batch.validationErr = err
+	}
+	return true
+}
+
+func (ls *LedgerState) utxoSetValidationError(txn ledgerdb.Txn) error {
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	batch := ls.utxoSetBatches[txn]
+	if batch == nil {
+		return nil
+	}
+	return batch.validationErr
 }
 
 // LiveUtxoStake implements types.LiveUtxoSource: the lovelace in live
@@ -1293,6 +1415,22 @@ type UtxoSetIterator interface {
 // iterateLiveUtxos calls fn for every live output as txn sees the live UTxO
 // set, with txn's staged changes over it. Rows passed to fn carry only the
 // reference and the output CBOR.
+// IterateLiveUtxos calls fn for each output of the live UTxO set as of the
+// ledger's tip, stopping at the first error fn returns or when ctx ends. A row
+// holds the output's reference and CBOR only, and its buffers are reused
+// between calls.
+func (ls *LedgerState) IterateLiveUtxos(
+	ctx context.Context,
+	fn func(*models.Utxo) error,
+) error {
+	return ls.iterateLiveUtxos(nil, func(u *models.Utxo) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fn(u)
+	})
+}
+
 func (ls *LedgerState) iterateLiveUtxos(
 	txn ledgerdb.Txn,
 	fn func(*models.Utxo) error,

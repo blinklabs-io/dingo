@@ -187,6 +187,10 @@ const (
 	// clears, each by the slot it was recorded at:
 	// T <slot:8 BE> <kind:1> ...
 	DRepHistoryTag = 'T'
+	// GovernanceBoundaryTag keys the governance state of each Conway epoch
+	// boundary: # <epoch:8 BE>, valued with the boundary slot (8 bytes BE)
+	// and the encoded snapshot. Each row is journaled at its boundary slot.
+	GovernanceBoundaryTag = '#'
 	// InactivityTag keys the one-time CIP-0163 delegator inactivity
 	// activation: 0 <kind:1> ..., kind 0 the epoch it ran at and kind 1 a
 	// credential it stamped.
@@ -197,6 +201,13 @@ const (
 	// RewardLikelihoodTag keys the non-myopic pool-ranking state a reward
 	// update installs: 2 <kind:1> <epoch:8 BE> [<pool:28>].
 	RewardLikelihoodTag = '2'
+	// TxIndexTag keys the transaction index, every transaction the ledger has
+	// applied on its chain: 3 <tx hash:32>, valued with the slot of the block
+	// the transaction was applied in (8 bytes BE), its position in that
+	// block (4 bytes BE), its era id (1 byte), whether it is phase-2 valid
+	// (1 byte) and the block's hash. A Leios closure transaction records the
+	// ranking block that certified its endorser block.
+	TxIndexTag = '3'
 )
 
 // MarkerPrefix starts every marker key. No row family tag may equal it.
@@ -280,8 +291,7 @@ var (
 	// rewardSeqKey holds the next reward record sequence number.
 	rewardSeqKey = []byte("mrwseq")
 	// rewardRecordsKey is set once the store holds the reward records of the
-	// metadata store's journal up to its tip, or marks them lost when the
-	// journal was drained before they could be read.
+	// journal up to its tip.
 	rewardRecordsKey = []byte("mrwrecs")
 	// rewardConsumerKey is present while a reader that copies the reward
 	// records needs them; rewardConsumedKey holds the sequence number below
@@ -296,6 +306,13 @@ var (
 	// rewardIndexedKey is set once every record has a number and an entry.
 	rewardSeqIndexPrefix = []byte("mrwq")
 	rewardIndexedKey     = []byte("mrwindexed")
+	// addressIndexPrefix keys the output index, a derived row family under
+	// the marker namespace (see address_index.go); addressIndexedKey is set
+	// once every live output has its index rows, and addressIndexAfterKey
+	// holds the last output a build wrote.
+	addressIndexPrefix   = []byte("mai")
+	addressIndexedKey    = []byte("mxaidone")
+	addressIndexAfterKey = []byte("mxaiafter")
 	drepsKey             = []byte("mdreps")
 	poolsKey             = []byte("mpools")
 	// poolHistoryKey is set once the store holds every pool certificate event
@@ -317,7 +334,7 @@ var (
 	// up to its tip, and witnessSlotsKey once it holds every witness slot.
 	importBaselinesKey = []byte("mbaseline")
 	// importBaselineDelegationsKey is set once the import baselines carry the
-	// delegations the import recorded, or marked lost when they cannot.
+	// delegations the import recorded.
 	importBaselineDelegationsKey = []byte("mbasedelegs")
 	// witnessSlotsKey is set once the witness rows carry the effective slot
 	// of a closure's witness. legacyWitnessSlotsKey marked rows without it,
@@ -372,6 +389,9 @@ var (
 	// closureUtxoKey is set once the store holds every closure output effect
 	// up to its tip.
 	closureUtxoKey = []byte("mclosureutxo")
+	// txIndexKey is set once the store holds the transaction index up to its
+	// tip.
+	txIndexKey = []byte("mtxindex")
 	// rewardInputsKey is set once the store holds the reward inputs of every
 	// epoch reward calculation can still read, up to its tip.
 	rewardInputsKey = []byte("mrewardin")

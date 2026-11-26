@@ -148,7 +148,7 @@ func TestProcessProposalsEnforcesParameterChangeWellFormedness(
 	}
 	// Every case uses its own transaction hash, so one shared store is
 	// isolated; the cases run sequentially against it.
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -229,7 +229,7 @@ func TestProcessProposalsRejectsProgrammaticParameterUpdateWidths(
 			}
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
-				db, err := dbtest.NewDatabase(t, &database.Config{
+				db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 					DataDir: t.TempDir(),
 					Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 				})

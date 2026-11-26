@@ -47,7 +47,7 @@ type ProviderDependencies struct {
 	Logger             *slog.Logger
 	Host               string
 	CORSAllowedOrigins []string
-	// Ready gates the IndexerDB-backed routes on a split layout. Nil serves
+	// Ready gates the IndexerDB-backed routes with an IndexerDB. Nil serves
 	// every route.
 	Ready apiready.Check
 }
@@ -68,6 +68,12 @@ func RegisterProvider(host *plugin.Host) error {
 			Capability:  plugin.CapabilityAPIBlockfrost,
 			Name:        "builtin",
 			Description: "built-in Blockfrost-compatible HTTP API",
+			Storage: plugin.StorageRequirements{
+				Tier: plugin.StorageTierAPI,
+				Features: []plugin.StorageFeature{
+					plugin.StorageFeatureBlockfrost,
+				},
+			},
 		},
 		DefaultProviderConfig,
 		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (*Blockfrost, plugin.Instance, error) {

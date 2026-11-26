@@ -5539,13 +5539,36 @@ func TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply(
 func TestChainsyncServerRequestNextIteratorErrorAfterAwaitReplyUnparksClient(
 	t *testing.T,
 ) {
-	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	waiting := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWaiter := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	f := newChainsyncServerFixtureWithConfig(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		func(o *Ouroboros) {
+			o.chainsyncServerAwaitNextHook = func() {
+				close(waiting)
+				<-release
+			}
+		},
+	)
+	t.Cleanup(releaseWaiter)
 	f.parkInAwaitReply(t)
+	testutil.RequireReceive(
+		t,
+		waiting,
+		5*time.Second,
+		"post-AwaitReply iterator waiter did not start",
+	)
 
-	// Break the backing store, then wake the parked iterator so its next
-	// lookup fails for real rather than returning the chain-tip sentinel.
+	// Break the backing store before the waiter reads, so the failure is
+	// immediate and independent of iterator notification timing.
 	require.NoError(t, dbtest.CloseDatabase(f.o.ledgerState.Database()))
-	f.o.ledgerState.Chain().NotifyIterators()
+	releaseWaiter()
 
 	f.requireClientUnparked(
 		t,
@@ -7573,7 +7596,7 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		event.ChainsyncResyncReasonPeerTipBehindMithril,
 		event.ChainsyncResyncReasonLiveTxValidationRecovery,
 		event.ChainsyncResyncReasonDeterministicTxValidationRecovery,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 		event.ChainsyncResyncReasonReplayRecoveryNonConverging,
 		event.ChainsyncResyncReasonChainSwitchCursorAhead,
 		// This connection runs no chainsync client, so the local reasons
@@ -8197,7 +8220,7 @@ func TestChainsyncResyncDeniesPeerByReason(
 			wantDeniesPeer: false,
 		},
 		{
-			reason: event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+			reason: event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 			// The rollback cannot be crossed locally, so the stale bearer
 			// must be replaced before the peer can retry its chain.
 			wantDeniesPeer: false,

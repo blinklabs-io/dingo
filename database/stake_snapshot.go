@@ -35,6 +35,9 @@ func (d *Database) GetPoolStakeSnapshotsByEpoch(
 			snapshotType,
 		)
 	}
+	if err := d.requireStore("GetPoolStakeSnapshotsByEpoch"); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		return d.stakeSnapshotStore().GetPoolStakeSnapshotsByEpoch(
 			epoch,

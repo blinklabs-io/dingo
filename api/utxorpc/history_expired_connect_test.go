@@ -213,8 +213,8 @@ func TestConnect_FetchBlock_NamesOldestRetainedSlot(t *testing.T) {
 	h, blocks := newPrunedHistoryHarness(t, 2)
 	pruneHarnessBlock(t, h, blocks[0].Slot, blocks[0].Hash)
 	pruneHarnessBlock(t, h, blocks[1].Slot, blocks[1].Hash)
-	require.NoError(t, h.DB.SetSyncState(
-		database.HistoryExpiryCursorSyncKey,
+	require.NoError(t, h.DB.SetChainState(
+		database.HistoryExpiryCursorKey,
 		strconv.FormatUint(blocks[2].Slot, 10),
 		nil,
 	))
@@ -257,14 +257,14 @@ func TestConnect_FetchBlock_BoundNotScannedPerRequest(t *testing.T) {
 	h, blocks := newPrunedHistoryHarness(t, 2)
 	pruneHarnessBlock(t, h, blocks[0].Slot, blocks[0].Hash)
 	pruneHarnessBlock(t, h, blocks[1].Slot, blocks[1].Hash)
-	require.NoError(t, h.DB.SetSyncState(
-		database.HistoryExpiryCursorSyncKey,
+	require.NoError(t, h.DB.SetChainState(
+		database.HistoryExpiryCursorKey,
 		strconv.FormatUint(blocks[2].Slot, 10),
 		nil,
 	))
 	require.NoError(t, h.DB.RefreshOldestRetainedSlot(t.Context()))
-	require.NoError(t, h.DB.SetSyncState(
-		database.HistoryExpiryCursorSyncKey,
+	require.NoError(t, h.DB.SetChainState(
+		database.HistoryExpiryCursorKey,
 		"not a slot",
 		nil,
 	))

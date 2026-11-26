@@ -99,9 +99,8 @@ func setPParamsRows(t *testing.T, set *utxoset.Set) int {
 }
 
 // TestValidationReadsFromTheLiveUtxoSet resolves every output the scenario
-// left live, and every one it spent, the way validation does. With metadata reads available
-// every answer must agree with the metadata store, and from the live set the set's
-// answers must be the store's.
+// left live, and every one it spent, the way validation does: every live
+// output resolves to the set's bytes and no spent one resolves.
 func TestValidationReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
 	for _, reads := range []string{"set"} {
@@ -111,37 +110,43 @@ func TestValidationReadsFromTheLiveUtxoSet(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
 			rec := &recordingSet{Set: set}
-			var db *database.Database
 			scenario := ledger.RunUtxoSetScenarioForTest(
 				t,
 				types.StorageModeCore,
 				nil,
 				rec,
-				func(d *database.Database) { db = d },
+				func(*database.Database) {},
 			)
-			ldb := dbadapter.New(db)
-			var refs []models.UtxoId
+			// The applied batches, not the set the reads resolve against,
+			// say which outputs must be live.
 			want := map[string][]byte{}
-			require.NoError(t, ldb.IterateLiveUtxos(
-				t.Context(), nil,
-				func(u *models.Utxo) error {
-					refs = append(
-						refs,
-						models.UtxoId{Hash: u.TxId, Idx: u.OutputIdx},
-					)
-					want[fmt.Sprintf("%x#%d", u.TxId, u.OutputIdx)] = u.Cbor
-					return nil
-				},
-			))
-			spent := 0
+			wantRef := map[string]models.UtxoId{}
+			var removed []models.UtxoId
 			for _, b := range rec.batches {
 				for _, c := range b.changes.Utxo {
-					for _, r := range c.Removed {
-						if _, live := want[fmt.Sprintf("%x#%d", r.Hash, r.Idx)]; !live {
-							refs = append(refs, r)
-							spent++
-						}
+					for _, o := range c.Added {
+						key := fmt.Sprintf("%x#%d", o.Ref.Hash, o.Ref.Idx)
+						want[key] = o.Cbor
+						wantRef[key] = o.Ref
 					}
+					for _, r := range c.Removed {
+						key := fmt.Sprintf("%x#%d", r.Hash, r.Idx)
+						delete(want, key)
+						delete(wantRef, key)
+						removed = append(removed, r)
+					}
+				}
+			}
+			require.NotEmpty(t, want, "the scenario left nothing live")
+			refs := make([]models.UtxoId, 0, len(wantRef)+len(removed))
+			for _, ref := range wantRef {
+				refs = append(refs, ref)
+			}
+			spent := 0
+			for _, r := range removed {
+				if _, live := want[fmt.Sprintf("%x#%d", r.Hash, r.Idx)]; !live {
+					refs = append(refs, r)
+					spent++
 				}
 			}
 			require.Positive(t, spent, "the scenario spent nothing")
@@ -533,8 +538,7 @@ func TestLiveUtxoSetAccountsFollowGenesisStaking(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewGenesisScenarioForTest(t, set)
-	ldb := dbadapter.New(scenario.DB)
-	require.NoError(t, set.LoadLedgerState(t.Context(), ldb))
+	ledger.AdoptLiveSetForTest(t, scenario.DB, set)
 	scenario.CreateGenesis()
 	staked := 0
 	require.NoError(t, set.Accounts(func(a *models.Account) error {
@@ -545,10 +549,12 @@ func TestLiveUtxoSetAccountsFollowGenesisStaking(t *testing.T) {
 	}))
 	require.Positive(t, staked, "genesis staking made no accounts")
 	// Genesis accounts are ledger state, which only the set holds.
-	require.NoError(t, ldb.IterateAccounts(nil, func(a *models.Account) error {
-		t.Errorf("the metadata store holds genesis account %x", a.StakingKey)
-		return nil
-	}))
+	require.ErrorIs(t, dbadapter.New(scenario.DB).IterateAccounts(
+		nil, func(a *models.Account) error {
+			t.Errorf("the metadata store holds genesis account %x", a.StakingKey)
+			return nil
+		},
+	), database.ErrNoMetadataStore)
 }
 
 // TestLiveUtxoSetHoldsEachPoolsLatestOpCert opens the set over op-cert

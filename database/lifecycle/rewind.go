@@ -51,7 +51,7 @@ func RewindMetadata(
 	txn := db.Transaction(ctx, true)
 	err = txn.Do(func(txn *database.Txn) error {
 		if rewound {
-			if err := rewindMetadata(
+			if err := revertStoredLedger(
 				ctx, db, txn,
 				ocommon.Point{Slot: target.Slot, Hash: target.Hash},
 				mithrilFloor,

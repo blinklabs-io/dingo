@@ -24,154 +24,112 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 )
 
-// realBackendOptions configures the real, production metadata plugin that
-// backs a conformance DingoStateManager's *database.Database. The blob
-// store is always the local Badger provider -- UTxO/tx CBOR bytes have no
-// reason to leave the machine running the suite even when the metadata
-// store is a remote Postgres/MySQL server, matching how a real Dingo node
-// is normally deployed (local blob store, possibly-remote metadata store).
-type realBackendOptions struct {
-	// dataDir is where the local Badger blob store (and, for the sqlite
-	// metadata provider, the metadata file too) keeps its files. Required.
-	dataDir string
-
-	// metadataName is the registered plugin name ("sqlite", "postgres", or
-	// "mysql").
-	metadataName string
-
-	// metadataConfig is the provider-specific config map, decoded the same
-	// way plugin.Resolve decodes any other provider's YAML/env config (e.g.
-	// {"dsn": "..."} for postgres/mysql).
-	metadataConfig map[string]any
-
-	// registerMetadata installs the metadata provider on a fresh host.
-	registerMetadata func(*hostplugin.Host) error
+// ledgerBackend is the storage a conformance state manager replays a vector
+// against: the ledger's database, which keeps no metadata store, its LedgerDB
+// set, and the LedgerDB a ledger-state import writes the set through.
+type ledgerBackend struct {
+	db   *database.Database
+	host *hostplugin.Host
+	set  *utxoset.Set
+	ldb  *dledger.ImportLedgerDB
 }
 
-// openRealDatabase composes a real blob+metadata backed *database.Database
-// for the conformance harness. It mirrors internal/test/dbtest's
-// NewDatabaseWithOptions composition (fresh plugin.Host -> RegisterProvider
-// -> plugin.Resolve -> database.New) -- the same plugin-resolution path the
-// production node uses at startup -- but without a testing.TB dependency,
-// so it can be called from non-test constructors (NewDingoStateManager,
-// NewDingoPostgresStateManager, NewDingoMysqlStateManager) and propagate a
-// construction error to the caller instead of failing the test process
-// outright. That propagation is what the "invalid DSN must fail
-// construction" acceptance tests assert on.
-func openRealDatabase(
-	opts realBackendOptions,
-) (*database.Database, *hostplugin.Host, error) {
-	if opts.dataDir == "" {
-		return nil, nil, errors.New(
-			"conformance: real backend requires a data directory",
+// openLedgerBackend opens the ledger's database and its LedgerDB set under
+// dataDir the way the node does before a Mithril import: the block store
+// through plugin resolution, then the set, which is reconciled with the
+// database before anything is written to it.
+func openLedgerBackend(dataDir string) (*ledgerBackend, error) {
+	if dataDir == "" {
+		return nil, errors.New(
+			"conformance: ledger backend requires a data directory",
 		)
 	}
-	if opts.registerMetadata == nil {
-		return nil, nil, errors.New(
-			"conformance: real backend requires a metadata provider registrar",
-		)
-	}
-
-	host := hostplugin.NewHost()
-	if err := badger.RegisterProvider(host); err != nil {
-		return nil, nil, fmt.Errorf(
-			"register badger blob provider: %w",
-			err,
-		)
-	}
-	if err := opts.registerMetadata(host); err != nil {
-		return nil, nil, fmt.Errorf(
-			"register %s metadata provider: %w",
-			opts.metadataName,
-			err,
-		)
-	}
-
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx := context.Background()
 
+	host := hostplugin.NewHost()
+	if err := badger.RegisterProvider(host); err != nil {
+		return nil, fmt.Errorf("register badger blob provider: %w", err)
+	}
 	blobStore, err := hostplugin.Resolve[blob.BlobStore](
 		ctx, host,
 		hostplugin.CapabilityStorageBlob, "badger",
 		testutil.BadgerBlobConfig(),
-		blob.ProviderDependencies{DataDir: opts.dataDir, Logger: logger},
+		blob.ProviderDependencies{DataDir: dataDir, Logger: logger},
 	)
 	if err != nil {
 		_ = host.Stop(ctx)
-		return nil, nil, fmt.Errorf("resolve badger blob store: %w", err)
+		return nil, fmt.Errorf("resolve badger blob store: %w", err)
 	}
-
-	if opts.metadataName == "sqlite" && opts.metadataConfig == nil {
-		// Seed the already-migrated schema rather than migrating a fresh
-		// store: the migration, not the conformance work, dominates the cost
-		// of building a state manager. A data directory that already holds a
-		// metadata file (a reopen) is left alone.
-		template, err := dbtest.MetadataTemplateBytes()
-		if err != nil {
-			_ = host.Stop(ctx)
-			return nil, nil, fmt.Errorf("build metadata template: %w", err)
-		}
-		if err := dbtest.SeedMetadataTemplateBytes(
-			opts.dataDir, template,
-		); err != nil {
-			_ = host.Stop(ctx)
-			return nil, nil, fmt.Errorf("seed metadata template: %w", err)
-		}
-	}
-
-	metadataStore, err := hostplugin.Resolve[metadata.MetadataStore](
-		ctx, host,
-		hostplugin.CapabilityStorageMetadata, opts.metadataName,
-		opts.metadataConfig,
-		metadata.ProviderDependencies{
-			DataDir: opts.dataDir,
-			Logger:  logger,
-		},
+	db, err := database.New(
+		ctx,
+		// alonzopparams:word-not-required -- this harness creates the
+		// database it opens, so it never holds a protocol-parameter row
+		// written before gouroboros v0.205.7.
+		&database.Config{DataDir: dataDir, Logger: logger},
+		database.Stores{Blob: blobStore},
 	)
 	if err != nil {
 		_ = host.Stop(ctx)
-		return nil, nil, fmt.Errorf(
-			"resolve %s metadata store: %w",
-			opts.metadataName,
-			err,
+		return nil, fmt.Errorf("construct database: %w", err)
+	}
+	set, err := utxoset.Open(utxoset.Config{
+		Dir:          utxoset.DirFor(dataDir),
+		Logger:       logger,
+		MemTableSize: 8 << 20,
+	})
+	if err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("open LedgerDB set: %w", err),
+			closeLedgerStores(db, host),
 		)
 	}
-
-	db, err := database.New(
-		context.Background(),
-		// alonzopparams:word-not-required -- this harness creates the
-		// database it opens, so there is never a pre-gouroboros-v0.205.7
-		// Alonzo protocol-parameter row here to repair from genesis.
-		&database.Config{DataDir: opts.dataDir, Logger: logger},
-		database.Stores{Blob: blobStore, Metadata: metadataStore},
-	)
-	if err != nil {
-		if db != nil {
-			_ = db.Close()
-		}
-		_ = host.Stop(ctx)
-		return nil, nil, fmt.Errorf("construct database: %w", err)
+	b := &ledgerBackend{
+		db:   db,
+		host: host,
+		set:  set,
+		ldb:  dledger.NewImportLedgerDB(db, set, logger),
 	}
-	return db, host, nil
+	if err := (nodestorage.Reconcile{
+		DB:     db,
+		Set:    set,
+		Logger: logger,
+	}).Run(ctx); err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("reconcile LedgerDB set: %w", err),
+			b.close(),
+		)
+	}
+	return b, nil
 }
 
-// closeRealDatabase closes db and stops host, in that dependency order,
-// joining any errors from both. Either argument may be nil.
-func closeRealDatabase(db *database.Database, host *hostplugin.Host) error {
+// close closes the set, then the database and its provider host, joining
+// their errors. A nil backend closes nothing.
+func (b *ledgerBackend) close() error {
+	if b == nil {
+		return nil
+	}
+	var err error
+	if b.set != nil {
+		err = b.set.Close()
+	}
+	return errors.Join(err, closeLedgerStores(b.db, b.host))
+}
+
+func closeLedgerStores(db *database.Database, host *hostplugin.Host) error {
 	var err error
 	if db != nil {
 		err = db.Close()
 	}
 	if host != nil {
-		if stopErr := host.Stop(context.Background()); stopErr != nil {
-			err = errors.Join(err, stopErr)
-		}
+		err = errors.Join(err, host.Stop(context.Background()))
 	}
 	return err
 }

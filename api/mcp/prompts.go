@@ -46,7 +46,7 @@ func RegisterPrompts(
 	server.AddPrompt(&mcp.Prompt{
 		Name:        "diagnose_node_health",
 		Title:       "Diagnose Cardano Node Sync & Health",
-		Description: "Workflow to inspect the reported Dingo node tip and sync status, identity fingerprint, and any forge fence in sync_state.",
+		Description: "Workflow to inspect the reported Dingo node tip and sync status, identity fingerprint, and forge readiness.",
 		Arguments: []*mcp.PromptArgument{
 			{
 				Name:        "detailed",
@@ -67,7 +67,7 @@ func RegisterPrompts(
 				"Follow this diagnostic protocol:\n"+
 				"1. Retrieve the node's current tip using 'get_cardano_tip'. Record its slot, block height, sync status, and whether the result came from live ledger state or the metadata database.\n"+
 				"2. Inspect the node identity and block production fingerprint using 'get_node_info' with topic='identity'. Verify that BlockHeaderProtocolMinor is 69 by default; when CIP-0203 is enabled, check scheme 0 and the low-byte identifier 69 instead.\n"+
-				"3. Query the 'sync_state' table using 'sqlite_query' (SELECT * FROM sync_state) to inspect the local sync watermark and check for any active forge fence ('forge_fence:<pool_id>').\n"+
+				"3. On a node with an IndexerDB, query its 'sync_state' table using 'sqlite_query' (SELECT * FROM sync_state) to inspect the IndexerDB's sync progress. The forge fence is not there: it is block-store chain state ('forge_fence:<pool_id>') that no MCP tool reads, so report the fence as not inspected.\n"+
 				"4. Read 'dingo://node/status' to cross-check the configured network, tip slot, block height/hash, and reported sync status. This resource does not expose storage statistics.\n"+
 				"5. Synthesize a structured diagnostic report with:\n"+
 				"   - Reported sync status and tracked slots behind head when available; this is not a measurement of remote network latency.\n"+
@@ -135,7 +135,7 @@ func RegisterPrompts(
 				"2. Analyze the evaluation result:\n"+
 				"   - If evaluation succeeds: Record the CPU steps, memory units, and total estimated execution fee. Verify that each redeemer's consumption is within the network's max execution budget per transaction.\n"+
 				"   - If evaluation fails: Inspect the exact error message. If the failure indicates a missing datum, determine the missing hash and check 'resolve_datum_or_script'. Note that CIP-32 inline datums are stored directly on the input UTxO.\n"+
-				"3. For each input referenced in the transaction, verify that the UTxO is currently unspent by querying 'get_utxos' or checking 'deleted_slot = 0' via 'sqlite_query'.\n"+
+				"3. For each input referenced in the transaction, verify that the UTxO is currently unspent by querying 'get_utxos' or, on a node with an IndexerDB, checking 'deleted_slot = 0' via 'sqlite_query'.\n"+
 				"4. Check if the transaction contains required collateral inputs adequate for the calculated execution fee.\n"+
 				"5. Synthesize a structured report detailing:\n"+
 				"   - Plutus redeemer execution units (CPU steps & Memory) and budget utilization\n"+
@@ -204,7 +204,7 @@ func RegisterPrompts(
 			"You are a Cardano staking analyst auditing the performance and reward distribution of stake pool '%s'%s.\n\n"+
 				"Execute the following audit workflow:\n"+
 				"1. Call 'get_pool_performance' with pool_id='%s'%s to retrieve recorded blocks, delegated stake and pledge, fixed cost, margin, apparent performance, and reward snapshots.\n"+
-				"2. Query the 'account' table via 'sqlite_query' (SELECT COUNT(*) AS active_delegators FROM account WHERE active = 1 AND pool = X'%s') to count currently active accounts delegated to this pool. Do not infer current delegated stake from this table; use the performance tool's recorded stake figures.\n"+
+				"2. On a node with an IndexerDB, query its 'account' table via 'sqlite_query' (SELECT COUNT(*) AS active_delegators FROM account WHERE active = 1 AND pool = X'%s') to count currently active accounts delegated to this pool. Do not infer current delegated stake from this table; use the performance tool's recorded stake figures.\n"+
 				"3. Compare recorded block counts and rewards across the returned snapshots. Do not infer protocol correctness or financial returns from these aggregates alone.\n"+
 				"4. Summarize the recorded cost, margin, and leader/member reward values. These snapshots do not independently verify protocol reward calculations.\n"+
 				"5. Synthesize an SPO performance dossier with:\n"+

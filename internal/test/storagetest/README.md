@@ -17,7 +17,7 @@ is caught the same way regardless of which plugin it happens in.
 - `RunMetadataStoreConformance` — the dialect-neutral capability surface
   every metadata plugin shares (`SettingsStore`, `TxnStore`, `SlotRangeStore`
   when the concrete store implements it, and the extracted storage domains):
-  commit-timestamp and node-settings round-trips, settings-gate
+  node-settings round-trips, settings-gate
   first-write-wins semantics including a concurrent insert-if-absent race,
   transaction commit/rollback, slot-range stats on empty data, one
   empty-state read through each domain interface's narrowed handle plus a

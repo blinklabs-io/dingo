@@ -61,6 +61,7 @@ func TestCheckNodeSettingsRejectsUnsafeAlonzoPParamsUnit(t *testing.T) {
 				DataDir:     dataDir,
 				StorageMode: "core",
 				Network:     "preprod",
+				Role:        RoleReleased,
 			}
 			db, err := newTestDatabase(t, cfg)
 			require.NoError(t, err)
@@ -75,21 +76,15 @@ func TestCheckNodeSettingsRejectsUnsafeAlonzoPParamsUnit(t *testing.T) {
 			}
 			require.NoError(t, closeTestDatabase(db))
 
-			sqlDB, err := openMetadataSQLite(dataDir)
-			require.NoError(t, err)
 			if tt.delete {
-				_, err = sqlDB.Exec(
-					"DELETE FROM node_settings_gate WHERE name = ?",
+				deleteNodeSettingAt(t, dataDir,
 					nodesettings.AlonzoPParamsUnitGateName,
 				)
 			} else {
-				_, err = sqlDB.Exec(`
-UPDATE node_settings_gate SET value = ? WHERE name = ?`,
-					tt.marker, nodesettings.AlonzoPParamsUnitGateName,
+				setNodeSettingAt(t, dataDir,
+					nodesettings.AlonzoPParamsUnitGateName, tt.marker,
 				)
 			}
-			require.NoError(t, err)
-			require.NoError(t, sqlDB.Close())
 
 			_, err = newTestDatabase(t, cfg)
 			require.ErrorContains(t, err, tt.wantErr)
@@ -138,6 +133,7 @@ func TestReconcileAlonzoPParamsUnitAfterRecovery(t *testing.T) {
 				DataDir:     dataDir,
 				StorageMode: "core",
 				Network:     "preprod",
+				Role:        RoleReleased,
 			})
 			require.NoError(t, err)
 			if !tt.nullEpochRow {
@@ -157,12 +153,10 @@ VALUES (X'80', 10, NULL, ?)`, alonzo.EraIdAlonzo)
 				require.NoError(t, err)
 				require.NoError(t, sqlDB.Close())
 			}
-			require.NoError(t, db.Metadata().SetNodeSettingsGates(context.Background(),
+			require.NoError(t, db.SetNodeSettingsGates(context.Background(),
 				nodesettings.Values{
 					nodesettings.AlonzoPParamsUnitGateName: tt.marker,
 				},
-				0,
-				0,
 			))
 			if !tt.keepAlonzo && !tt.nullEpochRow {
 				require.NoError(
@@ -172,55 +166,12 @@ VALUES (X'80', 10, NULL, ?)`, alonzo.EraIdAlonzo)
 			}
 
 			require.NoError(t, db.ReconcileAlonzoPParamsUnitAfterRecovery(context.Background()))
-			gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+			gates, err := db.NodeSettingsGates(context.Background())
 			require.NoError(t, err)
 			require.Equal(t, tt.wantMarker,
 				gates[nodesettings.AlonzoPParamsUnitGateName])
 		})
 	}
-}
-
-func TestRecoveryPhase1RechecksAlonzoPParamsUnit(t *testing.T) {
-	t.Parallel()
-
-	dataDir := t.TempDir()
-	cfg := &Config{
-		DataDir:     dataDir,
-		StorageMode: "core",
-		Network:     "preprod",
-	}
-	db, err := newTestDatabase(t, cfg)
-	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
-		[]byte{0x80},
-		0,
-		0,
-		alonzo.EraIdAlonzo,
-		nil,
-	))
-	require.NoError(t, db.Metadata().SetNodeSettingsGates(context.Background(),
-		nodesettings.Values{
-			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
-		},
-		0,
-		0,
-	))
-	metaTxn := db.Metadata().Transaction(t.Context())
-	require.NoError(t, db.Metadata().SetCommitTimestamp(123456789, metaTxn))
-	require.NoError(t, metaTxn.Commit())
-	require.NoError(t, closeTestDatabase(db))
-
-	reopened, reopenErr := openForRecoveryTest(t, cfg)
-	require.Error(t, reopenErr)
-	var commitErr CommitTimestampError
-	require.ErrorAs(t, reopenErr, &commitErr)
-	require.NotNil(t, reopened)
-
-	require.ErrorContains(
-		t,
-		reopened.CheckNodeSettings(context.Background()),
-		"legacy byte units",
-	)
 }
 
 func TestCheckNodeSettingsRepairsStrandedLegacyMarker(t *testing.T) {
@@ -231,6 +182,7 @@ func TestCheckNodeSettingsRepairsStrandedLegacyMarker(t *testing.T) {
 		DataDir:     dataDir,
 		StorageMode: "core",
 		Network:     "preprod",
+		Role:        RoleReleased,
 	}
 	db, err := newTestDatabase(t, cfg)
 	require.NoError(t, err)
@@ -241,12 +193,10 @@ func TestCheckNodeSettingsRepairsStrandedLegacyMarker(t *testing.T) {
 		alonzo.EraIdAlonzo,
 		nil,
 	))
-	require.NoError(t, db.Metadata().SetNodeSettingsGates(context.Background(),
+	require.NoError(t, db.SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
 		},
-		0,
-		0,
 	))
 	// Model a crash after rollback's metadata truncate committed but before
 	// the recovery path could rewrite the conservative marker.
@@ -256,25 +206,17 @@ func TestCheckNodeSettingsRepairsStrandedLegacyMarker(t *testing.T) {
 	reopened, err := newTestDatabase(t, cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, closeTestDatabase(reopened)) })
-	gates, err := reopened.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := reopened.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, nodesettings.AlonzoPParamsUnitWordV1,
 		gates[nodesettings.AlonzoPParamsUnitGateName])
 }
 
-// alonzoPParamsUnitMarkerAt reads the unit marker straight out of a closed
-// database's metadata store.
+// alonzoPParamsUnitMarkerAt reads the unit marker out of a closed
+// database's node settings.
 func alonzoPParamsUnitMarkerAt(t *testing.T, dataDir string) string {
 	t.Helper()
-	sqlDB, err := openMetadataSQLite(dataDir)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, sqlDB.Close()) }()
-	var marker string
-	require.NoError(t, sqlDB.QueryRow(
-		`SELECT value FROM node_settings_gate WHERE name = ?`,
-		nodesettings.AlonzoPParamsUnitGateName,
-	).Scan(&marker))
-	return marker
+	return nodeSettingsAt(t, dataDir)[nodesettings.AlonzoPParamsUnitGateName]
 }
 
 // alonzoPParamsCbor encodes an Alonzo protocol-parameter row holding the
@@ -358,6 +300,7 @@ func TestRepairAlonzoPParamsUnitFromGenesis(t *testing.T) {
 				DataDir:                   dataDir,
 				StorageMode:               "core",
 				Network:                   "preprod",
+				Role:                      RoleReleased,
 				AlonzoLovelacePerUtxoWord: tt.word,
 			}
 			db, err := newTestDatabase(t, cfg)
@@ -371,15 +314,10 @@ func TestRepairAlonzoPParamsUnitFromGenesis(t *testing.T) {
 			))
 			require.NoError(t, closeTestDatabase(db))
 
-			sqlDB, err := openMetadataSQLite(dataDir)
-			require.NoError(t, err)
-			_, err = sqlDB.Exec(
-				`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
-				nodesettings.AlonzoPParamsUnitLegacyByteV0,
+			setNodeSettingAt(t, dataDir,
 				nodesettings.AlonzoPParamsUnitGateName,
+				nodesettings.AlonzoPParamsUnitLegacyByteV0,
 			)
-			require.NoError(t, err)
-			require.NoError(t, sqlDB.Close())
 
 			reopened, err := newTestDatabase(t, cfg)
 			if tt.wantErr != "" {
@@ -417,6 +355,7 @@ func TestRepairAlonzoPParamsUnitIsIdempotent(t *testing.T) {
 		DataDir:                   dataDir,
 		StorageMode:               "core",
 		Network:                   "preprod",
+		Role:                      RoleReleased,
 		AlonzoLovelacePerUtxoWord: genesisWord,
 	}
 	db, err := newTestDatabase(t, cfg)
@@ -430,15 +369,10 @@ func TestRepairAlonzoPParamsUnitIsIdempotent(t *testing.T) {
 	))
 	require.NoError(t, closeTestDatabase(db))
 
-	sqlDB, err := openMetadataSQLite(dataDir)
-	require.NoError(t, err)
-	_, err = sqlDB.Exec(
-		`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
-		nodesettings.AlonzoPParamsUnitLegacyByteV0,
+	setNodeSettingAt(t, dataDir,
 		nodesettings.AlonzoPParamsUnitGateName,
+		nodesettings.AlonzoPParamsUnitLegacyByteV0,
 	)
-	require.NoError(t, err)
-	require.NoError(t, sqlDB.Close())
 
 	for range 2 {
 		reopened, err := newTestDatabase(t, cfg)
@@ -510,6 +444,7 @@ func TestRepairAlonzoPParamsUnitRefusesRowThatDoesNotRoundTrip(t *testing.T) {
 		DataDir:                   dataDir,
 		StorageMode:               "core",
 		Network:                   "preprod",
+		Role:                      RoleReleased,
 		AlonzoLovelacePerUtxoWord: genesisWord,
 	}
 	db, err := newTestDatabase(t, cfg)
@@ -523,15 +458,10 @@ func TestRepairAlonzoPParamsUnitRefusesRowThatDoesNotRoundTrip(t *testing.T) {
 		"the store must keep the row's bytes verbatim for this to test anything",
 	)
 
-	sqlDB, err := openMetadataSQLite(dataDir)
-	require.NoError(t, err)
-	_, err = sqlDB.Exec(
-		`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
-		nodesettings.AlonzoPParamsUnitLegacyByteV0,
+	setNodeSettingAt(t, dataDir,
 		nodesettings.AlonzoPParamsUnitGateName,
+		nodesettings.AlonzoPParamsUnitLegacyByteV0,
 	)
-	require.NoError(t, err)
-	require.NoError(t, sqlDB.Close())
 
 	_, err = newTestDatabase(t, cfg)
 	require.ErrorContains(
@@ -561,6 +491,7 @@ func TestRepairAlonzoPParamsUnitRefusesWordBelowEight(t *testing.T) {
 		DataDir:                   dataDir,
 		StorageMode:               "core",
 		Network:                   "preprod",
+		Role:                      RoleReleased,
 		AlonzoLovelacePerUtxoWord: genesisWord,
 	}
 	db, err := newTestDatabase(t, cfg)
@@ -571,15 +502,10 @@ func TestRepairAlonzoPParamsUnitRefusesWordBelowEight(t *testing.T) {
 	)
 	require.NoError(t, closeTestDatabase(db))
 
-	sqlDB, err := openMetadataSQLite(dataDir)
-	require.NoError(t, err)
-	_, err = sqlDB.Exec(
-		`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
-		nodesettings.AlonzoPParamsUnitLegacyByteV0,
+	setNodeSettingAt(t, dataDir,
 		nodesettings.AlonzoPParamsUnitGateName,
+		nodesettings.AlonzoPParamsUnitLegacyByteV0,
 	)
-	require.NoError(t, err)
-	require.NoError(t, sqlDB.Close())
 
 	_, err = newTestDatabase(t, cfg)
 	require.ErrorContains(t, err, "is not separable from its per-byte form")

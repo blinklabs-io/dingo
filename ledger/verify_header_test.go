@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ledgersnapshot "github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -1694,7 +1696,7 @@ func TestVerifyDeferredBlockHeaderStateRollbackKeepsMarker(t *testing.T) {
 	require.NoError(t, txn.Rollback())
 
 	require.True(t, deferredMarkerPersisted(t, ls, point))
-	required, _, err := ls.deferredHeaderValidationRequired(point, nil)
+	required, _, err := ls.deferredHeaderValidationRequired(point)
 	require.NoError(t, err)
 	require.True(t, required, "rolled-back apply must leave the check pending")
 }
@@ -2303,25 +2305,22 @@ type deferredFloorWriteGateStore struct {
 	floorWrites      int
 }
 
-func (s *deferredFloorWriteGateStore) SetSyncState(
-	key string,
-	value string,
-	txn ledgerdb.Txn,
+func (s *deferredFloorWriteGateStore) SetDeferredHeaderFloor(
+	slot uint64,
 ) error {
-	if key == deferredHeaderValidationFloorSyncStateKey {
-		s.mu.Lock()
-		write := s.floorWrites
-		s.floorWrites++
-		s.mu.Unlock()
-		switch write {
-		case 0:
-			s.firstFloorWrite <- value
-			<-s.releaseFirst
-		case 1:
-			s.secondFloorWrite <- value
-		}
+	value := strconv.FormatUint(slot, 10)
+	s.mu.Lock()
+	write := s.floorWrites
+	s.floorWrites++
+	s.mu.Unlock()
+	switch write {
+	case 0:
+		s.firstFloorWrite <- value
+		<-s.releaseFirst
+	case 1:
+		s.secondFloorWrite <- value
 	}
-	return s.LedgerDB.SetSyncState(key, value, txn)
+	return s.LedgerDB.SetDeferredHeaderFloor(slot)
 }
 
 type malformedVrfKeyHashStore struct {
@@ -3549,35 +3548,18 @@ func seedLiveDelegatedPoolStake(
 	copy(txId, poolKeyHash)
 	txId[28] = discriminator
 	txId[31] = discriminator + 1
-	if ls := seedLedgerOf(db); ls != nil {
-		require.NoError(t, seedCreateAccount(
-			t, db, t.Context(), nil, &models.Account{
-				StakingKey: stakingKey,
-				Pool:       poolKeyHash,
-				AddedSlot:  slot,
-				Active:     true,
-			},
-		))
-		seedTestStakedOutput(
-			t, ls, txId, uint32(discriminator), stakingKey, totalStake,
-		)
-		return
-	}
-	err = db.Metadata().CreateAccount(nil, &models.Account{
-		StakingKey: stakingKey,
-		Pool:       poolKeyHash,
-		AddedSlot:  slot,
-		Active:     true,
-	})
-	require.NoError(t, err)
-	err = db.Metadata().CreateUtxo(nil, &models.Utxo{
-		TxId:       txId,
-		OutputIdx:  uint32(discriminator),
-		StakingKey: stakingKey,
-		Amount:     types.Uint64(totalStake),
-		AddedSlot:  slot,
-	})
-	require.NoError(t, err)
+	require.NoError(t, seedCreateAccount(
+		t, db, t.Context(), nil, &models.Account{
+			StakingKey: stakingKey,
+			Pool:       poolKeyHash,
+			AddedSlot:  slot,
+			Active:     true,
+		},
+	))
+	seedTestStakedOutput(
+		t, seedLedgerOf(t, db), txId, uint32(discriminator), stakingKey,
+		totalStake,
+	)
 }
 
 func captureLiveMarkSnapshot(
@@ -4772,8 +4754,7 @@ func seedLiveStakeCredential(
 ) {
 	t.Helper()
 	require.Len(t, stakingKey, 28)
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the database has no open LedgerDB set")
+	ls := seedLedgerOf(t, db)
 	require.NoError(t, seedCreateAccount(
 		t, db, t.Context(), nil, &models.Account{
 			StakingKey: stakingKey,
@@ -5417,11 +5398,7 @@ func deferredMarkerCount(t *testing.T, db *database.Database) int {
 	t.Helper()
 	keys, err := db.ListDeferredHeaderMarkers()
 	require.NoError(t, err)
-	legacy, err := db.ListSyncStateKeysByPrefix(
-		deferredHeaderValidationSyncStatePrefix, nil,
-	)
-	require.NoError(t, err)
-	return len(keys) + len(legacy)
+	return len(keys)
 }
 
 // TestBoundDeferredHeaderValidationWhileAppliedTipStalls drives deferred
@@ -5572,12 +5549,10 @@ func TestConcurrentDeferredHeaderBoundsKeepPersistedFloorCurrent(
 		"second bound should finish after the first bound",
 	))
 
-	storedFloor, err := seedDB(t, db).GetSyncState(
-		deferredHeaderValidationFloorSyncStateKey,
-		nil,
-	)
+	storedFloor, found, err := db.DeferredHeaderFloor()
 	require.NoError(t, err)
-	require.Equal(t, "51", storedFloor)
+	require.True(t, found)
+	require.Equal(t, uint64(51), storedFloor)
 	ls.deferredHeaderValidationMu.Lock()
 	inMemoryFloor := ls.deferredHeaderValidationFloor
 	ls.deferredHeaderValidationMu.Unlock()
@@ -5594,7 +5569,6 @@ func TestConcurrentDeferredHeaderBoundsKeepPersistedFloorCurrent(
 	require.NoError(t, restarted.repopulateDeferredHeaderValidation())
 	required, _, err := restarted.deferredHeaderValidationRequired(
 		newlyDeferred,
-		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, required)
@@ -5629,7 +5603,7 @@ func TestRepopulateDeferredHeaderValidationEnforcesMarkerCap(t *testing.T) {
 	require.LessOrEqual(t, count, markerCap)
 	require.Equal(t, 3, deferredMarkerCount(t, db))
 	require.Equal(t, uint64(3), floor)
-	required, _, err := ls.deferredHeaderValidationRequired(points[1], nil)
+	required, _, err := ls.deferredHeaderValidationRequired(points[1])
 	require.NoError(t, err)
 	require.True(t, required, "evicted slot must be covered by the floor")
 }
@@ -6142,37 +6116,6 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates(
 	)
 }
 
-// TestDeleteDeferredMarkerUnlessReadmitted_FailedLegacyReadKeepsMarker pins
-// the ordering the failed-delete path relies on. A delete error is logged and
-// returns before the readmission re-test, which is safe only if the error
-// leaves the blob marker in place; removing the blob marker before the legacy
-// sync_state read would drop the durable pin of a point re-deferred during the
-// call, and after a restart its stateful check would be skipped.
-func TestDeleteDeferredMarkerUnlessReadmitted_FailedLegacyReadKeepsMarker(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	tb := createTestBlock(t, [32]byte{76}, 0, tamperNone)
-	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
-
-	point := ocommon.Point{Slot: 1_170, Hash: []byte{0x13}}
-	require.NoError(t, ls.persistDeferredHeaderValidation(point))
-
-	// Closing the metadata store makes the legacy sync_state read fail while
-	// the blob store stays usable.
-	require.NoError(t, db.Metadata().Close())
-
-	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
-		headerValidationPointKey(point),
-	))
-	assert.True(
-		t,
-		deferredMarkerPersisted(t, ls, point),
-		"a failed delete must leave the blob marker in place",
-	)
-}
-
 // TestGenesisOverlayUnresolvablePParamsDefers pins the classification of an
 // overlay decision the node cannot make from its own state. A nil pparams
 // result means the snapshot, the persisted row and the era forecast all
@@ -6243,11 +6186,11 @@ func TestGenesisOverlayUnresolvablePParamsDefers(t *testing.T) {
 // TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover
 // mirrors the basic bootstrap scenario but exercises the header
 // verification path (advanceEpochCache → computeEpochNonceForSlot)
-// instead of the rollover path (calculateEpochNonce). The two paths
+// instead of the rollover path (CalculateEpochNonce). The two paths
 // must agree: header verification of any block in the new epoch
 // uses the cached epoch-nonce computed by computeEpochNonceForSlot,
 // while the persisted epoch row written by processEpochRollover uses
-// calculateEpochNonce. Disagreement means peer headers verifying
+// CalculateEpochNonce. Disagreement means peer headers verifying
 // against one nonce while we recompute another — the freeze pattern
 // seen when cached and calculated nonces diverge.
 func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
@@ -6367,7 +6310,7 @@ func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 		t,
 		db.Transaction(context.Background(), true).
 			Do(func(txn *database.Txn) error {
-				n, ev, c, lab, err := ls.calculateEpochNonce(
+				n, ev, c, lab, err := ls.engine().CalculateEpochNonce(
 					context.Background(),
 					txn,
 					epochEnd,
@@ -6599,7 +6542,7 @@ func TestEnsureEpochForSlotJumpsEmptyEpochsOnce(t *testing.T) {
 	require.Equal(t, candidate, target.CandidateNonce)
 	require.Equal(t, carriedLab, target.LastEpochBlockNonce)
 
-	expectedNonce, err := assembleEpochNonce(candidate, carriedLab, nil)
+	expectedNonce, err := epochengine.AssembleEpochNonce(candidate, carriedLab, nil)
 	require.NoError(t, err)
 	require.Equal(t, expectedNonce, target.Nonce)
 	require.Len(t, ls.loadConsensusSnapshot().epochCache, 2,
@@ -6671,7 +6614,7 @@ func TestComputeEpochNonceAfterSparseJumpKeepsPublishedExtraEntropy(
 		cache[1],
 	)
 	require.NoError(t, err)
-	want, err := assembleEpochNonce(candidate, lab, entropy)
+	want, err := epochengine.AssembleEpochNonce(candidate, lab, entropy)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 }
@@ -6807,7 +6750,7 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 		t,
 		db.Transaction(context.Background(), true).
 			Do(func(txn *database.Txn) error {
-				n, _, c, lab, err := ls.calculateEpochNonce(
+				n, _, c, lab, err := ls.engine().CalculateEpochNonce(
 					context.Background(),
 					txn,
 					epochEnd,
@@ -6931,7 +6874,7 @@ func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
 		t,
 		db.Transaction(context.Background(), true).
 			Do(func(txn *database.Txn) error {
-				n, ev, c, lab, err := ls.calculateEpochNonce(
+				n, ev, c, lab, err := ls.engine().CalculateEpochNonce(
 					context.Background(),
 					txn,
 					500,
@@ -7135,7 +7078,7 @@ func TestComputeEpochNonceForSlotFoldsExtraEntropy(t *testing.T) {
 // the imported (frozen) CandidateNonce — NOT the imported EvolvingNonce,
 // and NOT a value re-derived from a pre-cutoff block (there are none with
 // stored nonces; pre-cutoff blocks were imported as immutable). Both the
-// rollover path (calculateEpochNonce) and the header-verification path
+// rollover path (CalculateEpochNonce) and the header-verification path
 // (computeEpochNonceForSlot) must agree, because the first header of the
 // new epoch is verified against the eagerly-cached value.
 func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
@@ -7260,7 +7203,7 @@ func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
 		t,
 		db.Transaction(context.Background(), true).
 			Do(func(txn *database.Txn) error {
-				n, ev, c, lab, err := ls.calculateEpochNonce(
+				n, ev, c, lab, err := ls.engine().CalculateEpochNonce(
 					context.Background(),
 					txn,
 					epochEnd,
@@ -7754,7 +7697,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		ls.epochCache[1].EraId,
 	)
 	require.NoError(t, err)
-	forkEpochNonce, err := assembleEpochNonce(
+	forkEpochNonce, err := epochengine.AssembleEpochNonce(
 		forkCandidate,
 		ls.epochCache[0].LastEpochBlockNonce,
 		extraEntropy,
@@ -7984,7 +7927,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		),
 		BlockNumber: lateAnchor.block.BlockNumber(),
 	})
-	frozenEpochNonce, err := assembleEpochNonce(
+	frozenEpochNonce, err := epochengine.AssembleEpochNonce(
 		localCandidate,
 		ls.epochCache[0].LastEpochBlockNonce,
 		extraEntropy,
@@ -8282,7 +8225,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		ls.epochCache[2].EraId,
 	)
 	require.NoError(t, err)
-	multiEpochTargetNonce, err := assembleEpochNonce(
+	multiEpochTargetNonce, err := epochengine.AssembleEpochNonce(
 		middleCandidateNonce,
 		lateAnchor.block.Header().PrevHash().Bytes(),
 		epoch7ExtraEntropy,
@@ -8364,7 +8307,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		postCutoffHeader.block.Header(),
 	)
 	require.NoError(t, err)
-	epoch8CutoffNonce, err := assembleEpochNonce(
+	epoch8CutoffNonce, err := epochengine.AssembleEpochNonce(
 		middleCandidateNonce,
 		lateAnchor.block.Header().PrevHash().Bytes(),
 		epoch7ExtraEntropy,
@@ -8391,7 +8334,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		ls.epochCache[3].EraId,
 	)
 	require.NoError(t, err)
-	epoch8Nonce, err := assembleEpochNonce(
+	epoch8Nonce, err := epochengine.AssembleEpochNonce(
 		epoch7CandidateNonce,
 		multiEpochForkMiddle.block.Hash().Bytes(),
 		epoch8ExtraEntropy,
@@ -9562,11 +9505,11 @@ func containsAny(s string, subs ...string) bool {
 	return false
 }
 
-// TestDeferredHeaderMarkerLegacySyncStateStillHonoured covers a marker an
-// earlier version wrote to sync_state: it must still force the apply-time
-// check, repopulate into the in-memory set, and be removed once the check
-// passes.
-func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
+// TestDeferredHeaderMarkerWithoutSourceStillHonoured covers a marker with the
+// one-byte payload a database from an earlier version carries: it must force
+// the apply-time check, repopulate into the in-memory set, and be removed once
+// the check passes.
+func TestDeferredHeaderMarkerWithoutSourceStillHonoured(t *testing.T) {
 	t.Parallel()
 
 	tb := createTestBlock(t, [32]byte{48}, 0, tamperNone)
@@ -9576,10 +9519,8 @@ func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
 	seedBlockPoolRegistration(t, db, tb.block)
 	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
 
-	require.NoError(t, seedDB(t, db).SetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		deferredHeaderValidationSyncStateValue,
-		nil,
+	require.NoError(t, db.SetDeferredHeaderMarker(
+		headerValidationPointKey(point),
 	))
 	require.NoError(t, ls.repopulateDeferredHeaderValidation())
 	ls.deferredHeaderValidationMu.Lock()
@@ -9588,9 +9529,9 @@ func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
 	require.True(t, restored)
 	require.True(t, ls.consumeDeferredHeaderValidation(point))
 
-	required, _, err := ls.deferredHeaderValidationRequired(point, nil)
+	required, _, err := ls.deferredHeaderValidationRequired(point)
 	require.NoError(t, err)
-	require.True(t, required, "legacy sync_state marker must still gate apply")
+	require.True(t, required, "the marker must gate apply")
 
 	require.NoError(
 		t,
@@ -9604,12 +9545,9 @@ func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
 				)
 			}),
 	)
-	value, err := seedDB(t, db).GetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		nil,
-	)
+	held, err := db.HasDeferredHeaderMarker(headerValidationPointKey(point))
 	require.NoError(t, err)
-	require.Empty(t, value, "legacy marker must be removed after apply")
+	require.False(t, held, "the marker must be removed after apply")
 }
 
 // TestGenesisOverlayForecastsNextEpochInEraUpdate reproduces the preview
@@ -10113,4 +10051,13 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsDistributionFrozenByAnEmptyEp
 		assert.LessOrEqual(t, seenBefore, uint64(39),
 			"%s: mark[39], the frozen distribution, must be retained", tc.name)
 	}
+}
+
+// consumeDeferredHeaderValidation removes point's deferred marker and reports
+// whether there was one.
+func (ls *LedgerState) consumeDeferredHeaderValidation(
+	point ocommon.Point,
+) bool {
+	_, ok := ls.takeDeferredHeaderValidation(point)
+	return ok
 }

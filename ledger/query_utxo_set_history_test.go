@@ -123,6 +123,10 @@ func (s *querySetHistory) PreviewUtxoSetRollback(
 	return s.RollbackUtxoSet(point)
 }
 
+func (s *querySetHistory) JournalReaches(ocommon.Point) (bool, error) {
+	return true, nil
+}
+
 func (s *querySetHistory) SnapshotUtxoSet() (UtxoSetWriter, func(), error) {
 	view := newQuerySetHistory()
 	view.live = cloneQueryUtxos(s.live)
@@ -180,9 +184,9 @@ func cloneQueryUtxos(src map[utxoref.Key][]byte) map[utxoref.Key][]byte {
 	return clone
 }
 
-// attachQueryLiveUtxoSet puts the outputs db's metadata rows hold live into
-// the ledger's LedgerDB set, committed at db's tip, and returns the set. A
-// ledger built without a set gets an in-memory one that serves outputs only.
+// attachQueryLiveUtxoSet puts the outputs db's LedgerDB set holds live into
+// the ledger's set, committed at db's tip, and returns the set. A ledger
+// built without a set gets an in-memory one that serves outputs only.
 func attachQueryLiveUtxoSet(
 	t *testing.T,
 	ls *LedgerState,
@@ -193,15 +197,18 @@ func attachQueryLiveUtxoSet(
 		ls.config.UtxoSet = newQuerySetHistory()
 	}
 	set := ls.config.UtxoSet
+	source, ok := OpenLiveSetForTest(t, db).(UtxoSetIterator)
+	require.True(t, ok, "the database's set must list its outputs")
 	var added []UtxoOutput
-	err := db.IterateLiveUtxos(t.Context(), nil, func(utxo *models.Utxo) error {
-		added = append(added, UtxoOutput{
-			Ref:  models.UtxoId{Hash: slices.Clone(utxo.TxId), Idx: utxo.OutputIdx},
-			Cbor: slices.Clone(utxo.Cbor),
-		})
-		return nil
-	})
-	require.NoError(t, err)
+	require.NoError(t, source.EachUtxo(
+		func(txID []byte, index uint32, cbor []byte) error {
+			added = append(added, UtxoOutput{
+				Ref:  models.UtxoId{Hash: slices.Clone(txID), Idx: index},
+				Cbor: slices.Clone(cbor),
+			})
+			return nil
+		},
+	))
 	tip, err := db.GetTip(nil)
 	require.NoError(t, err)
 	point := ocommon.Point{

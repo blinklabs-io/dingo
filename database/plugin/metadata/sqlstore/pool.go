@@ -528,9 +528,6 @@ func (s *Store) GetPool(
 	includeInactive bool,
 	txn types.Txn,
 ) (*models.Pool, error) {
-	if err := s.refuseDrained("pool"); err != nil {
-		return nil, err
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -1029,9 +1026,6 @@ func (s *Store) UpdatePoolOpCertSequence(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	if s.tableDrained("pool_opcert_sequence") {
-		return nil
-	}
 	sequenceValue := encodeOpCertSequence(sequence)
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
@@ -1076,9 +1070,6 @@ func (s *Store) UpdatePoolOpCertSequence(
 					poolKeyHash.Bytes(), slot, inserted,
 				)
 			}
-			if s.poolsDrained() {
-				return nil
-			}
 			_, err = s.execCached(ctx, db, poolUpdateLatestOpCertSequenceSQL,
 				sequenceValue,
 				poolKeyHash.Bytes(),
@@ -1096,9 +1087,6 @@ func (s *Store) UpdatePoolOpCertSequenceBatched(
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
-	if s.tableDrained("pool_opcert_sequence") {
-		return nil
-	}
 	batched, ok := accumulator.(*transactionBatchAccumulator)
 	if !ok {
 		return fmt.Errorf(
@@ -1214,9 +1202,6 @@ ON CONFLICT (pool_key_hash, slot) DO NOTHING`
 			latest[key.poolKeyHash] = queued.sequenceValue
 		}
 	}
-	if s.poolsDrained() {
-		return nil
-	}
 	updated := make(map[lcommon.PoolKeyHash]struct{}, len(latest))
 	for _, key := range batched.opCertOrder {
 		if _, ok := updated[key.poolKeyHash]; ok {
@@ -1256,9 +1241,6 @@ func (s *Store) LatestPoolOpCertSequence(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn types.Txn,
 ) (uint64, bool, error) {
-	if s.tableDrained("pool_opcert_sequence") {
-		return 0, false, errTableDrained("pool_opcert_sequence")
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, false, err
@@ -1305,9 +1287,6 @@ func (s *Store) LatestPoolOpCertSequenceAfter(
 	afterSlot uint64,
 	txn types.Txn,
 ) (uint64, bool, error) {
-	if s.tableDrained("pool_opcert_sequence") {
-		return 0, false, errTableDrained("pool_opcert_sequence")
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, false, err
@@ -1330,9 +1309,6 @@ func (s *Store) PoolOpCertSequencesExistAtSlot(
 	slot uint64,
 	txn types.Txn,
 ) (bool, error) {
-	if s.tableDrained("pool_opcert_sequence") {
-		return false, errTableDrained("pool_opcert_sequence")
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return false, err
@@ -1378,9 +1354,6 @@ func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
 	slot uint64,
 	txn types.Txn,
 ) (uint64, bool, error) {
-	if s.tableDrained("pool_opcert_sequence") {
-		return 0, false, errTableDrained("pool_opcert_sequence")
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, false, err
@@ -1419,9 +1392,6 @@ func (s *Store) LatestPoolOpCertSequenceInRange(
 	endSlot uint64,
 	txn types.Txn,
 ) (uint64, bool, error) {
-	if s.tableDrained("pool_opcert_sequence") {
-		return 0, false, errTableDrained("pool_opcert_sequence")
-	}
 	if startSlot > endSlot {
 		return 0, false, nil
 	}
@@ -1472,9 +1442,6 @@ GROUP BY pool_key_hash`
 func (s *Store) LatestPoolOpCertSequences(
 	txn types.Txn,
 ) (map[string]uint64, error) {
-	if s.tableDrained("pool_opcert_sequence") {
-		return nil, errTableDrained("pool_opcert_sequence")
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -1518,9 +1485,6 @@ FROM (
 func (s *Store) LatestPoolOpCertCounters(
 	txn types.Txn,
 ) ([]models.PoolOpCertCounter, error) {
-	if s.tableDrained("pool_opcert_sequence") {
-		return nil, errTableDrained("pool_opcert_sequence")
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -1595,9 +1559,6 @@ func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
 	slot uint64,
 	txn types.Txn,
 ) (map[string]uint64, error) {
-	if s.tableDrained("pool_opcert_sequence") {
-		return nil, errTableDrained("pool_opcert_sequence")
-	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -1678,7 +1639,7 @@ const mithrilTrustBoundarySyncKey = "mithril_ledger_slot"
 // Counting them as blocks credits every pool holding a certified counter with
 // a block it never minted and inflates the epoch's block total by the size of
 // the pool set, which reaches pool reward performance
-// (ledger/reward_calculation.go), the reward_pool_input rows seeded at the
+// (ledger/epochengine/reward_calculation.go), the reward_pool_input rows seeded at the
 // epoch boundary (ledger/snapshot/rotation.go), and Blockfrost's
 // blocks_minted. The boundary is the same discriminator
 // LedgerState.latestOpCertCounterForValidation already uses to tell an
@@ -1738,9 +1699,6 @@ func (s *Store) GetPoolBlockIssuersInSlotRange(
 	endSlot uint64,
 	txn types.Txn,
 ) ([]models.PoolOpCertSequence, error) {
-	if s.tableDrained("pool_opcert_sequence") {
-		return nil, errTableDrained("pool_opcert_sequence")
-	}
 	if endSlot < startSlot {
 		return nil, nil
 	}
@@ -1791,9 +1749,6 @@ func (s *Store) CountPoolBlocksInSlotRange(
 	endSlot uint64,
 	txn types.Txn,
 ) (map[string]uint64, uint64, error) {
-	if s.tableDrained("pool_opcert_sequence") {
-		return nil, 0, errTableDrained("pool_opcert_sequence")
-	}
 	counts := make(map[string]uint64, len(poolKeyHashes))
 	for _, poolKeyHash := range poolKeyHashes {
 		counts[string(poolKeyHash.Bytes())] = 0
@@ -2124,9 +2079,6 @@ func (s *Store) poolsByRetirementPage(
 	descending bool,
 	txn types.Txn,
 ) ([]models.PoolRetiringRow, int, error) {
-	if err := s.refuseDrained("pool"); err != nil {
-		return nil, 0, err
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, err
@@ -2207,9 +2159,6 @@ func (s *Store) GetActivePoolKeyHashesPage(
 	descending bool,
 	txn types.Txn,
 ) ([][]byte, int, error) {
-	if err := s.refuseDrained("pool"); err != nil {
-		return nil, 0, err
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -2721,9 +2670,6 @@ func (s *Store) GetStakeByPools(
 	poolKeyHashes [][]byte,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
-	if err := s.refuseDrained("account", "reward_live_stake"); err != nil {
-		return nil, nil, err
-	}
 	if len(poolKeyHashes) == 0 {
 		stakes, delegators := emptyPoolStakeMaps(poolKeyHashes)
 		return stakes, delegators, nil
@@ -2755,9 +2701,6 @@ func (s *Store) GetStakeByPools(
 // when it is incomplete the total is rebuilt from the per-pool path, which
 // falls back to the UTxO table exactly as GetStakeByPools does.
 func (s *Store) GetActivePoolStakeTotal(txn types.Txn) (uint64, error) {
-	if err := s.refuseDrained("account", "reward_live_stake", "pool"); err != nil {
-		return 0, err
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
@@ -3799,28 +3742,18 @@ func (s *Store) RestorePoolStateAtSlot(
 			// values that lose a sequence row to this rollback, and that set
 			// is unrecoverable from pool_opcert_sequence once the DELETE has
 			// run.
-			var affectedOpCertPoolKeyHashes [][]byte
-			opCertsDrained := s.tableDrained("pool_opcert_sequence")
-			if !opCertsDrained {
-				hashes, err := queryPoolKeyHashesWithOpCertAfterSlot(
-					ctx, db, slot,
-				)
-				if err != nil {
-					return err
-				}
-				affectedOpCertPoolKeyHashes = hashes
-				if _, err := db.ExecContext(
-					ctx,
-					"DELETE FROM pool_opcert_sequence WHERE slot > ?",
-					slot,
-				); err != nil {
-					return err
-				}
+			affectedOpCertPoolKeyHashes, err := queryPoolKeyHashesWithOpCertAfterSlot(
+				ctx, db, slot,
+			)
+			if err != nil {
+				return err
 			}
-			// The op-cert rows above are the only pool state a drained
-			// pools-history family leaves in this store.
-			if s.poolsDrained() {
-				return nil
+			if _, err := db.ExecContext(
+				ctx,
+				"DELETE FROM pool_opcert_sequence WHERE slot > ?",
+				slot,
+			); err != nil {
+				return err
 			}
 			// pool_registration_owner and pool_registration_relay reference
 			// pool through a plain foreign key (fk_pool_owners,
@@ -3862,10 +3795,7 @@ WHERE NOT EXISTS (
 			if _, err := s.restorePoolDenormalizedFields(ctx, db, slot); err != nil {
 				return err
 			}
-			if opCertsDrained {
-				return nil
-			}
-			_, err := s.restorePoolLatestOpCertSequence(
+			_, err = s.restorePoolLatestOpCertSequence(
 				ctx,
 				db,
 				affectedOpCertPoolKeyHashes,

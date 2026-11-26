@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
@@ -483,9 +484,8 @@ func seedMigratedMetadata(dir string) error {
 }
 
 type remoteTestDatabase struct {
-	db       *database.Database
-	blob     *badger.BlobStoreBadger
-	metadata *sqlstore.Store
+	db   *database.Database
+	blob *badger.BlobStoreBadger
 }
 
 func openRemoteTestDatabase(
@@ -512,24 +512,13 @@ func openRemoteTestDatabaseInNamespace(
 		badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 	)
 	require.NoError(t, err)
-	require.NoError(t, seedMigratedMetadata(
-		filepath.Join(dataRoot, "metadata"),
-	))
-	metadataStore, err := sqlite.NewSQLStore(
-		sqlite.Config{DataDir: filepath.Join(dataRoot, "metadata")},
-		metadata.ProviderDependencies{},
-	)
-	require.NoError(t, err)
-	require.NoError(t, metadataStore.Start(context.Background()))
 	db, err := database.New(
 		context.Background(),
 		&database.Config{Network: "preview"},
-		database.Stores{Blob: blobStore, Metadata: metadataStore},
+		database.Stores{Blob: blobStore},
 	)
 	require.NoError(t, err)
-	return &remoteTestDatabase{
-		db: db, blob: blobStore, metadata: metadataStore,
-	}
+	return &remoteTestDatabase{db: db, blob: blobStore}
 }
 
 func readRemoteBlobNamespace(
@@ -572,7 +561,6 @@ func readRemoteBlobNamespace(
 func (d *remoteTestDatabase) close(t *testing.T) {
 	t.Helper()
 	require.NoError(t, d.db.Close())
-	require.NoError(t, d.metadata.Close())
 	require.NoError(t, d.blob.Close())
 }
 
@@ -643,11 +631,7 @@ func runRemoteRestoreFailureRollback(
 	require.NoError(t, original.db.BlockCreate(testBlock(2, 0x22), nil))
 	originalTip, err := original.db.GetTip(nil)
 	require.NoError(t, err)
-	originalCommitTimestamp, err := original.db.Metadata().
-		GetCommitTimestamp(context.Background())
-	require.NoError(t, err)
-	originalGates, err := original.db.Metadata().
-		GetNodeSettingsGates(context.Background())
+	originalGates, err := original.db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	originalBlobs := readBlobContents(t, original.db)
 	original.close(t)
@@ -685,12 +669,7 @@ func runRemoteRestoreFailureRollback(
 	restoredTip, err := restored.db.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, originalTip, restoredTip)
-	restoredCommitTimestamp, err := restored.db.Metadata().
-		GetCommitTimestamp(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, originalCommitTimestamp, restoredCommitTimestamp)
-	restoredGates, err := restored.db.Metadata().
-		GetNodeSettingsGates(context.Background())
+	restoredGates, err := restored.db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, originalGates, restoredGates)
 	require.Equal(t, originalBlobs, readBlobContents(t, restored.db))
@@ -1285,11 +1264,7 @@ func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
 	require.NoError(t, original.db.BlockCreate(testBlock(2, 0x22), nil))
 	originalTip, err := original.db.GetTip(nil)
 	require.NoError(t, err)
-	originalCommitTimestamp, err := original.db.Metadata().
-		GetCommitTimestamp(context.Background())
-	require.NoError(t, err)
-	originalGates, err := original.db.Metadata().
-		GetNodeSettingsGates(context.Background())
+	originalGates, err := original.db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	originalBlobs := readBlobContents(t, original.db)
 	original.close(t)
@@ -1353,12 +1328,7 @@ func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
 	rolledBackTip, err := rolledBack.db.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, originalTip, rolledBackTip)
-	rolledBackCommitTimestamp, err := rolledBack.db.Metadata().
-		GetCommitTimestamp(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, originalCommitTimestamp, rolledBackCommitTimestamp)
-	rolledBackGates, err := rolledBack.db.Metadata().
-		GetNodeSettingsGates(context.Background())
+	rolledBackGates, err := rolledBack.db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, originalGates, rolledBackGates)
 	require.Equal(t, originalBlobs, readBlobContents(t, rolledBack.db))
@@ -1373,7 +1343,8 @@ func TestLegacyAPIRestoreServerMetadata(t *testing.T) {
 	t.Parallel()
 	ctx := metadata.AllowResetOfPopulatedTarget(t.Context())
 	const stateKey = "legacy-api-restore-probe"
-	source, err := dbtest.NewDatabase(t, &database.Config{
+	// A v0.94.2 API-mode database, whose snapshot carries its metadata store.
+	source, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir: t.TempDir(), StorageMode: "api",
 	})
 	require.NoError(t, err)
@@ -1554,6 +1525,9 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 	require.NoError(t, src.BlockCreate(testBlock(2, 0x02), nil))
+	require.NoError(t, src.EnforceNodeSettings(context.Background(),
+		nodesettings.Values{"history_expiry_active": nodesettings.LatchOn},
+	))
 
 	snapshotDir := snapshotTestDir(t, "snap1")
 	snapMan, err := lifecycle.Snapshot(
@@ -1577,13 +1551,15 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)
 	require.NoError(t, err)
-	require.Equal(t, snapMan.CommitTimestamp, restoreMan.CommitTimestamp)
 	require.Equal(t, snapMan.TipSlot, restoreMan.TipSlot)
 
 	// Reopen the restored data dir like a normal node startup would and
-	// confirm the blocks survived the round trip.
+	// confirm the blocks and the node settings survived the round trip.
 	restored, err := dbtest.NewDatabase(t, &database.Config{DataDir: targetDir})
 	require.NoError(t, err)
+	gates, err := restored.NodeSettingsGates(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, nodesettings.LatchOn, gates["history_expiry_active"])
 
 	block1, err := restored.BlockByIndex(1, nil)
 	require.NoError(t, err)
@@ -1596,13 +1572,14 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 func TestRestoreRebuildsDeferredIndexes(t *testing.T) {
 	t.Parallel()
 
-	src := newTestDB(t)
+	src, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
 	manager, ok := src.Metadata().(metadata.DeferredIndexManager)
 	require.True(t, ok)
 	require.NoError(t, manager.DropDeferredIndexes())
 
 	snapshotDir := snapshotTestDir(t, "snapshot")
-	_, err := lifecycle.Snapshot(
+	_, err = lifecycle.Snapshot(
 		context.Background(),
 		src,
 		snapshotDir,
@@ -1624,7 +1601,7 @@ func TestRestoreRebuildsDeferredIndexes(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	restored, err := dbtest.NewDatabase(t, &database.Config{DataDir: targetDir})
+	restored, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: targetDir})
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, restored)
 	require.NoError(t, err)

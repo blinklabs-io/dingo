@@ -24,7 +24,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -78,26 +77,9 @@ func newDijkstraReferenceOverlapFixture(
 		OutputAddress: address,
 		OutputAmount:  value,
 	}
-	require.NoError(
-		t,
-		db.Transaction(context.Background(), true).
-			Do(func(txn *database.Txn) error {
-				if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
-					TxId:       inputTxID,
-					OutputIdx:  0,
-					PaymentKey: paymentHash.Bytes(),
-					AddedSlot:  1,
-					Amount:     dbtypes.Uint64(value),
-				}); err != nil {
-					return err
-				}
-				encoded, err := cbor.Encode(output)
-				if err != nil {
-					return err
-				}
-				return db.Blob().SetUtxo(txn.Blob(), inputTxID, 0, encoded)
-			}),
-	)
+	encoded, err := cbor.Encode(output)
+	require.NoError(t, err)
+	fxSeedOutput(t, db, inputTxID, 0, 1, encoded)
 
 	tx := &dijkstra.DijkstraTransaction{
 		Body: dijkstra.DijkstraTransactionBody{
@@ -266,12 +248,10 @@ func TestDijkstraSpendReferenceOverlapLiveApplyAndReplay(t *testing.T) {
 	t.Run("live block application", func(t *testing.T) {
 		fixture := newDijkstraReferenceOverlapFixture(t)
 		require.NoError(t, applyDijkstraReferenceOverlapBlock(t, fixture))
-		_, err := fixture.db.Metadata().GetUtxoIncludingSpent(
-			fixture.tx.Hash().Bytes(),
-			0,
-			nil,
+		require.True(
+			t, outputLiveIn(t, fixture.ls, fixture.tx.Hash().Bytes(), 0),
+			"the block's output is live",
 		)
-		require.NoError(t, err)
 	})
 
 	t.Run("historical replay", func(t *testing.T) {
@@ -304,11 +284,9 @@ func TestDijkstraSpendReferenceOverlapLiveApplyAndReplay(t *testing.T) {
 		default:
 			t.Fatal("reader result was not released after replay")
 		}
-		_, err := fixture.db.Metadata().GetUtxoIncludingSpent(
-			fixture.tx.Hash().Bytes(),
-			0,
-			nil,
+		require.True(
+			t, outputLiveIn(t, fixture.ls, fixture.tx.Hash().Bytes(), 0),
+			"the block's output is live",
 		)
-		require.NoError(t, err)
 	})
 }

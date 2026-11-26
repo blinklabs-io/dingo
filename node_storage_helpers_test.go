@@ -23,32 +23,12 @@ import (
 // The steps of nodestorage.Reconcile, run one at a time against a node's
 // database and set.
 
-type (
-	drainStore      = nodestorage.DrainStore
-	publishingStore = nodestorage.PublishingStore
-)
-
 func (n *Node) migrateUtxoRows(ctx context.Context) error {
 	return nodestorage.MigrateUtxoRows(
 		ctx, n.db, n.utxoSet, n.config.dataDir, n.config.logger,
 	)
 }
 
-func (n *Node) checkUtxoSetOnly() error {
-	return nodestorage.CheckUtxoSetOnly(n.db)
-}
-
-func (n *Node) publishDrainedFamilies(ctx context.Context) error {
-	mask, err := n.db.EffectiveDrainedFamilies(ctx)
-	if err != nil {
-		return err
-	}
-	n.setDrainedFamilies(mask)
-	return nil
-}
-
-func (n *Node) drainLedgerState(ctx context.Context) error {
-	return nodestorage.DrainLedgerState(
-		ctx, n.db, n.utxoSet, n.config.logger, nil, n.setDrainedFamilies,
-	)
+func (n *Node) checkUtxoSetMigrated() error {
+	return nodestorage.CheckUtxoSetMigrated(n.db)
 }

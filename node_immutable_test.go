@@ -242,6 +242,8 @@ func newExpiryRunNode(
 			ListenAddress: "127.0.0.1:0",
 		}),
 		WithUtxorpcPort(0),
+		WithBlockfrostPort(0),
+		WithMeshPort(0),
 		WithMidnightConfig(MidnightConfig{Port: 0}),
 		WithShutdownTimeout(5 * time.Second),
 	}

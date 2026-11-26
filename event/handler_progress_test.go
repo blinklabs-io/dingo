@@ -332,7 +332,7 @@ func TestHandlerStallSeriesExistsBeforeAnyStall(t *testing.T) {
 // interval after the handler stopped returning. Sampling once per interval
 // therefore puts it anywhere in (interval, 2*interval] -- 30s to 60s at the
 // production value, against the "within one and a half intervals" the
-// watchdog, event/doc.go and ARCHITECTURE.md state. Sampling at most twice per
+// watchdog and event/doc.go state. Sampling at most twice per
 // interval is what makes that bound hold.
 func TestHandlerProgressSamplesTwicePerInterval(t *testing.T) {
 	t.Parallel()
@@ -359,8 +359,8 @@ func TestHandlerProgressSamplesTwicePerInterval(t *testing.T) {
 // TestHandlerStallCounterMatchesWarnRate pins the counter to the report rate
 // rather than the sample rate. handlerProgressTick samples twice per interval,
 // so counting every stalled sample moved
-// event_subscriber_handler_stalled_total at twice the rate ARCHITECTURE.md and
-// event/doc.go document for it, and twice the rate of the warning it is meant
+// event_subscriber_handler_stalled_total at twice the rate event/doc.go
+// documents for it, and twice the rate of the warning it is meant
 // to accompany.
 func TestHandlerStallCounterMatchesWarnRate(t *testing.T) {
 	t.Parallel()

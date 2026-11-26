@@ -347,12 +347,12 @@ func testSQLStoreIntegration(
 	testLimitOffset(t, store)
 
 	txn := store.Transaction(t.Context())
-	require.NoError(t, store.SetCommitTimestamp(42, txn))
+	require.NoError(t, store.SetSyncState("backup_probe", "42", txn))
 	require.NoError(t, store.SetNetworkState(11, 22, 33, txn))
 	require.NoError(t, txn.Commit())
-	timestamp, err := store.GetCommitTimestamp(context.Background())
+	timestamp, err := store.GetSyncState("backup_probe", nil)
 	require.NoError(t, err)
-	require.Equal(t, int64(42), timestamp)
+	require.Equal(t, "42", timestamp)
 	state, err := store.GetNetworkState(nil)
 	require.NoError(t, err)
 	require.Equal(t, types.Uint64(11), state.Treasury)
@@ -633,29 +633,25 @@ INSERT INTO redeemer (
 	require.NoError(t, err)
 	require.True(t, pending)
 
-	// The critical rebuild is the last step before the node serves API
-	// writes, so it restores the retained set too. Drop it again to reach the
+	// The rebuild restores the retained set too. Drop it again to reach the
 	// state a cycle interrupted by an older binary leaves behind.
 	_, err = db.Exec(dialect.DropIndexSQL(retained.Name, retained.Table))
 	require.NoError(t, err)
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
+	require.NoError(t, store.BuildDeferredIndexes())
 	exists, err = store.deferredIndexExists(t.Context(), catalog, retained)
 	require.NoError(t, err)
 	require.True(
 		t,
 		exists,
-		"%s must be restored by the critical rebuild on %s",
+		"%s must be restored by the rebuild on %s",
 		retained.Name,
 		dialect.Name(),
 	)
 	pending, err = store.HasDeferredIndexesPending()
 	require.NoError(t, err)
-	require.True(
-		t,
-		pending,
-		"the critical rebuild must leave the marker for the lazy remainder",
-	)
+	require.False(t, pending, "the rebuild clears the marker")
 
+	// A second rebuild of a complete set changes nothing.
 	require.NoError(t, store.BuildDeferredIndexes())
 	pending, err = store.HasDeferredIndexesPending()
 	require.NoError(t, err)

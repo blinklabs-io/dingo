@@ -38,9 +38,6 @@ const (
 	migrationCommitted    = "committed"
 )
 
-// defaultMigrationChunk is how many utxo rows one delete statement removes.
-const defaultMigrationChunk = 5000
-
 // MigrationStore is the metadata store as the UTxO set migration uses it.
 type MigrationStore interface {
 	// SQLTip returns the metadata store's tip.
@@ -48,9 +45,6 @@ type MigrationStore interface {
 	GetSyncState(ctx context.Context, key string) (string, error)
 	SetSyncState(ctx context.Context, key, value string) error
 	DeleteSyncState(ctx context.Context, key string) error
-	// DeleteUtxoRows deletes up to limit utxo rows and returns how many it
-	// deleted; fewer than limit means none remain.
-	DeleteUtxoRows(ctx context.Context, limit int) (int64, error)
 }
 
 // MigrationEnv carries what MigrateFromSQL needs.
@@ -60,19 +54,13 @@ type MigrationEnv struct {
 	// once the set is verified and again on every resumed run, so it must be
 	// idempotent.
 	Mark func(ctx context.Context) error
-	// Marked reports whether the set-only mark is already written. A run that
+	// Marked reports whether the moved-state mark is already written. A run that
 	// finds the commit recorded and no mark checks the set again, since the
 	// metadata store may have moved on; nil reads as not marked.
 	Marked func(ctx context.Context) (bool, error)
 	// FreeBytes returns the bytes available for the set's directory; nil
 	// skips the space check.
 	FreeBytes func() (uint64, error)
-	// ChunkRows overrides the rows one delete statement removes.
-	ChunkRows int
-	// DeferCleanup returns after the set-only mark is durable, leaving the
-	// redundant SQL rows for CleanupMigratedSQLRows. The migration progress
-	// record remains until that cleanup finishes, so a restart can resume it.
-	DeferCleanup bool
 	// Hook, when non-nil, is called after each step with the step's name; an
 	// error it returns stops the migration there, as a crash would. Tests
 	// use it to stop between steps.
@@ -90,15 +78,12 @@ var ErrMigrationInsufficientSpace = errors.New(
 // allowed to need: Badger keeps a value log and levels beside the live data.
 const spaceFactor = 2
 
-// MigrateFromSQL moves a database that holds its UTxO set in the metadata
-// store to the set-only layout in place. The metadata store stays the
-// authority until the end: the set is built from its live utxo rows, checked
-// against them by count and a streamed digest of every output, the set-only
-// mark is written, and only then are the utxo rows eligible for deletion in
-// bounded batches. Every step is resumable: a crash before the mark leaves
-// the metadata store whole and the next run rebuilds or reuses the set after
-// checking it again; a crash after the mark leaves a committed progress
-// record from which cleanup resumes.
+// MigrateFromSQL copies the UTxO set of a database that holds it in the
+// metadata store into the set. The set is built from the live utxo rows,
+// checked against them by count and a streamed digest of every output, and
+// then the mark is written; the metadata store's rows are left in place.
+// Every step is resumable: a crash before the mark leaves the metadata store
+// whole and the next run rebuilds or reuses the set after checking it again.
 func (s *Set) MigrateFromSQL(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
@@ -126,17 +111,15 @@ func (s *Set) MigrateFromSQL(
 			return fmt.Errorf("utxoset: read the UTxO set mark: %w", err)
 		}
 	}
-	// Once the mark is written the rows are being deleted and cannot be
-	// checked against; before it, a commit recorded by an earlier run says
-	// nothing of what the metadata store has been given since.
+	// The mark is written only after the commit record, and the record is
+	// removed only after the mark, so a marked database with no record has
+	// finished.
+	if marked && progress == "" {
+		return nil
+	}
+	// Before the mark, a commit recorded by an earlier run says nothing of
+	// what the metadata store has been given since.
 	if progress != migrationCommitted || !marked {
-		// Drained families mean the rows are no longer a faithful source;
-		// a committed, marked migration never reads them again.
-		if s.sqlDrained.Load() {
-			return errors.New(
-				"utxoset: the metadata store has drained ledger-state families, so its UTxO rows cannot be the source of a migration",
-			)
-		}
 		tip, err := env.Store.SQLTip(ctx)
 		if err != nil {
 			return fmt.Errorf("utxoset: read metadata tip: %w", err)
@@ -146,6 +129,11 @@ func (s *Set) MigrateFromSQL(
 			func(marker string) error { return env.Store.SetSyncState(ctx, MigrationSyncKey, marker) },
 		); err != nil {
 			return err
+		}
+		// The commit record lets a later run skip the build, so the set it
+		// vouches for must survive a host crash first.
+		if err := s.store.Sync(); err != nil {
+			return fmt.Errorf("utxoset: sync the live UTxO set: %w", err)
 		}
 		if err := env.Store.SetSyncState(
 			ctx, MigrationSyncKey, migrationCommitted,
@@ -162,72 +150,11 @@ func (s *Set) MigrateFromSQL(
 	if err := hook("marked"); err != nil {
 		return err
 	}
-	if env.DeferCleanup {
-		log.Info(
-			"moved the UTxO set out of the metadata store; row cleanup deferred",
-		)
-		return hook("ready")
-	}
-	inlineEnv := env
-	inlineEnv.Marked = func(context.Context) (bool, error) {
-		return true, nil
-	}
-	return s.CleanupMigratedSQLRows(ctx, inlineEnv)
-}
-
-// CleanupMigratedSQLRows deletes the metadata store's redundant UTxO rows
-// after MigrateFromSQL has durably committed and marked the live set as the
-// authority. The committed progress record is cleared only after every batch
-// succeeds, so cancellation or failure leaves cleanup resumable.
-func (s *Set) CleanupMigratedSQLRows(
-	ctx context.Context,
-	env MigrationEnv,
-) error {
-	progress, err := env.Store.GetSyncState(ctx, MigrationSyncKey)
-	if err != nil {
-		return fmt.Errorf("utxoset: read migration progress: %w", err)
-	}
-	if progress == "" {
-		return nil
-	}
-	if progress != migrationCommitted {
-		return fmt.Errorf(
-			"utxoset: refuse SQL row cleanup from migration state %q",
-			progress,
-		)
-	}
-	if env.Marked == nil {
-		return errors.New(
-			"utxoset: refuse SQL row cleanup without the UTxO set mark",
-		)
-	}
-	marked, err := env.Marked(ctx)
-	if err != nil {
-		return fmt.Errorf("utxoset: read the UTxO set mark: %w", err)
-	}
-	if !marked {
-		return errors.New(
-			"utxoset: refuse SQL row cleanup before the UTxO set mark",
-		)
-	}
-	log := env.Logger
-	if log == nil {
-		log = s.logger
-	}
-	hook := func(step string) error {
-		if env.Hook == nil {
-			return nil
-		}
-		return env.Hook(step)
-	}
-	if err := s.drainUtxoRows(ctx, env, log, hook); err != nil {
-		return err
-	}
 	if err := env.Store.DeleteSyncState(ctx, MigrationSyncKey); err != nil {
 		return fmt.Errorf("utxoset: clear migration progress: %w", err)
 	}
 	log.Info("moved the UTxO set out of the metadata store")
-	return hook("done")
+	return hook("ready")
 }
 
 func (s *Set) buildAndVerify(
@@ -335,41 +262,6 @@ func (s *Set) buildAndVerify(
 	log.Info("verified the live UTxO set against the metadata store",
 		"live_outputs", got.count, "digest", got.hex())
 	return hook("verified")
-}
-
-func (s *Set) drainUtxoRows(
-	ctx context.Context,
-	env MigrationEnv,
-	log *slog.Logger,
-	hook func(string) error,
-) error {
-	chunk := env.ChunkRows
-	if chunk <= 0 {
-		chunk = defaultMigrationChunk
-	}
-	var total int64
-	for batches := 1; ; batches++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n, err := env.Store.DeleteUtxoRows(ctx, chunk)
-		if err != nil {
-			return fmt.Errorf("utxoset: delete utxo rows: %w", err)
-		}
-		total += n
-		if batches%100 == 0 {
-			log.Info("deleting the metadata store's utxo rows",
-				"deleted", total)
-		}
-		if err := hook(fmt.Sprintf("drain:%d", batches)); err != nil {
-			return err
-		}
-		if n < int64(chunk) {
-			break
-		}
-	}
-	log.Info("deleted the metadata store's utxo rows", "deleted", total)
-	return nil
 }
 
 // utxoDigest summarizes a set of outputs independently of their order: the

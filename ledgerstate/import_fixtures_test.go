@@ -102,9 +102,7 @@ func snapshotConfig(
 
 func openFixtureSet(t *testing.T) *utxoset.Set {
 	t.Helper()
-	set, err := utxoset.Open(utxoset.Config{
-		Dir: t.TempDir(), Only: true, Authoritative: true,
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	return set

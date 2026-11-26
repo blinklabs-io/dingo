@@ -18,13 +18,12 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// PoolSource answers the pool reads of a database whose pools-history family
-// is drained, from the live UTxO set. It reads the committed set with no
-// transaction.
+// PoolSource answers a database's pool reads from the live UTxO set, which
+// holds the pool registrations and retirements the LedgerDB keeps. It reads the
+// committed set with no transaction.
 type PoolSource interface {
 	// Pool returns nil when the pool has no registration or retirement.
 	Pool(pkh lcommon.PoolKeyHash, includeInactive bool) (*models.Pool, error)
@@ -49,21 +48,21 @@ type PoolSource interface {
 	) ([]models.PoolRetirementRefund, error)
 }
 
-// ErrNoPoolSource is returned by a pool read of a drained pools-history family
-// when no PoolSource was installed.
+// ErrNoPoolSource is returned by a pool read of a database with no metadata
+// store when no PoolSource was installed.
 var ErrNoPoolSource = errors.New(
-	"pools are drained from the metadata store and no source is installed",
+	"the database keeps no pools and no pool source is installed",
 )
 
-// SetPoolSource installs the source the pool reads of a drained pools-history
-// family come from.
+// SetPoolSource installs the source the pool reads of a database with no
+// metadata store come from.
 func (d *Database) SetPoolSource(src PoolSource) {
 	d.poolSource.Store(&src)
 }
 
-// poolsDrained reports whether the pools-history family is drained.
-func (d *Database) poolsDrained() bool {
-	return d.FamilyDrained(nodesettings.FamilyPoolsHistory)
+// poolsFromSource reports whether pool reads come from the PoolSource.
+func (d *Database) poolsFromSource() bool {
+	return d.metadata == nil
 }
 
 func (d *Database) poolSourceOrErr() (PoolSource, error) {

@@ -18,6 +18,7 @@ package tracing
 
 import (
 	"context"
+	"math"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -51,8 +52,12 @@ func End(span trace.Span, err error) {
 	span.End()
 }
 
-// Uint64 is attribute.Int64 for an unsigned value. Slots and epochs stay far
-// below the int64 limit, so the conversion cannot overflow in practice.
+// Uint64 is attribute.Int64 for an unsigned value. A value above the int64
+// limit is recorded as that limit, so a corrupt slot or number read back
+// from storage never wraps to a negative attribute.
 func Uint64(key string, v uint64) attribute.KeyValue {
-	return attribute.Int64(key, int64(v)) //nolint:gosec // see above
+	if v > math.MaxInt64 {
+		return attribute.Int64(key, math.MaxInt64)
+	}
+	return attribute.Int64(key, int64(v))
 }

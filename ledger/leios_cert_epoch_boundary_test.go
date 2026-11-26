@@ -26,7 +26,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -365,10 +364,10 @@ func runLeiosCertEpochBoundaryCase(
 			_ event.EpochTransitionEvent,
 		) error {
 			boundarySnapshots++
-			tx, err := db.GetTransactionByHash(
+			tx, err := ls.ledgerDB().GetTransactionByHash(
 				t.Context(),
 				closureTx.Hash().Bytes(),
-				dbadapter.Unwrap(txn),
+				txn,
 			)
 			if err != nil {
 				return err
@@ -393,7 +392,7 @@ func runLeiosCertEpochBoundaryCase(
 			"the rejected certifying block must leave the primary chain",
 		)
 		require.Less(t, ls.currentTip.Point.Slot, certifier.SlotNumber())
-		storedTx, err := db.GetTransactionByHash(
+		storedTx, err := ls.ledgerDB().GetTransactionByHash(
 			t.Context(),
 			closureTx.Hash().Bytes(),
 			nil,
@@ -602,7 +601,7 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	}
 	close(batches)
 	require.NoError(t, ls.ProcessTrustedBlockBatches(t.Context(), batches))
-	stored, err := db.GetTransactionByHash(t.Context(), spender.Hash().Bytes(), nil)
+	stored, err := ls.ledgerDB().GetTransactionByHash(t.Context(), spender.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	inputs := spender.Inputs()

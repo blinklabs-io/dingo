@@ -15,6 +15,9 @@ name: ci
 #     gate (macOS)     the whole suite on macOS
 #     gate (build)     every release binary target plus the Docker image
 #
+# Jobs here only restore the Go module and build caches; go-cache.yml saves
+# them from main, where the merge queue's refs can read them.
+#
 # Main and release tags run no tests at all: the merge queue fast-forwards main
 # to the commit it tested, so publish.yml only builds and publishes. A release
 # tag checks that its commit passed every tier-2 gate before it creates the
@@ -81,6 +84,11 @@ jobs:
     # Backstop against a wedged runner only, replacing GitHub's 360-minute
     # default. The go test -timeout below is the diagnostic.
     timeout-minutes: 60
+    # cmd/dingo/default.pgo applies to every build and test of cmd/dingo and
+    # recompiles most of the dependency tree again for it. Only the release
+    # binaries benefit, and gate (build) keeps the profile.
+    env:
+      GOFLAGS: -pgo=off
     outputs:
       run-ci: ${{ steps.detect.outputs.run-ci }}
     steps:
@@ -112,7 +120,7 @@ jobs:
             echo "run-ci=true" >> "$GITHUB_OUTPUT"
           fi
           rm -rf .trusted-ci
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 https://github.com/actions/setup-go/releases/tag/v7.1.0
         with:
           go-version-file: go.mod
           cache: false
@@ -120,23 +128,29 @@ jobs:
       # every job on it instead of a copy inside each build cache. The
       # cache version includes the resolved home directory, so Linux and
       # macOS cannot share one.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-mod-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          key: ${{ runner.os }}-go-build-check-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-build-
-      # These two run on documentation-only changes too.
+            ${{ runner.os }}-go-build-check-
+      # These five run on documentation-only changes too.
       - name: docs-parity
         run: make docs-parity
       - name: test-change-selection
         run: python3 .github/scripts/test-ci-changes.py
+      - name: test-conformance-reports
+        run: python3 .github/scripts/test-conformance-reports.py
+      - name: test-makefile-pgo
+        run: python3 .github/scripts/test-makefile-pgo.py
+      - name: test-go-cache
+        run: python3 .github/scripts/test-ci-go-cache.py
       # One step per Go module.
       #
       # internal/docsparity's TestLintCoversEveryGoModule derives the module
@@ -207,11 +221,9 @@ jobs:
         if: steps.detect.outputs.run-ci == 'true'
         run: node --test .github/scripts/test-cancel-obsolete-merge-groups.cjs
       - name: go-test
-        # No services and no -race: the Postgres and MySQL variants in
-        # internal/test/conformance gate on POSTGRES_PASSWORD / MYSQL_DSN and
-        # friends and t.Skip when unset, so this replays vectors against SQLite
-        # only. gate (services) and gate (race) cover the rest on the merged
-        # commit.
+        # No services and no -race: the service-backed tests gate on
+        # POSTGRES_PASSWORD / MYSQL_DSN and friends and t.Skip when unset.
+        # gate (services) and gate (race) cover the rest on the merged commit.
         if: steps.detect.outputs.run-ci == 'true'
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
       # The root ./... stops at sdk/go.mod.
@@ -262,13 +274,9 @@ jobs:
   # release-only arrangement is what abandoned v0.70.3, when a genuine
   # race-detector failure in ./ledger surfaced with the tag already pushed.
   #
-  # It runs without the service containers on purpose. The Postgres and MySQL
-  # variants in internal/test/conformance gate on POSTGRES_PASSWORD /
-  # POSTGRES_DSN and MYSQL_ROOT_PASSWORD / MYSQL_DSN and t.Skip when unset, so
-  # with no job env here that suite replays its vectors against SQLite only.
-  # gate (services) covers those backends; replaying them under race
-  # instrumentation would dominate this job -- conformance alone took 917s
-  # uninstrumented with the services attached, against 86s SQLite-only.
+  # It runs without the service containers on purpose: the service-backed
+  # tests gate on POSTGRES_PASSWORD / POSTGRES_DSN and MYSQL_ROOT_PASSWORD /
+  # MYSQL_DSN and t.Skip when unset, and gate (services) covers them.
   #
   # Tests that only run single-goroutine computation or assert SQLite query
   # plans call testutil.SkipUnderRace; check runs them un-instrumented.
@@ -291,28 +299,33 @@ jobs:
     # hang; this cap must stay well clear of a legitimately slow run so it
     # cannot fail the job without naming a stuck test.
     timeout-minutes: 120
+    # cmd/dingo/default.pgo applies to every build and test of cmd/dingo and
+    # recompiles most of the dependency tree again for it. Only the release
+    # binaries benefit, and gate (build) keeps the profile.
+    env:
+      GOFLAGS: -pgo=off
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
       - name: runner-probe-start
         run: python3 .github/scripts/runner-probe.py start
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 https://github.com/actions/setup-go/releases/tag/v7.1.0
         with:
           go-version-file: go.mod
           cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-mod-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-race-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          key: ${{ runner.os }}-go-build-race-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-race-
+            ${{ runner.os }}-go-build-race-
       - name: go-test-race
         # -timeout stays at 60m so a hang is still named by the per-package
         # panic before the job backstop above fires.
@@ -387,6 +400,7 @@ jobs:
         ports:
           - 4443:4443
     env:
+      GOFLAGS: -pgo=off
       DINGO_CI_PG_CONTAINER: dingo-ci-postgres-${{ github.run_id }}-${{ github.run_attempt }}-services
       DINGO_CI_MYSQL_CONTAINER: dingo-ci-mysql-${{ github.run_id }}-${{ github.run_attempt }}-services
       POSTGRES_HOST: localhost
@@ -488,22 +502,22 @@ jobs:
             --header 'Content-Type: application/json' \
             --data "{\"name\":\"$DINGO_TEST_GCS_BUCKET\"}" \
             "$DINGO_TEST_GCS_ENDPOINT/storage/v1/b?project=dingo-ci" >/dev/null
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 https://github.com/actions/setup-go/releases/tag/v7.1.0
         with:
           go-version-file: go.mod
           cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-mod-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          key: ${{ runner.os }}-go-build-services-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-build-
+            ${{ runner.os }}-go-build-services-
       - name: install-mariadb-client
         # database/plugin/metadata/mysql's backup/restore CLI arg mapping
         # (mysqlSSLArgs) targets the mysqldump/mysql client this repo's own
@@ -570,11 +584,7 @@ jobs:
         #
         # -timeout is a hang diagnostic rather than a budget: it panics with a
         # goroutine dump naming the stuck test, which this job's
-        # timeout-minutes cannot do. internal/test/conformance on real
-        # Postgres and MySQL is the long pole: it took 707-1238s across ten
-        # consecutive runs and reached 1800s once, still issuing TRUNCATE
-        # statements rather than deadlocked, so 60m leaves room for runner
-        # speed without failing pull requests for it.
+        # timeout-minutes cannot do.
         run: |
           set -euo pipefail
           pattern='POSTGRES_PASSWORD|POSTGRES_DSN|MYSQL_ROOT_PASSWORD|MYSQL_DSN|DINGO_TEST_S3_BUCKET|DINGO_TEST_S3_ENDPOINT|AWS_ENDPOINT'
@@ -630,28 +640,29 @@ jobs:
     timeout-minutes: 60
     env:
       CGO_ENABLED: 0
+      GOFLAGS: -pgo=off
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
       - name: runner-probe-start
         run: python3 .github/scripts/runner-probe.py start
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 https://github.com/actions/setup-go/releases/tag/v7.1.0
         with:
           go-version-file: go.mod
           cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-mod-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/Library/Caches/go-build
-          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          key: ${{ runner.os }}-go-build-macos-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-build-
+            ${{ runner.os }}-go-build-macos-
       - name: go-test
         run: go test -v -ldflags="-s -w" -timeout 30m ./...
       - name: runner-probe-end
@@ -696,22 +707,16 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 https://github.com/actions/setup-go/releases/tag/v7.1.0
         with:
           go-version-file: go.mod
           cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-mod-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-build-
       - name: build
         env:
           BUILD_TARGETS: linux/amd64 linux/arm64 freebsd/amd64 freebsd/arm64 darwin/amd64 darwin/arm64

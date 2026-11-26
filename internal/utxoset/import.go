@@ -20,7 +20,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -196,6 +195,30 @@ func (s *Set) LoadUtxoSetCatchUp(
 	return nil
 }
 
+// CatchUpReaches reports whether LoadUtxoSetCatchUp can load a snapshot at
+// point without being refused: the set holds no tip, holds an import it has
+// not finished, is not past point, or can be rolled back to exactly point
+// from its journal. It changes nothing.
+func (s *Set) CatchUpReaches(point ocommon.Point) (bool, error) {
+	incomplete, err := s.store.BootstrapIncomplete()
+	if err != nil {
+		return false, fmt.Errorf("utxoset: catch-up reach: %w", err)
+	}
+	if incomplete {
+		return true, nil
+	}
+	tip, ok, err := s.store.Tip()
+	if err != nil {
+		return false, fmt.Errorf("utxoset: catch-up reach: %w", err)
+	}
+	if !ok || tip.Slot <= point.Slot {
+		return true, nil
+	}
+	// RollbackReaches also accepts a point inside the journal's range that
+	// is no journaled tip, which the rollback the load runs then refuses.
+	return s.store.HasJournalPoint(point)
+}
+
 // ReplaceImportedBlockCounts replaces the imported per-pool block counts of
 // epoch, keyed by pool key hash, and their total, captured at slot.
 func (s *Set) ReplaceImportedBlockCounts(
@@ -223,9 +246,6 @@ func (s *Set) DeleteNetworkDonationsForEpoch(epoch uint64) error {
 // so a catch-up has a state to write the snapshot over.
 func (s *Set) HoldsLedgerState() (bool, error) {
 	for _, f := range nodesettings.Families() {
-		if statedrain.Tables(f) == nil {
-			continue
-		}
 		loaded, err := ledger.FamilyLoaded(f, s)
 		if err != nil || !loaded {
 			return false, err

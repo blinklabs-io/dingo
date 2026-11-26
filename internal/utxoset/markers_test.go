@@ -41,7 +41,7 @@ func TestSyncMarkerNamesAreTheSyncKeys(t *testing.T) {
 func TestLoadLedgerStateLoadsTheSyncMarkers(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{})
-	db := ledgerAt(t, slotPoint(1))
+	db := releasedAt(t, slotPoint(1))
 	require.NoError(t, db.SetSyncState(
 		database.SyntheticV2CostModelSyncKey, "false", nil,
 	))

@@ -444,7 +444,7 @@ func TestImportBlocksMadeRecordsAnEmptyMapAsACertifiedZero(t *testing.T) {
 func TestImportedBlockCountsRejectATotalThatDisagreesWithTheRows(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	store := db.Metadata()
 
@@ -1243,9 +1243,12 @@ func TestImportGovStatePreservesScriptCommitteeCredentialTag(t *testing.T) {
 		drepPulsingStateWithEnactCommittee(t, committee),
 	)
 
+	cfg := govImportConfigForTest(t, db, govStateData)
+	loader := &boundaryLoader{}
+	cfg.UtxoSet = loader
 	require.NoError(t, importGovState(
 		context.Background(),
-		govImportConfigForTest(t, db, govStateData),
+		cfg,
 		func(ImportProgress) {},
 	))
 
@@ -1254,6 +1257,17 @@ func TestImportGovStatePreservesScriptCommitteeCredentialTag(t *testing.T) {
 	require.Len(t, members, 1)
 	assert.Equal(t, uint8(1), members[0].ColdCredentialTag)
 	assert.Equal(t, hash, members[0].ColdCredHash)
+	snapshot, ok, err := loader.GovernanceBoundarySnapshotAt(
+		cfg.State.Epoch, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(
+		t,
+		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
+		snapshot.BoundarySlot,
+	)
+	assert.NotEmpty(t, snapshot.ImportedRatifyState)
 }
 
 func TestParseGovStateCommitteeMatchesEnactState(t *testing.T) {

@@ -17,9 +17,11 @@
 //
 // The Utxorpc type is a gRPC server that translates incoming requests
 // into queries against the ledger and mempool packages and streams
-// results back to clients. It is only started when the node runs in
-// "api" storage mode and DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT is non-zero — "core" mode
-// nodes do not index the data required to answer query requests.
+// results back to clients. It is started when
+// DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT is non-zero, in either storage mode.
+// An "api" node answers query requests from its IndexerDB; a "core" node
+// answers UTxO and inline datum reads from the ledger's live UTxO set and
+// refuses transaction reads (ErrQueryNeedsAPIStorage).
 //
 // # Predicate evaluation
 //

@@ -211,10 +211,10 @@ type rollbackUndoBlock struct {
 // transaction a newer endorser block repeats; without it the repeat would be
 // undone twice.
 //
-// A block the rollback outbox recorded endorser transactions for uses them:
-// they were read from the rows that name the applying block before the
-// truncation removed those rows. Any other block is resolved from the endorser
-// block provider and the metadata store.
+// A block the rollback outbox names endorser transactions for uses them:
+// which ones it applied was read from the rows that name the applying block
+// before the truncation removed those rows. Any other block is resolved from
+// the endorser block provider and the metadata store.
 func (ls *LedgerState) rollbackUndoBlocks(
 	ctx context.Context,
 	blocks []models.Block,
@@ -233,9 +233,9 @@ func (ls *LedgerState) rollbackUndoBlocks(
 		if u.decodeErr != nil {
 			continue
 		}
-		if txs, ok := recorded[string(u.block.Hash)]; ok {
+		if rec, ok := recorded[string(u.block.Hash)]; ok {
 			u.endorserTxs, u.endorserErr = recordedEndorserTransactions(
-				txs,
+				rec.txs,
 				applied,
 			)
 		} else {
@@ -338,7 +338,7 @@ func (ls *LedgerState) certifiedEndorserTransactions(
 	for i, ebTx := range txs {
 		hashes[i] = ebTx.tx.Hash().Bytes()
 	}
-	recorded, err := ls.db.GetTransactionsByHashes(ctx, hashes, nil)
+	recorded, err := ls.ledgerDB().GetTransactionsByHashes(ctx, hashes, nil)
 	if err != nil {
 		return nil, fmt.Errorf("look up endorser transactions: %w", err)
 	}
@@ -388,10 +388,10 @@ func (ls *LedgerState) leiosEndorserBlockForRollback(
 }
 
 // rollbackEndorserUndo returns the endorser transactions the pending rollback
-// intent recorded for blocks. Every caller of emitRollbackTransactionEvents
-// writes that intent before the truncation, while the rows that name the
-// applying block still exist; a rollback too large for the intent loses this
-// undo along with its crash replay.
+// intent names for blocks, read from their endorser blocks. Every caller of
+// emitRollbackTransactionEvents writes that intent before the truncation,
+// while the rows that name the applying block still exist; a rollback too
+// large for the intent resolves them from what the truncation left.
 func (ls *LedgerState) rollbackEndorserUndo(
 	blocks []models.Block,
 ) endorserUndo {
@@ -400,7 +400,7 @@ func (ls *LedgerState) rollbackEndorserUndo(
 	}) {
 		return nil
 	}
-	endorser, err := loadRollbackIntentEndorserUndo(ls.db)
+	endorser, err := ls.loadRollbackIntentEndorserUndo()
 	if err != nil {
 		ls.config.Logger.Error(
 			"failed to load endorser transactions for rollback undo",
@@ -569,7 +569,7 @@ func (ls *LedgerState) validateAndEmitRollbackUndo(ctx context.Context,
 func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(ctx context.Context,
 	point ocommon.Point,
 ) (bool, error) {
-	existing, _, pending, loadErr := loadRollbackIntent(ls.db)
+	existing, _, pending, loadErr := pendingRollbackIntent(ls.db)
 	if loadErr != nil || (pending && !pointMatches(existing, point) &&
 		point.Slot >= existing.Slot) {
 		if err := ls.recoverRollbackIntentLocked(ctx); err != nil {
@@ -597,18 +597,17 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(ctx context.Context,
 	if mithrilLedgerSlot > 0 && resolved.Slot < mithrilLedgerSlot {
 		return false, ErrRollbackExceedsMithrilBoundary
 	}
-	belowPruneFloor, pruneFloor, err := ls.rollbackBelowConsumedUtxoPruneFloor(
+	belowJournal, err := ls.rollbackBelowUtxoSetJournal(
 		resolved,
 	)
 	if err != nil {
-		return false, fmt.Errorf("determine consumed UTxO prune floor: %w", err)
+		return false, fmt.Errorf("check the live UTxO set journal: %w", err)
 	}
-	if belowPruneFloor {
+	if belowJournal {
 		return false, fmt.Errorf(
-			"%w: target slot %d, prune floor %d",
-			ErrRollbackBelowUtxoPruneFloor,
+			"%w: target slot %d",
+			ErrRollbackBelowUtxoJournal,
 			resolved.Slot,
-			pruneFloor,
 		)
 	}
 	// The primary chain can be ahead of the applied ledger during catch-up.

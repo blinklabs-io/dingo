@@ -41,7 +41,7 @@ const defaultFallbackInterval = 2 * time.Minute
 // same value (--fallback-interval doubling as the per-cycle deadline), which
 // made full mode fail by default out of the box: a real whole-UTxO
 // comparison against a Preview-scale node measured 7-9+ minutes end to end
-// (see ARCHITECTURE.md), far longer than --fallback-interval's own 2m
+// far longer than --fallback-interval's own 2m
 // default, so runWatchCycle self-cancelled via its own context deadline
 // before a comparison could ever complete -- indistinguishable in the logs
 // from the unrelated node-side "protocol is shutting down" failure this tool

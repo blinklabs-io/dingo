@@ -2303,7 +2303,7 @@ func TestObserverSeedBacklogExcludesEpochsBeforeEarliestAvailableEpoch(
 	require.NoError(t, db.SetEpoch(
 		1_000, 10, nil, nil, nil, nil, 5, 20, 432_000, nil,
 	))
-	require.NoError(t, db.SetSyncState("mithril_ledger_slot", "1000", nil))
+	require.NoError(t, db.SetChainState("mithril_ledger_slot", "1000", nil))
 
 	// This node has itself computed one local epoch transition past the
 	// boundary (epoch_summary at epoch 12), so GetLatestEpoch is 12 and

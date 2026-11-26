@@ -61,33 +61,23 @@ func (s fakePParamsSource) SyncMarker(name string) (string, bool, error) {
 	return v, ok, nil
 }
 
-// newDrainedPParamsDatabase holds, in the metadata store, a row, a proposal
-// and markers the source does not, so an answer from it would differ.
-func newDrainedPParamsDatabase(t *testing.T) *Database {
+// newLedgerPParamsDatabase opens the ledger's database, whose protocol
+// parameters, proposals and markers are LedgerDB records it reads from the
+// installed source.
+func newLedgerPParamsDatabase(t *testing.T) *Database {
 	t.Helper()
 	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams([]byte{0xff}, 1, 1, 5, nil))
-	require.NoError(
-		t,
-		db.SetPParamUpdate([]byte{0xff}, []byte{0xff}, 1, 1, nil),
-	)
-	require.NoError(t, db.SetSyncState(SyntheticV2CostModelSyncKey, "sql", nil))
-	require.NoError(t, db.SetSyncState(
-		SyntheticV2CostModelClearedEpochSyncKey, "99", nil,
-	))
-	require.NoError(t, db.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyPParamsUpdates,
-	))
+	require.Nil(t, db.Metadata())
 	return db
 }
 
-// A drained pparams-updates family answers every protocol parameter,
-// proposal and marker read from the installed source, and fails closed
-// without one or while it does not hold the family.
-func TestDrainedPParamReadsComeFromTheSource(t *testing.T) {
+// The ledger's database answers every protocol parameter, proposal and marker
+// read from the installed source, and fails closed without one or while it
+// does not hold the family.
+func TestPParamReadsComeFromTheSource(t *testing.T) {
 	t.Parallel()
-	db := newDrainedPParamsDatabase(t)
+	db := newLedgerPParamsDatabase(t)
 	decode := func(b []byte) (lcommon.ProtocolParameters, error) {
 		return nil, nil
 	}
@@ -191,62 +181,62 @@ func TestDrainedPParamReadsComeFromTheSource(t *testing.T) {
 	require.Equal(t, "false", v)
 	_, cleared, err := SyntheticV2CostModelClearedEpoch(db, nil)
 	require.NoError(t, err)
-	require.False(t, cleared, "the SQL marker of epoch 99 is not read")
+	require.False(t, cleared, "the source holds no cleared epoch")
 }
 
-// A write to a drained family is refused, so no SQL row reappears beside the
-// set, and a rollback leaves the markers to the set.
-func TestDrainedPParamWritesAreRefused(t *testing.T) {
+// A protocol parameter write to the ledger's database is refused, so no SQL
+// row appears beside the set, and a rollback leaves the markers to the set.
+func TestPParamWritesAreRefused(t *testing.T) {
 	t.Parallel()
-	db := newDrainedPParamsDatabase(t)
+	db := newLedgerPParamsDatabase(t)
 	ctx := context.Background()
 	require.ErrorIs(
-		t, db.SetPParams([]byte{1}, 2, 2, 5, nil), ErrFamilyDrained,
+		t, db.SetPParams([]byte{1}, 2, 2, 5, nil), ErrNoMetadataStore,
 	)
 	require.ErrorIs(
 		t, db.SetPParamUpdate([]byte{1}, []byte{1}, 2, 2, nil),
-		ErrFamilyDrained,
+		ErrNoMetadataStore,
 	)
 	require.ErrorIs(
-		t, db.DeletePParamsAfterSlot(ctx, 0, nil), ErrFamilyDrained,
+		t, db.DeletePParamsAfterSlot(ctx, 0, nil), ErrNoMetadataStore,
 	)
 	require.ErrorIs(
-		t, db.DeletePParamUpdatesAfterSlot(ctx, 0, nil), ErrFamilyDrained,
+		t, db.DeletePParamUpdatesAfterSlot(ctx, 0, nil), ErrNoMetadataStore,
 	)
 	for _, key := range []string{
 		SyntheticV2CostModelSyncKey, SyntheticV2CostModelClearedEpochSyncKey,
 	} {
 		require.ErrorIs(
-			t, db.SetSyncState(key, "1", nil), ErrFamilyDrained,
+			t, db.SetSyncState(key, "1", nil), ErrNoMetadataStore,
 		)
-		require.ErrorIs(t, db.DeleteSyncState(key, nil), ErrFamilyDrained)
+		require.ErrorIs(t, db.DeleteSyncState(key, nil), ErrNoMetadataStore)
 	}
-	// An unrelated sync key is not the family's.
-	require.NoError(t, db.SetSyncState("other", "1", nil))
-	// The database has no epoch to place the slot in and no source; an
-	// undrained rollback would fail reading the marker.
+	// Every other sync key is refused too: there is no sync_state.
+	require.ErrorIs(t, db.SetSyncState("other", "1", nil), ErrNoMetadataStore)
+	// The database has no epoch to place the slot in and no source; a
+	// rollback that read the marker would fail.
 	require.NoError(
 		t, RecomputeSyntheticV2CostModelMarkerAfterTruncate(db, nil, 0),
 	)
 }
 
-// A legacy Alonzo unit marker on a database whose protocol parameters are
-// drained is refused, not read as "no Alonzo rows left" from the empty table.
-func TestDrainedAlonzoUnitMarkerIsNotReclassified(t *testing.T) {
+// A per-byte Alonzo unit marker on the ledger's database, whose protocol
+// parameters have no rows, is refused, not read as "no Alonzo rows left".
+func TestAlonzoUnitMarkerWithoutRowsIsNotReclassified(t *testing.T) {
 	t.Parallel()
-	db := newDrainedPParamsDatabase(t)
+	db := newLedgerPParamsDatabase(t)
 	ctx := context.Background()
-	require.NoError(t, db.Metadata().SetNodeSettingsGates(ctx,
+	require.NoError(t, db.SetNodeSettingsGates(ctx,
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
-		}, 0, 0,
+		},
 	))
 	require.ErrorIs(
 		t, db.ReconcileAlonzoPParamsUnitAfterRecovery(ctx),
-		ErrAlonzoPParamsUnitDrained,
+		ErrAlonzoPParamsUnitNoRows,
 	)
-	require.ErrorIs(t, db.CheckNodeSettings(ctx), ErrAlonzoPParamsUnitDrained)
-	gates, err := db.Metadata().GetNodeSettingsGates(ctx)
+	require.ErrorIs(t, db.CheckNodeSettings(ctx), ErrAlonzoPParamsUnitNoRows)
+	gates, err := db.NodeSettingsGates(ctx)
 	require.NoError(t, err)
 	require.Equal(t, nodesettings.AlonzoPParamsUnitLegacyByteV0,
 		gates[nodesettings.AlonzoPParamsUnitGateName])

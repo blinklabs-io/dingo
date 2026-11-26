@@ -581,14 +581,6 @@ func (i *barkItem) RawValueCopy(dst []byte) ([]byte, error) {
 	return i.ValueCopy(dst)
 }
 
-func (b *BlobStoreBark) GetCommitTimestamp() (int64, error) {
-	return b.upstream.GetCommitTimestamp()
-}
-
-func (b *BlobStoreBark) SetCommitTimestamp(i int64, txn types.Txn) error {
-	return b.upstream.SetCommitTimestamp(i, txn)
-}
-
 func (b *BlobStoreBark) SetBlock(
 	txn types.Txn,
 	slot uint64,

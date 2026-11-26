@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/blinklabs-io/dingo/database/dbinfo"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/config"
 	_ "modernc.org/sqlite" // the read opens the store without its provider
@@ -38,6 +39,14 @@ func refuseInterruptedBackfill(cfg *config.Config) error {
 	switch cfg.Plugins.Storage.Metadata.Provider {
 	case "", "sqlite":
 	default:
+		return nil
+	}
+	// Moving the settings into the dbinfo file is the first open of the
+	// store by this release, which upgrades its schema: v0.94.2 then
+	// refuses the store and no backfill can be finished there, so the store
+	// is not read again.
+	if info, err := dbinfo.Read(cfg.DatabasePath); err == nil &&
+		info.HoldsGates() {
 		return nil
 	}
 	path := filepath.Join(cfg.DatabasePath, "metadata.sqlite")

@@ -66,7 +66,7 @@ import (
 func TestGetPParams_PicksRowMatchingRequestedEra(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
@@ -160,7 +160,7 @@ func TestGetPParams_PicksRowMatchingRequestedEra(t *testing.T) {
 func TestGetPParams_MaryToAlonzo_PicksMaryRow(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
@@ -240,8 +240,7 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 ) {
 	t.Parallel()
 
-	config := &Config{DataDir: ""}
-	db, err := newTestDatabase(t, config)
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -323,8 +322,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 ) {
 	t.Parallel()
 
-	config := &Config{DataDir: ""}
-	db, err := newTestDatabase(t, config)
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -429,8 +427,7 @@ func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
 ) {
 	t.Parallel()
 
-	config := &Config{DataDir: ""}
-	db, err := newTestDatabase(t, config)
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -501,8 +498,7 @@ func TestComputeAndApplyPParamUpdates_FalseWhenUpdateDoesNotWritePlutusV2CostMod
 ) {
 	t.Parallel()
 
-	config := &Config{DataDir: ""}
-	db, err := newTestDatabase(t, config)
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -562,8 +558,7 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 ) {
 	t.Parallel()
 
-	config := &Config{DataDir: ""}
-	db, err := newTestDatabase(t, config)
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -634,8 +629,7 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
 	t.Parallel()
 
-	config := &Config{DataDir: ""}
-	db, err := newTestDatabase(t, config)
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -707,8 +701,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 ) {
 	t.Parallel()
 
-	config := &Config{DataDir: ""}
-	db, err := newTestDatabase(t, config)
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -798,8 +791,7 @@ func TestComputeAndApplyPParamUpdates_NoUpdates(
 ) {
 	t.Parallel()
 
-	config := &Config{DataDir: ""}
-	db, err := newTestDatabase(t, config)
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -843,8 +835,7 @@ func TestComputeAndApplyPParamUpdates_DuplicateGenesis(
 ) {
 	t.Parallel()
 
-	config := &Config{DataDir: ""}
-	db, err := newTestDatabase(t, config)
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -963,8 +954,7 @@ func shelleyForecastFuncs() (
 func TestForecastPParamUpdates_QuorumMetNoPersist(t *testing.T) {
 	t.Parallel()
 
-	config := &Config{DataDir: ""}
-	db, err := newTestDatabase(t, config)
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -1035,8 +1025,7 @@ func TestForecastPParamUpdates_QuorumMetNoPersist(t *testing.T) {
 func TestForecastPParamUpdates_QuorumNotMet(t *testing.T) {
 	t.Parallel()
 
-	config := &Config{DataDir: ""}
-	db, err := newTestDatabase(t, config)
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -1077,7 +1066,7 @@ func TestForecastPParamUpdates_QuorumNotMet(t *testing.T) {
 func TestPParamEnactmentPendingShortCircuitsTheWriter(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	defer db.Close()
 

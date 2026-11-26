@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"strconv"
@@ -29,9 +28,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -76,7 +74,7 @@ func migrateLegacyDatabase(
 ) string {
 	t.Helper()
 	dir := unpackLegacyDatabase(t, legacyParityArchive)
-	require.NoError(t, MigrateToSplit(
+	require.NoError(t, MigrateToIndexerDB(
 		t.Context(), parityConfig(dir),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
@@ -89,16 +87,23 @@ func migrateLegacyDatabase(
 	return dir
 }
 
-// openConsensus opens the consensus database of the split data directory
+// openConsensus opens the consensus database of the API node's data directory
 // dir. The returned function closes it.
 func openConsensus(t *testing.T, dir string) (*database.Database, func()) {
+	t.Helper()
+	return openConsensusRewound(t, dir, 0)
+}
+
+// openReleased opens the v0.94.2 database of dir as the migration's source.
+func openReleased(t *testing.T, dir string) *database.Database {
 	t.Helper()
 	cfg := parityConfig(dir)
 	rt, err := internalplugins.OpenDatabase(
 		t.Context(),
 		&database.Config{
+			Role:    database.RoleReleased,
 			DataDir: dir, StorageMode: "core", Network: "preview",
-			IndexerLayout:  config.IndexerLayoutSplit,
+			IndexerLayout:  config.IndexerLayoutIndexerDB,
 			BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 			MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 		},
@@ -106,8 +111,57 @@ func openConsensus(t *testing.T, dir string) (*database.Database, func()) {
 			Blob:     cfg.Plugins.Storage.Blob,
 			Metadata: cfg.Plugins.Storage.Metadata,
 		},
+		internalplugins.StorageDependencies{DataDir: dir, StorageMode: "core"},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close(context.Background())) })
+	return rt.Database
+}
+
+// openConsensusRewound is openConsensus that moves a v0.94.2 database's
+// ledger state into the live UTxO set first, reverting it rewind blocks below
+// its tip, as the node's startup does.
+func openConsensusRewound(
+	t *testing.T,
+	dir string,
+	rewind uint64,
+) (*database.Database, func()) {
+	t.Helper()
+	cfg := parityConfig(dir)
+	dbConfig := &database.Config{
+		DataDir: dir, StorageMode: "core", Network: "preview",
+		IndexerLayout:  config.IndexerLayoutIndexerDB,
+		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
+		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
+	}
+	rt, err := internalplugins.OpenDatabase(
+		t.Context(),
+		dbConfig,
+		internalplugins.StorageSelections{
+			Blob:     cfg.Plugins.Storage.Blob,
+			Metadata: cfg.Plugins.Storage.Metadata,
+		},
 		internalplugins.StorageDependencies{
 			DataDir: dir, StorageMode: "core",
+			MigrateReleased: func(
+				ctx context.Context,
+				stores database.Stores,
+				openMetadata func(context.Context) (metadata.MetadataStore, func() error, error),
+			) error {
+				_, err := nodestorage.ReleasedMigration{
+					Config:       dbConfig,
+					Blob:         stores.Blob,
+					Immutable:    stores.Immutable,
+					OpenMetadata: openMetadata,
+					UtxoSet: nodestorage.UtxoSetConfig{
+						DataDir:             dir,
+						CardanoNodeConfig:   previewNodeConfig(t),
+						RetainRewardRecords: true,
+					},
+					RewindBlocks: rewind,
+				}.Run(ctx)
+				return err
+			},
 		},
 	)
 	require.NoError(t, err)
@@ -204,14 +258,9 @@ func TestMigratedNodeRollsBackBelowItsMigrationPoint(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, (nodestorage.Reconcile{
-		DB:      consensus,
-		Set:     set,
-		DataDir: dir,
-		Logger:  logger,
-		Publish: func(mask nodesettings.FamilyMask) {
-			ls.SetDrainedFamilies(mask)
-			set.SetDrainedFamilies(mask)
-		},
+		DB:     consensus,
+		Set:    set,
+		Logger: logger,
 		Resume: ls.ResumeUtxoSetFrom,
 	}).Run(ctx))
 	require.NoError(t, cm.SetLedger(ls))
@@ -313,17 +362,19 @@ func TestMigratedDatabaseTruncatesBelowItsMigrationPoint(t *testing.T) {
 func TestMigrationRewindRunsOnce(t *testing.T) {
 	t.Parallel()
 	dir := unpackLegacyDatabase(t, legacyParityArchive)
-	require.NoError(t, MigrateToSplit(
+	require.NoError(t, MigrateToIndexerDB(
 		t.Context(), parityConfig(dir),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
-	db, _ := openConsensus(t, dir)
+	db := openReleased(t, dir)
 	k := previewSecurityParam(t)
 	released, err := db.GetTip(nil)
 	require.NoError(t, err)
 	// No set is open, so the run stops where the UTxO rows would move.
 	run := func() error {
-		return nodestorage.Reconcile{DB: db, RewindBlocks: k}.Run(t.Context())
+		return nodestorage.ReleasedMigration{
+			RewindBlocks: k,
+		}.Move(t.Context(), db, nil)
 	}
 	require.ErrorContains(t, run(), "is not open")
 	rewound, err := db.GetTip(nil)
@@ -342,41 +393,33 @@ func TestMigrationRewindRunsOnce(t *testing.T) {
 }
 
 // The pending reward stake inputs are resolved from the metadata store before
-// the move into the live UTxO set deletes its UTxO rows and drains its reward
-// families, and a failure to resolve stops the start.
-func TestReconcileResolvesRewardInputsBeforeTheUtxoRowsMove(t *testing.T) {
+// its UTxO rows stop being the ledger's: a stop where the rows would move
+// leaves the pending entry whose snapshot is gone already cleared.
+func TestMigrationResolvesRewardInputsBeforeTheUtxoRowsMove(t *testing.T) {
 	t.Parallel()
 	dir := unpackLegacyDatabase(t, legacyParityArchive)
-	require.NoError(t, MigrateToSplit(
+	require.NoError(t, MigrateToIndexerDB(
 		t.Context(), parityConfig(dir),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
-	db, _ := openConsensus(t, dir)
-	k := previewSecurityParam(t)
-	calls := 0
-	boom := errors.New("cannot resolve")
-	run := func(resolve func(context.Context, ledgerdb.LedgerDB) error) error {
-		return nodestorage.Reconcile{
-			DB: db, RewindBlocks: k, ResolveRewardInputs: resolve,
-		}.Run(t.Context())
-	}
-
-	// No set is open, so the run stops where the UTxO rows would move.
-	err := run(func(ctx context.Context, _ ledgerdb.LedgerDB) error {
-		calls++
-		marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
-		require.NoError(t, err)
-		require.Empty(t, marked, "the UTxO rows have not moved yet")
-		drained, err := db.EffectiveDrainedFamilies(ctx)
-		require.NoError(t, err)
-		require.Zero(t, drained, "no family has drained yet")
-		return nil
+	db := openReleased(t, dir)
+	raw, err := json.Marshal(map[string][]ledger.RewardStakeInputsPendingEntry{
+		"entries": {{Epoch: 999, BoundarySlot: 1}},
 	})
-	require.ErrorContains(t, err, "is not open")
-	require.Equal(t, 1, calls, "the rewards are resolved before the move")
-
-	err = run(func(context.Context, ledgerdb.LedgerDB) error { return boom })
-	require.ErrorIs(t, err, boom)
+	require.NoError(t, err)
+	require.NoError(t, db.SetSyncState(
+		models.RewardStakeInputsPendingKey, string(raw), nil,
+	))
+	// No set is open, so the run stops where the UTxO rows would move.
+	require.ErrorContains(t, nodestorage.ReleasedMigration{
+		RewindBlocks: previewSecurityParam(t),
+	}.Move(t.Context(), db, nil), "is not open")
+	marked, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
+	require.NoError(t, err)
+	require.Empty(t, marked, "the UTxO rows have not moved yet")
+	pending, err := db.GetSyncState(models.RewardStakeInputsPendingKey, nil)
+	require.NoError(t, err)
+	require.NotContains(t, pending, "999", "the pending entry was resolved")
 }
 
 // `dingo load` can be the first to open a database the released version
@@ -388,17 +431,15 @@ func TestLoadResolvesPendingRewardInputsBeforeTheUtxoRowsMove(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dir := unpackLegacyDatabase(t, legacyParityArchive)
-	require.NoError(t, MigrateToSplit(ctx, parityConfig(dir), logger))
+	require.NoError(t, MigrateToIndexerDB(ctx, parityConfig(dir), logger))
 	// Below every rewind point, so only the resolve can clear it.
 	raw, err := json.Marshal(map[string][]ledger.RewardStakeInputsPendingEntry{
 		"entries": {{Epoch: 999, BoundarySlot: 1}},
 	})
 	require.NoError(t, err)
-	db, closeDB := openConsensus(t, dir)
-	require.NoError(t, db.SetSyncState(
-		models.RewardStakeInputsPendingKey, string(raw), nil,
-	))
-	closeDB()
+	seedReleasedSyncState(
+		t, dir, models.RewardStakeInputsPendingKey, string(raw),
+	)
 
 	require.NoError(t, Load(
 		ctx, parityConfig(dir), logger,
@@ -409,4 +450,29 @@ func TestLoadResolvesPendingRewardInputsBeforeTheUtxoRowsMove(t *testing.T) {
 	pending, err := m.ls.RewardStakeInputsPendingState()
 	require.NoError(t, err)
 	require.Empty(t, pending, "the load resolved the pending entry")
+}
+
+// seedReleasedSyncState writes a sync_state row into the v0.94.2 database of
+// dir and closes it again.
+func seedReleasedSyncState(t *testing.T, dir, key, value string) {
+	t.Helper()
+	cfg := parityConfig(dir)
+	rt, err := internalplugins.OpenDatabase(
+		t.Context(),
+		&database.Config{
+			Role:    database.RoleReleased,
+			DataDir: dir, StorageMode: "core", Network: "preview",
+			IndexerLayout:  config.IndexerLayoutIndexerDB,
+			BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
+			MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
+		},
+		internalplugins.StorageSelections{
+			Blob:     cfg.Plugins.Storage.Blob,
+			Metadata: cfg.Plugins.Storage.Metadata,
+		},
+		internalplugins.StorageDependencies{DataDir: dir, StorageMode: "core"},
+	)
+	require.NoError(t, err)
+	require.NoError(t, rt.Database.SetSyncState(key, value, nil))
+	require.NoError(t, rt.Close(context.Background()))
 }

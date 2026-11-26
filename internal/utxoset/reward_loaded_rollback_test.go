@@ -148,7 +148,7 @@ func TestLoadedRewardRowsAreDroppedByARollbackBelowTheirCapture(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
+	db := releasedAt(t, slotPoint(8))
 	seedRewardEpoch(t, db, 2, 3)
 	seedRewardEpoch(t, db, 3, 7)
 
@@ -191,7 +191,7 @@ func TestLoadedSeedFailureKeepsItsCapturedSlot(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
+	db := releasedAt(t, slotPoint(8))
 	seedRewardEpoch(t, db, 3, 7)
 	require.NoError(t, db.Metadata().SaveRewardSeedFailure(
 		3, "mark", "imported basis", 2, nil,

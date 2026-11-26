@@ -1,0 +1,264 @@
+name: go-cache
+
+# Seeds the Go module and build caches that the ci workflow restores.
+#
+# GitHub lets a pull request ref or a merge-queue ref restore caches saved on
+# main, but not the reverse, and ci runs only on those refs. Without a run on
+# main, every ci job started with an empty build cache. ci restores and never
+# saves; this workflow is the only writer.
+#
+# One build cache per flavor, because each compiles a different flag or tag
+# set (race instrumentation, extra plugin tags, another OS) and sharing a key
+# lets whichever job saves first decide what the others restore. Each key ends
+# in the commit SHA, so a new entry is written for every main push, and the
+# entries it supersedes are deleted right after the save to stay inside the
+# repository's 10 GB cache limit. GOFLAGS matches ci so the cached objects are
+# the ones its jobs ask for, and test-ci-go-cache.py fails when a go build,
+# test or vet in a ci job has no compile here with the same flags.
+#
+# A push that arrives while a run is in progress waits for it rather than
+# cancelling it: a cancelled run saves nothing, and a burst of merges would
+# then never refresh the caches. GitHub keeps only the newest waiting run.
+#
+# Every job runs on main only: a dispatch from another branch would save where
+# ci cannot restore it and then prune main's current entries.
+
+on:
+  push:
+    branches: ['main']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GOFLAGS: -pgo=off
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - id: mod
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - id: build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-check-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-check-
+      # Compile only: the objects are what is cached, and running the suite
+      # here would repeat what the merge queue already did.
+      - name: compile
+        run: |
+          set -euo pipefail
+          go build -tags dingo_extra_plugins ./cmd/dingo
+          go build ./cmd/dingo
+          GOARCH=386 go vet -tags dingo_extra_plugins ./...
+          go test -tags dingo_extra_plugins -ldflags="-s -w" -run '^$' ./...
+          go test -run '^$' ./internal/docsparity
+      # The root ./... stops at sdk/go.mod.
+      - name: compile (sdk)
+        working-directory: sdk
+        run: go test -run '^$' ./...
+      - name: save-go-mod
+        if: steps.mod.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+      - name: save-go-build
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-check-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}
+      - name: prune-go-build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/prune-go-cache.sh '${{ runner.os }}-go-build-check-' '${{ runner.os }}-go-build-check-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}'
+      - name: prune-go-mod
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/prune-go-cache.sh '${{ runner.os }}-go-mod-' '${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}'
+
+  race:
+    name: race
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GOFLAGS: -pgo=off
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - id: mod
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - id: build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-race-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-race-
+      # Compile only: the objects are what is cached, and running the suite
+      # here would repeat what the merge queue already did.
+      - name: compile
+        run: |
+          set -euo pipefail
+          go test -tags dingo_extra_plugins -ldflags="-s -w" -race -gcflags='modernc.org/...=-d=checkptr=0' -run '^$' ./...
+      - name: compile (sdk)
+        working-directory: sdk
+        run: go test -race -run '^$' ./...
+      - name: save-go-build
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-race-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}
+      - name: prune-go-build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/prune-go-cache.sh '${{ runner.os }}-go-build-race-' '${{ runner.os }}-go-build-race-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}'
+
+  services:
+    name: services
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GOFLAGS: -pgo=off
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - id: mod
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - id: build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-services-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-services-
+      # Compile only: the objects are what is cached, and running the suite
+      # here would repeat what the merge queue already did.
+      - name: compile
+        run: |
+          set -euo pipefail
+          go test -tags 'dingo_extra_plugins dingo_db_integration' -ldflags="-s -w" -run '^$' ./...
+          go test -tags dingo_extra_plugins -ldflags="-s -w" -run '^$' ./...
+          # make test-live-lifecycle runs the root package under -race.
+          go test -tags 'dingo_extra_plugins dingo_db_integration' -race -gcflags='modernc.org/...=-d=checkptr=0' -run '^$' .
+      - name: save-go-build
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-services-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}
+      - name: prune-go-build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/prune-go-cache.sh '${{ runner.os }}-go-build-services-' '${{ runner.os }}-go-build-services-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}'
+
+  macos:
+    name: macos
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GOFLAGS: -pgo=off
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - id: mod
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - id: build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/Library/Caches/go-build
+          key: ${{ runner.os }}-go-build-macos-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-macos-
+      # Compile only: the objects are what is cached, and running the suite
+      # here would repeat what the merge queue already did.
+      - name: compile
+        run: |
+          set -euo pipefail
+          go test -ldflags="-s -w" -run '^$' ./...
+      - name: save-go-mod
+        if: steps.mod.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+      - name: save-go-build
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/Library/Caches/go-build
+          key: ${{ runner.os }}-go-build-macos-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}
+      - name: prune-go-build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/prune-go-cache.sh '${{ runner.os }}-go-build-macos-' '${{ runner.os }}-go-build-macos-${{ hashFiles('**/go.mod', '**/go.sum') }}-${{ github.sha }}'
+      - name: prune-go-mod
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/prune-go-cache.sh '${{ runner.os }}-go-mod-' '${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}'

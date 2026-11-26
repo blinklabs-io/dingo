@@ -38,7 +38,6 @@ import (
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database/internal/badgermem"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
 )
@@ -87,6 +86,11 @@ type ApplyResult struct {
 type Store struct {
 	db  *badger.DB
 	agg Aggregator
+	// indexer derives the output index rows; nil keeps no index.
+	indexer Indexer
+	// afterIndexBatch observes the output index build between its
+	// transactions; an error stops it there. Only tests set it.
+	afterIndexBatch func(done int) error
 	// snap is set on a store returned by Snapshot: every read goes through
 	// its transaction and every write is refused.
 	snap *snapshot
@@ -106,9 +110,8 @@ type Store struct {
 	// afterBootstrapFlush runs between a bootstrap's contents and its tip;
 	// an error stops the bootstrap there. Only tests set it.
 	afterBootstrapFlush func() error
-	// loadsRefused holds the families whose source tables have lost rows; see
-	// RefuseLoadsFor.
-	loadsRefused atomic.Uint64
+	// loadsRefused is set by RefuseLoads.
+	loadsRefused atomic.Bool
 	// added holds, for each family, the index of rows below the export floor
 	// that eachRowAddedIn serves. rowsRewritten counts the operations that can
 	// put a row below the floor, each of which invalidates it.
@@ -127,24 +130,16 @@ type Store struct {
 
 // ErrLoadsRefused reports a family load refused by RefuseLoads.
 var ErrLoadsRefused = errors.New(
-	"badgerutxo: a row family cannot be reloaded from a source that has lost rows",
+	"badgerutxo: a row family cannot be reloaded while the set holds its rows",
 )
 
-// RefuseLoadsFor makes a Load* method fail with ErrLoadsRefused, changing
-// nothing, while the family it replaces is in drained and holds rows. A load
-// replaces a family's rows with the source's, which is wrong once the source
-// has drained that family: it would replace the set's only copy with nothing.
-// A family outside drained still has its source rows, and a family that holds
-// no row loses none.
-func (s *Store) RefuseLoadsFor(drained nodesettings.FamilyMask) {
-	s.loadsRefused.Store(uint64(drained))
-}
-
-// LoadsRefusedFor reports whether family has lost its source rows. In-place
-// migrations use this to avoid querying a drained source before upgrading the
-// set's retained rows.
-func (s *Store) LoadsRefusedFor(family nodesettings.Family) bool {
-	return nodesettings.FamilyMask(s.loadsRefused.Load()).Has(family)
+// RefuseLoads makes a Load* method fail with ErrLoadsRefused, changing
+// nothing, while the rows it replaces are held. A load replaces a family's
+// rows with the source's, which is wrong once the set is the ledger's only
+// copy of its state: no metadata store holds the rows to load. A family that
+// holds no row loses none.
+func (s *Store) RefuseLoads() {
+	s.loadsRefused.Store(true)
 }
 
 // Open opens or creates the store in dir.
@@ -181,6 +176,10 @@ func Open(dir string, options ...Option) (*Store, error) {
 		}
 		return txn.Set(formatKey, []byte{formatVersion})
 	}); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
+	}
+	if err := s.ensureAddressIndex(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
 	}
@@ -411,6 +410,11 @@ func (s *Store) bootstrap(
 	err := feed(func(o Output) error {
 		n++
 		s.addOutput(sums, o.Cbor, 1)
+		for _, k := range s.indexKeys(o.Ref, o.Cbor) {
+			if err := wb.Set(k, nil); err != nil {
+				return err
+			}
+		}
 		return wb.Set(utxoKey(o.Ref), o.Cbor)
 	})
 	if err != nil {
@@ -443,6 +447,9 @@ func (s *Store) bootstrap(
 			return err
 		}
 		if err := txn.Set(formatKey, []byte{formatVersion}); err != nil {
+			return err
+		}
+		if err := s.markAddressIndexed(txn); err != nil {
 			return err
 		}
 		if importing {
@@ -626,7 +633,7 @@ func (s *Store) applyLedgerTxn(
 	res *ApplyResult,
 ) error {
 	if batch.DeleteNoncesAfter != nil {
-		err := rollbackLedgerState(txn, *batch.DeleteNoncesAfter)
+		err := rollbackLedgerState(txn, *batch.DeleteNoncesAfter, nil)
 		if err != nil {
 			return err
 		}
@@ -782,6 +789,9 @@ func (s *Store) applyLedgerTxn(
 			if err := txn.Delete(utxoKey(r)); err != nil {
 				return err
 			}
+			if err := s.deleteIndex(txn, r, v); err != nil {
+				return err
+			}
 			s.addOutput(sums, v, -1)
 			count--
 		}
@@ -792,11 +802,17 @@ func (s *Store) applyLedgerTxn(
 			}
 			if live {
 				res.Duplicate = append(res.Duplicate, o.Ref)
+				if err := s.deleteIndex(txn, o.Ref, v); err != nil {
+					return err
+				}
 				s.addOutput(sums, v, -1)
 			} else {
 				count++
 			}
 			if err := txn.Set(utxoKey(o.Ref), o.Cbor); err != nil {
+				return err
+			}
+			if err := s.setIndex(txn, o.Ref, o.Cbor); err != nil {
 				return err
 			}
 			s.addOutput(sums, o.Cbor, 1)
@@ -945,6 +961,9 @@ func (s *Store) RemoveOutputs(
 				if err := txn.Delete(utxoKey(r)); err != nil {
 					return err
 				}
+				if err := s.deleteIndex(txn, r, v); err != nil {
+					return err
+				}
 				s.addOutput(sums, v, -1)
 				count--
 				n++
@@ -963,4 +982,9 @@ func (s *Store) RemoveOutputs(
 		removed += n
 	}
 	return removed, nil
+}
+
+// Sync makes every write committed so far durable.
+func (s *Store) Sync() error {
+	return s.db.Sync()
 }

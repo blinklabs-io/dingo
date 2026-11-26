@@ -193,11 +193,11 @@ func TestCreateGenesisBlockStoresExactlyOneUtxoPerGenesisOutput(t *testing.T) {
 	for i := range genesisUtxos {
 		txId := genesisUtxos[i].Id.Id()
 		idx := genesisUtxos[i].Id.Index()
-		exists, err := db.UtxoExists(context.Background(), txId[:], idx, nil)
+		model, err := ls.UtxoByRef(txId[:], idx)
 		require.NoError(t, err)
-		require.True(
+		require.NotNil(
 			t,
-			exists,
+			model,
 			"genesis output %x#%d must be stored exactly once",
 			txId,
 			idx,
@@ -208,8 +208,6 @@ func TestCreateGenesisBlockStoresExactlyOneUtxoPerGenesisOutput(t *testing.T) {
 		// not another output's -- existence alone would not catch an
 		// offset collapsed onto the wrong reference.
 		wantCbor, err := cbor.Encode(genesisUtxos[i].Output)
-		require.NoError(t, err)
-		model, err := db.UtxoByRef(context.Background(), txId[:], idx, nil)
 		require.NoError(t, err)
 		require.Equal(
 			t,

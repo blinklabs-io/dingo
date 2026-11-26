@@ -15,10 +15,12 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 
@@ -244,6 +246,7 @@ func TestLazyHotStatementsConcurrentFirstUse(t *testing.T) {
 // uncached path, and is not retried on every call.
 func TestLazyHotStatementsFailedPrepareFallsBackAndIsRemembered(t *testing.T) {
 	t.Parallel()
+	var logs bytes.Buffer
 	db, err := OpenDB(
 		"sqlite",
 		fmt.Sprintf(
@@ -258,6 +261,10 @@ func TestLazyHotStatementsFailedPrepareFallsBackAndIsRemembered(t *testing.T) {
 		WriteDB:           db,
 		Dialect:           SQLiteDialect(),
 		LazyHotStatements: true,
+		Logger: slog.New(slog.NewTextHandler(
+			&logs,
+			nil,
+		)),
 	})
 	require.NoError(t, err)
 	require.NoError(t, store.Start(context.Background()))
@@ -268,6 +275,11 @@ func TestLazyHotStatementsFailedPrepareFallsBackAndIsRemembered(t *testing.T) {
 	_, _, ok := store.borrowStmt(ctx, q, sumCredentialUtxoStakeQuery)
 	require.False(t, ok)
 	require.Contains(t, store.stmtFailed, sumCredentialUtxoStakeQuery)
+	require.NotContains(
+		t,
+		logs.String(),
+		"sqlstore: skipping prepared-statement cache entry",
+	)
 
 	// The uncached fallback reports the real SQL error to the caller.
 	_, err = store.sumCredentialUtxoStake(

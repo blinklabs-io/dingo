@@ -2478,7 +2478,7 @@ func TestImportPoolsRejectsPastPendingRetirement(t *testing.T) {
 func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, dbtest.CloseDatabase(db))

@@ -176,37 +176,21 @@ func newPathFixture(
 	f := &pathFixture{t: t, db: db}
 	f.pparams = newPathProtocolParameters(t)
 	seed := func(txID []byte, amount uint64, script lcommon.PlutusV4Script) {
-		require.NoError(
-			t,
-			db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-				if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
-					TxId:       txID,
-					OutputIdx:  0,
-					PaymentKey: paymentHash.Bytes(),
-					AddedSlot:  pathOriginSlot,
-					Amount:     dbtypes.Uint64(amount),
-				}); err != nil {
-					return err
-				}
-				output := &babbage.BabbageTransactionOutput{
-					OutputAddress: shelleyAddress,
-					OutputAmount: mary.MaryTransactionOutputValue{
-						Amount: amount,
-					},
-				}
-				if script != nil {
-					output.TxOutScriptRef = &lcommon.ScriptRef{
-						Type:   lcommon.ScriptRefTypePlutusV4,
-						Script: script,
-					}
-				}
-				encoded, err := cbor.Encode(output)
-				if err != nil {
-					return err
-				}
-				return db.Blob().SetUtxo(txn.Blob(), txID, 0, encoded)
-			}),
-		)
+		output := &babbage.BabbageTransactionOutput{
+			OutputAddress: shelleyAddress,
+			OutputAmount: mary.MaryTransactionOutputValue{
+				Amount: amount,
+			},
+		}
+		if script != nil {
+			output.TxOutScriptRef = &lcommon.ScriptRef{
+				Type:   lcommon.ScriptRefTypePlutusV4,
+				Script: script,
+			}
+		}
+		encoded, err := cbor.Encode(output)
+		require.NoError(t, err)
+		fxSeedOutput(t, db, txID, 0, pathOriginSlot, encoded)
 	}
 	for _, account := range accounts {
 		tag := uint8(0)
@@ -352,6 +336,11 @@ func newPathFixture(
 		Point: ocommon.Point{Slot: pathOriginSlot, Hash: f.originHash},
 	}
 	require.NoError(t, db.SetTip(originTip, nil))
+	// The seeded state is the set's at the origin, so its journal holds the
+	// point a rollback returns to.
+	require.NoError(t, OpenLiveSetForTest(t, db).ApplyUtxoChanges(
+		&originTip.Point, nil,
+	))
 	config := newTestShelleyGenesisCfg(t)
 	config.ShelleyGenesis().NetworkId = "Testnet"
 	ls := &LedgerState{

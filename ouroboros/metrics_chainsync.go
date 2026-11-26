@@ -109,7 +109,7 @@ var chainsyncResyncReasons = map[string]struct{}{
 	event.ChainsyncResyncReasonPromotedObserverAhead:             {},
 	event.ChainsyncResyncReasonReplayRecoveryNonConverging:       {},
 	event.ChainsyncResyncReasonRollbackAhead:                     {},
-	event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor:       {},
+	event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal:       {},
 	event.ChainsyncResyncReasonRollbackExceedsK:                  {},
 	event.ChainsyncResyncReasonRollbackExceedsMithril:            {},
 	event.ChainsyncResyncReasonRollbackLoop:                      {},

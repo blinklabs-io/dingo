@@ -29,7 +29,7 @@ func (d *Database) GetPoolsRetiringAtEpoch(
 	boundarySlot uint64,
 	txn *Txn,
 ) ([]models.PoolRetirementRefund, error) {
-	if d.poolsDrained() {
+	if d.poolsFromSource() {
 		src, err := d.poolSourceOrErr()
 		if err != nil {
 			return nil, err
@@ -39,6 +39,9 @@ func (d *Database) GetPoolsRetiringAtEpoch(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("GetPoolsRetiringAtEpoch"); err != nil {
+		return nil, err
 	}
 	return d.metadata.GetPoolsRetiringAtEpoch(
 		epoch, boundarySlot, txn.Metadata(),

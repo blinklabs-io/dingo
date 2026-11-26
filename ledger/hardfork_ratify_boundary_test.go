@@ -165,8 +165,9 @@ func newHardForkRatifyLiveStakeFixture(
 
 	// Live delegation state at the decisive ratio (0.6283, mark[742] in the
 	// real incident) -- no pool_stake_snapshot row exists for epoch 742 at
-	// all. ImportPool + CreateAccount + CreateUtxo is exactly how a normal
-	// block-processing run builds the stake the SNAP-point calculator reads.
+	// all. A pool, a delegated account and a live output are what a normal
+	// block-processing run builds the stake the SNAP-point calculator reads
+	// from.
 	seedLiveDelegatedStake(t, db, hfrLiveYesPool, 6_283)
 	seedLiveDelegatedStake(t, db, hfrLiveSilentPool, 3_717)
 
@@ -320,8 +321,7 @@ func seedLiveDelegatedStake(
 		Active:     true,
 	}))
 	txID := repeatByte(32, poolKeyHash[len(poolKeyHash)-1])
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the database has no open LedgerDB set")
+	ls := seedLedgerOf(t, db)
 	seedTestStakedOutput(t, ls, txID, 0, stakingKey, amount)
 }
 

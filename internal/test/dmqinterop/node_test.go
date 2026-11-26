@@ -22,15 +22,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/localmessagenotification"
 	"github.com/blinklabs-io/gouroboros/protocol/localmessagesubmission"
@@ -46,8 +43,6 @@ import (
 type nodeEnvironment struct {
 	// socket is the node's DMQ local socket.
 	socket string
-	// submit is the dmq-submit helper built for this machine.
-	submit string
 	// metrics is the node's Prometheus endpoint.
 	metrics string
 }
@@ -56,10 +51,9 @@ func loadNodeEnvironment(t *testing.T) nodeEnvironment {
 	t.Helper()
 	node := nodeEnvironment{
 		socket:  os.Getenv("DMQ_INTEROP_NODE_SOCKET"),
-		submit:  os.Getenv("DMQ_INTEROP_NODE_SUBMIT"),
 		metrics: os.Getenv("DMQ_INTEROP_NODE_METRICS"),
 	}
-	if node.socket == "" || node.submit == "" || node.metrics == "" {
+	if node.socket == "" || node.metrics == "" {
 		t.Skip("DMQ_INTEROP_NODE_* is not set; run run.sh with " +
 			"DMQ_INTEROP_NODE_MODE=1")
 	}
@@ -101,25 +95,19 @@ func (n nodeEnvironment) metricSum(
 	return sum
 }
 
-// submitToLocalSocket submits a message to the node's local socket with the
-// helper and returns its verdict.
+// submitToLocalSocket submits a message to the node's local socket and
+// returns its verdict.
 func (n nodeEnvironment) submitToLocalSocket(
 	t *testing.T,
 	msg ocommon.DmqMessage,
-	name string,
 ) string {
 	t.Helper()
-	raw, err := cbor.Encode(msg)
-	require.NoError(t, err)
-	file := filepath.Join(t.TempDir(), name)
-	require.NoError(t, os.WriteFile(file, raw, 0o600))
-	out, err := exec.Command(
-		n.submit, n.socket, fmt.Sprint(dmqNetworkMagic), file,
-	).CombinedOutput()
+	verdict, err := submitMessage(n.socket, dmqNetworkMagic, msg)
 	if err != nil {
-		t.Logf("dmq-submit: %v", err)
+		t.Logf("submit: %v", err)
+		return "ERROR: " + err.Error()
 	}
-	return strings.TrimSpace(string(out))
+	return verdict
 }
 
 // consumerHolds connects to the node's local socket as a notification
@@ -262,7 +250,7 @@ func TestInteropNodeExchangesMessagesWithDmqNode(t *testing.T) {
 	retryUntil(t, env, "the node accepts a message on its local socket",
 		func(n int) bool {
 			msg := signedMessage(t, env, fmt.Sprintf("node-to-d-%d", n))
-			verdict := node.submitToLocalSocket(t, msg, "node-to-d.cbor")
+			verdict := node.submitToLocalSocket(t, msg)
 			if verdict == "ACCEPTED" {
 				sent = msg
 				return true

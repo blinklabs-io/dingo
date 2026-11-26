@@ -41,7 +41,7 @@ func startWithUnseededChild(
 ) (*LedgerState, error) {
 	t.Helper()
 	db := newTestDB(t)
-	require.NoError(t, seedDB(t, db).SetSyncState(mithrilLedgerSlotSyncKey, "42", nil))
+	require.NoError(t, db.SetChainState(mithrilLedgerSlotSyncKey, "42", nil))
 	require.NoError(t, seedDB(t, db).SetEpoch(
 		purposeRootStartEpoch*100, purposeRootStartEpoch,
 		nil, nil, nil, nil,
@@ -84,10 +84,6 @@ func TestLedgerStateStartRefusesUnseededPurposeRoot(t *testing.T) {
 	// Node.Run registers Close only after Start succeeds, so the refusal
 	// must happen before Start creates anything Close would release.
 	require.Nil(t, ls.dbWorkerPool, "worker pool started before refusal")
-	ls.cleanupMu.Lock()
-	timer := ls.timerCleanupConsumedUtxos
-	ls.cleanupMu.Unlock()
-	require.Nil(t, timer, "cleanup timer scheduled before refusal")
 }
 
 // The startup check reads the active set at the latest stored epoch, the

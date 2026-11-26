@@ -40,6 +40,9 @@ func (d *Database) GetScript(
 		defer txn.Release()
 	}
 	scriptHash := lcommon.NewBlake2b224(hash)
+	if err := d.requireStore("GetScript"); err != nil {
+		return nil, err
+	}
 	ret, err := d.metadata.GetScript(scriptHash, txn.Metadata())
 	if err != nil {
 		return nil, err

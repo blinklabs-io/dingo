@@ -239,9 +239,8 @@ func TestValidateParentChain_NoConfidenceRootAllowsCommitteeUpdate(
 // approval (needsCCApproval returns false for it), so no committee fixture
 // is needed either.
 func noConfidencePParams() *conway.ConwayProtocolParameters {
-	p := &conway.ConwayProtocolParameters{}
-	p.ProtocolVersion.Major = 10
-	p.PoolVotingThresholds.MotionNoConfidence = newRat(51, 100)
+	p := conwayPParamsFixture(10)
+	p.DRepVotingThresholds.MotionNoConfidence = newRat(0, 1)
 	return p
 }
 

@@ -16,7 +16,6 @@ package conformance
 
 import (
 	"bytes"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -26,8 +25,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+
+	dledger "github.com/blinklabs-io/dingo/ledger"
+
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -58,7 +60,7 @@ func TestStateProviderConstitutionExposesStoredShape(t *testing.T) {
 
 	anchorHash := testHash32(0xc1)
 	policyHash := bytes.Repeat([]byte{0xc2}, 28)
-	require.NoError(t, m.db.SetConstitution(&models.Constitution{
+	require.NoError(t, m.ldb.SetConstitution(&models.Constitution{
 		AnchorURL:  "https://example.invalid/conformance",
 		AnchorHash: anchorHash,
 		PolicyHash: policyHash,
@@ -84,7 +86,7 @@ func TestStateProviderConstitutionWithoutPolicyHash(t *testing.T) {
 	defer func() { require.NoError(t, m.Close()) }()
 
 	anchorHash := testHash32(0xd1)
-	require.NoError(t, m.db.SetConstitution(&models.Constitution{
+	require.NoError(t, m.ldb.SetConstitution(&models.Constitution{
 		AnchorURL:  "https://example.invalid/conformance-plain",
 		AnchorHash: anchorHash,
 		AddedSlot:  0,
@@ -132,10 +134,10 @@ func TestLoadInitialStateSeedsConstitution(t *testing.T) {
 				PolicyHash: policyHash,
 			},
 		},
-		&conway.ConwayProtocolParameters{},
+		testutil.CompleteRats(&conway.ConwayProtocolParameters{}),
 	))
 
-	stored, err := m.db.GetConstitution(nil)
+	stored, err := m.ldb.GetConstitution(nil)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	require.Equal(t, "https://example.invalid/vector", stored.AnchorURL)
@@ -176,7 +178,7 @@ const (
 func stakeDepositVectorPparams(
 	keyDeposit uint64,
 ) *conway.ConwayProtocolParameters {
-	return &conway.ConwayProtocolParameters{
+	return testutil.CompleteRats(&conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{
 			Major: 9,
 		},
@@ -186,7 +188,7 @@ func stakeDepositVectorPparams(
 		MaxValueSize:         5_000,
 		CollateralPercentage: 150,
 		MaxCollateralInputs:  3,
-	}
+	})
 }
 
 func stakeDepositVectorCredential() common.Credential {
@@ -360,7 +362,7 @@ func TestStateProviderTreasuryValueReportsBackendState(t *testing.T) {
 	const treasury = uint64(87_920_693_660_807)
 	require.NoError(
 		t,
-		m.db.Metadata().SetNetworkState(treasury, 1_000, 42, nil),
+		m.ldb.SetNetworkState(treasury, 1_000, 42, nil),
 	)
 
 	got, err := m.GetStateProvider().TreasuryValue()
@@ -395,8 +397,8 @@ func TestStateProviderTreasuryValueTracksLatestSlot(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
 
-	require.NoError(t, m.db.Metadata().SetNetworkState(100, 900, 10, nil))
-	require.NoError(t, m.db.Metadata().SetNetworkState(250, 750, 20, nil))
+	require.NoError(t, m.ldb.SetNetworkState(100, 900, 10, nil))
+	require.NoError(t, m.ldb.SetNetworkState(250, 750, 20, nil))
 
 	got, err := m.GetStateProvider().TreasuryValue()
 	require.NoError(t, err)
@@ -424,17 +426,20 @@ func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
 	defer func() { require.NoError(t, m.Close()) }()
 	for _, tc := range []struct {
 		name   string
-		mutate func(t *testing.T, raw *sql.DB)
+		mutate func(st *dledger.CommitteeState) []dledger.CommitteeChange
 		lookup func(p *DingoStateProvider) error
 	}{
 		{
 			name: "authorized hot credential",
-			mutate: func(t *testing.T, raw *sql.DB) {
-				_, err := raw.Exec(
-					`UPDATE auth_committee_hot SET host_credential = ?`,
-					overlong(hot),
-				)
-				require.NoError(t, err)
+			mutate: func(st *dledger.CommitteeState) []dledger.CommitteeChange {
+				changes := make([]dledger.CommitteeChange, 0, len(st.Auths))
+				for _, auth := range st.Auths {
+					auth.HotCredential = overlong(hot)
+					changes = append(changes, dledger.CommitteeChange{
+						Slot: auth.AddedSlot, Auth: &auth,
+					})
+				}
+				return changes
 			},
 			lookup: func(p *DingoStateProvider) error {
 				_, err := p.CommitteeHotCredentialMember(keyCredential(hot))
@@ -449,12 +454,8 @@ func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
 		},
 		{
 			name: "seated cold credential",
-			mutate: func(t *testing.T, raw *sql.DB) {
-				_, err := raw.Exec(
-					`UPDATE committee_member SET cold_cred_hash = ?`,
-					overlong(cold),
-				)
-				require.NoError(t, err)
+			mutate: func(st *dledger.CommitteeState) []dledger.CommitteeChange {
+				return replaceColdHashes(st, overlong(cold), false)
 			},
 			lookup: func(p *DingoStateProvider) error {
 				_, err := p.CommitteeCredentialIsElected(keyCredential(cold))
@@ -463,12 +464,8 @@ func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
 		},
 		{
 			name: "committee member list",
-			mutate: func(t *testing.T, raw *sql.DB) {
-				_, err := raw.Exec(
-					`UPDATE committee_member SET cold_cred_hash = ?`,
-					overlong(cold),
-				)
-				require.NoError(t, err)
+			mutate: func(st *dledger.CommitteeState) []dledger.CommitteeChange {
+				return replaceColdHashes(st, overlong(cold), false)
 			},
 			lookup: func(p *DingoStateProvider) error {
 				_, err := p.CommitteeMembers()
@@ -477,23 +474,8 @@ func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
 		},
 		{
 			name: "committee member list with hash under both tags",
-			mutate: func(t *testing.T, raw *sql.DB) {
-				_, err := raw.Exec(
-					`UPDATE committee_member SET cold_cred_hash = ?`,
-					overlong(cold),
-				)
-				require.NoError(t, err)
-				_, err = raw.Exec(
-					`INSERT INTO committee_member (
-						cold_credential_tag, cold_cred_hash, expires_epoch,
-						term_start_slot, term_start_slot_set, added_slot
-					)
-					SELECT 1 - cold_credential_tag, cold_cred_hash,
-						expires_epoch, term_start_slot, term_start_slot_set,
-						added_slot
-					FROM committee_member`,
-				)
-				require.NoError(t, err)
+			mutate: func(st *dledger.CommitteeState) []dledger.CommitteeChange {
+				return replaceColdHashes(st, overlong(cold), true)
 			},
 			lookup: func(p *DingoStateProvider) error {
 				_, err := p.CommitteeMembers()
@@ -512,11 +494,14 @@ func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
 						cold: hot,
 					},
 				},
-				&conway.ConwayProtocolParameters{},
+				testutil.CompleteRats(&conway.ConwayProtocolParameters{}),
 			))
-			raw, err := dbtest.RawSQLiteMetadata(t, m.db)
+			set := m.backend.set
+			st, err := set.CommitteeStateAt(nil)
 			require.NoError(t, err)
-			tc.mutate(t, raw)
+			require.NoError(t, set.ApplyLedgerChanges(
+				nil, dledger.LedgerChanges{Committee: tc.mutate(st)},
+			))
 
 			require.ErrorContains(
 				t,
@@ -525,6 +510,41 @@ func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
 			)
 		})
 	}
+}
+
+// replaceColdHashes rewrites every seated committee member of st under hash,
+// retiring the row it replaces, and with bothTags also seats the rewritten
+// member under the other credential tag.
+func replaceColdHashes(
+	st *dledger.CommitteeState,
+	hash []byte,
+	bothTags bool,
+) []dledger.CommitteeChange {
+	var changes []dledger.CommitteeChange
+	for _, member := range st.Members {
+		if member.DeletedSlot != nil {
+			continue
+		}
+		retired := member
+		slot := member.AddedSlot
+		retired.DeletedSlot = &slot
+		changes = append(changes, dledger.CommitteeChange{
+			Slot: slot, Member: &retired,
+		})
+		rewritten := member
+		rewritten.ColdCredHash = hash
+		changes = append(changes, dledger.CommitteeChange{
+			Slot: slot, Member: &rewritten,
+		})
+		if bothTags {
+			other := rewritten
+			other.ColdCredentialTag = 1 - member.ColdCredentialTag
+			changes = append(changes, dledger.CommitteeChange{
+				Slot: slot, Member: &other,
+			})
+		}
+	}
+	return changes
 }
 
 var (
@@ -1194,11 +1214,11 @@ func inputlessEraProbes() map[string]eraProbe {
 		},
 		conway.EraNameConway: {
 			tx: &conway.ConwayTransaction{},
-			pp: &conway.ConwayProtocolParameters{},
+			pp: testutil.CompleteRats(&conway.ConwayProtocolParameters{}),
 		},
 		dijkstra.EraNameDijkstra: {
 			tx: &dijkstra.DijkstraTransaction{},
-			pp: &dijkstra.DijkstraProtocolParameters{},
+			pp: testutil.CompleteRats(&dijkstra.DijkstraProtocolParameters{}),
 		},
 	}
 }

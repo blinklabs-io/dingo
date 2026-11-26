@@ -26,8 +26,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
-	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -535,59 +533,6 @@ func TestQueryViewEraHistoryUsesFrozenTransition(t *testing.T) {
 	require.Equal(t, before, viewed)
 }
 
-// TestQueryViewLeavesAReadConnectionForOtherReaders proves acquired views
-// cannot occupy the whole metadata read pool. A view holds its read
-// connection for its whole lifetime, so without a cap as many clients as
-// there are connections would block every other reader in the node -- chain
-// sync, APIs, rollback -- until their views expire. Once the cap is reached
-// an Acquire fails when its context ends instead of taking the last
-// connection. The context passed to AcquireQueryView bounds only that wait.
-func TestQueryViewLeavesAReadConnectionForOtherReaders(t *testing.T) {
-	t.Parallel()
-
-	ls, db := newDiskTestLedger(t)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(1_000, repeatedBytes(32, 0x0B)),
-	}, nil))
-
-	// Every connection but one can hold a view. The acquire contexts end as
-	// soon as each view is open.
-	views := make([]*QueryView, 0, sqlite.DefaultMaxConnections-1)
-	for range sqlite.DefaultMaxConnections - 1 {
-		ctx, cancel := context.WithCancel(t.Context())
-		view, err := ls.AcquireQueryView(ctx, QueryPoint{})
-		cancel()
-		require.NoError(t, err)
-		t.Cleanup(view.Close)
-		views = append(views, view)
-	}
-
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	_, err := ls.AcquireQueryView(ctx, QueryPoint{})
-	cancel()
-	require.ErrorIs(
-		t, err, context.DeadlineExceeded,
-		"the last read connection must stay free",
-	)
-	require.ErrorContains(
-		t, err, "admit read snapshot",
-		"a timed-out open must name the stage it was waiting in",
-	)
-
-	// The context only bounds the wait to acquire: a view outlives it.
-	for _, view := range views {
-		_, err := view.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
-		require.NoError(t, err)
-	}
-
-	ctx, cancel = context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	txn := db.TransactionContext(ctx, false)
-	defer txn.Release()
-	_, err = db.GetTip(txn)
-	require.NoError(t, err, "a reader outside the views must still get a connection")
-}
-
 // TestAcquireQueryViewDoesNotWaitForOpenWriteTxn proves a view opens while a
 // read-write transaction is open and uncommitted. Snapshot construction used
 // to wait for every open read-write Txn to finish, so a long block-apply chunk
@@ -797,20 +742,18 @@ func TestQueryViewUtxoWholeReleasesSnapshotAndAnswersAsOfAcquire(t *testing.T) {
 	released := make(chan struct{})
 	view.txn.OnFinish(func() { close(released) })
 
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(
-		context.Background(),
-		nil,
-		[]dbtypes.UtxoKey{{TxId: spentLater, OutputIdx: 0}},
-		400,
-	))
 	createdLater := bytes.Repeat([]byte{0xC4}, 32)
-	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:      createdLater,
-		OutputIdx: 0,
-		AddedSlot: 400,
-	}))
-	require.NoError(t, txn.Commit())
+	laterPoint := ocommon.NewPoint(400, bytes.Repeat([]byte{0xAC}, 32))
+	require.NoError(t, ls.config.UtxoSet.ApplyUtxoChanges(
+		&laterPoint, []UtxoEvent{{
+			Point:   laterPoint,
+			Removed: []models.UtxoId{{Hash: spentLater}},
+			Added: []UtxoOutput{{
+				Ref:  models.UtxoId{Hash: createdLater},
+				Cbor: seedTestOutputCBOR(t, db, createdLater, 0, 1_000_000),
+			}},
+		}},
+	))
 
 	result, err := view.Query(t.Context(), utxoWholeQuery(), 0)
 	require.NoError(t, err)
@@ -821,11 +764,8 @@ func TestQueryViewUtxoWholeReleasesSnapshotAndAnswersAsOfAcquire(t *testing.T) {
 	}
 	utxos := requireUtxoWholeMap(t, result)
 	require.Len(t, utxos, 1)
-	ls.acquiredPins.mu.Lock()
-	pinnedSlot, pinned := ls.acquiredPins.oldestPinnedSlotLocked()
-	ls.acquiredPins.mu.Unlock()
-	require.True(t, pinned, "the detached view must retain its acquired-point pin")
-	require.Equal(t, uint64(300), pinnedSlot)
+	require.Equal(t, 1, ls.AcquiredPointPinCountForTesting(),
+		"the detached view must retain its acquired-point pin")
 	_, ok := utxos[olocalstatequery.UtxoId{
 		Hash: ledger.NewBlake2b256(spentLater), Idx: 0,
 	}]

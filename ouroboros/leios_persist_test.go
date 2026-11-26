@@ -417,6 +417,32 @@ func TestLeiosPersistenceWorkersEachGetFullDrainBudget(t *testing.T) {
 	require.Equal(t, []time.Duration{budget, budget}, waits)
 }
 
+func TestLeiosPersistenceGCStopCancelsWorkerContextSynchronously(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	o.leiosPersistGCMu.Lock()
+	o.leiosPersistGCStop = stop
+	o.leiosPersistGCCancel = cancel
+	o.leiosPersistGCDone = done
+	o.leiosPersistGCMu.Unlock()
+	o.leiosPersistGCStarted.Store(true)
+
+	gotDone, started := o.requestLeiosPersistenceGCStop()
+	require.True(t, started)
+	require.NotNil(t, gotDone)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	select {
+	case <-stop:
+	default:
+		t.Fatal("GC stop was not requested")
+	}
+}
+
 func TestLeiosPersistPauseWaitsForInFlightWrite(t *testing.T) {
 	t.Parallel()
 	o := newTestOuroborosWithLeiosDB(t)

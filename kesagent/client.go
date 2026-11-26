@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,6 +82,32 @@ var (
 	)
 )
 
+const sharedKESSlotAlreadySignedReason = "a different header was already signed for this slot"
+
+type sharedKESSlotAlreadySignedError struct {
+	err error
+}
+
+func (e sharedKESSlotAlreadySignedError) Error() string { return e.err.Error() }
+func (e sharedKESSlotAlreadySignedError) Unwrap() error { return e.err }
+
+// SharedKESSlotAlreadySigned marks the one agent refusal that is an expected
+// outcome when several producers share a signer for the same pool.
+func (sharedKESSlotAlreadySignedError) SharedKESSlotAlreadySigned() {}
+
+func newAgentRefusalError(reason string) error {
+	err := fmt.Errorf("%w: %s", ErrAgentRefused, reason)
+	if strings.Contains(reason, sharedKESSlotAlreadySignedReason) {
+		return sharedKESSlotAlreadySignedError{err: err}
+	}
+	return err
+}
+
+func isSharedKESSlotAlreadySigned(err error) bool {
+	var refusal interface{ SharedKESSlotAlreadySigned() }
+	return errors.As(err, &refusal)
+}
+
 // Config configures a Client.
 type Config struct {
 	// SocketPath is the Unix-domain service socket of a running bursa KES
@@ -107,6 +134,10 @@ type Config struct {
 	// signature itself, which subsumes both).
 	KESVKey           []byte
 	OpCertStartPeriod uint64
+	// SharedSigner says another producer for this pool uses the same agent.
+	// Its already-signed refusal is an expected slot outcome, not a failed
+	// signing request.
+	SharedSigner bool
 
 	Logger  *slog.Logger
 	Metrics *Metrics
@@ -740,9 +771,11 @@ func (c *Client) Sign(period uint64, message []byte) (_ []byte, err error) {
 		)
 	}
 	// Every failure from here on is a failed sign request, including a refused
-	// or failed connect: each request authenticates its own connection.
+	// or failed connect, except the expected already-signed outcome of a
+	// configured shared signer. Each request authenticates its own connection.
 	defer func() {
-		if err != nil {
+		if err != nil &&
+			(!c.cfg.SharedSigner || !isSharedKESSlotAlreadySigned(err)) {
 			c.cfg.Metrics.incSignFailure()
 		}
 	}()
@@ -783,7 +816,9 @@ func (c *Client) Sign(period uint64, message []byte) (_ []byte, err error) {
 		message,
 		resp,
 	); err != nil {
-		c.recordDialFailureLocked()
+		if !c.cfg.SharedSigner || !isSharedKESSlotAlreadySigned(err) {
+			c.recordDialFailureLocked()
+		}
 		return nil, err
 	}
 
@@ -821,7 +856,7 @@ func validateSignResponse(
 		)
 	}
 	if resp.Error != "" {
-		return fmt.Errorf("%w: %s", ErrAgentRefused, resp.Error)
+		return newAgentRefusalError(resp.Error)
 	}
 	if len(resp.Signature) != kes.CardanoKesSignatureSize {
 		return fmt.Errorf(

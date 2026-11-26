@@ -111,6 +111,13 @@ func DeleteBlocksAfter(
 	if tipID <= afterID {
 		return 0, nil
 	}
+	// A rollback that was interrupted before this truncate still has to
+	// tell subscribers what it undid, so the bodies its intent names are
+	// copied out of the chain first. They are copied one transaction each,
+	// not in the delete batches below, which are sized for deletes.
+	if _, err := db.RetainRollbackIntentBlocks(ctx); err != nil {
+		return 0, fmt.Errorf("keep rolled-back blocks: %w", err)
+	}
 	indexPrefix := []byte(types.BlockBlobIndexKeyPrefix)
 	for start := afterID + 1; start <= tipID; {
 		if err := ctx.Err(); err != nil {

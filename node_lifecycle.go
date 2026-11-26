@@ -125,10 +125,6 @@ type namedStop struct {
 // manager stops last.
 func (n *Node) quiesceComponentStops() []namedStop {
 	var stops []namedStop
-	stops = append(stops, namedStop{
-		name: "legacy SQL UTxO row cleanup",
-		stop: n.stopUtxoMigrationCleanup,
-	})
 	// First: a Mithril run holds network ingest, pauses chain ingest and
 	// applies blocks to the ledger about to be closed.
 	if n.mithrilCoordinator != nil {
@@ -220,12 +216,6 @@ func (n *Node) quiesceComponentStops() []namedStop {
 		stops = append(stops, namedStop{
 			name: "database lifecycle manager",
 			stop: n.dbLifecycleMgr.Stop,
-		})
-	}
-	if n.plannerStatsMgr != nil {
-		stops = append(stops, namedStop{
-			name: "planner statistics manager",
-			stop: n.plannerStatsMgr.Stop,
 		})
 	}
 	if n.indexerPlannerStatsMgr != nil {
@@ -616,26 +606,6 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 		}
 	}
 
-	if n.deferredIndexMaintenanceDone != nil {
-		select {
-		case <-n.deferredIndexMaintenanceDone:
-		case <-ctx.Done():
-			// The maintenance goroutine may still be writing the metadata
-			// store. Durable providers below close to completion whatever
-			// ctx says, so nothing later in this function reports the
-			// drain as unconfirmed on this goroutine's behalf.
-			err = errors.Join(
-				err,
-				errStorageDrainUnconfirmed,
-				fmt.Errorf(
-					"deferred-index maintenance shutdown: %w",
-					ctx.Err(),
-				),
-			)
-		}
-		n.deferredIndexMaintenanceDone = nil
-	}
-
 	// The IndexerDB reads blocks through the ledger database's blob store, so
 	// it closes first.
 	if closeErr := n.closeIndexerDatabase(); closeErr != nil {
@@ -743,6 +713,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to reopen storage: %w", err)
 	}
+	if err := n.migrateReleasedLedger(ctx, stores, deps); err != nil {
+		return fmt.Errorf("migrate the v0.94.2 ledger state: %w", err)
+	}
 	db, err := database.New(ctx, n.databaseConfig(), stores)
 	if db == nil {
 		if err != nil {
@@ -751,27 +724,11 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		return errors.New("reopen database: empty database returned")
 	}
 	n.db = db
-	dbNeedsRecovery := false
 	if err != nil {
-		if _, ok := errors.AsType[database.CommitTimestampError](err); !ok {
-			return fmt.Errorf("failed to reopen database: %w", err)
-		}
-		n.config.logger.Warn(
-			"database reinitialization error, needs recovery",
-			"error", err,
-		)
-		dbNeedsRecovery = true
+		return fmt.Errorf("failed to reopen database: %w", err)
 	}
-	if !dbNeedsRecovery {
-		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
-			return fmt.Errorf("consensus database compatibility: %w", err)
-		}
-	}
-	// A Mithril run this operation aborted skipped its index rebuild, and a
-	// restored snapshot may have been taken during one: either way the
-	// critical indexes rollback reads can be missing behind the marker.
-	if err := n.repairCriticalIndexesBeforeIngest(ctx); err != nil {
-		return err
+	if err := n.enforceConsensusDatabaseIdentity(); err != nil {
+		return fmt.Errorf("consensus database compatibility: %w", err)
 	}
 
 	cm, err := chain.NewManager(ctx, n.db, n.eventBus, n.config.promRegistry)
@@ -824,23 +781,6 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
-	// Recovery changes both the ledger tip and blob contents. Complete it
-	// before starting background maintenance that reads or prunes either store.
-	if dbNeedsRecovery {
-		if err := n.ledgerState.RecoverCommitTimestampConflict(ctx); err != nil {
-			return fmt.Errorf("failed to recover database: %w", err)
-		}
-		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
-			return fmt.Errorf("consensus database compatibility: %w", err)
-		}
-		if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
-			return err
-		}
-		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
-			return err
-		}
-	}
-
 	if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
 		return err
 	}
@@ -866,7 +806,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		)
 	}
 
-	if err := n.backfillRewardLiveStake(ctx); err != nil {
+	if err := n.checkStakeSnapshotProvenance(); err != nil {
 		return err
 	}
 
@@ -882,7 +822,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 // Startup era history preparation publishes both the epoch cache and applied tip so
 // timestamp conversion uses the persisted tip's forecast horizon.
 func (n *Node) reinitializeMidnightIndexer() error {
-	if !midnightIndexerActive(n.apiStorageMode(), n.config.midnight) {
+	if !midnightIndexerActive(n.config.storageFeatures, n.config.midnight) {
 		return nil
 	}
 	if err := n.prepareEpochCache(n.ctx); err != nil {
@@ -961,17 +901,6 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	if err := n.dbLifecycleMgr.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf(
 			"failed to restart database lifecycle manager: %w",
-			err,
-		)
-	}
-	// The database handle was replaced, so the previous manager's updater is
-	// closed; build a new one rather than restarting it, and run its startup
-	// pass now: the replacement may never have been analyzed, and the epoch
-	// trigger would leave it without statistics until the next rollover.
-	n.runPlannerStatsStartup(ctx)
-	if err := n.startPlannerStatsManager(n.ctx); err != nil { //nolint:contextcheck
-		return fmt.Errorf(
-			"failed to restart planner statistics manager: %w",
 			err,
 		)
 	}
@@ -1177,7 +1106,9 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.apiStorageMode().IsAPI() && utxorpcPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIUtxorpc, utxorpcSelection, utxorpcPort,
+	) {
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
 			utxorpcSelection.Provider, utxorpcSelection.Config,
@@ -1199,7 +1130,7 @@ func (n *Node) reinitializeAPIServers() error {
 		n.bark.ResumeDB(n.db)
 	}
 
-	if midnightServerActive(n.apiStorageMode(), n.config.midnight) {
+	if midnightServerActive(n.config.storageFeatures, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			n.midnightServerConfig(),
@@ -1221,7 +1152,9 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.apiStorageMode().IsAPI() && blockfrostPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIBlockfrost, blockfrostSelection, blockfrostPort,
+	) {
 		adapter, err := blockfrost.NewNodeAdapter(
 			n.ledgerState, n.mempool, n.indexerStore,
 		)
@@ -1249,7 +1182,9 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.apiStorageMode().IsAPI() && kupoPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIKupo, kupoSelection, kupoPort,
+	) {
 		adapter, err := kupo.NewNodeAdapter(
 			n.ledgerState, n.indexerStore,
 		)
@@ -1277,7 +1212,9 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.apiStorageMode().IsAPI() && meshPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIMesh, meshSelection, meshPort,
+	) {
 		var genesisHash string
 		if nc := n.config.cardanoNodeConfig; nc != nil {
 			genesisHash = nc.ByronGenesisHash
@@ -1294,7 +1231,7 @@ func (n *Node) reinitializeAPIServers() error {
 			mesh.ProviderDependencies{
 				Listen:             n.config.apiListenerFactory,
 				Logger:             n.config.logger,
-				LedgerState:        n.meshLedgerState(),
+				LedgerState:        n.ledgerState,
 				Database:           n.meshDatabase(),
 				Chain:              n.meshChain(),
 				Ready:              n.apiReadiness(),
@@ -1317,7 +1254,9 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if mcpPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIMcp, mcpSelection, mcpPort,
+	) {
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIMcp,
 			mcpSelection.Provider, mcpSelection.Config,
@@ -1326,6 +1265,7 @@ func (n *Node) reinitializeAPIServers() error {
 				Database:           n.apiDatabase(),
 				LedgerState:        n.ledgerState,
 				Ready:              n.apiReadiness(),
+				AddressLookup:      n.mcpAddressLookup(),
 				Mempool:            n.mempool,
 				Host:               n.config.bindAddr,
 				Network:            n.config.network,
@@ -1337,7 +1277,7 @@ func (n *Node) reinitializeAPIServers() error {
 		}
 	}
 
-	if n.apiStorageMode().IsAPI() {
+	if n.storageFeatureEnabled(plugin.StorageFeatureOffchainMetadata) {
 		fetcher, err := offchainmetadata.New(
 			n.offchainMetadataConfig(),
 		)
@@ -1348,7 +1288,8 @@ func (n *Node) reinitializeAPIServers() error {
 		if err := n.offchainMetadataFetcher.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("restarting off-chain metadata fetcher: %w", err)
 		}
-		if n.config.tokenRegistry.Enabled {
+		if n.storageFeatureEnabled(plugin.StorageFeatureCIP26) &&
+			n.config.tokenRegistry.Enabled {
 			sync, err := n.newTokenRegistrySync()
 			if err != nil {
 				return fmt.Errorf("recreate token registry sync: %w", err)
@@ -1358,13 +1299,6 @@ func (n *Node) reinitializeAPIServers() error {
 				return fmt.Errorf("restarting token registry sync: %w", err)
 			}
 		}
-		// startDeferredIndexMaintenance sets n.deferredIndexMaintenanceDone
-		// itself (nil already, since closeStorageForLiveLifecycleOp cleared
-		// it) and returns a cleanup closure Run() only uses for its
-		// startup-failure rollback stack; closeStorageForLiveLifecycleOp
-		// already waits on the channel directly, so the closure is unused
-		// here.
-		_ = n.startDeferredIndexMaintenance()
 	}
 
 	return nil
@@ -1435,7 +1369,7 @@ func (n *Node) storageSelections() internalplugins.StorageSelections {
 	return internalplugins.StorageSelections{
 		Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob],
 		Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata],
-		SplitIndexer: n.splitIndexer() ||
+		IndexerDB: n.hasIndexerDB() ||
 			(n.config.cfg != nil && n.config.cfg.ServerCoreNamespace),
 	}
 }
@@ -1460,7 +1394,6 @@ func (n *Node) storageDependencies(
 		Logger:              n.config.logger,
 		TracingEnabled:      n.config.tracing,
 		GenesisStakingEmpty: genesisStakingEmpty,
-		StatementGuard:      n.statementGuard(),
 	}, nil
 }
 
@@ -1505,9 +1438,6 @@ func (n *Node) reinitializeAndResume(ctx context.Context) error {
 			return fmt.Errorf("reinitialize %s: %w", step.name, err)
 		}
 	}
-	// The cleanup survives the restore/truncate operation and is stopped by
-	// the node's storage lifecycle before that storage can close.
-	n.startUtxoMigrationCleanup(n.ctx) //nolint:contextcheck
 	return nil
 }
 
@@ -1560,7 +1490,7 @@ func (n *Node) Snapshot(
 		stagedIndexer string
 		indexerMeta   indexerPayload
 	)
-	if n.splitIndexer() {
+	if n.hasIndexerDB() {
 		if err := n.checkIndexerSnapshotSupported(); err != nil {
 			return lifecycle.Manifest{}, err
 		}
@@ -1660,7 +1590,7 @@ func (n *Node) Restore(
 	restoreStorage := n.restoreStorageConfig()
 	validateManifest := func(m lifecycle.Manifest) error {
 		compatibilityGates := n.nodeSettingsGateValues()
-		if n.splitIndexer() {
+		if n.hasIndexerDB() {
 			compatibilityGates["indexer_layout"] = n.indexerLayout()
 		}
 		if n.config.networkMagic != 0 {
@@ -1687,7 +1617,7 @@ func (n *Node) Restore(
 		}
 		return nil
 	}
-	if n.splitIndexer() {
+	if n.hasIndexerDB() {
 		// Refuse an incompatible snapshot before pausing the node. Restore
 		// validates the manifest again before touching any staged stores.
 		manifest, err := lifecycle.PeekManifest(
@@ -2179,7 +2109,7 @@ func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
 			n.config.cardanoNodeConfig, "", n.config.network,
 		),
 	}
-	if n.splitIndexer() && n.config.cfg != nil &&
+	if n.hasIndexerDB() && n.config.cfg != nil &&
 		storageadopt.SupportsAPIAdoption(n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider) {
 		restoreStorage.AdoptLegacyAPI = func(ctx context.Context, stagingDir string) error {
 			cfg := *n.config.cfg
@@ -2439,22 +2369,6 @@ func (n *Node) Truncate(
 		tmpRuntime, err := internalplugins.OpenDatabase(
 			ctx, n.databaseConfig(), n.storageSelections(), deps,
 		)
-		// OpenDatabase can return a non-nil runtime alongside a nil error
-		// even when the underlying database.New hit a recoverable
-		// CommitTimestampError, surfacing it instead through
-		// tmpRuntime.RecoveryError() below (normal node startup wants the
-		// runtime kept open for recovery in that case). Truncate has no
-		// use for a half-consistent tmpDB, so that's treated as a hard
-		// failure here too. The defer must be registered here, before
-		// either check below, so both cases still close tmpRuntime rather
-		// than leaking its open badger/sqlite handles: an early return
-		// before this line would skip the deferred Close entirely, leaving
-		// tmpRuntime's storage locks held. reinitializeAndResume's
-		// reinitializeCoreStorage then reopens the very same data
-		// directory a moment later (this error is classified as
-		// ErrTruncateNotStarted, so nothing on disk was touched and
-		// resume is expected to succeed) — reopening storage that a
-		// leaked tmpRuntime is still holding open.
 		if tmpRuntime != nil {
 			defer tmpRuntime.Close(ctx)
 		}
@@ -2464,24 +2378,7 @@ func (n *Node) Truncate(
 				lifecycle.ErrTruncateNotStarted, err,
 			)
 		}
-		if recErr := tmpRuntime.RecoveryError(); recErr != nil {
-			return 0, fmt.Errorf(
-				"%w: open database for truncate: %w",
-				lifecycle.ErrTruncateNotStarted, recErr,
-			)
-		}
 		tmpDB := tmpRuntime.Database
-		// The truncate's rollback reads the critical indexes a Mithril run
-		// this operation aborted left dropped; without them it scans the
-		// utxo table once per rolled-back transaction.
-		if err := repairPendingCriticalIndexes(
-			ctx, tmpDB, n.config.logger,
-		); err != nil {
-			return 0, fmt.Errorf(
-				"%w: %w", lifecycle.ErrTruncateNotStarted, err,
-			)
-		}
-
 		setOpts, closeSet, err := dblifecycle.TruncateOptions(
 			n.config.dataDir,
 		)
@@ -2509,8 +2406,6 @@ func (n *Node) Truncate(
 				tmpDB,
 				models.Block{},
 				0,
-				n.config.delegatorInactivityEnabled,
-				n.config.delegatorInactivity,
 				setOpts...,
 			))
 		}
@@ -2540,8 +2435,6 @@ func (n *Node) Truncate(
 			tmpDB,
 			block,
 			0,
-			n.config.delegatorInactivityEnabled,
-			n.config.delegatorInactivity,
 			setOpts...,
 		))
 	}()

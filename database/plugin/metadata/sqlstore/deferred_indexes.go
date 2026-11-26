@@ -27,18 +27,11 @@ import (
 )
 
 var (
-	_ metadata.DeferredIndexManager                      = (*Store)(nil)
-	_ metadata.ContextDeferredIndexDropper               = (*Store)(nil)
-	_ metadata.LazyDeferredIndexDropper                  = (*Store)(nil)
-	_ metadata.CatchUpIndexManager                       = (*Store)(nil)
-	_ metadata.CatchUpPragmaTuner                        = (*Store)(nil)
-	_ metadata.MissingCriticalDeferredIndexLister        = (*Store)(nil)
-	_ metadata.ContextMissingCriticalDeferredIndexLister = (*Store)(nil)
-	_ metadata.MissingDeferredIndexLister                = (*Store)(nil)
-	_ metadata.ContextDeferredIndexBuilder               = (*Store)(nil)
-	_ metadata.ContextCriticalDeferredIndexBuilder       = (*Store)(nil)
-	_ metadata.DeferredIndexProgressBuilder              = (*Store)(nil)
-	_ metadata.CriticalDeferredIndexProgressBuilder      = (*Store)(nil)
+	_ metadata.DeferredIndexManager         = (*Store)(nil)
+	_ metadata.ContextDeferredIndexDropper  = (*Store)(nil)
+	_ metadata.MissingDeferredIndexLister   = (*Store)(nil)
+	_ metadata.ContextDeferredIndexBuilder  = (*Store)(nil)
+	_ metadata.DeferredIndexProgressBuilder = (*Store)(nil)
 )
 
 // withDeferredIndexWriteContext runs fn in one write transaction, with every
@@ -79,29 +72,6 @@ func (s *Store) DropDeferredIndexes() error {
 // DropDeferredIndexesContext is DropDeferredIndexes bound to ctx.
 func (s *Store) DropDeferredIndexesContext(ctx context.Context) error {
 	return s.dropDeferredIndexes(ctx, deferred.Manifest)
-}
-
-// DropLazyDeferredIndexesContext records the recovery marker and drops only
-// the non-critical manifest entries, in one transaction.
-func (s *Store) DropLazyDeferredIndexesContext(ctx context.Context) error {
-	return s.dropDeferredIndexes(ctx, deferred.LazyManifest())
-}
-
-// DropCatchUpIndexesContext records the recovery marker and drops the lazy
-// and catch-up droppable manifest entries, in one transaction.
-func (s *Store) DropCatchUpIndexesContext(ctx context.Context) error {
-	return s.dropDeferredIndexes(
-		ctx,
-		append(deferred.LazyManifest(), deferred.CatchUpDroppableManifest()...),
-	)
-}
-
-// BuildCatchUpIndexesContext rebuilds any missing catch-up droppable entry and
-// leaves the recovery marker for the full rebuild to clear.
-func (s *Store) BuildCatchUpIndexesContext(ctx context.Context) error {
-	return s.buildDeferredIndexes(
-		ctx, deferred.CatchUpDroppableManifest(), false,
-	)
 }
 
 func (s *Store) dropDeferredIndexes(
@@ -170,33 +140,6 @@ func isMySQLForeignKeyIndexError(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "1553") &&
 		strings.Contains(message, "foreign key constraint")
-}
-
-// BuildCriticalDeferredIndexes restores the indexes needed before API and
-// rollback traffic begins. The recovery marker stays set until the full
-// manifest is restored.
-func (s *Store) BuildCriticalDeferredIndexes() error {
-	return s.BuildCriticalDeferredIndexesContext(context.Background())
-}
-
-// BuildCriticalDeferredIndexesContext is BuildCriticalDeferredIndexes bound
-// to ctx for cancellable startup repair.
-func (s *Store) BuildCriticalDeferredIndexesContext(
-	ctx context.Context,
-) error {
-	return s.buildDeferredIndexes(ctx, deferred.CriticalManifest(), false)
-}
-
-// BuildCriticalDeferredIndexesContextWithProgress is
-// BuildCriticalDeferredIndexesContext with per-index progress callbacks.
-func (s *Store) BuildCriticalDeferredIndexesContextWithProgress(
-	ctx context.Context,
-	before func(string),
-	after func(string, time.Duration),
-) error {
-	return s.buildDeferredIndexesWithProgress(
-		ctx, deferred.CriticalManifest(), false, before, after,
-	)
 }
 
 // BuildDeferredIndexes restores the full manifest and clears the durable
@@ -513,40 +456,6 @@ WHERE type = 'index' AND name = ? LIMIT 1`
 		return false, nil
 	}
 	return found != 0, err
-}
-
-// MissingCriticalDeferredIndexes reports the Critical=true manifest entries
-// absent from the schema, in manifest order, using the read connection and no
-// DDL. Callers use it to name the indexes a rebuild is about to build before
-// the rebuild starts.
-func (s *Store) MissingCriticalDeferredIndexes() ([]string, error) {
-	return s.MissingCriticalDeferredIndexesContext(context.Background())
-}
-
-// MissingCriticalDeferredIndexesContext reports absent critical entries using
-// the caller's cancellation context and no DDL.
-func (s *Store) MissingCriticalDeferredIndexesContext(
-	ctx context.Context,
-) ([]string, error) {
-	if err := s.ensureReady(); err != nil {
-		return nil, err
-	}
-	db := s.instrumentedQueryer(s.readDB)
-	var missing []string
-	for _, index := range deferred.CriticalManifest() {
-		exists, err := s.deferredIndexExists(ctx, db, index)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"check deferred index %s: %w",
-				index.Name,
-				err,
-			)
-		}
-		if !exists {
-			missing = append(missing, index.Name)
-		}
-	}
-	return missing, nil
 }
 
 // MissingDeferredIndexes reports every manifest entry absent from the schema,

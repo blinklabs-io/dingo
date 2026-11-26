@@ -120,9 +120,6 @@ func (n *Node) ledgerStateConfigBase() ledger.LedgerStateConfig {
 		// Verify validated blocks' witness signatures ahead of the apply
 		// loop. Not consensus-affecting; on by default.
 		LedgerValidateAheadEnabled: n.config.ledgerValidateAheadEnabled,
-		// Core-mode batched metadata writes for blocks that are not
-		// validated. Not consensus-affecting; off by default.
-		ApplyRowBatchingEnabled: n.config.ledgerApplyRowBatchingEnabled,
 		// Start blockfetch at one range of queued headers while far from
 		// the peer tip. Not consensus-affecting; off by default.
 		BlockfetchLowWatermarkEnabled: n.config.blockfetchLowWatermarkEnabled,
@@ -278,6 +275,9 @@ func (n *Node) ledgerStateConfigBase() ledger.LedgerStateConfig {
 			start ocommon.Point,
 			end ocommon.Point,
 		) (uint64, error) {
+			if override := n.blockfetchRangeOverride.Load(); override != nil {
+				return (*override)(connId, start, end)
+			}
 			o := n.ouroboros()
 			if o == nil {
 				return 0, errOuroborosNotStarted

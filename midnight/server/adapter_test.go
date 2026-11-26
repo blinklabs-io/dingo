@@ -66,19 +66,13 @@ func TestBlockByNumberWithBoundaryBlockStorageOffset(t *testing.T) {
 	for i, number := range []uint64{0, 0, 1, 2} {
 		hash := make([]byte, 32)
 		hash[0] = byte(i + 1)
-		require.NoError(
-			t,
-			db.BlockCreate(
-				models.Block{
-					ID:     uint64(i) + 1,
-					Number: number,
-					Slot:   uint64(i) * 20,
-					Hash:   hash,
-					Cbor:   []byte{byte(i)},
-				},
-				nil,
-			),
-		)
+		createBlock(t, db, models.Block{
+			ID:     uint64(i) + 1,
+			Number: number,
+			Slot:   uint64(i) * 20,
+			Hash:   hash,
+			Cbor:   []byte{byte(i)},
+		})
 	}
 	block, err := server.NewDatabase(db).BlockByNumber(context.Background(), 2)
 	require.NoError(t, err)

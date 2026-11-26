@@ -167,3 +167,14 @@ func TestMithrilSyncAppliesProfilingRates(t *testing.T) {
 	require.Equal(t, new(5), atRun.mutex)
 	require.Equal(t, new(1000), atRun.block)
 }
+
+// A shutdown signal that cancels startup migration is a clean stop, not a
+// startup failure. Not t.Parallel: commonRun replaces the slog default.
+func TestCommonRunReportsShutdownDuringStartup(t *testing.T) {
+	origDefault := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(origDefault) })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := commonRun(ctx, &config.Config{})
+	require.ErrorIs(t, err, errShutdownRequested)
+}

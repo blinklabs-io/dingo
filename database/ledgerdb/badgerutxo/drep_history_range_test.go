@@ -31,7 +31,7 @@ func TestRowsInRangeSeeksIntoTheDRepHistory(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 	bootstrap(t, s, point(1, 0x01))
 	const slots = 2000
-	require.NoError(t, s.LoadDRepHistory(false, func(
+	require.NoError(t, s.LoadDRepHistory(func(
 		put func(k, v []byte) error,
 	) error {
 		for slot := uint64(1); slot <= slots; slot++ {

@@ -1973,33 +1973,6 @@ func (s *Store) getUtxoRefsBySlot(
 	return ret, nil
 }
 
-func (s *Store) GetUtxosDeletedBeforeSlot(
-	slot uint64,
-	limit int,
-	txn types.Txn,
-) ([]models.Utxo, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, err
-	}
-	sqlSlot, err := checkedInt64(slot)
-	if err != nil {
-		return nil, err
-	}
-	sqlLimit := int64(-1)
-	if limit > 0 {
-		sqlLimit = int64(limit)
-	}
-	return s.queryUtxoModels(
-		ctx, db, `-- name: GetUtxosDeletedBeforeSlot :many
-SELECT `+utxoRowColumns+`
-FROM utxo
-WHERE utxo.deleted_slot > 0 AND utxo.deleted_slot <= ?
-LIMIT ?`,
-		sqlSlot, sqlLimit,
-	)
-}
-
 // GetUtxosByAddress runs one OR-joined query per chunk of patterns -- a
 // single statement covering every pattern can exceed the dialect's
 // bound-parameter limit (e.g. SQLite's 999) or its OR-expression tree depth
@@ -2962,33 +2935,6 @@ const fillUtxoAddressOrderByTransactionSQL = `-- name: FillUtxoAddressOrderByTra
 UPDATE utxo_address` + utxoAddressOrderSet + `
 WHERE utxo_id IN (SELECT id FROM utxo WHERE tx_id = ?)`
 
-// fillUtxoAddressOrderByTransactions is fillUtxoAddressOrderByTransaction for
-// many transactions, in statements of a bounded size.
-func fillUtxoAddressOrderByTransactions(
-	ctx context.Context,
-	db Execer,
-	transactionIDs []int64,
-) error {
-	const chunk = 500
-	for start := 0; start < len(transactionIDs); start += chunk {
-		ids := transactionIDs[start:min(start+chunk, len(transactionIDs))]
-		args := make([]any, len(ids))
-		for i, id := range ids {
-			args[i] = id
-		}
-		if _, err := db.ExecContext(ctx,
-			"-- name: FillUtxoAddressOrderByTransactions :exec\n"+
-				"UPDATE utxo_address"+utxoAddressOrderSet+
-				"\nWHERE utxo_id IN (SELECT id FROM utxo WHERE tx_id IN ("+
-				strings.TrimSuffix(strings.Repeat("?, ", len(ids)), ", ")+"))",
-			args...,
-		); err != nil {
-			return fmt.Errorf("fill UTxO address order: %w", err)
-		}
-	}
-	return nil
-}
-
 func persistUtxoAddress(
 	ctx context.Context,
 	db queryer,
@@ -3160,8 +3106,8 @@ func iterateLiveUtxos(
 
 // IterateUtxosAsOf invokes fn once for each UTxO row live as of atSlot --
 // added at or before atSlot, and either never spent or spent strictly
-// after atSlot -- matching UtxosByRefsAsOf's identical predicate for a
-// bounded ref list, here applied to the whole table. See the
+// after atSlot -- the predicate GetUtxosByRefsAsOf applies to a bounded ref
+// list, here applied to the whole table. See the
 // MetadataStore interface doc comment for why this has no indexed
 // shortcut, unlike IterateLiveUtxos' deleted_slot = 0 filter.
 func (s *Store) IterateUtxosAsOf(

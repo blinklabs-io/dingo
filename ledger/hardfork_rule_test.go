@@ -194,7 +194,7 @@ func TestApplyIntraEraHardForkRule_Pv10RebuildsDRepDelegators(t *testing.T) {
 		)
 	}
 
-	require.NoError(t, db.Metadata().ImportDrep(
+	require.NoError(t, fxImporter(t, db).ImportDrep(
 		&models.Drep{
 			CredentialTag: 0,
 			Credential:    drepOne,
@@ -205,14 +205,10 @@ func TestApplyIntraEraHardForkRule_Pv10RebuildsDRepDelegators(t *testing.T) {
 				Key: stakeOne,
 			}},
 		},
-		&models.RegistrationDrep{
-			CredentialTag:  0,
-			DrepCredential: drepOne,
-			AddedSlot:      1,
-		},
+		0,
 		nil,
 	))
-	require.NoError(t, db.Metadata().ImportDrep(
+	require.NoError(t, fxImporter(t, db).ImportDrep(
 		&models.Drep{
 			CredentialTag: 0,
 			Credential:    drepTwo,
@@ -223,28 +219,20 @@ func TestApplyIntraEraHardForkRule_Pv10RebuildsDRepDelegators(t *testing.T) {
 				Key: stakeOne,
 			}},
 		},
-		&models.RegistrationDrep{
-			CredentialTag:  0,
-			DrepCredential: drepTwo,
-			AddedSlot:      1,
-		},
+		0,
 		nil,
 	))
-	require.NoError(t, db.Metadata().ImportDrep(
+	require.NoError(t, fxImporter(t, db).ImportDrep(
 		&models.Drep{
 			CredentialTag: 0,
 			Credential:    drepThree,
 			AddedSlot:     22,
 			Active:        true,
 		},
-		&models.RegistrationDrep{
-			CredentialTag:  0,
-			DrepCredential: drepThree,
-			AddedSlot:      22,
-		},
+		0,
 		nil,
 	))
-	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+	require.NoError(t, fxImporter(t, db).ImportAccount(&models.Account{
 		StakingKey:    stakeOne,
 		CredentialTag: 0,
 		Drep:          drepTwo,
@@ -253,7 +241,7 @@ func TestApplyIntraEraHardForkRule_Pv10RebuildsDRepDelegators(t *testing.T) {
 		CreatedSlot:   1,
 		Active:        true,
 	}, nil))
-	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+	require.NoError(t, fxImporter(t, db).ImportAccount(&models.Account{
 		StakingKey:    stakeTwo,
 		CredentialTag: 0,
 		Drep:          drepThree,
@@ -377,14 +365,13 @@ func newTestLSForHardForkRule(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	attachTestLiveSet(t, ls)
+	fxAttachLedgerDB(t, ls)
 	return ls
 }
 
-// seedByronAvvmFixtures inserts two live Byron UTxOs — one at a redeem
-// (AVVM) address, one at a pubkey address — through the metadata + blob
-// stores so the iterator's loadCbor path resolves a real address on
-// each row. Returns the two synthetic 32-byte tx ids.
+// seedByronAvvmFixtures makes two Byron UTxOs live in db's LedgerDB set,
+// one at a redeem (AVVM) address and one at a pubkey address, and returns
+// their synthetic 32-byte tx ids.
 func seedByronAvvmFixtures(
 	t *testing.T,
 	db *database.Database,
@@ -407,9 +394,8 @@ func seedByronAvvmFixtures(
 	return avvmTxId, pubkeyTxId
 }
 
-// seedByronUtxo inserts a Utxo metadata row plus a raw-CBOR blob entry
-// for a Byron output at addr. Returns the synthetic tx id (txIdSeed
-// repeated 32×) so callers can look it up afterwards.
+// seedByronUtxo makes a Byron output at addr live in db's LedgerDB set and
+// returns its synthetic tx id (txIdSeed repeated 32×).
 func seedByronUtxo(
 	t *testing.T,
 	db *database.Database,
@@ -452,19 +438,7 @@ func seedByronUtxoAt(
 	require.NoError(t, err)
 
 	txId := bytes.Repeat([]byte{txIdSeed}, 32)
-	addressBytes, err := addr.Bytes()
-	require.NoError(t, err)
-	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:      txId,
-		OutputIdx: outputIdx,
-		AddedSlot: 100,
-		Address:   addressBytes,
-	}))
-	blob := db.Blob()
-	require.NotNil(t, blob)
-	require.NoError(t, blob.SetUtxo(txn.Blob(), txId, outputIdx, cborBytes))
-	require.NoError(t, txn.Commit())
+	fxSeedOutput(t, db, txId, outputIdx, 100, cborBytes)
 	return txId
 }
 
@@ -484,28 +458,21 @@ func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
 		nil, 3, boundarySlot, 208,
 	))
 
-	_, err := db.UtxoByRef(context.Background(), avvmTxId, 0, nil)
+	_, err := ls.UtxoByRef(avvmTxId, 0)
 	assert.ErrorIs(t, err, database.ErrUtxoNotFound,
-		"AVVM redeem UTxO must be marked deleted by pv3")
+		"AVVM redeem UTxO must be removed by pv3")
 
-	stillLive, err := db.UtxoByRefIncludingSpent(
-		context.Background(),
-		avvmTxId,
-		0,
-		nil,
+	// The removal is journalled at the boundary, so a rollback across the
+	// boundary restores the AVVM output.
+	requireSpentAt(
+		t, ls, avvmTxId, 0,
+		ocommon.Point{Slot: boundarySlot - 1},
+		ocommon.Point{Slot: boundarySlot},
 	)
-	require.NoError(t, err)
-	require.NotNil(t, stillLive)
-	assert.Equal(t, boundarySlot, stillLive.DeletedSlot,
-		"DeletedSlot must equal the boundary slot so a rollback "+
-			"across the boundary correctly un-deletes via "+
-			"SetUtxosNotDeletedAfterSlot")
 
-	pubkey, err := db.UtxoByRef(context.Background(), pubkeyTxId, 0, nil)
+	pubkey, err := ls.UtxoByRef(pubkeyTxId, 0)
 	require.NoError(t, err)
-	require.NotNil(t, pubkey)
-	assert.Equal(t, uint64(0), pubkey.DeletedSlot,
-		"non-AVVM Byron UTxO must survive the pv3 rule")
+	require.NotNil(t, pubkey, "non-AVVM Byron UTxO must survive the pv3 rule")
 }
 
 func TestApplyIntraEraHardForkRule_Pv3_CreditsAvvmToReserves(t *testing.T) {
@@ -536,9 +503,9 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsAvvmToReserves(t *testing.T) {
 		"reserves plus live AVVM value must be conserved when AVVM is removed")
 	assert.Equal(t, boundarySlot, state.Slot)
 
-	_, err = db.UtxoByRef(context.Background(), avvmTxId, 0, nil)
+	_, err = ls.UtxoByRef(avvmTxId, 0)
 	assert.ErrorIs(t, err, database.ErrUtxoNotFound)
-	pubkey, err := db.UtxoByRef(context.Background(), pubkeyTxId, 0, nil)
+	pubkey, err := ls.UtxoByRef(pubkeyTxId, 0)
 	require.NoError(t, err)
 	assert.NotNil(t, pubkey)
 
@@ -580,9 +547,9 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsOnlyAvvmValue(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(1), uint64(state.Reserves))
-	_, err = db.UtxoByRef(context.Background(), pubkeyTxID, 0, nil)
+	_, err = ls.UtxoByRef(pubkeyTxID, 0)
 	require.NoError(t, err)
-	_, err = db.UtxoByRef(context.Background(), avvmTxID, 0, nil)
+	_, err = ls.UtxoByRef(avvmTxID, 0)
 	assert.ErrorIs(t, err, database.ErrUtxoNotFound)
 }
 
@@ -606,7 +573,7 @@ func TestApplyIntraEraHardForkRule_Pv3_RollbackRestoresReserveAndAvvm(
 	assert.Equal(t, uint64(7_000), uint64(state.Treasury))
 	assert.Equal(t, uint64(5_000), uint64(state.Reserves))
 	assert.Equal(t, uint64(100), state.Slot)
-	_, err = db.UtxoByRef(context.Background(), avvmTxID, 0, nil)
+	_, err = ls.UtxoByRef(avvmTxID, 0)
 	require.NoError(t, err)
 }
 
@@ -631,18 +598,9 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		})
 		require.NoError(t, err)
 		txID := bytes.Repeat([]byte{0xAA}, 32)
-		seedTxn := db.Transaction(context.Background(), true)
 		for i := range uint32(outputs) {
-			require.NoError(t, db.CreateUtxo(
-				context.Background(), seedTxn, &models.Utxo{
-					TxId: txID, OutputIdx: i, AddedSlot: 100,
-				},
-			))
-			require.NoError(t, db.Blob().SetUtxo(
-				seedTxn.Blob(), txID, i, outputCbor,
-			))
+			fxSeedOutput(t, db, txID, i, 100, outputCbor)
 		}
-		require.NoError(t, seedTxn.Commit())
 		require.NoError(
 			t,
 			seedDB(t, db).SetNetworkState(7_000, 5_000, 100, nil),
@@ -652,9 +610,7 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		err = ls.applyIntraEraHardForkRule(context.Background(), nil, 3, 200, 1)
 		require.ErrorContains(t, err, "AVVM lovelace total overflows uint64")
 		for i := range uint32(outputs) {
-			_, lookupErr := db.UtxoByRef(
-				context.Background(), txID, i, nil,
-			)
+			_, lookupErr := ls.UtxoByRef(txID, i)
 			require.NoError(t, lookupErr)
 		}
 		state, stateErr := seedDB(t, db).GetNetworkState(nil)
@@ -679,7 +635,7 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		ls := newTestLSForHardForkRule(t, db)
 		err = ls.applyIntraEraHardForkRule(context.Background(), nil, 3, 200, 1)
 		require.ErrorContains(t, err, "AVVM reserve credit overflows uint64")
-		_, lookupErr := db.UtxoByRef(context.Background(), txID, 0, nil)
+		_, lookupErr := ls.UtxoByRef(txID, 0)
 		require.NoError(t, lookupErr)
 		state, stateErr := seedDB(t, db).GetNetworkState(nil)
 		require.NoError(t, stateErr)
@@ -701,7 +657,7 @@ func TestApplyIntraEraHardForkRule_NonPv3_PreservesAvvm(t *testing.T) {
 	ls := newTestLSForHardForkRule(t, db)
 	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(), nil, 4, 1234, 100))
 
-	avvm, err := db.UtxoByRef(context.Background(), avvmTxId, 0, nil)
+	avvm, err := ls.UtxoByRef(avvmTxId, 0)
 	require.NoError(t, err)
 	assert.NotNil(t, avvm,
 		"non-pv3 dispatch must not touch AVVM UTxOs")

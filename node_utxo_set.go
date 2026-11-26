@@ -27,11 +27,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/nodestorage"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
-
-var cleanupMigratedUtxoRows = nodestorage.CleanupMigratedUtxoRows
 
 // openUtxoSet opens the live UTxO set, which holds the UTxO set and the ledger
 // state. An in-memory node uses a temporary directory. It stays open across a live
@@ -40,14 +39,9 @@ func (n *Node) openUtxoSet() error {
 	if n.utxoSet != nil {
 		return nil
 	}
-	set, tempDir, err := nodestorage.OpenUtxoSet(nodestorage.UtxoSetConfig{
-		DataDir:             n.config.dataDir,
-		Logger:              n.config.logger,
-		Registerer:          n.config.promRegistry,
-		CardanoNodeConfig:   n.config.cardanoNodeConfig,
-		RetainRewardRecords: n.splitIndexer(),
-		CheckpointKeep:      n.config.ledgerUtxoCheckpointKeep,
-	})
+	cfg := n.utxoSetConfig()
+	cfg.Registerer = n.config.promRegistry
+	set, tempDir, err := nodestorage.OpenUtxoSet(cfg)
 	if err != nil {
 		return err
 	}
@@ -62,105 +56,63 @@ func (n *Node) openUtxoSet() error {
 	return nil
 }
 
-// reconcileUtxoSet makes the live UTxO set equal to the ledger's live set,
-// rolling the ledger back to the set's tip when the set trails it, and drains
-// the graduated ledger-state families. It runs after database recovery and
-// before the ledger starts applying blocks.
-func (n *Node) reconcileUtxoSet(ctx context.Context) error {
-	r := nodestorage.Reconcile{
-		DB:                         n.db,
+func (n *Node) utxoSetConfig() nodestorage.UtxoSetConfig {
+	return nodestorage.UtxoSetConfig{
+		DataDir:             n.config.dataDir,
+		Logger:              n.config.logger,
+		CardanoNodeConfig:   n.config.cardanoNodeConfig,
+		RetainRewardRecords: n.hasIndexerDB(),
+		CheckpointKeep:      n.config.ledgerUtxoCheckpointKeep,
+	}
+}
+
+// migrateReleasedLedger moves a v0.94.2 database's ledger state out of its
+// metadata store before the ledger's database opens over the resolved stores.
+func (n *Node) migrateReleasedLedger(
+	ctx context.Context,
+	stores database.Stores,
+	deps internalplugins.StorageDependencies,
+) error {
+	m := n.releasedMigration()
+	m.Blob = stores.Blob
+	m.Immutable = stores.Immutable
+	m.OpenMetadata = internalplugins.ReleasedMetadataOpener(
+		n.storageSelections(), deps,
+	)
+	_, err := m.Run(ctx)
+	return err
+}
+
+func (n *Node) releasedMigration() nodestorage.ReleasedMigration {
+	return nodestorage.ReleasedMigration{
+		Config:                     n.databaseConfig(),
+		UtxoSet:                    n.utxoSetConfig(),
 		Set:                        n.utxoSet,
-		DataDir:                    n.config.dataDir,
 		Logger:                     n.config.logger,
-		CardanoNodeConfig:          n.config.cardanoNodeConfig,
-		FinishImport:               n.finishPendingImport,
-		Publish:                    n.setDrainedFamilies,
-		Resume:                     n.ledgerState.ResumeUtxoSetFrom,
-		ResolveRewardInputs:        n.ledgerState.ResolvePendingRewardStakeInputs,
 		RewindBlocks:               n.shelleySecurityParam(),
 		DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
 		DelegatorInactivity:        n.config.delegatorInactivity,
-		DeferUtxoRowCleanup:        true,
+	}
+}
+
+// reconcileUtxoSet makes the live UTxO set equal to the ledger's live set,
+// rolling the ledger back to the set's tip when the set trails it. It runs
+// after database recovery and
+// before the ledger starts applying blocks.
+func (n *Node) reconcileUtxoSet(ctx context.Context) error {
+	r := nodestorage.Reconcile{
+		DB:                n.db,
+		Set:               n.utxoSet,
+		Logger:            n.config.logger,
+		CardanoNodeConfig: n.config.cardanoNodeConfig,
+		FinishImport:      n.finishPendingImport,
+		Resume:            n.ledgerState.ResumeUtxoSetFrom,
 		Reconciled: func(ctx context.Context) error {
 			n.utxoSetReconciled = true
-			if err := n.backfillRewardLiveStake(ctx); err != nil {
-				return fmt.Errorf(
-					"failed to backfill reward live stake: %w", err,
-				)
-			}
-			return nil
+			return n.checkStakeSnapshotProvenance()
 		},
 	}
-	if n.statementGuard() != nil {
-		r.Guard = n.drainGuard
-	}
 	return r.Run(ctx)
-}
-
-// startInitialUtxoMigrationCleanup serializes the startup registration with
-// live restore and truncate. Those operations can become reachable before
-// Run finishes starting every service; whichever takes the lifecycle gate
-// first either registers the worker before quiesce or starts it against the
-// replacement storage after reinitialization.
-func (n *Node) startInitialUtxoMigrationCleanup(
-	ctx context.Context,
-) func() {
-	n.liveLifecycleMu.Lock()
-	defer n.liveLifecycleMu.Unlock()
-	return n.startUtxoMigrationCleanup(ctx)
-}
-
-// startUtxoMigrationCleanup removes legacy SQL UTxO rows after the live set
-// has become authoritative and the rest of node startup has completed. The
-// returned stop joins the worker before storage can close.
-func (n *Node) startUtxoMigrationCleanup(parent context.Context) func() {
-	n.utxoMigrationCleanupMu.Lock()
-	if n.utxoMigrationCleanupDone != nil {
-		n.utxoMigrationCleanupMu.Unlock()
-		return func() { _ = n.stopUtxoMigrationCleanup() }
-	}
-	ctx, cancel := context.WithCancel(parent)
-	done := make(chan struct{})
-	n.utxoMigrationCleanupCancel = cancel
-	n.utxoMigrationCleanupDone = done
-	db := n.db
-	set := n.utxoSet
-	n.utxoMigrationCleanupMu.Unlock()
-
-	go func() {
-		defer close(done)
-		err := cleanupMigratedUtxoRows(
-			ctx, db, set, n.config.logger,
-		)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			n.config.logger.Error(
-				"legacy SQL UTxO row cleanup failed",
-				"error", err,
-			)
-		}
-	}()
-	return func() { _ = n.stopUtxoMigrationCleanup() }
-}
-
-func (n *Node) stopUtxoMigrationCleanup() error {
-	n.utxoMigrationCleanupMu.Lock()
-	cancel := n.utxoMigrationCleanupCancel
-	done := n.utxoMigrationCleanupDone
-	n.utxoMigrationCleanupMu.Unlock()
-	if done == nil {
-		return nil
-	}
-	if cancel != nil {
-		cancel()
-	}
-	<-done
-	n.utxoMigrationCleanupMu.Lock()
-	if n.utxoMigrationCleanupDone == done {
-		n.utxoMigrationCleanupCancel = nil
-		n.utxoMigrationCleanupDone = nil
-	}
-	n.utxoMigrationCleanupMu.Unlock()
-	return nil
 }
 
 // utxoSetBackuper returns the live UTxO set for a snapshot, nil when the node
@@ -436,11 +388,11 @@ func (n *Node) resumeLedgerReimport(ctx context.Context) (bool, error) {
 		n.finishLedgerReimport == nil {
 		return false, nil
 	}
-	status, err := n.db.GetSyncState("sync_status", nil)
+	status, err := n.db.GetChainState(database.SyncStatusKey, nil)
 	if err != nil {
 		return false, fmt.Errorf("read sync status: %w", err)
 	}
-	reimport, err := n.db.GetSyncState(database.LedgerReimportSyncKey, nil)
+	reimport, err := n.db.GetChainState(database.LedgerReimportSyncKey, nil)
 	if err != nil {
 		return false, fmt.Errorf("read re-import mark: %w", err)
 	}
@@ -462,7 +414,7 @@ func (n *Node) resumeLedgerReimport(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, fmt.Errorf("read live UTxO set tip: %w", err)
 	}
-	swapped, err := n.db.GetSyncState(
+	swapped, err := n.db.GetChainState(
 		database.LedgerReimportSwappedSyncKey,
 		nil,
 	)

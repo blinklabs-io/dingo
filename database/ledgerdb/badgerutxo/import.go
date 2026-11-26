@@ -184,6 +184,12 @@ func (s *Store) importOutputsHeld(point ocommon.Point) (bool, error) {
 	return held, err
 }
 
+// LoadMissingFamiliesEmpty marks every family the store has not loaded as
+// loaded with no rows, for a set that starts empty.
+func (s *Store) LoadMissingFamiliesEmpty() error {
+	return s.loadNoRows(true)
+}
+
 // loadNoRows marks every family loaded with the rows it holds, for a set
 // whose rows an import writes itself. With missingOnly it leaves a family
 // already loaded as it is.
@@ -217,8 +223,13 @@ func (s *Store) loadNoRows(missingOnly bool) error {
 			return s.LoadAccountInactivityActivation(0, 0, nil)
 		}},
 		{inactivityKey, func() error { return s.LoadInactivity(noneSlots) }},
-		{drepsKey, func() error { return s.LoadDrepState(none) }},
-		{drepHistoryLoadedKey, func() error { return s.LoadDRepHistory(false, none) }},
+		{drepsKey, func() error {
+			// A loaded DRep state carries its dormancy counter.
+			return s.LoadDrepState(func(put func(k, v []byte) error) error {
+				return put(DormancyKey, make([]byte, 8))
+			})
+		}},
+		{drepHistoryLoadedKey, func() error { return s.LoadDRepHistory(none) }},
 		{poolsKey, func() error { return s.LoadPools(none) }},
 		{poolHistoryKey, func() error { return s.LoadPoolHistory(none) }},
 		{registrationHistoryKey, func() error { return s.LoadRegistrationHistory(none) }},
@@ -226,14 +237,15 @@ func (s *Store) loadNoRows(missingOnly bool) error {
 		{witnessSlotsKey, func() error { return s.LoadWitnessSlots(none) }},
 		{closureUtxoKey, func() error { return s.LoadClosureUtxoEffects(none) }},
 		{delegationsKey, func() error { return s.LoadDelegations(none) }},
+		{txIndexKey, func() error { return s.LoadTxIndex(none) }},
 		{genesisMIRKey, func() error { return s.LoadGenesisMIR(none) }},
 		{rewardOutputsKey, func() error { return s.LoadRewardOutputs(none) }},
 		{opCertsKey, func() error { return s.LoadOpCerts(none) }},
 		{rewardBlocksKey, func() error { return s.LoadRewardBlocks(none) }},
-		{importedBlocksKey, func() error { return s.LoadImportedBlocks(false, noneSlots) }},
+		{importedBlocksKey, func() error { return s.LoadImportedBlocks(noneSlots) }},
 		{rewardRecordsKey, func() error {
 			return s.LoadRewardRecords(
-				false, func(func(RewardRecord) error) error { return nil },
+				func(func(RewardRecord) error) error { return nil },
 			)
 		}},
 		{rewardInputsKey, func() error { return s.LoadRewardInputs(noneSlots) }},

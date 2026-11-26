@@ -83,7 +83,11 @@ func TestConsumedInputRecoveryReadsOnlySpendState(t *testing.T) {
 				}
 			}
 			t.Run(name, func(t *testing.T) {
-				db := openTestDB(t)
+				// Consumed-input recovery runs where transactions are
+				// written, which is an IndexerDB; its boundary is a
+				// metadata read. The seeded output has no address, which
+				// only an API-mode store requires.
+				db := openTestDBWithStorageMode(t, "")
 				db.config.StrictUtxoValidation = true
 				hash := bytes.Repeat([]byte{0x71}, 32)
 				input, err := mockledger.NewSimpleTransactionInput(hash, 0)
@@ -140,7 +144,7 @@ func TestConsumedInputRecoveryReadsOnlySpendState(t *testing.T) {
 func TestConsumedInputRecoveryReadsBoundaryOncePerCall(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 	db.config.StrictUtxoValidation = false
 	counter := &recoveryReadCounter{MetadataStore: db.metadata}
 	db.metadata = counter

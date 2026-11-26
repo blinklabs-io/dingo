@@ -25,8 +25,8 @@ import (
 
 // The account lookups and lists answer from the LedgerDB set with the
 // metadata store's reads hidden, and a predefined DRep, which has no set key,
-// is refused as unserved rather than read from the emptied table.
-func TestAccountReadsUseLoadedSetAfterDrain(t *testing.T) {
+// is refused as unserved rather than read as empty.
+func TestAccountReadsServeFromTheSet(t *testing.T) {
 	t.Parallel()
 	h := newLiveStakeHarnessWithReads(t, false, "set")
 	ldb := h.scenario.LedgerDB()
@@ -63,7 +63,7 @@ func TestAccountReadsUseLoadedSetAfterDrain(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, delegators)
 	_, err = ldb.GetDRepDelegators(ctx, 2, nil, nil)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved, "predefined DRep has no set key")
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved, "predefined DRep has no set key")
 	hide(false)
 	require.Zero(t, reached(), "account reads reached the metadata store")
 }

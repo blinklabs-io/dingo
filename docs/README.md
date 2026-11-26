@@ -15,7 +15,8 @@ current branch.
 | --- | --- |
 | How do I decode or enable block producer version signalling? | [CIP-0203 payload](cip-0203.md) |
 | How do I build, configure, or run Dingo? | The repository [README](../README.md) and [`dingo.yaml.example`](../dingo.yaml.example) |
-| How are components wired and what owns a behavior? | [Architecture](../ARCHITECTURE.md) |
+| What are the system responsibilities, boundaries and principal flows? | [Architecture](../ARCHITECTURE.md) |
+| Which Koios fields does the parity tracker compare? | [Koios parity reference](../internal/koiosparity/README.md) |
 | How are storage, schemas, and persisted formats designed? | [Database reference](../DATABASE.md) |
 | How does secure from-origin synchronization work? | [Ouroboros Genesis operator guide](../GENESIS_SYNC.md) |
 | What does a Go package or exported symbol do? | [Go code reference](code-reference.md), package `doc.go` files, and `go doc` |

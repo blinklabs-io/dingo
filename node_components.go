@@ -133,17 +133,37 @@ func (n *Node) newPeerGovernor() *peergov.PeerGovernor {
 }
 
 func (n *Node) newHistoryExpiryPruner() *historyexpiry.Pruner {
+	return historyexpiry.NewPruner(n.newHistoryExpiryPrunerConfig())
+}
+
+func (n *Node) newHistoryExpiryPrunerConfig() historyexpiry.PrunerConfig {
 	prunerFreq := n.config.historyExpiry.Frequency
 	if prunerFreq <= 0 {
 		prunerFreq = time.Hour
 	}
-	return historyexpiry.NewPruner(historyexpiry.PrunerConfig{
-		LedgerState: n.ledgerState,
-		DB:          n.db,
-		Logger:      n.config.logger,
-		Frequency:   prunerFreq,
-		Ceiling:     n.historyExpiryCeiling,
-	})
+	return historyexpiry.PrunerConfig{
+		LedgerState:  n.ledgerState,
+		DB:           n.db,
+		Logger:       n.config.logger,
+		Frequency:    prunerFreq,
+		Ceiling:      n.historyExpiryCeiling,
+		BeforeExpire: n.materializeIndexerBlockUtxos,
+	}
+}
+
+// materializeIndexerBlockUtxos rewrites the IndexerDB's UTxO entries that are
+// offsets into a block about to expire as raw CBOR. The ledger's own expiry
+// materializes nothing: the live UTxO set holds its outputs.
+func (n *Node) materializeIndexerBlockUtxos(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+) error {
+	if n.indexerDB == nil {
+		return nil
+	}
+	_, err := n.indexerDB.MaterializeBlockUtxos(ctx, slot, hash)
+	return err
 }
 
 // historyExpiryCeiling keeps history expiry behind the IndexerDB writer,
@@ -254,16 +274,6 @@ func (n *Node) configureSnapshotManager() error {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
-	// When the Koios parity observer is enabled, retain reward_account_output
-	// without bound in CORE storage mode too: the observer only
-	// validates a closed epoch after fetching and comparing against Koios over
-	// the network, which can fall arbitrarily far behind chain progression
-	// during a from-genesis or catch-up sync, well past the fixed 4-epoch
-	// window cleanupOldSnapshots otherwise prunes reward_account_output to.
-	// Configure this before capture or startup locks the settings.
-	n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
-		n.config.koiosParity.Enabled,
-	)
 	// Prune pool snapshots through the deferred-header retention guard, so a
 	// snapshot a queued/deferred header still needs for leader validation is
 	// never pruned out from under it and misread as pool absence, and the

@@ -28,7 +28,7 @@ import (
 
 func newAdapter(t *testing.T) dbadapter.Adapter {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	return dbadapter.New(db)
 }
@@ -140,7 +140,7 @@ func TestForeignTxnPanics(t *testing.T) {
 
 func TestAdapterInInterfaceDoesNotAllocate(t *testing.T) {
 	// Not t.Parallel: testing.AllocsPerRun is a process-wide measurement.
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	var sink ledgerdb.LedgerDB
 	allocs := testing.AllocsPerRun(100, func() {

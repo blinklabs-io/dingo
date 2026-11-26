@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -124,15 +123,6 @@ func totalActiveStakeFrom(
 	return total, nil
 }
 
-func sameSummaryPtr(a, b *models.EpochSummary) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	x, y := *a, *b
-	x.ID, y.ID = 0, 0
-	return fmt.Sprintf("%+v", x) == fmt.Sprintf("%+v", y)
-}
-
 func (s stagingLedgerDB) GetEpochSummary(
 	epoch uint64,
 	txn ledgerdb.Txn,
@@ -221,8 +211,7 @@ func (ls *LedgerState) summaryListViewLocked(
 	return view, nil
 }
 
-// GetLatestEpochSummary is the set's highest-epoch summary, as txn sees it,
-// once the summaries family is drained; it is otherwise the metadata store's.
+// GetLatestEpochSummary is the set's highest-epoch summary, as txn sees it.
 func (s stagingLedgerDB) GetLatestEpochSummary(
 	txn ledgerdb.Txn,
 ) (*models.EpochSummary, error) {

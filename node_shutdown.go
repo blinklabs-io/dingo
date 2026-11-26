@@ -531,29 +531,6 @@ func (n *Node) shutdown() error {
 		}
 	}
 
-	if n.deferredIndexMaintenanceDone != nil {
-		n.config.logger.Info("waiting for deferred-index maintenance")
-		select {
-		case <-n.deferredIndexMaintenanceDone:
-			n.config.logger.Info("deferred-index maintenance stopped")
-		case <-ctx.Done():
-			n.config.logger.Warn(
-				"timed out waiting for deferred-index maintenance; continuing shutdown",
-				"timeout",
-				shutdownTimeout,
-				"error",
-				ctx.Err(),
-			)
-			err = errors.Join(
-				err,
-				fmt.Errorf(
-					"deferred-index maintenance shutdown: %w",
-					ctx.Err(),
-				),
-			)
-		}
-	}
-
 	if n.utxoSet != nil {
 		if !storageDrainConfirmed {
 			n.config.logger.Error(

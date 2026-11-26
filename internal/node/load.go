@@ -35,7 +35,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	datatypes "github.com/blinklabs-io/dingo/database/types"
@@ -62,8 +61,6 @@ const (
 	progressLogInterval   = 10 * time.Second
 	loadDecodeMinWorkers  = 2
 	loadDecodeMaxWorkers  = 8
-
-	immutableUtxoOffsetsSyncStateKey = "immutable_utxo_offsets_tip"
 )
 
 // loadDecodeWorkerCount bounds the parallel full-block decoder used by the
@@ -226,11 +223,11 @@ func Load(
 }
 
 // loadIndexerLayout is the layout a load freezes into a new database: the
-// split layout's gate must be filled while the database has no chain state, or
-// the node refuses to start over the loaded blocks.
+// IndexerDB layout's gate must be filled while the database has no chain
+// state, or the node refuses to start over the loaded blocks.
 func loadIndexerLayout(cfg *config.Config) string {
-	if cfg.SplitIndexer() || cfg.ServerCoreNamespace {
-		return config.IndexerLayoutSplit
+	if cfg.HasIndexerDB() || cfg.ServerCoreNamespace {
+		return config.IndexerLayoutIndexerDB
 	}
 	return ""
 }
@@ -284,6 +281,7 @@ func ensureDB(
 			MaxConnections: cfg.DatabaseWorkers,
 			Logger:         logger, TracingEnabled: cfg.Tracing,
 			GenesisStakingEmpty: genesisStakingEmpty,
+			MigrateReleased:     nodestorage.MigrateReleased(cfg, dbConfig, nodeCfg, logger),
 		},
 	)
 	if err != nil {
@@ -297,26 +295,6 @@ func ensureDB(
 	newDB := runtime.Database
 	cleanup := func() {
 		_ = runtime.Close(context.Background())
-	}
-	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		// Bootstrap paths (load / mithril sync) tolerate a recoverable
-		// commit-timestamp mismatch: the import work that follows
-		// writes through full transactions which heal the timestamps.
-		// Returning the error here would leave the user unable to
-		// re-run a load / re-bootstrap from a previous interrupted
-		// import.
-		if cte, ok := errors.AsType[database.CommitTimestampError](
-			recoveryErr,
-		); ok {
-			logger.Warn(
-				"opened database with commit timestamp mismatch; "+
-					"continuing — import will heal it",
-				"metadata_timestamp", cte.MetadataTimestamp,
-				"blob_timestamp", cte.BlobTimestamp,
-			)
-			return newDB, cleanup, nil
-		}
-		return nil, nil, fmt.Errorf("creating database: %w", recoveryErr)
 	}
 	return newDB, cleanup, nil
 }
@@ -339,120 +317,14 @@ func captureLoadGenesisSnapshot(
 	)
 }
 
-// WithBulkLoadPragmas enables bulk-load optimizations on the metadata
-// store if it implements BulkLoadOptimizer. The caller should defer the
-// returned cleanup and may call it earlier when normal pragmas are needed.
-func WithBulkLoadPragmas(
-	db *database.Database,
-	logger *slog.Logger,
-) func() error {
-	optimizer, ok := db.Metadata().(metadata.BulkLoadOptimizer)
-	if !ok {
-		return func() error { return nil }
-	}
-	return withBulkLoadPragmas(optimizer, logger)
-}
-
-func withBulkLoadPragmas(
-	optimizer metadata.BulkLoadOptimizer,
-	logger *slog.Logger,
-) func() error {
-	restored := false
-	cleanup := func() error {
-		if restored {
-			return nil
-		}
-		if err := optimizer.RestoreNormalPragmas(); err != nil {
-			logger.Error(
-				"failed to restore normal settings",
-				"error", err,
-			)
-			return err
-		}
-		restored = true
-		return nil
-	}
-	if err := optimizer.SetBulkLoadPragmas(); err != nil {
-		logger.Warn(
-			"failed to set bulk-load optimizations",
-			"error", err,
-		)
-		return cleanup
-	}
-	return cleanup
-}
-
-// RunPlannerStats collects query-planner statistics on the metadata store
-// if it implements PlannerStatsUpdater. No-op for non-SQLite stores.
-func RunPlannerStats(
-	ctx context.Context,
-	db *database.Database,
-	logger *slog.Logger,
-) error {
-	updater, ok := db.Metadata().(metadata.PlannerStatsUpdater)
-	if !ok {
-		return nil
-	}
-	if err := runPlannerStats(ctx, updater); err != nil {
-		return fmt.Errorf("planner statistics maintenance: %w", err)
-	}
-	return nil
-}
-
-// runPlannerStats keeps a full ANALYZE for a database that has no statistics.
-// Once statistics exist it runs the incremental form instead: a full ANALYZE
-// reads every table and index, so its cost grows with the database and delays
-// a resumed backfill. The final statistics are still a full ANALYZE, taken by
-// FinalizeBackfillPlannerStats.
-func runPlannerStats(
-	ctx context.Context,
-	updater metadata.PlannerStatsUpdater,
-) error {
-	incremental, hasIncremental := updater.(metadata.IncrementalPlannerStatsUpdater)
-	presence, hasPresence := updater.(metadata.PlannerStatsPresenceChecker)
-	if hasIncremental && hasPresence {
-		exists, err := presence.HasPlannerStats(ctx)
-		if err == nil && exists {
-			result, err := incremental.OptimizePlannerStatsContext(
-				ctx,
-				datatypes.PlannerStatsTriggerStartup,
-			)
-			if err != nil {
-				return err
-			}
-			if result.Supported && !result.Skipped {
-				return nil
-			}
-		}
-	}
-	if contextual, ok := updater.(metadata.ContextPlannerStatsUpdater); ok {
-		return contextual.UpdatePlannerStatsContext(ctx)
-	}
-	return updater.UpdatePlannerStats()
-}
-
 // DeferredIndexRebuilder owns the drop/rebuild pairing for a single
-// bulk-load run. The critical subset can be rebuilt before API
-// readiness; the full rebuild finishes the lazy maintenance work
-// and clears the pending marker.
+// bulk-load run: the IndexerDB writer drops the deferred indexes before it
+// replays to a Mithril anchor and rebuilds the full manifest, clearing the
+// pending marker, once the anchor is reached.
 type DeferredIndexRebuilder struct {
 	manager metadata.DeferredIndexManager
 	logger  *slog.Logger
 	ctx     context.Context
-}
-
-func (r *DeferredIndexRebuilder) BuildCritical() error {
-	if r == nil || r.manager == nil {
-		return nil
-	}
-	logger := r.logger
-	if logger == nil {
-		logger = slog.New(slog.DiscardHandler)
-	}
-	if err := ensureCriticalDeferredIndexes(r.ctx, r.manager, logger); err != nil {
-		return fmt.Errorf("rebuilding critical deferred indexes: %w", err)
-	}
-	return nil
 }
 
 func (r *DeferredIndexRebuilder) BuildAll() error {
@@ -471,29 +343,8 @@ func (r *DeferredIndexRebuilder) BuildAll() error {
 	return nil
 }
 
-// WithDeferredIndexes drops the deferred-index manifest before bulk
-// load and returns a rebuilder for the critical and full rebuild
-// phases. Stores that do not implement metadata.DeferredIndexManager
-// are silently skipped — the orchestrator behaves as if every index
-// stayed in place.
-//
-// BuildCritical must be called before the database is marked ready
-// (i.e. before sync_status is cleared). BuildAll may run later as
-// maintenance; it clears the pending marker once the full manifest
-// exists.
-func WithDeferredIndexes(
-	ctx context.Context,
-	db *database.Database,
-	logger *slog.Logger,
-) *DeferredIndexRebuilder {
-	rebuilder := NewDeferredIndexRebuilder(ctx, db, logger)
-	rebuilder.drop()
-	return rebuilder
-}
-
-// NewDeferredIndexRebuilder returns the rebuilder WithDeferredIndexes would,
-// without dropping anything: for a run that resumes after the drop. Building
-// skips the indexes that exist.
+// NewDeferredIndexRebuilder returns a rebuilder for db's deferred-index
+// manifest without dropping anything. Building skips the indexes that exist.
 func NewDeferredIndexRebuilder(
 	ctx context.Context,
 	db *database.Database,
@@ -533,95 +384,19 @@ func (r *DeferredIndexRebuilder) drop() {
 	}
 }
 
-// criticalIndexRebuildLogThreshold is how long the critical-index check
-// may take before it is reported even though nothing in the critical subset
-// was missing. A complete manifest costs one catalog lookup per entry and
+// deferredIndexCheckLogThreshold is how long the deferred-index check may
+// take before it is reported even though nothing in the manifest was
+// missing. A complete manifest costs one catalog lookup per entry and
 // stays well under it; anything slower did work an operator watching a
 // startup should see attributed.
-const criticalIndexRebuildLogThreshold = time.Second
-
-// ensureCriticalDeferredIndexes rebuilds every missing critical manifest
-// entry, whether or not a drop/rebuild cycle is outstanding.
-//
-// The pending marker records that a cycle was interrupted; it does not
-// record which indexes exist, and it is not durable across a Mithril sync:
-// mithril/sync.go rebuilds the critical subset and then calls
-// updateMithrilReadyState, which now leaves deferred.SyncStateKey untouched
-// (mithril/sync_import.go). Before that preservation, every completed
-// Mithril sync erased the marker moments after BuildCritical set it, leaving
-// the database with the critical subset built, the lazy remainder dropped,
-// and nothing recording either — the state two Mithril-bootstrapped preview
-// nodes were found in, missing the utxo child index the rollback DELETE
-// cascades through. Databases bootstrapped by any binary released so far are
-// still in it, and nothing else recreates those indexes: the schema migration
-// that created them is recorded complete, so its CREATE INDEX IF NOT EXISTS
-// never runs again, and the manifest is only consulted by a cycle that is no
-// longer pending.
-//
-// BuildCriticalDeferredIndexes skips indexes that are present, so this is a
-// catalog lookup per entry on a healthy database, and it never touches the
-// marker.
-func ensureCriticalDeferredIndexes(
-	ctx context.Context,
-	manager metadata.DeferredIndexManager,
-	logger *slog.Logger,
-) error {
-	missing, listed := missingCriticalDeferredIndexes(ctx, manager, logger)
-	if listed && len(missing) > 0 {
-		// Logged before the build: building one index on a
-		// multi-million-row table takes minutes, and the rebuild itself
-		// is silent while it runs.
-		logger.Info(
-			"rebuilding missing critical deferred metadata indexes",
-			"indexes", strings.Join(missing, ","),
-			"count", len(missing),
-		)
-	}
-	start := time.Now()
-	var err error
-	if builder, ok := manager.(metadata.ContextCriticalDeferredIndexBuilder); ok {
-		err = builder.BuildCriticalDeferredIndexesContext(ctx)
-	} else {
-		err = manager.BuildCriticalDeferredIndexes()
-	}
-	if err != nil {
-		return err
-	}
-	elapsed := time.Since(start)
-	if (listed && len(missing) > 0) ||
-		elapsed >= criticalIndexRebuildLogThreshold {
-		attrs := []any{
-			"duration", elapsed,
-			// The store runs the critical rebuild inside
-			// withDeferredIndexWrite, which restores any missing
-			// deferred.Retained index first. Both halves are inside
-			// this measurement.
-			"duration_covers",
-			"critical rebuild and retained-index restore",
-		}
-		if listed {
-			indexes := "none"
-			if len(missing) > 0 {
-				indexes = strings.Join(missing, ",")
-			}
-			attrs = append(attrs, "critical_indexes_built", indexes)
-		}
-		logger.Info(
-			"critical deferred metadata index check complete",
-			attrs...,
-		)
-	}
-	return nil
-}
+const deferredIndexCheckLogThreshold = time.Second
 
 // ensureAllDeferredIndexes rebuilds the complete manifest, naming the entries
 // it is about to build and reporting how long the build took.
 //
-// BuildDeferredIndexes is as silent as BuildCriticalDeferredIndexes and has
-// the whole manifest to get through, so without this an operator watching a
-// restored database start up sees the critical announcement, then nothing at
-// all for however long the remaining entries take on a multi-million-row
-// table.
+// BuildDeferredIndexes emits nothing while it runs and has the whole manifest
+// to get through, so without this an operator sees nothing at all for however
+// long the entries take on a multi-million-row table.
 func ensureAllDeferredIndexes(
 	ctx context.Context,
 	manager metadata.DeferredIndexManager,
@@ -647,7 +422,7 @@ func ensureAllDeferredIndexes(
 	}
 	elapsed := time.Since(start)
 	if (listed && len(missing) > 0) ||
-		elapsed >= criticalIndexRebuildLogThreshold {
+		elapsed >= deferredIndexCheckLogThreshold {
 		attrs := []any{"duration", elapsed}
 		if listed {
 			indexes := "none"
@@ -662,8 +437,9 @@ func ensureAllDeferredIndexes(
 }
 
 // missingDeferredIndexes names the manifest entries absent from the schema.
-// The second return reports whether the store could answer, on the same terms
-// as missingCriticalDeferredIndexes.
+// The second return reports whether the store could answer: stores that do
+// not implement the lister, and read errors on the catalog query, fall back to
+// logging after the rebuild rather than failing over a log line.
 func missingDeferredIndexes(
 	ctx context.Context,
 	manager metadata.DeferredIndexManager,
@@ -689,72 +465,6 @@ func missingDeferredIndexes(
 	return missing, true
 }
 
-// missingCriticalDeferredIndexes names the critical manifest entries absent
-// from the schema. The second return reports whether the store could answer:
-// stores that do not implement the lister, and read errors on the catalog
-// query, fall back to logging after the rebuild rather than failing a startup
-// over a log line.
-func missingCriticalDeferredIndexes(
-	ctx context.Context,
-	manager metadata.DeferredIndexManager,
-	logger *slog.Logger,
-) ([]string, bool) {
-	var missing []string
-	var err error
-	if lister, ok := manager.(metadata.ContextMissingCriticalDeferredIndexLister); ok {
-		missing, err = lister.MissingCriticalDeferredIndexesContext(ctx)
-	} else if lister, ok := manager.(metadata.MissingCriticalDeferredIndexLister); ok {
-		missing, err = lister.MissingCriticalDeferredIndexes()
-	} else {
-		return nil, false
-	}
-	if err != nil {
-		logger.Warn(
-			"could not list missing critical deferred metadata indexes; "+
-				"rebuilding without naming them",
-			"error", err,
-		)
-		return nil, false
-	}
-	return missing, true
-}
-
-// RepairDeferredIndexes rebuilds any deferred indexes that were
-// recorded as pending by a prior interrupted run. It is safe to call
-// when no rebuild is outstanding: BuildDeferredIndexes is itself
-// idempotent and clears the marker.
-//
-// With no cycle outstanding it restores the complete manifest because a
-// restored database can have recorded migrations but missing index entries.
-func RepairDeferredIndexes(
-	ctx context.Context,
-	db *database.Database,
-	logger *slog.Logger,
-) error {
-	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
-	if !ok {
-		return nil
-	}
-	pending, err := manager.HasDeferredIndexesPending()
-	if err != nil {
-		return err
-	}
-	if !pending {
-		// A restore can carry missing deferred indexes without the pending
-		// marker. Rebuild the complete manifest before any rollback or query
-		// runs; BuildDeferredIndexes is idempotent on a healthy database.
-		if err := ensureCriticalDeferredIndexes(ctx, manager, logger); err != nil {
-			return err
-		}
-		return ensureAllDeferredIndexes(ctx, manager, logger)
-	}
-	logger.Warn(
-		"deferred metadata indexes pending from a prior run; " +
-			"rebuilding before continuing",
-	)
-	return ensureAllDeferredIndexes(ctx, manager, logger)
-}
-
 // openLoadUtxoSet opens the live UTxO set of the database a load replays
 // into, as a node over that database does, so the replay reads and writes the
 // ledger state where the node will look for it. It returns the directory the
@@ -773,7 +483,7 @@ func openLoadUtxoSet(
 		DataDir:             dataDir,
 		Logger:              logger,
 		CardanoNodeConfig:   nodeCfg,
-		RetainRewardRecords: cfg.SplitIndexer(),
+		RetainRewardRecords: cfg.HasIndexerDB(),
 		CheckpointKeep:      cfg.LedgerUtxoCheckpointKeep,
 	})
 	if err != nil {
@@ -842,23 +552,13 @@ func LoadWithDB(
 		)
 	}
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
-	cardanoConfigPath := cfg.CardanoConfig
 	network := cfg.Network
-	if cardanoConfigPath == "" {
-		if network == "" {
-			network = "preview"
-		}
-		cardanoConfigPath = cardano.EmbeddedConfigPath(network)
+	if cfg.CardanoConfig == "" && network == "" {
+		network = "preview"
 	}
-	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
-		cardanoConfigPath,
-		network,
-		cardano.EmbeddedConfigFS,
-	)
+	nodeCfg, err := nodestorage.LoadNodeConfig(cfg)
 	if err != nil {
-		return fmt.Errorf(
-			"loading cardano node config: %w", err,
-		)
+		return err
 	}
 	if cfg.FullPotRewardsEnabled &&
 		!cfg.UnsafeFullPotRewardsOnStandardNetworks {
@@ -943,7 +643,7 @@ func LoadWithDB(
 	); err != nil {
 		return err
 	}
-	utxoSet, utxoSetDataDir, closeUtxoSet, err := openLoadUtxoSet(
+	utxoSet, _, closeUtxoSet, err := openLoadUtxoSet(
 		cfg, logger, db, nodeCfg,
 	)
 	if err != nil {
@@ -955,14 +655,6 @@ func LoadWithDB(
 			logger.Error("failed to close the live UTxO set", "error", err)
 		}
 	}()
-	// Enable bulk-load optimizations if the metadata store supports them
-	cleanupBulkLoadPragmas := WithBulkLoadPragmas(db, logger)
-	defer func() {
-		if err := cleanupBulkLoadPragmas(); err != nil {
-			logger.Error("failed to restore normal settings", "error", err)
-		}
-	}()
-	deferredIndexes := WithDeferredIndexes(ctx, db, logger)
 	// Immutable load replays trusted block batches directly into the ledger, so
 	// it does not need the event-driven reread path here.
 	cm, err := chain.NewManager(
@@ -1019,8 +711,6 @@ func LoadWithDB(
 			// must match serve mode (node.go) on replay of the same DB.
 			DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
 			DelegatorInactivity:        cfg.DelegatorInactivity,
-			// Load replays unvalidated blocks, the path this setting batches.
-			ApplyRowBatchingEnabled: cfg.LedgerApplyRowBatchingEnabled,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,
@@ -1032,8 +722,8 @@ func LoadWithDB(
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	// The snapshot manager writes through the ledger's LedgerDB, so its
-	// snapshot rows reach the live UTxO set, where the drained reward-input
-	// families live.
+	// snapshot rows reach the live UTxO set, where the reward-input families
+	// live.
 	snapshotMgr := snapshot.NewManager(ls.LedgerDB(), nil, logger)
 	// Mirror the CIP-0163 reward-account inactivity gate into snapshot capture
 	// so replay matches serve mode (node.go) on the same DB.
@@ -1089,28 +779,15 @@ func LoadWithDB(
 	); err != nil {
 		return fmt.Errorf("installing epoch-boundary snapshot hook: %w", err)
 	}
-	// The node's startup sequence: the set is made equal to the ledger and
-	// the graduated ledger-state families leave the metadata store before the
-	// ledger writes its genesis or applies a block. A set that cannot be
-	// brought to the database's ledger tip stops the load here. A load can be
-	// the first to open a database a release without the set wrote, so it
-	// reverts one below its tip as the node does; the replay below applies
-	// the blocks the revert kept before it appends any.
+	// The node's startup sequence: the set is made equal to the ledger
+	// before the ledger writes its genesis or applies a block. A set that
+	// cannot be brought to the database's ledger tip stops the load here.
 	if err := (nodestorage.Reconcile{
-		DB:      db,
-		Set:     utxoSet,
-		DataDir: utxoSetDataDir,
-		Logger:  logger,
-		Publish: func(mask nodesettings.FamilyMask) {
-			ls.SetDrainedFamilies(mask)
-			utxoSet.SetDrainedFamilies(mask)
-		},
-		Resume:                     ls.ResumeUtxoSetFrom,
-		CardanoNodeConfig:          nodeCfg,
-		ResolveRewardInputs:        ls.ResolvePendingRewardStakeInputs,
-		RewindBlocks:               nodestorage.SecurityParam(nodeCfg),
-		DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
-		DelegatorInactivity:        cfg.DelegatorInactivity,
+		DB:                db,
+		Set:               utxoSet,
+		Logger:            logger,
+		Resume:            ls.ResumeUtxoSetFrom,
+		CardanoNodeConfig: nodeCfg,
 	}).Run(ctx); err != nil {
 		return fmt.Errorf("failed to prepare the live UTxO set: %w", err)
 	}
@@ -1220,12 +897,6 @@ func LoadWithDB(
 	// the database missing mark/reward snapshots for those epochs.
 	if err := captureFailures.err(); err != nil {
 		return err
-	}
-	if err := deferredIndexes.BuildCritical(); err != nil {
-		return fmt.Errorf(
-			"rebuilding critical metadata indexes after immutable load: %w",
-			err,
-		)
 	}
 	return nil
 }
@@ -1434,24 +1105,11 @@ func LoadBlobsWithDB(
 		}
 	}
 	// Load database (open new one if not provided)
-	callerProvidedDB := db != nil
 	db, closeDB, err := ensureDB(cfg, logger, db, nil) //nolint:contextcheck
 	if err != nil {
 		return nil, err
 	}
 	defer closeDB()
-	// Enable bulk-load optimizations if available. When the
-	// caller provides a db, they are responsible for pragma
-	// management (avoids concurrent pragma modification if
-	// multiple goroutines share the same database).
-	if !callerProvidedDB {
-		cleanupBulkLoadPragmas := WithBulkLoadPragmas(db, logger)
-		defer func() {
-			if err := cleanupBulkLoadPragmas(); err != nil {
-				logger.Error("failed to restore normal settings", "error", err)
-			}
-		}()
-	}
 	// Load chain without event bus (no ledger processing)
 	cm, err := chain.NewManager(ctx, db, nil)
 	if err != nil {
@@ -2210,6 +1868,17 @@ func copyBlocksRawWithCallback(
 	return blocksCopied, immutableTip.Slot, nil
 }
 
+// immutableUtxoOffsetsMark reads the mark for db's own rows. The ledger keeps
+// it in its block store. An IndexerDB reads that block store too, but the
+// ledger's mark says nothing about the offsets of the IndexerDB's rows, so an
+// IndexerDB keeps its own in its sync_state.
+func immutableUtxoOffsetsMark(db *database.Database) (string, error) {
+	if db.IsIndexer() {
+		return db.GetSyncState(database.ImmutableUtxoOffsetsTipKey, nil)
+	}
+	return db.GetChainState(database.ImmutableUtxoOffsetsTipKey, nil)
+}
+
 func immutableUtxoOffsetsComplete(
 	db *database.Database,
 	immutableTipSlot uint64,
@@ -2226,16 +1895,13 @@ func immutableUtxoOffsetsComplete(
 
 // ImmutableUtxoOffsetsTipSlot reports the latest slot for which the Mithril
 // immutable-copy phase persisted produced-UTxO offset references. The second
-// return value is false when no immutable copy has run (the sync-state key is
-// unset); callers must treat that as "no skip threshold" and write offsets
+// return value is false when no immutable copy has run (the chain state value
+// is unset); callers must treat that as "no skip threshold" and write offsets
 // normally.
 func ImmutableUtxoOffsetsTipSlot(
 	db *database.Database,
 ) (uint64, bool, error) {
-	val, err := db.GetSyncState(
-		immutableUtxoOffsetsSyncStateKey,
-		nil,
-	)
+	val, err := immutableUtxoOffsetsMark(db)
 	if err != nil {
 		return 0, false, fmt.Errorf(
 			"checking immutable UTxO offset state: %w",
@@ -2273,8 +1939,12 @@ func markImmutableUtxoOffsetsComplete(
 	db *database.Database,
 	immutableTipSlot uint64,
 ) error {
-	if err := db.SetSyncState(
-		immutableUtxoOffsetsSyncStateKey,
+	set := db.SetChainState
+	if db.IsIndexer() {
+		set = db.SetSyncState
+	}
+	if err := set(
+		database.ImmutableUtxoOffsetsTipKey,
 		strconv.FormatUint(immutableTipSlot, 10),
 		nil,
 	); err != nil {

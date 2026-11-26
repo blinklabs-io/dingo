@@ -1848,11 +1848,14 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 			blobSize,
 		) //nolint:gosec // G115: guarded by blobSize > 0 above
 	}
-	if metadataSize, err := db.Metadata().DiskSize(); err == nil &&
-		metadataSize > 0 {
-		sizeBytes += uint64(
-			metadataSize,
-		) //nolint:gosec // G115: guarded by metadataSize > 0 above
+	// The ledger's database keeps no metadata store.
+	if store := db.Metadata(); store != nil {
+		if metadataSize, err := store.DiskSize(); err == nil &&
+			metadataSize > 0 {
+			sizeBytes += uint64(
+				metadataSize,
+			) //nolint:gosec // G115: guarded by metadataSize > 0 above
+		}
 	}
 
 	resp := &databasev1alpha1.GetDatabaseInfoResponse{

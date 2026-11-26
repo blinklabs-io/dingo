@@ -46,7 +46,7 @@ type RewardAdaPots struct {
 	// (UTxOState.utxosFees minus SnapShots.ssFee at import time; see
 	// seedImportedRewardBasis). A live-computed row never sets it. It exists
 	// because this epoch's locally stored transactions only cover slots
-	// after CapturedSlot: rewardEpochFees adds it to a post-anchor local sum
+	// after CapturedSlot: RewardEpochFees adds it to a post-anchor local sum
 	// instead of summing the whole epoch, which would silently omit the
 	// fees collected before the anchor. Nil means the row was computed live
 	// or imported by a release predating this field; either way the

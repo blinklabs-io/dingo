@@ -97,3 +97,7 @@ func (m *memUtxoSet) RollbackUtxoSet(ocommon.Point) (UtxoEvent, error) {
 func (m *memUtxoSet) PreviewUtxoSetRollback(ocommon.Point) (UtxoEvent, error) {
 	return UtxoEvent{}, errors.New("unused")
 }
+
+func (m *memUtxoSet) JournalReaches(ocommon.Point) (bool, error) {
+	return true, nil
+}

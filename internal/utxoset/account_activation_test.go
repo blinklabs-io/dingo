@@ -30,7 +30,7 @@ import (
 // relation into its account rows, then retains it across a restart.
 func TestLoadLedgerStateMigratesAccountInactivityActivation(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	for _, e := range []struct{ start, id uint64 }{{0, 0}, {10, 1}} {

@@ -63,7 +63,7 @@ func TestBlocksAppliedBetweenFollowsTipAncestry(t *testing.T) {
 	require.ErrorIs(t, err, errRollbackUndoAncestry)
 }
 
-func TestUtxoWholeDetachedPointOffChainIsRejectedInSetOnlyMode(t *testing.T) {
+func TestUtxoWholeDetachedPointOffChainIsRejected(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newDiskTestLedger(t)

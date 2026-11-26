@@ -62,6 +62,11 @@ var (
 	logExportShutdown = func(context.Context) error { return nil }
 )
 
+// errShutdownRequested reports that a shutdown signal interrupted startup
+// before the command began serving. It is not a failure: run exits 0 without
+// logging it, as it does for a signal received by a running node.
+var errShutdownRequested = errors.New("shutdown requested during startup")
+
 func commonRun(
 	ctx context.Context,
 	cfg *config.Config,
@@ -119,8 +124,11 @@ func commonRun(
 	)
 	// Before any command opens the consensus store: opening an API-mode store
 	// in core mode would otherwise latch the mode before its rows are copied.
-	if err := node.MigrateToSplit(ctx, cfg, logger); err != nil {
-		return nil, fmt.Errorf("migrate to the split indexer layout: %w", err)
+	if err := node.MigrateToIndexerDB(ctx, cfg, logger); err != nil {
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			return nil, errShutdownRequested
+		}
+		return nil, fmt.Errorf("migrate to the IndexerDB layout: %w", err)
 	}
 	return logger, nil
 }
@@ -591,7 +599,8 @@ Database Workers:
 
 	// Execute cobra command
 	exitCode := 0
-	if err := executeWithSignalContext(rootCmd); err != nil {
+	if err := executeWithSignalContext(rootCmd); err != nil &&
+		!errors.Is(err, errShutdownRequested) {
 		logExecuteError(slog.Default(), err)
 		exitCode = 1
 	}

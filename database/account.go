@@ -32,8 +32,8 @@ func (d *Database) CreateAccount(
 	txn *Txn,
 	account *models.Account,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return err
 	}
 	if txn != nil {
@@ -56,8 +56,8 @@ func (d *Database) RenewAccountExpirations(
 	expirationEpoch uint64,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return err
 	}
 	if txn != nil {
@@ -88,8 +88,8 @@ func (d *Database) AccountLastWitnessSlots(
 	maxSlot uint64,
 	txn *Txn,
 ) (map[string]uint64, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
 	if txn == nil {
@@ -111,8 +111,8 @@ func (d *Database) AccountsWitnessedAfterSlot(
 	txn *Txn,
 ) ([]models.StakeCredentialRef, error) {
 	// The set restores a rolled-back account's expiration itself, so a
-	// drained family has no credential to recompute.
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
+	// database with no metadata store has no credential to recompute.
+	if d.metadata == nil {
 		return nil, nil
 	}
 	if txn == nil {
@@ -134,8 +134,8 @@ func (d *Database) StampAllActiveAccountExpirations(
 	expirationEpoch uint64,
 	txn *Txn,
 ) (int64, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return 0, err
 	}
 	if txn != nil {
@@ -167,6 +167,9 @@ func (d *Database) AccountInactivityActivationMembership(
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("AccountInactivityActivationMembership"); err != nil {
+		return nil, err
+	}
 	return d.metadata.AccountInactivityActivationMembership(
 		refs,
 		txn.Metadata(),
@@ -182,8 +185,8 @@ func (d *Database) ResetAccountExpirationActivation(
 	ctx context.Context,
 	txn *Txn,
 ) ([]models.StakeCredentialRef, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
 	if txn != nil {
@@ -211,8 +214,8 @@ func (d *Database) RestoreImportedAccountStates(
 	minBaselineSlot uint64,
 	txn *Txn,
 ) (int, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return 0, err
 	}
 	var n int
@@ -246,12 +249,12 @@ func (d *Database) ClearDanglingDRepDelegations(
 	atSlot uint64,
 	txn *Txn,
 ) (int, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return 0, err
 	}
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return 0, err
 	}
 	var n int
@@ -283,12 +286,12 @@ func (d *Database) ReconcileImportedDRepDelegations(
 	atSlot uint64,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return err
 	}
-	if d.FamilyDrained(nodesettings.FamilyDReps) {
-		err := drainedWrite(nodesettings.FamilyDReps)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyDReps)
 		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
@@ -314,8 +317,8 @@ func (d *Database) RestoreAccountStateAtSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
@@ -341,8 +344,8 @@ func (d *Database) GetAccountByCredential(
 	includeInactive bool,
 	txn *Txn,
 ) (*models.Account, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
 	if txn == nil {
@@ -372,8 +375,8 @@ func (d *Database) GetAccountsByCredential(
 	includeInactive bool,
 	txn *Txn,
 ) (map[string]*models.Account, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
 	if txn == nil {
@@ -396,8 +399,8 @@ func (d *Database) GetAccountsByCredentialAtSlot(
 	slot uint64,
 	txn *Txn,
 ) (map[string]*models.Account, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
 	if txn == nil {
@@ -427,8 +430,8 @@ func (d *Database) AddAccountRewardByCredential(
 	sourceHash []byte,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return err
 	}
 	return d.addAccountRewardByCredential(
@@ -445,8 +448,8 @@ func (d *Database) AddAccountRewardsByCredential(
 	credits []models.AccountRewardCredit,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return err
 	}
 	if len(credits) == 0 {
@@ -479,8 +482,8 @@ func (d *Database) AddPostSnapshotAccountRewardByCredential(
 	sourceHash []byte,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return err
 	}
 	return d.addAccountRewardByCredential(
@@ -529,8 +532,8 @@ func (d *Database) DeleteAccountRewardsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
@@ -558,8 +561,8 @@ func (d *Database) DeleteAccountRewardJournalForCredentialsAfterSlot(
 	refs []models.StakeCredentialRef,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return err
 	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {

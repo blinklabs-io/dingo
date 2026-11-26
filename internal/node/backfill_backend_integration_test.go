@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
+	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -103,14 +104,26 @@ func newBackendBackfillDB(
 	register.Config = config
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{
-			DataDir: t.TempDir(),
-			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			DataDir:     t.TempDir(),
+			Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Role:        database.RoleIndexer,
+			StorageMode: types.StorageModeAPI,
 		},
 		Metadata: register,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		dbtest.CloseDatabase(db) //nolint:errcheck
+	})
+	// The IndexerDB owns its blob store here, so it stores the blocks too.
+	indexerConsensus.Store(db, db)
+	// testing keeps a finished test's cleanups reachable until the run
+	// ends; dropping the reference lets the closed database be collected.
+	closing := db
+	t.Cleanup(func() {
+		key := closing
+		closing = nil
+		indexerConsensus.Delete(key)
 	})
 	return db
 }

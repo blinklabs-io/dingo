@@ -31,7 +31,7 @@ import (
 
 // FactTable describes a table of ledger facts: rows the ledger derives at
 // epoch boundaries and from governance and reward rules, which block replay
-// alone cannot reproduce. A split IndexerDB receives them from the ledger's
+// alone cannot reproduce. An IndexerDB receives them from the ledger's
 // store by natural key, so a store's own row ids never cross between stores.
 type FactTable struct {
 	// Name is the SQL table name.
@@ -160,7 +160,7 @@ type CommitSyncer interface {
 }
 
 // FactRowStore copies fact rows by natural key. It is an optional capability
-// of a metadata store: the split indexer requires it on both of its stores,
+// of a metadata store: the IndexerDB requires it on both of its stores,
 // which hold the same schema.
 type FactRowStore interface {
 	// ReadFactRows returns rows of table with a slot column in [from,
@@ -234,7 +234,7 @@ type UtxoSetDigest struct {
 // and reference scripts.
 type UtxoOutputResolver func(txHash []byte, outputIdx uint32) ([]byte, error)
 
-// AnchorStateStore is the optional capability a split IndexerDB uses to take
+// AnchorStateStore is the optional capability an IndexerDB uses to take
 // over the ledger state a snapshot import established, and to check its own
 // history against it.
 type AnchorStateStore interface {
@@ -266,7 +266,7 @@ type AnchorOpCertSource interface {
 	) ([]OpCertCounter, error)
 }
 
-// FactTables lists the ledger-fact tables a split IndexerDB receives. Rollback
+// FactTables lists the ledger-fact tables an IndexerDB receives. Rollback
 // of the ones whose block-derived counterpart the rollback sweep already
 // removes is covered there as well; deleting again is harmless.
 var FactTables = []FactTable{
@@ -462,7 +462,7 @@ var AccountRewardCreditTable = FactTable{
 	FilterColumn: "withdrawal", FilterValue: false,
 }
 
-// RewardFoldStore is the optional capability a split IndexerDB uses to keep
+// RewardFoldStore is the optional capability an IndexerDB uses to keep
 // its reward outputs consistent with the reward credits it copies. The
 // ledger folds a credited round lazily, journaling each credit under the
 // round's boundary slot only when its credential is next touched, so a

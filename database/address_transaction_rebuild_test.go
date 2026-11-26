@@ -72,7 +72,7 @@ func rebuildPayments(rows []models.AddressTransaction) []byte {
 // block's transactions. Every row resolves to its own level by hash.
 func TestRebuildAddressTransactionResolvesDijkstraLevels(t *testing.T) {
 	t.Parallel()
-	db := newTestDBWithMode(t, types.StorageModeAPI)
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
 	for ref, payment := range map[byte]byte{0xa1: 0x11, 0xa2: 0x22, 0xa3: 0x33, 0xa4: 0x44} {
 		seedRebuildSource(t, db, ref, payment)
 	}
@@ -185,7 +185,7 @@ func TestRebuildAddressTransactionResolvesDijkstraLevels(t *testing.T) {
 // way.
 func TestRebuildAddressTransactionReadsClosureBody(t *testing.T) {
 	t.Parallel()
-	db := newTestDBWithMode(t, types.StorageModeAPI)
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
 	for ref, payment := range map[byte]byte{0xa1: 0x11, 0xa2: 0x22} {
 		seedRebuildSource(t, db, ref, payment)
 	}

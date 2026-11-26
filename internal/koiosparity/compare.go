@@ -182,7 +182,17 @@ const (
 	StatusPass  = "PASS"
 	StatusFail  = "FAIL"
 	StatusError = "ERROR"
+	// StatusNotChecked is a result that is neither a pass nor a mismatch:
+	// Dingo no longer holds the state the comparison reads. NotCheckedReason
+	// says why. It is reported through metrics and logs only and never
+	// replaces the epoch's stored verdict.
+	StatusNotChecked = "NOT_CHECKED"
 )
+
+// NotCheckedRewardStatePruned is the NotCheckedReason of an epoch whose stake
+// epoch's reward outputs the LedgerDB has pruned, on a node with no IndexerDB
+// to read them from.
+const NotCheckedRewardStatePruned = "reward_state_pruned"
 
 // EpochCompareResult holds the comparison outcome for one epoch.
 //
@@ -203,6 +213,9 @@ type EpochCompareResult struct {
 	// CheckedScopes names the check phases this result's Status is a verdict
 	// on, drawn from ScopeAggregate/ScopeAccount.
 	CheckedScopes []string
+	// NotCheckedReason says why Status is StatusNotChecked, and is empty
+	// otherwise.
+	NotCheckedReason string
 }
 
 // CoversScope reports whether Status is a verdict on the named check phase.
@@ -305,7 +318,7 @@ func CompareEpochAggregates(
 // totals.fees and totals.treasury/reserves are single point-in-time pot
 // balances, matching what Dingo already stores per epoch (Fees is that
 // epoch's fee-pot snapshot; Treasury/Reserves are running ledger balances
-// Dingo already carries forward — see ledger/reward_calculation.go's
+// Dingo already carries forward — see ledger/epochengine/reward_calculation.go's
 // NetworkState updates), so those three are compared directly. totals.reward
 // is different in kind — a cumulative accumulator, not a snapshot — and is
 // not compared at all; see the comment after the totals_fees check below.
@@ -1271,8 +1284,8 @@ func rewardTypeSumsRepeatedRows(rewardType string) bool {
 // accounting is never masked by a flood of "missing" rows for a mechanism
 // Dingo was never expected to track in the first place. If Dingo's ledger
 // package ever starts tracking any of these (see
-// ledger/reward_calculation.go/ledger/rewards/rewards.go), this map (and
-// ARCHITECTURE.md's Koios Parity Tracker section) is the first place to
+// ledger/epochengine/reward_calculation.go/ledger/rewards/rewards.go), this map (and
+// README.md's account comparison reference) is the first place to
 // update.
 var koiosAccountRewardTypesOutOfScope = map[string]bool{
 	"treasury": true,
@@ -1329,8 +1342,7 @@ type accountRewardPoolAmount struct {
 // CompareAccountEpoch compares every Koios /account_reward_history reference
 // row against Dingo's committed reward_account_output rows for one epoch,
 // exactly — integer lovelace, no rounding/sampling/tolerance.
-// See ARCHITECTURE.md's Koios Parity Tracker
-// "Per-account exact parity" subsection for the full design.
+// See README.md's "Per-account exact parity" section for the full design.
 //
 // koiosRows/dingoRows are each scanned for internal duplicates first: the
 // same (stake_address, reward_type) key appearing more than once within one

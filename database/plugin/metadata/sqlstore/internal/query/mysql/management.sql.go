@@ -7,7 +7,6 @@ package mysqlquery
 
 import (
 	"context"
-	"database/sql"
 )
 
 const backfillNodeSettingsNetwork = `-- name: BackfillNodeSettingsNetwork :execrows
@@ -27,19 +26,6 @@ func (q *Queries) BackfillNodeSettingsNetwork(ctx context.Context, arg BackfillN
 		return 0, err
 	}
 	return result.RowsAffected()
-}
-
-const getCommitTimestamp = `-- name: GetCommitTimestamp :one
-SELECT timestamp
-FROM commit_timestamp
-WHERE id = 1
-`
-
-func (q *Queries) GetCommitTimestamp(ctx context.Context) (sql.NullInt64, error) {
-	row := q.db.QueryRowContext(ctx, getCommitTimestamp)
-	var timestamp sql.NullInt64
-	err := row.Scan(&timestamp)
-	return timestamp, err
 }
 
 const getNodeSettings = `-- name: GetNodeSettings :one
@@ -141,17 +127,6 @@ func (q *Queries) InsertNodeSettingsGateIfAbsent(ctx context.Context, arg Insert
 		return 0, err
 	}
 	return result.RowsAffected()
-}
-
-const setCommitTimestamp = `-- name: SetCommitTimestamp :exec
-INSERT INTO commit_timestamp (id, timestamp)
-VALUES (1, ?)
-ON DUPLICATE KEY UPDATE timestamp = VALUES(timestamp)
-`
-
-func (q *Queries) SetCommitTimestamp(ctx context.Context, timestamp sql.NullInt64) error {
-	_, err := q.db.ExecContext(ctx, setCommitTimestamp, timestamp)
-	return err
 }
 
 const upsertNodeSettingsGate = `-- name: UpsertNodeSettingsGate :exec

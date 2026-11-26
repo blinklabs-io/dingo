@@ -32,7 +32,7 @@ import (
 // unapplied block that may apply a certified closure) must not validate.
 func TestWithTxValidationSessionAtParentRequiresParentTip(t *testing.T) {
 	t.Parallel()
-	ls, _, _ := newLeiosApplyTestLedger(t)
+	ls, _ := newLeiosApplyTestLedger(t)
 	tipHash := bytes.Repeat([]byte{0x5a}, lcommon.Blake2b256Size)
 	ls.currentTip = ochainsync.Tip{
 		Point:       ocommon.NewPoint(500, tipHash),
@@ -66,7 +66,7 @@ func TestWithTxValidationSessionAtParentRequiresParentTip(t *testing.T) {
 // session, so it must pin to the ranking block's parent the same way.
 func TestWithLeiosSelectionSessionRequiresParentTip(t *testing.T) {
 	t.Parallel()
-	ls, _, _ := newLeiosApplyTestLedger(t)
+	ls, _ := newLeiosApplyTestLedger(t)
 	tipHash := bytes.Repeat([]byte{0x5a}, lcommon.Blake2b256Size)
 	ls.currentTip = ochainsync.Tip{
 		Point:       ocommon.NewPoint(500, tipHash),
@@ -107,7 +107,7 @@ func TestWithLeiosSelectionSessionRequiresParentTip(t *testing.T) {
 // reflects the closure.
 func TestValidationSessionRejectsAppliedClosureTransaction(t *testing.T) {
 	t.Parallel()
-	ls, db, _ := newLeiosApplyTestLedger(t)
+	ls, db := newLeiosApplyTestLedger(t)
 	enableLeiosApplyInputValidation(ls)
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0x61)
 	rawSpend, spendTx := leiosApplyTestSpendingTx(

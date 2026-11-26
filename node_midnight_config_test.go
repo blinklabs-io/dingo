@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -33,9 +34,18 @@ func TestMidnightIndexerEnablement(t *testing.T) {
 		for _, enabled := range []bool{false, true} {
 			cfg := MidnightConfig{Enabled: enabled}
 			want := enabled && mode.IsAPI()
-			require.Equal(t, want, midnightIndexerActive(mode, cfg))
+			features := []plugin.StorageFeature(nil)
+			if mode.IsAPI() {
+				features = []plugin.StorageFeature{
+					plugin.StorageFeatureMidnight,
+				}
+			}
+			require.Equal(t, want, midnightIndexerActive(features, cfg))
 			if !want {
-				n := &Node{config: Config{storageMode: mode, midnight: cfg}}
+				n := &Node{config: Config{
+					storageMode: mode, midnight: cfg,
+					storageFeatures: features,
+				}}
 				require.NotPanics(t, func() {
 					require.NoError(t, n.reinitializeMidnightIndexer())
 				}, "inactive indexers must return before accessing ledger or storage")
@@ -43,7 +53,9 @@ func TestMidnightIndexerEnablement(t *testing.T) {
 		}
 	}
 	// A separately enabled server must not enable indexing.
-	require.False(t, midnightIndexerActive(StorageModeAPI, MidnightConfig{
+	require.False(t, midnightIndexerActive([]plugin.StorageFeature{
+		plugin.StorageFeatureMidnight,
+	}, MidnightConfig{
 		ServerEnabled: true, Port: 50051,
 	}))
 }
@@ -97,12 +109,19 @@ func TestMidnightIndexerFatalCallbackPreservesCause(t *testing.T) {
 func TestMidnightIndexerConfigFollowsReplacedStorage(t *testing.T) {
 	t.Parallel()
 
-	n := &Node{db: newMidnightConfigDatabase(t, 1)}
+	reopen := func(slot uint64) (*database.Database, *database.Database) {
+		db := newMidnightConfigDatabase(t, slot)
+		idx, err := dbtest.NewIndexerDatabase(t, db, dbtest.IndexerOptions{})
+		require.NoError(t, err)
+		return db, idx
+	}
+	n := &Node{}
+	n.db, n.indexerDB = reopen(1)
 	before := n.midnightIndexerConfig()
-	require.Same(t, n.db.Metadata(), before.Metadata)
+	require.Same(t, n.indexerDB.Metadata(), before.Metadata)
 
-	n.db = newMidnightConfigDatabase(t, 2)
+	n.db, n.indexerDB = reopen(2)
 	after := n.midnightIndexerConfig()
-	require.Same(t, n.db.Metadata(), after.Metadata)
+	require.Same(t, n.indexerDB.Metadata(), after.Metadata)
 	require.NotSame(t, before.Metadata, after.Metadata)
 }

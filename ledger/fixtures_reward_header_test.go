@@ -56,10 +56,6 @@ func fxMintBlock(
 	); err != nil {
 		return err
 	}
-	if seedLedgerOf(db) == nil {
-		// The set counts the block from the store's rows when it opens.
-		return nil
-	}
 	epoch, err := ldb.GetEpochBySlot(slot, nil)
 	if err != nil {
 		return err
@@ -69,6 +65,49 @@ func fxMintBlock(
 		Slot: slot, Epoch: epoch.EpochId, Pool: bytes.Clone(pool.Bytes()),
 	}}})
 	return nil
+}
+
+// fxSeedEpochFee adds fee to epoch's fees in db's LedgerDB set as a block
+// at slot does.
+func fxSeedEpochFee(
+	t testing.TB,
+	db *database.Database,
+	epoch, slot, fee uint64,
+) {
+	t.Helper()
+	fxSeed(t, db, LedgerChanges{RewardBlocks: []RewardBlockChange{{
+		Slot: slot, Epoch: epoch, Fee: fee,
+	}}})
+}
+
+// fxImportRewardBlocks finishes what a Mithril import at anchorSlot writes
+// of the reward blocks: the snapshot's per-pool block counts and epoch total
+// of each epoch in counts, then the block counts and fees reward calculation
+// reads, which replace whatever the set held of them. The epochs and ADA pots
+// are seeded first, as the import writes them first.
+func fxImportRewardBlocks(
+	t testing.TB,
+	db *database.Database,
+	anchorSlot uint64,
+	counts []models.ImportedPoolBlockCount,
+	totals map[uint64]uint64,
+) {
+	t.Helper()
+	importer := fxImporter(t, db)
+	byEpoch := map[uint64]map[string]uint64{}
+	for _, c := range counts {
+		if byEpoch[c.Epoch] == nil {
+			byEpoch[c.Epoch] = map[string]uint64{}
+		}
+		byEpoch[c.Epoch][string(c.PoolKeyHash)] = c.BlocksProduced
+	}
+	for epoch, total := range totals {
+		require.NoError(t, importer.ReplaceImportedBlockCounts(
+			epoch, byEpoch[epoch], total, anchorSlot, nil,
+		))
+	}
+	require.NoError(t, importer.ImportRewardBlocks(t.Context(), anchorSlot))
+	require.NoError(t, importer.Err())
 }
 
 // fxEditRewardPoolInput rewrites the reward pool input the set holds for pool
@@ -208,8 +247,7 @@ func fxDeregisterStake(
 	slot uint64,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the database has no open LedgerDB set")
+	ls := seedLedgerOf(t, db)
 	txID := make([]byte, 32)
 	binary.BigEndian.PutUint64(txID[24:], slot)
 	copy(txID, stakingKey[:8])

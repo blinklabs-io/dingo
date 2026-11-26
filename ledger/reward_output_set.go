@@ -583,7 +583,7 @@ func postSnapshotCreditEvents(
 		if c.Loaded {
 			return nil, fmt.Errorf(
 				"%w: the credits at slot %d were loaded without their sources",
-				ErrDrainedFamilyUnserved, slot,
+				ErrLedgerStateUnserved, slot,
 			)
 		}
 		out = append(out, &models.AccountRewardDelta{
@@ -698,19 +698,6 @@ func (s stagingLedgerDB) ClaimUnfoldedRewardCredits(
 	return s.claimUnfoldedFromSet(txn, snapshotEpoch, limit)
 }
 
-func sameRewardRound(a, b models.RewardCreditRound) bool {
-	return a.SnapshotEpoch == b.SnapshotEpoch && a.BoundarySlot == b.BoundarySlot
-}
-
-func sameRewardOutput(a, b *models.RewardAccountOutput) bool {
-	return a.Epoch == b.Epoch && a.CredentialTag == b.CredentialTag &&
-		bytes.Equal(a.StakingKey, b.StakingKey) &&
-		bytes.Equal(a.PoolKeyHash, b.PoolKeyHash) &&
-		a.RewardType == b.RewardType && a.Amount == b.Amount &&
-		a.Spendable == b.Spendable && a.Guarded == b.Guarded &&
-		a.CapturedSlot == b.CapturedSlot && a.BoundarySlot == b.BoundarySlot
-}
-
 func (s stagingLedgerDB) HasAppliedRewardCreditRound(
 	epoch uint64,
 	txn ledgerdb.Txn,
@@ -776,9 +763,7 @@ func (s stagingLedgerDB) HasUnfoldedRewardCreditsThroughEpoch(
 	return s.ls.hasCreditedRewardOutputs(r, txn, &snapshotEpoch)
 }
 
-// GetPostSnapshotRewardCreditEvents is the store's own read until the accounts
-// or reward-outputs family is drained, whose rows it joins; after that the
-// events come from the set's credits, which keep the source hash of each
+// GetPostSnapshotRewardCreditEvents reads the events from the set's credits, which keep the source hash of each
 // credit the set followed.
 func (s stagingLedgerDB) GetPostSnapshotRewardCreditEvents(
 	slot uint64,

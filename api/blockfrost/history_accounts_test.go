@@ -24,6 +24,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+	"github.com/blinklabs-io/dingo/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -359,10 +361,16 @@ func TestNodeAdapterStakeHistoryIgnoresIncompleteSnapshotBeforeAccount(t *testin
 		},
 	))
 	address := newRewardHistoryStakeAddress(t, key)
-	const pendingKey = models.StakeRewardSourcePrefix + "stake-inputs-pending"
-	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetSyncState(
-		pendingKey, `{"entries":[{"epoch":0,"boundary_slot":0}]}`, nil,
-	))
+	set, ok := livesettest.LedgerDBOf(fx.adapter.ledgerState.Database())
+	require.True(t, ok, "the fixture's ledger has a LedgerDB set")
+	require.NoError(t, set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
+		RewardInputs: []ledger.RewardInputChange{{
+			Kind: ledger.RewardInputPending,
+			Pending: []ledger.RewardStakeInputsPendingEntry{
+				{Epoch: 0, BoundarySlot: 0},
+			},
+		}},
+	}))
 
 	rows, total, err := fx.adapter.AccountStakeHistory(ctx, address, PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc})
 	require.NoError(t, err, "label 0 predates an account created in epoch 2")

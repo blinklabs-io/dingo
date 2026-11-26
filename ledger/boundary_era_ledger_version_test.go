@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -321,15 +322,17 @@ func newBoundaryEraLedgerChain(
 	}
 
 	db := tc.db
-	if db == nil {
+	switch {
+	case db != nil:
+	case tc.utxoSet != nil:
+		db = newTestDBAwaitingSet(t, dbtypes.StorageModeCore)
+	default:
 		db = newTestDB(t)
 	}
-	// The caller's set is the database's LedgerDB set from the start, so
-	// everything seeded below lands in it.
 	if tc.utxoSet != nil {
-		if _, open := LiveSetOfForTest(db); !open {
-			AdoptLiveSetForTest(t, db, tc.utxoSet)
-		}
+		// The caller's set is the database's LedgerDB set from the start, so
+		// everything seeded below lands in it.
+		AdoptLiveSetForTest(t, db, tc.utxoSet)
 	}
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -413,7 +416,7 @@ func newBoundaryEraLedgerChain(
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	// The snapshot manager reads through the ledger's LedgerDB, as a node's
-	// does, so a drained family is served from the set it reads.
+	// does, so each family is served from the set it reads.
 	if tc.utxoSet != nil {
 		ls.config.UtxoSet = tc.utxoSet
 		ls.installEpochSource()

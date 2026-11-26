@@ -118,7 +118,7 @@ func TestMetadataStoreResourceCleanup(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.Start(t.Context()))
 		txn := store.Transaction(t.Context())
-		require.NoError(t, store.SetCommitTimestamp(1, txn))
+		require.NoError(t, store.SetSyncState("timeout_probe", "1", txn))
 		require.NoError(t, txn.Commit())
 		require.NoError(t, store.Close())
 	})
@@ -515,7 +515,7 @@ func (f *gapDepositFixture) applyGap(
 // pool whose registration was ingested from a Mithril gap block.
 //
 // GetPoolsRetiringAtEpoch takes the retiring pool's latest pool_registration
-// row and applyPoolRetirements credits that row's deposit_held as the refund.
+// row and ApplyPoolRetirements credits that row's deposit_held as the refund.
 // A gap block replays from raw CBOR with no ledger delta, so nothing upstream
 // calculates its deposits; mithril's gapCertDeposits derives them from the
 // block's era and the epoch's protocol parameters and passes them in here.
@@ -734,7 +734,7 @@ const mithrilTrustBoundarySyncKey = "mithril_ledger_slot"
 // node never applied a block for them, and the anchor slot cannot hold more
 // than one block in any case.
 //
-// Reward performance (ledger/reward_calculation.go),
+// Reward performance (ledger/epochengine/reward_calculation.go),
 // reward_pool_input seeding (ledger/snapshot/rotation.go) and Blockfrost's
 // blocks_minted all count these rows as minted blocks, so a bootstrapped node
 // credits every pool holding a certified counter with a block it never made
@@ -2956,7 +2956,7 @@ func TestEpochBoundaryStakeIncludesPreSnapshotCreditsOnly(t *testing.T) {
 		AddedSlot:  10,
 	}).Error)
 
-	// Pre-SNAP: delayed reward update (ledger.applyStakeRewards) and MIR
+	// Pre-SNAP: delayed reward update (epochengine.Engine.ApplyStakeRewards) and MIR
 	// (governance.CreditRegisteredRewardAccountBeforeSnapshot).
 	for i, amount := range []uint64{50, 3} {
 		require.NoError(t, store.AddAccountRewardByCredential(
@@ -3138,32 +3138,4 @@ func (emptyLiveSource) EachLiveUtxoStake(
 	types.Txn, func(uint8, []byte, uint64) error,
 ) error {
 	return nil
-}
-
-// TestLiveStakeOfACredentialRegisteredAndPaidInOneTransaction registers a
-// credential and pays its base address in the same transaction, with and
-// without utxo rows, and requires the same reward_live_stake row: the live
-// set does not yet hold the transaction's outputs when the credential's row
-// is first computed.
-func TestLiveStakeOfACredentialRegisteredAndPaidInOneTransaction(t *testing.T) {
-	t.Parallel()
-	row := func(live bool) string {
-		f := newPointerStakeFixture(t)
-		f.setEra(t, babbage.EraIdBabbage)
-		if live {
-			f.store.SetLiveUtxoSource(emptyLiveSource{})
-		}
-		f.apply(t, 100, 0,
-			[]lcommon.Certificate{f.register(), f.delegate()},
-			f.output(700, f.baseAddress(t)),
-		)
-		var utxo, total string
-		require.NoError(t, f.db.QueryRow(
-			`SELECT utxo_stake, total_stake FROM reward_live_stake WHERE staking_key = ?`,
-			f.stakeKey.Bytes(),
-		).Scan(&utxo, &total))
-		return utxo + "/" + total
-	}
-	require.Equal(t, "700/700", row(false))
-	require.Equal(t, row(false), row(true))
 }

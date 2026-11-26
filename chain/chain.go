@@ -48,11 +48,11 @@ const (
 	// recent block, then fall back to exponentially older points to avoid
 	// origin intersects when the peer lags by more than a few dozen blocks.
 	intersectDensePointCount = 32
-	// rollbackHighWaterSyncKey names the sync-state row holding the highest
+	// rollbackHighWaterKey names the chain state value holding the highest
 	// block index the persistent chain held before its most recent
 	// rollback. The in-memory anchor is rebuilt from it on load; without it a
 	// restart would measure the next rollback from the already-lowered tip.
-	rollbackHighWaterSyncKey = database.RollbackHighWaterSyncKey
+	rollbackHighWaterKey = database.RollbackHighWaterKey
 )
 
 type Chain struct {
@@ -74,7 +74,7 @@ type Chain struct {
 	// lowers it.
 	rollbackAnchorBlockIndex uint64
 	// persistedRollbackAnchor is the value last written under
-	// rollbackHighWaterSyncKey, so repeated rollbacks from one anchor write
+	// rollbackHighWaterKey, so repeated rollbacks from one anchor write
 	// it once.
 	persistedRollbackAnchor uint64
 	// mutationGeneration counts mutations of the in-memory block state:
@@ -2025,33 +2025,6 @@ func (c *Chain) RollbackDeferredWithPreflight(
 	return c.rollbackWithMutationBarrierHeld(ctx, point, false)
 }
 
-// RollbackDeferredThen rewinds the chain like RollbackDeferred and runs after
-// the rewind before admitting another persistent-chain mutation. Event
-// publication stays deferred until the caller has released its own outer locks.
-func (c *Chain) RollbackDeferredThen(
-	ctx context.Context,
-	point ocommon.Point,
-	after func() error,
-) ([]event.Event, error) {
-	if c == nil {
-		return nil, errors.New("chain is nil")
-	}
-	return c.rollbackLockedThen(ctx, point, false, after)
-}
-
-// RollbackUnboundedDeferredThen is RollbackDeferredThen without the security
-// parameter bound. It is restricted to startup reconciliation of local state.
-func (c *Chain) RollbackUnboundedDeferredThen(
-	ctx context.Context,
-	point ocommon.Point,
-	after func() error,
-) ([]event.Event, error) {
-	if c == nil {
-		return nil, errors.New("chain is nil")
-	}
-	return c.rollbackLockedThen(ctx, point, true, after)
-}
-
 // rollbackForkDepth returns the number of blocks a rollback to
 // rollbackBlockIndex removes from the chain. The rollback point is normally at
 // or behind the tip, but it can sit ahead of the tip: rolled-back blocks stay
@@ -2087,7 +2060,7 @@ func (c *Chain) rollbackForkDepth(
 	return 0
 }
 
-// persistRollbackAnchorLocked records anchor under rollbackHighWaterSyncKey
+// persistRollbackAnchorLocked records anchor under rollbackHighWaterKey
 // before a rollback removes the blocks above it, so a crash or restart cannot
 // lose the high-water mark. Callers must hold c.mutex.
 func (c *Chain) persistRollbackAnchorLocked(anchor uint64) error {
@@ -2095,8 +2068,8 @@ func (c *Chain) persistRollbackAnchorLocked(anchor uint64) error {
 		anchor == c.persistedRollbackAnchor {
 		return nil
 	}
-	if err := c.manager.db.SetSyncState(
-		rollbackHighWaterSyncKey,
+	if err := c.manager.db.SetChainState(
+		rollbackHighWaterKey,
 		strconv.FormatUint(anchor, 10),
 		nil,
 	); err != nil {
@@ -2402,31 +2375,13 @@ func (c *Chain) rollbackLocked(
 	point ocommon.Point,
 	unbounded bool,
 ) ([]event.Event, error) {
-	return c.rollbackLockedThen(ctx, point, unbounded, nil)
-}
-
-func (c *Chain) rollbackLockedThen(
-	ctx context.Context,
-	point ocommon.Point,
-	unbounded bool,
-	after func() error,
-) ([]event.Event, error) {
 	// Wait for any chain-owned batch transaction that has already applied to
-	// the in-memory chain to conclude, so the removal loop below cannot ask
-	// the store for an index whose write has not committed yet. See the
+	// the in-memory chain to conclude, so the removal loop cannot ask the
+	// store for an index whose write has not committed yet. See the
 	// batchCommitMutex field.
 	c.batchCommitMutex.Lock()
 	defer c.batchCommitMutex.Unlock()
-	events, err := c.rollbackWithMutationBarrierHeld(ctx, point, unbounded)
-	if err != nil {
-		return events, err
-	}
-	if after != nil {
-		if err := after(); err != nil {
-			return events, err
-		}
-	}
-	return events, nil
+	return c.rollbackWithMutationBarrierHeld(ctx, point, unbounded)
 }
 
 func (c *Chain) rollbackWithMutationBarrierHeld(

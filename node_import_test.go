@@ -37,7 +37,7 @@ func pendingImportNode(t *testing.T) *Node {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	tip := ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{1}, 32)}
@@ -58,7 +58,7 @@ func TestFinishPendingImportLeavesAnUnfinishedImportToItsOwner(t *testing.T) {
 	t.Run("a Mithril sync's import", func(t *testing.T) {
 		t.Parallel()
 		n := pendingImportNode(t)
-		require.NoError(t, n.db.SetSyncState("sync_status", "in_progress", nil))
+		require.NoError(t, n.db.SetChainState("sync_status", "in_progress", nil))
 		err := n.finishPendingImport(t.Context())
 		require.ErrorIs(t, err, badgerutxo.ErrImportPending)
 	})
@@ -71,8 +71,8 @@ func TestFinishPendingImportLeavesAnUnfinishedImportToItsOwner(t *testing.T) {
 	t.Run("the node's own re-import", func(t *testing.T) {
 		t.Parallel()
 		n := pendingImportNode(t)
-		require.NoError(t, n.db.SetSyncState("sync_status", "in_progress", nil))
-		require.NoError(t, n.db.SetSyncState(database.LedgerReimportSyncKey, "1", nil))
+		require.NoError(t, n.db.SetChainState("sync_status", "in_progress", nil))
+		require.NoError(t, n.db.SetChainState(database.LedgerReimportSyncKey, "1", nil))
 		var asked []ocommon.Point
 		n.utxoSet.SetReimporter(func(
 			_ context.Context, tip ocommon.Point,
@@ -117,10 +117,10 @@ func TestFinishPendingImportResumesAReimportPastItsImportStep(t *testing.T) {
 				require.NoError(t, n.utxoSet.LoadUtxoSet(other,
 					func(func([]byte, uint32, []byte) error) error { return nil }))
 			}
-			require.NoError(t, n.db.SetSyncState("sync_status", "in_progress", nil))
-			require.NoError(t, n.db.SetSyncState(database.LedgerReimportSyncKey, "1", nil))
+			require.NoError(t, n.db.SetChainState("sync_status", "in_progress", nil))
+			require.NoError(t, n.db.SetChainState(database.LedgerReimportSyncKey, "1", nil))
 			if tc.swapped {
-				require.NoError(t, n.db.SetSyncState(
+				require.NoError(t, n.db.SetChainState(
 					database.LedgerReimportSwappedSyncKey,
 					database.LedgerReimportPointMark(ocommon.Point{
 						Slot: 10, Hash: bytes.Repeat([]byte{1}, 32),

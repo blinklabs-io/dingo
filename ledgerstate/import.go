@@ -39,6 +39,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
 // SnapshotTip represents the chain tip recorded in the ledger state
@@ -450,11 +451,10 @@ type ImportConfig struct {
 	// transaction folds. Zero selects defaultRewardCreditFoldBatchSize.
 	rewardCreditFoldBatchSize int
 	// UtxoSet is the live UTxO set, the only copy of it, and is required. It
-	// receives the snapshot's UTxO set: the import marks the database
-	// (database.UtxoSetOnlySyncKey), writes no utxo rows or output CBOR to
-	// the metadata and blob stores, and reads UTxO stake from the set. A
-	// Reconcile import keeps the set's older ledger-state families when the
-	// set is also a CatchUpLoader.
+	// receives the snapshot's UTxO set: the import writes no utxo rows or
+	// output CBOR to the metadata and blob stores, and reads UTxO stake from
+	// the set. A Reconcile import keeps the set's older ledger-state families
+	// when the set is also a CatchUpLoader.
 	UtxoSet UtxoSetLoader
 	// LedgerDB is the LedgerDB the import writes the snapshot's ledger state
 	// through, over UtxoSet. It is required.
@@ -556,6 +556,9 @@ type CatchUpLoader interface {
 		point ocommon.Point,
 		feed func(put func(txID []byte, index uint32, cbor []byte) error) error,
 	) error
+	// CatchUpReaches reports whether LoadUtxoSetCatchUp can load a snapshot
+	// at point, without changing the set.
+	CatchUpReaches(point ocommon.Point) (bool, error)
 }
 
 func requiredImportEraParams(
@@ -761,11 +764,6 @@ func ImportLedgerState(
 		return errors.New(
 			"UTxO-HD ledger state requires external UTxO table file",
 		)
-	}
-	// Marked only once the snapshot is known valid: the mark pins the
-	// database to the live UTxO set.
-	if err := markUtxoSetOnlyImport(ctx, cfg); err != nil {
-		return err
 	}
 	if err := cfg.Database.SetLiveUtxoSource(cfg.UtxoSet); err != nil {
 		return fmt.Errorf("read UTxOs from the live UTxO set: %w", err)
@@ -1144,9 +1142,8 @@ func setCheckpoint(_ context.Context, cfg ImportConfig, phase string) error {
 	if cfg.ImportKey == "" {
 		return nil
 	}
-	if err := cfg.Database.Metadata().SetImportCheckpoint(
-		&models.ImportCheckpoint{ImportKey: cfg.ImportKey, Phase: phase},
-		nil,
+	if err := cfg.Database.SetImportCheckpoint(
+		cfg.ImportKey, phase,
 	); err != nil {
 		return fmt.Errorf("saving checkpoint for phase %q: %w", phase, err)
 	}
@@ -1334,38 +1331,6 @@ func loadUtxoSet(
 		"component", "ledgerstate",
 		"count", total,
 	)
-	return nil
-}
-
-// markUtxoSetOnlyImport records that the database keeps its UTxO set only in
-// the live UTxO set, unless it already does. An unmarked database must hold
-// no live utxo rows; a snapshot restore may already have stored its blocks.
-func markUtxoSetOnlyImport(ctx context.Context, cfg ImportConfig) error {
-	marked, err := cfg.Database.GetSyncState(database.UtxoSetOnlySyncKey, nil)
-	if err != nil {
-		return fmt.Errorf("read UTxO set mode: %w", err)
-	}
-	if marked != "" {
-		return nil
-	}
-	errHasRows := errors.New("has utxo rows")
-	err = cfg.Database.IterateLiveUtxos(
-		ctx, nil,
-		func(*models.Utxo) error { return errHasRows },
-	)
-	if err != nil && !errors.Is(err, errHasRows) {
-		return fmt.Errorf("look for utxo rows: %w", err)
-	}
-	if err != nil {
-		return errors.New(
-			"a live-UTxO-set-only import needs a database without a metadata UTxO set",
-		)
-	}
-	if err := cfg.Database.SetSyncState(
-		database.UtxoSetOnlySyncKey, "1", nil,
-	); err != nil {
-		return fmt.Errorf("record UTxO set mode: %w", err)
-	}
 	return nil
 }
 
@@ -4241,6 +4206,14 @@ func importGovState(
 			)
 		}
 	}
+	if err := importGovernanceBoundarySnapshot(
+		ctx,
+		cfg,
+		govState,
+		currentEpochSlot,
+	); err != nil {
+		return err
+	}
 
 	progress(ImportProgress{
 		Stage:       "governance",
@@ -4248,6 +4221,141 @@ func importGovState(
 		Description: "governance state imported",
 	})
 
+	return nil
+}
+
+// GovernanceBoundaryLoader is a live UTxO set that keeps the Conway epoch
+// boundary snapshots. An import writes the snapshot's own boundary into it
+// directly, since no metadata table holds them for a later load.
+type GovernanceBoundaryLoader interface {
+	// LoadGovernanceBoundarySnapshot replaces the boundary row of
+	// snapshot.Epoch.
+	LoadGovernanceBoundarySnapshot(*models.GovernanceBoundarySnapshot) error
+	// GovernanceBoundarySnapshotAt returns the boundary snapshot of epoch as
+	// a rollback to *at would leave it, or as it is now when at is nil.
+	GovernanceBoundarySnapshotAt(
+		epoch uint64,
+		at *uint64,
+	) (*models.GovernanceBoundarySnapshot, bool, error)
+}
+
+// importGovernanceBoundarySnapshot writes the boundary snapshot the imported
+// DRep pulser holds into the live UTxO set. A UTxO set that does not implement
+// GovernanceBoundaryLoader holds no boundary snapshots.
+func importGovernanceBoundarySnapshot(
+	_ context.Context,
+	cfg ImportConfig,
+	parsed *ParsedGovState,
+	boundarySlot uint64,
+) error {
+	loader, ok := cfg.UtxoSet.(GovernanceBoundaryLoader)
+	if !ok {
+		return nil
+	}
+	govFields, err := decodeRawArray(cfg.State.GovStateData)
+	if err != nil {
+		return fmt.Errorf("decode imported governance boundary state: %w", err)
+	}
+	if len(govFields) != 7 {
+		return fmt.Errorf("imported governance state has %d fields, expected 7", len(govFields))
+	}
+	pulsingFields, err := decodeRawArray(govFields[6])
+	if err != nil {
+		return fmt.Errorf("decode imported DRep pulsing state: %w", err)
+	}
+	if len(pulsingFields) != 2 {
+		return fmt.Errorf("imported DRep pulsing state has %d fields, expected 2", len(pulsingFields))
+	}
+	snapshotFields, err := decodeRawArray(pulsingFields[0])
+	if err != nil {
+		return fmt.Errorf("decode imported pulsing snapshot: %w", err)
+	}
+	if len(snapshotFields) != 4 {
+		return fmt.Errorf("imported pulsing snapshot has %d fields, expected 4", len(snapshotFields))
+	}
+	wrappedDistribution := append([]byte{0x81}, snapshotFields[1]...)
+	var distribution olocalstatequery.DRepStakeDistrResult
+	if _, err := cbor.DecodeExact(wrappedDistribution, &distribution); err != nil {
+		return fmt.Errorf("decode imported DRep distribution: %w", err)
+	}
+	ratifyFields, err := decodeRawArray(pulsingFields[1])
+	if err != nil {
+		return fmt.Errorf("decode imported ratification state: %w", err)
+	}
+	if len(ratifyFields) != 4 {
+		return fmt.Errorf("imported ratification state has %d fields, expected 4", len(ratifyFields))
+	}
+	var delayed bool
+	if _, err := cbor.DecodeExact(ratifyFields[3], &delayed); err != nil {
+		return fmt.Errorf("decode imported ratification delayed flag: %w", err)
+	}
+	enactFields, err := decodeRawArray(ratifyFields[0])
+	if err != nil {
+		return fmt.Errorf("decode imported ratification enact state: %w", err)
+	}
+	if len(enactFields) != 7 {
+		return fmt.Errorf("imported ratification enact state has %d fields, expected 7", len(enactFields))
+	}
+	var treasury uint64
+	if len(enactFields[4]) > 0 && enactFields[4][0] != 0xf6 {
+		if _, err := cbor.DecodeExact(enactFields[4], &treasury); err != nil {
+			return fmt.Errorf("decode imported ratification treasury: %w", err)
+		}
+	}
+	snapshot := &models.GovernanceBoundarySnapshot{
+		Epoch:                cfg.State.Epoch,
+		BoundarySlot:         boundarySlot,
+		PostEnactmentPParams: append([]byte(nil), govFields[3]...),
+		FuturePParams:        append([]byte(nil), govFields[5]...),
+		RatificationTreasury: treasury,
+		Delayed:              delayed,
+		ImportedRatifyState:  append([]byte(nil), pulsingFields[1]...),
+		DRepDistribution: make(
+			[]models.DRepStakeDistributionEntry,
+			0,
+			len(distribution),
+		),
+		Ratified: make(
+			[]models.GovernanceActionRef,
+			0,
+			len(parsed.RatifiedGovActionIds),
+		),
+		Expired: make(
+			[]models.GovernanceActionRef,
+			0,
+			len(parsed.ExpiredGovActionIds),
+		),
+	}
+	for _, entry := range distribution {
+		if entry.Drep.Type < lcommon.DrepTypeAddrKeyHash ||
+			entry.Drep.Type > lcommon.DrepTypeNoConfidence {
+			return fmt.Errorf("imported DRep distribution type %d", entry.Drep.Type)
+		}
+		snapshot.DRepDistribution = append(
+			snapshot.DRepDistribution,
+			models.DRepStakeDistributionEntry{
+				Credential:    append([]byte(nil), entry.Drep.Credential...),
+				Stake:         entry.Stake,
+				DRepType:      uint8(entry.Drep.Type), //nolint:gosec // checked above
+				CredentialTag: uint8(entry.Drep.Type), //nolint:gosec // checked above
+			},
+		)
+	}
+	for _, action := range parsed.RatifiedGovActionIds {
+		snapshot.Ratified = append(snapshot.Ratified, models.GovernanceActionRef{
+			TxHash:      append([]byte(nil), action.TxHash...),
+			ActionIndex: action.ActionIndex,
+		})
+	}
+	for _, action := range parsed.ExpiredGovActionIds {
+		snapshot.Expired = append(snapshot.Expired, models.GovernanceActionRef{
+			TxHash:      append([]byte(nil), action.TxHash...),
+			ActionIndex: action.ActionIndex,
+		})
+	}
+	if err := loader.LoadGovernanceBoundarySnapshot(snapshot); err != nil {
+		return fmt.Errorf("save imported governance boundary snapshot: %w", err)
+	}
 	return nil
 }
 

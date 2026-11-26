@@ -21,6 +21,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -151,7 +153,7 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 
 	txn := ledgerDBFor(t, db).Begin(t.Context(), true)
 	defer txn.Release()
-	pp := &conway.ConwayProtocolParameters{}
+	pp := testutil.CompleteRats(&conway.ConwayProtocolParameters{})
 	pp.ProtocolVersion.Major = 10
 	out, err := governance.ProcessEpoch(t.Context(), &governance.EpochInput{
 		DB:           ledgerDBFor(t, db),

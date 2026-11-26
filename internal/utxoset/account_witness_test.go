@@ -160,7 +160,7 @@ func TestImportBaselinesRollBackToTheirTarget(t *testing.T) {
 // markers, so they load again from the metadata store.
 func TestLoadingUtxoSetClearsAccountWitnessFamilies(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	set := openAccountSet(t)

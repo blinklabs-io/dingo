@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -228,8 +229,6 @@ func TestApplyEndorserBlockDenseOffsetsReadableByLaterBlock(t *testing.T) {
 	t.Parallel()
 
 	ls, db, count := newLeiosApplyDenseLedger(t)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
 	raws, txs := leiosApplyDenseBlock(t, count)
 	rbPoint := leiosApplyTestRankingPoint(0x53)
 	spent := txs[count/2]
@@ -249,8 +248,10 @@ func TestApplyEndorserBlockDenseOffsetsReadableByLaterBlock(t *testing.T) {
 		)
 		return err
 	}))
-	spender, _ := leiosApplyTestUtxoState(t, raw, spent.Hash().Bytes(), 3)
-	require.NotEmpty(t, spender, "the later block must spend the dense output")
+	require.False(
+		t, outputLiveIn(t, ls, spent.Hash().Bytes(), 3),
+		"the later block must spend the dense output",
+	)
 	requireLeiosDenseOutputsResolve(t, db, txs)
 }
 
@@ -262,8 +263,6 @@ func TestApplyEndorserBlockDenseOffsetsSpentWithinBlock(t *testing.T) {
 	t.Parallel()
 
 	ls, db, count := newLeiosApplyDenseLedger(t)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
 	raws, txs := leiosApplyDenseBlock(t, count)
 	spent := txs[0]
 	spendRaw, spendTx := leiosApplyTestSpendingTx(
@@ -275,9 +274,12 @@ func TestApplyEndorserBlockDenseOffsetsSpentWithinBlock(t *testing.T) {
 		ls, db, leiosApplyTestRankingPoint(0x5c), 715,
 		leiosApplyTestEbHash(0x5d), raws,
 	))
-	requireLeiosApplyTestTxCount(t, raw, int64(count+1))
-	spender, _ := leiosApplyTestUtxoState(t, raw, spent.Hash().Bytes(), 3)
-	require.Equal(t, spendTx.Hash().Bytes(), spender)
+	requireLeiosApplyTestTxCount(t, ls, count+1)
+	require.False(t, outputLiveIn(t, ls, spent.Hash().Bytes(), 3))
+	require.True(
+		t, outputLiveIn(t, ls, spendTx.Hash().Bytes(), 0),
+		"the spend's own output is live",
+	)
 	requireLeiosDenseOutputsResolve(t, db, append(txs, spendTx))
 }
 
@@ -288,8 +290,6 @@ func TestApplyEndorserBlockDenseOffsetsCrashBetweenBatches(t *testing.T) {
 	t.Parallel()
 
 	ls, db, count := newLeiosApplyDenseLedger(t)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
 	raws, txs := leiosApplyDenseBlock(t, count)
 	rbPoint := leiosApplyTestRankingPoint(0x57)
 	ebHash := leiosApplyTestEbHash(0x58)
@@ -300,14 +300,14 @@ func TestApplyEndorserBlockDenseOffsetsCrashBetweenBatches(t *testing.T) {
 		batches++
 		return injected
 	}
-	err = applyLeiosDenseBlock(ls, db, rbPoint, 720, ebHash, raws)
+	err := applyLeiosDenseBlock(ls, db, rbPoint, 720, ebHash, raws)
 	require.ErrorIs(t, err, injected)
 	require.Equal(t, 1, batches, "the crash must follow the first committed batch")
-	requireLeiosApplyTestTxCount(t, raw, 0)
+	requireLeiosApplyTestTxCount(t, ls, 0)
 
 	ls.afterEndorserOffsetBatch = nil
 	require.NoError(t, applyLeiosDenseBlock(ls, db, rbPoint, 720, ebHash, raws))
-	requireLeiosApplyTestTxCount(t, raw, int64(count))
+	requireLeiosApplyTestTxCount(t, ls, count)
 	requireLeiosDenseOutputsResolve(t, db, txs)
 }
 
@@ -352,29 +352,41 @@ func TestApplyEndorserBlockDenseOffsetsRollbackThenReapply(t *testing.T) {
 	t.Parallel()
 
 	ls, db, count := newLeiosApplyDenseLedger(t)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
 	raws, txs := leiosApplyDenseBlock(t, count)
 	rbPoint := leiosApplyTestRankingPoint(0x59)
 	ebHash := leiosApplyTestEbHash(0x5a)
 
 	require.NoError(t, applyLeiosDenseBlock(ls, db, rbPoint, 730, ebHash, raws))
-	requireLeiosApplyTestTxCount(t, raw, int64(count))
+	requireTxIndexCount(t, ls, count)
 
 	rollback := db.Transaction(context.Background(), true)
 	require.NoError(t, rollback.Do(func(txn *database.Txn) error {
-		if err := db.UtxosDeleteRolledback(
-			context.Background(), rbPoint.Slot-1, txn,
+		if _, _, err := db.TruncateAfterSlot(
+			context.Background(), ocommon.Point{}, 0, txn,
 		); err != nil {
 			return err
 		}
-		return db.TransactionsDeleteRolledback(
-			context.Background(), rbPoint.Slot-1, txn,
+		ls.stageUtxoSetRollback(
+			dbadapter.Txn(txn), ocommon.Point{},
 		)
+		return nil
 	}))
-	requireLeiosApplyTestTxCount(t, raw, 0)
+	requireTxIndexCount(t, ls, 0)
 
 	require.NoError(t, applyLeiosDenseBlock(ls, db, rbPoint, 730, ebHash, raws))
-	requireLeiosApplyTestTxCount(t, raw, int64(count))
+	requireTxIndexCount(t, ls, count)
 	requireLeiosDenseOutputsResolve(t, db, txs)
+}
+
+// requireTxIndexCount asserts how many transactions the LedgerDB indexes.
+func requireTxIndexCount(t *testing.T, ls *LedgerState, want int) {
+	t.Helper()
+	r, ok := ls.config.UtxoSet.(TxIndexReader)
+	require.True(t, ok, "the LedgerDB keeps no transaction index")
+	got := 0
+	require.NoError(t, r.EachTxIndexEntry(func(TxIndexEntry) error {
+		got++
+		return nil
+	}))
+	require.Equal(t, want, got)
 }

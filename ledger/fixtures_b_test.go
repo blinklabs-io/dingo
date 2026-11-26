@@ -18,15 +18,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/cbor"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -37,9 +36,6 @@ import (
 func fxAttachLedgerDB(t testing.TB, ls *LedgerState) {
 	t.Helper()
 	if ls.config.UtxoSet == nil {
-		if _, open := LiveSetOfForTest(ls.db); !open {
-			fxStoreSeededUtxoCbor(t, ls.db)
-		}
 		attachTestLiveSet(t, ls)
 	}
 	require.NoError(t, ls.db.SetLiveUtxoSource(ls))
@@ -59,26 +55,19 @@ func fxOpenDB(t *testing.T) *database.Database {
 }
 
 // fxSeed writes changes to db's LedgerDB set outside any block, as an import
-// does. The set must be open.
+// does.
 func fxSeed(t testing.TB, db *database.Database, changes LedgerChanges) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the database has no open LedgerDB set")
-	ls.stageLedgerChanges(nil, changes)
+	seedLedgerOf(t, db).stageLedgerChanges(nil, changes)
 }
 
-// fxSeedSnapshot saves one pool stake snapshot row in db's LedgerDB set, or
-// in the metadata store for the set to take over when it opens later. It
-// returns an error so it stands where the metadata store's save did.
+// fxSeedSnapshot saves one pool stake snapshot row in db's LedgerDB set.
 func fxSeedSnapshot(
 	t testing.TB,
 	db *database.Database,
 	snapshot *models.PoolStakeSnapshot,
 ) error {
 	t.Helper()
-	if seedLedgerOf(db) == nil {
-		return db.Metadata().SavePoolStakeSnapshot(snapshot, nil)
-	}
 	fxSeed(t, db, LedgerChanges{Snapshots: []SnapshotChange{{
 		Kind: SnapshotSave, Snapshot: snapshot,
 	}}})
@@ -95,9 +84,7 @@ func fxCommitAt(
 	changes LedgerChanges,
 ) {
 	t.Helper()
-	set, ok := LiveSetOfForTest(db)
-	require.True(t, ok, "the database has no open LedgerDB set")
-	w, ok := set.(LedgerChangesWriter)
+	w, ok := OpenLiveSetForTest(t, db).(LedgerChangesWriter)
 	require.True(t, ok, "the fixture's set must keep ledger state")
 	if len(changes.Utxo) == 0 {
 		changes.Utxo = []UtxoEvent{{Point: point}}
@@ -106,8 +93,7 @@ func fxCommitAt(
 }
 
 // fxSeedPParamUpdate stores a protocol parameter update proposal in db's
-// LedgerDB set, or in the metadata store for the set to take over when it
-// opens later.
+// LedgerDB set.
 func fxSeedPParamUpdate(
 	t testing.TB,
 	db *database.Database,
@@ -115,9 +101,6 @@ func fxSeedPParamUpdate(
 	slot, epoch uint64,
 ) error {
 	t.Helper()
-	if seedLedgerOf(db) == nil {
-		return db.SetPParamUpdate(genesis, params, slot, epoch, nil)
-	}
 	fxSeed(t, db, LedgerChanges{PParamUpdates: []PParamUpdateChange{{
 		Update: models.PParamUpdate{
 			GenesisHash: genesis, Cbor: params,
@@ -127,51 +110,121 @@ func fxSeedPParamUpdate(
 	return nil
 }
 
-// fxStoreSeededUtxoCbor gives every live metadata UTxO row that has no body
-// in the blob store a Shelley output paying the row's amount to its staking
-// key, so the LedgerDB set can take the rows over when it opens.
-func fxStoreSeededUtxoCbor(t testing.TB, db *database.Database) {
+// requireSpentAt requires ls's LedgerDB set to record the spend of
+// txID#index at at and no earlier: a rollback to at leaves the output spent,
+// and one to before restores it. A point without a hash stands for every
+// change through its slot, so slots before and at bound the spend exactly.
+func requireSpentAt(
+	t testing.TB,
+	ls *LedgerState,
+	txID []byte,
+	index uint32,
+	before, at ocommon.Point,
+) {
 	t.Helper()
-	type row struct {
-		txID, stakeKey []byte
-		index          uint32
-		amount         uint64
+	restores := func(point ocommon.Point) bool {
+		evt := previewSetRollback(t, ls, point)
+		return slices.ContainsFunc(evt.Added, func(out UtxoOutput) bool {
+			return bytes.Equal(out.Ref.Hash, txID) && out.Ref.Idx == index
+		})
 	}
-	var seeded []row
-	require.NoError(t, db.IterateLiveUtxoRefs(
-		t.Context(), nil, func(u *models.Utxo) error {
-			seeded = append(seeded, row{
-				txID:     bytes.Clone(u.TxId),
-				stakeKey: bytes.Clone(u.StakingKey),
-				index:    u.OutputIdx,
-				amount:   uint64(u.Amount),
-			})
-			return nil
-		},
+	require.False(
+		t, restores(at), "%x#%d is not yet spent at slot %d",
+		txID, index, at.Slot,
+	)
+	require.True(
+		t, restores(before), "%x#%d was spent at or before slot %d",
+		txID, index, before.Slot,
+	)
+}
+
+// requireCreatedAt is requireSpentAt for the creation of txID#index: a
+// rollback to at keeps the output, and one to before removes it.
+func requireCreatedAt(
+	t testing.TB,
+	ls *LedgerState,
+	txID []byte,
+	index uint32,
+	before, at ocommon.Point,
+) {
+	t.Helper()
+	removes := func(point ocommon.Point) bool {
+		evt := previewSetRollback(t, ls, point)
+		return slices.ContainsFunc(evt.Removed, func(id models.UtxoId) bool {
+			return bytes.Equal(id.Hash, txID) && id.Idx == index
+		})
+	}
+	require.False(
+		t, removes(at), "%x#%d is not yet created at slot %d",
+		txID, index, at.Slot,
+	)
+	require.True(
+		t, removes(before), "%x#%d was created at or before slot %d",
+		txID, index, before.Slot,
+	)
+}
+
+func previewSetRollback(
+	t testing.TB,
+	ls *LedgerState,
+	point ocommon.Point,
+) UtxoEvent {
+	t.Helper()
+	history, ok := ls.config.UtxoSet.(UtxoSetRollbacker)
+	require.True(t, ok, "the ledger's set keeps no history")
+	evt, err := history.PreviewUtxoSetRollback(point)
+	require.NoError(t, err)
+	return evt
+}
+
+// fxSeedOutput makes encoded the live output txID#index in db's LedgerDB
+// set, created at slot outside any block, with its body in the blob store
+// where a block's outputs keep theirs.
+func fxSeedOutput(
+	t testing.TB,
+	db *database.Database,
+	txID []byte,
+	index uint32,
+	slot uint64,
+	encoded []byte,
+) {
+	t.Helper()
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+		return db.Blob().SetUtxo(txn.Blob(), txID, index, encoded)
+	}))
+	require.NoError(t, OpenLiveSetForTest(t, db).ApplyUtxoChanges(
+		nil, []UtxoEvent{{
+			Point: ocommon.Point{Slot: slot},
+			Added: []UtxoOutput{{
+				Ref:  models.UtxoId{Hash: bytes.Clone(txID), Idx: index},
+				Cbor: bytes.Clone(encoded),
+			}},
+		}},
 	))
-	for _, r := range seeded {
-		read := db.BlobTxn(false)
-		_, err := db.Blob().GetUtxo(read.Blob(), r.txID, r.index)
-		read.Release()
-		if err == nil {
-			continue
-		}
-		addrType := lcommon.AddressTypeKeyNone
-		if len(r.stakeKey) > 0 {
-			addrType = lcommon.AddressTypeKeyKey
-		}
-		addr, err := lcommon.NewAddressFromParts(
-			uint8(addrType), lcommon.AddressNetworkTestnet,
-			bytes.Repeat([]byte{0x37}, lcommon.AddressHashSize), r.stakeKey,
+}
+
+// fxImporter writes ledger state into db's LedgerDB set as a Mithril import
+// does.
+func fxImporter(t testing.TB, db *database.Database) *ImportLedgerDB {
+	t.Helper()
+	return NewImportLedgerDB(db, OpenLiveSetForTest(t, db), testLogger())
+}
+
+// fxImportAccountBaselines gives every active account in db's LedgerDB set
+// the import baseline a Mithril import writes, so a rollback has the
+// account's imported delegation to restore.
+func fxImportAccountBaselines(t testing.TB, db *database.Database) {
+	t.Helper()
+	ldb := seedDB(t, db)
+	refs, err := ldb.GetActiveAccountCredentials(nil)
+	require.NoError(t, err)
+	importer := fxImporter(t, db)
+	for _, ref := range refs {
+		account, err := ldb.GetAccountByCredential(
+			t.Context(), ref.Tag, ref.Key, false, nil,
 		)
 		require.NoError(t, err)
-		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
-			OutputAddress: addr, OutputAmount: r.amount,
-		})
-		require.NoError(t, err)
-		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
-			return db.Blob().SetUtxo(txn.Blob(), r.txID, r.index, encoded)
-		}))
+		require.NoError(t, importer.ImportAccount(account, nil))
 	}
 }
 
@@ -203,9 +256,6 @@ func fxImportPool(
 	if err := seedImportPool(t, db, ctx, txn, pool, reg); err != nil {
 		return err
 	}
-	if seedLedgerOf(db) == nil {
-		return nil
-	}
 	fxSeed(t, db, LedgerChanges{PoolEvents: []PoolEventChange{{
 		Pool: bytes.Clone(pool.PoolKeyHash),
 		Event: PoolEvent{
@@ -226,8 +276,7 @@ func fxReregisterPool(
 	reg *models.PoolRegistration,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the database has no open LedgerDB set")
+	ls := seedLedgerOf(t, db)
 	state, err := ls.poolReader(nil).PoolState(reg.PoolKeyHash)
 	require.NoError(t, err)
 	require.NotNil(t, state, "the pool is not registered")
@@ -255,8 +304,7 @@ func fxRetirePool(
 	epoch, slot uint64,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the database has no open LedgerDB set")
+	ls := seedLedgerOf(t, db)
 	state, err := ls.poolReader(nil).PoolState(pool)
 	require.NoError(t, err)
 	require.NotNil(t, state, "the pool is not registered")
@@ -280,8 +328,7 @@ func fxPoolDeposit(
 	slot, deposit uint64,
 ) {
 	t.Helper()
-	ls := seedLedgerOf(db)
-	require.NotNil(t, ls, "the database has no open LedgerDB set")
+	ls := seedLedgerOf(t, db)
 	state, err := ls.poolReader(nil).PoolState(pool)
 	require.NoError(t, err)
 	require.NotNil(t, state, "the pool is not registered")
@@ -339,6 +386,26 @@ func fxJournalChain(t testing.TB, ls *LedgerState) {
 	}
 }
 
+// fxPruneJournal drops from the journal of ls's LedgerDB set every tip at or
+// below slot, as the set does once those tips are a stability window behind
+// its own. A rollback then reaches the block at slot and nothing below it.
+func fxPruneJournal(t testing.TB, ls *LedgerState, slot uint64) {
+	t.Helper()
+	pruner, ok := ls.config.UtxoSet.(interface{ PruneHistory(uint64) error })
+	require.True(t, ok, "the set cannot prune its journal")
+	require.NoError(t, pruner.PruneHistory(slot+1))
+}
+
+// fxEmptyJournal records the ledger's tip as the tip of ls's LedgerDB set and
+// drops the set's whole journal, as a set holds it once every earlier tip is
+// a stability window behind: no rollback below the tip reaches.
+func fxEmptyJournal(t testing.TB, ls *LedgerState) {
+	t.Helper()
+	tip := ls.currentTip.Point
+	fxTip(t, ls, tip)
+	fxPruneJournal(t, ls, tip.Slot)
+}
+
 // fxBlock commits what write stages as the block at point, so the set
 // journals it under that point and a rollback below the point undoes it.
 func fxBlock(
@@ -362,4 +429,45 @@ func fxRollback(t testing.TB, ls *LedgerState, point ocommon.Point) {
 	t.Helper()
 	ls.stageUtxoSetRollback(nil, point)
 	require.False(t, ls.utxoSetFailed.Load(), "the set must roll back")
+}
+
+// fxAddOutput makes txId#0 a live output of ls's LedgerDB set outside any
+// block, as an output produced below the journal is.
+func fxAddOutput(t testing.TB, ls *LedgerState, txId []byte) {
+	t.Helper()
+	tt, ok := t.(*testing.T)
+	require.True(t, ok)
+	require.NoError(t, ls.config.UtxoSet.ApplyUtxoChanges(nil, []UtxoEvent{{
+		Added: []UtxoOutput{{
+			Ref:  models.UtxoId{Hash: txId, Idx: 0},
+			Cbor: boundaryOutputCbor(tt, 1_000_000),
+		}},
+	}}))
+}
+
+// fxSpendAt commits the spend of txId#0 as the block at point, so a rollback
+// below point restores the output from the set's journal.
+func fxSpendAt(
+	t testing.TB,
+	ls *LedgerState,
+	point ocommon.Point,
+	txId []byte,
+) {
+	t.Helper()
+	fxCommitAt(t, ls.db, point, LedgerChanges{Utxo: []UtxoEvent{{
+		Point:   point,
+		Removed: []models.UtxoId{{Hash: txId, Idx: 0}},
+	}}})
+}
+
+// fxOutputLive reports whether txId#0 is a live output of the ledger, by the
+// lookup validation resolves inputs with.
+func fxOutputLive(t testing.TB, ls *LedgerState, txId []byte) bool {
+	t.Helper()
+	_, err := ls.UtxoByRef(txId, 0)
+	if errors.Is(err, database.ErrUtxoNotFound) {
+		return false
+	}
+	require.NoError(t, err)
+	return true
 }

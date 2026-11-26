@@ -618,8 +618,7 @@ func TestApplyUtxoStakeDeltaOverflowAndUnderflow(t *testing.T) {
 // load-bearing test for the whole design: the incremental
 // running total this change introduces trades away sumCredentialUtxoStake's
 // self-healing full-scan property, so it depends entirely on
-// RewardLiveStakeNeedsBackfill (run at every node startup, before block
-// application resumes -- see Node.backfillRewardLiveStake) actually
+// RewardLiveStakeNeedsBackfill actually
 // detecting a corrupted running total and RebuildRewardLiveStake actually
 // correcting it. This proves both halves against a corruption that exactly
 // simulates a missed or double-applied delta: the stored total is wrong, and

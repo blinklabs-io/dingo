@@ -397,8 +397,7 @@ func (d *Database) initBlockInventory() error {
 }
 
 // EnsureBlockInventory creates the retained-block inventory when it is absent.
-// It is safe to call during commit-timestamp recovery and is a no-op after the
-// inventory has been initialized.
+// It is a no-op after the inventory has been initialized.
 func (d *Database) EnsureBlockInventory() error {
 	return d.initBlockInventory()
 }

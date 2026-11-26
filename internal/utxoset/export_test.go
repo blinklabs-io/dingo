@@ -64,3 +64,10 @@ func (s *Set) PutSnapshotRowForTest(
 func (s *Set) IndexSnapshotSlotsForTest() error {
 	return s.indexSnapshotSlots()
 }
+
+// StartEmptyForTest loads every ledger-state family empty, as Reconcile does
+// for a set that starts at origin, so a test can apply changes to a new set
+// and then reconcile it past origin.
+func (s *Set) StartEmptyForTest() error {
+	return s.store.LoadMissingFamiliesEmpty()
+}

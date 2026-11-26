@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -46,7 +47,7 @@ import (
 // TestLedgerProcessBlockRejectsLateMIRCertificate is the block-application
 // other half: a block carrying a MIR certificate inside the final
 // stability window fails validation, so the certificate is never stored for
-// applyMIRCerts to credit at the boundary.
+// ApplyMIRCerts to credit at the boundary.
 func TestLedgerProcessBlockRejectsLateMIRCertificate(t *testing.T) {
 	t.Parallel()
 
@@ -277,7 +278,7 @@ func runApplyMIRCertsEra(
 	t.Helper()
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyMIRCerts(
+		return ls.engine().ApplyMIRCerts(
 			context.Background(),
 			txn,
 			epochStartSlot,
@@ -305,7 +306,7 @@ func applyMIRCertsErrEra(
 ) error {
 	txn := db.Transaction(context.Background(), true)
 	return txn.Do(func(txn *database.Txn) error {
-		return ls.applyMIRCerts(
+		return ls.engine().ApplyMIRCerts(
 			context.Background(),
 			txn,
 			epochStartSlot,
@@ -329,7 +330,7 @@ func TestApplyMIRCerts_UnknownPotDiscardsBoundary(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		400,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(500)},
@@ -384,7 +385,7 @@ func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		500,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(mirAmount)},
@@ -445,7 +446,7 @@ func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(firstAmount)},
@@ -454,7 +455,7 @@ func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		400,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(secondAmount)},
@@ -518,7 +519,7 @@ func TestApplyMIRCerts_PreAlonzoSameCredentialReplaces(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(firstAmount)},
@@ -527,7 +528,7 @@ func TestApplyMIRCerts_PreAlonzoSameCredentialReplaces(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		400,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(secondAmount)},
@@ -585,7 +586,7 @@ func TestApplyMIRCerts_ReservesAndTreasuryStayDistinct(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(reservesAmount)},
@@ -594,7 +595,7 @@ func TestApplyMIRCerts_ReservesAndTreasuryStayDistinct(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotTreasury,
+		epochengine.MIRPotTreasury,
 		400,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(treasuryAmount)},
@@ -676,7 +677,7 @@ func TestApplyMIRCerts_DistributionTotalBeyondEveryPotIsNoOp(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: credA, Amount: new(big.Int).SetUint64(maxUint)},
@@ -744,7 +745,7 @@ func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotTreasury,
+		epochengine.MIRPotTreasury,
 		500,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(mirAmount)},
@@ -794,7 +795,7 @@ func TestApplyMIRCerts_DistributionUnregisteredAccount(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		500,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(400)},
@@ -823,7 +824,7 @@ func TestApplyMIRCerts_PotTransferReservesToTreasury(t *testing.T) {
 	ls, db, _ := newMIRTestLedger(t)
 
 	const transfer = uint64(2_000)
-	seedMIRPotTransfer(t, db, mirPotReserves, transfer, 500)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotReserves, transfer, 500)
 	require.NoError(t, seedDB(t, db).SetNetworkState(3_000, 10_000, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, 0, 1_000)
@@ -845,7 +846,7 @@ func TestApplyMIRCerts_PotTransferTreasuryToReserves(t *testing.T) {
 	ls, db, _ := newMIRTestLedger(t)
 
 	const transfer = uint64(1_500)
-	seedMIRPotTransfer(t, db, mirPotTreasury, transfer, 500)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotTreasury, transfer, 500)
 	require.NoError(t, seedDB(t, db).SetNetworkState(4_000, 6_000, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, 0, 1_000)
@@ -871,7 +872,7 @@ func TestApplyMIRCerts_PotTransferOverflow(t *testing.T) {
 
 	t.Run("reserves to treasury", func(t *testing.T) {
 		ls, db, _ := newMIRTestLedger(t)
-		seedMIRPotTransfer(t, db, mirPotReserves, 1, 500)
+		seedMIRPotTransfer(t, db, epochengine.MIRPotReserves, 1, 500)
 		require.NoError(t, seedDB(t, db).SetNetworkState(maxUint, 1, 50, nil))
 
 		require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
@@ -885,7 +886,7 @@ func TestApplyMIRCerts_PotTransferOverflow(t *testing.T) {
 
 	t.Run("treasury to reserves", func(t *testing.T) {
 		ls, db, _ := newMIRTestLedger(t)
-		seedMIRPotTransfer(t, db, mirPotTreasury, 1, 500)
+		seedMIRPotTransfer(t, db, epochengine.MIRPotTreasury, 1, 500)
 		require.NoError(t, seedDB(t, db).SetNetworkState(1, maxUint, 50, nil))
 
 		require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
@@ -911,7 +912,7 @@ func TestApplyMIRCerts_PotTransferOverflowLogsDiscardReason(t *testing.T) {
 	ls.config.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
 
 	maxUint := ^uint64(0)
-	seedMIRPotTransfer(t, db, mirPotReserves, 1, 500)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotReserves, 1, 500)
 	require.NoError(t, seedDB(t, db).SetNetworkState(maxUint, 1, 50, nil))
 
 	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000))
@@ -940,7 +941,7 @@ func TestApplyMIRCerts_UnknownSourcePotIsNoOp(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		400,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(500)},
@@ -990,8 +991,8 @@ func TestApplyMIRCerts_TransferTotalOverflowIsNoOp(t *testing.T) {
 	ls.config.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
 
 	maxUint := ^uint64(0)
-	seedMIRPotTransfer(t, db, mirPotReserves, maxUint, 200)
-	seedMIRPotTransfer(t, db, mirPotReserves, maxUint, 400)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotReserves, maxUint, 200)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotReserves, maxUint, 400)
 	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 10_000, 50, nil))
 
 	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
@@ -1025,7 +1026,7 @@ func TestApplyMIRCerts_OutsideEpochRange(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		50,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(500)},
@@ -1035,7 +1036,7 @@ func TestApplyMIRCerts_OutsideEpochRange(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		1_000,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(300)},
@@ -1089,7 +1090,7 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(mirAmount)},
@@ -1111,7 +1112,7 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 		fxBlock(t, ls, fxPoint(boundarySlot), func(
 			_ ledgerdb.LedgerDB, txn ledgerdb.Txn,
 		) error {
-			return ls.applyMIRCerts(
+			return ls.engine().ApplyMIRCerts(
 				context.Background(), dbadapter.Unwrap(txn),
 				epochStartSlot, boundarySlot, alonzo.EraIdAlonzo,
 			)
@@ -1202,7 +1203,7 @@ func TestApplyMIRCerts_OverBudgetReservesIsNoOp(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		500,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(750)},
@@ -1251,7 +1252,7 @@ func TestApplyMIRCerts_ExactBudgetApplies(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		500,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(750)},
@@ -1306,7 +1307,7 @@ func TestApplyMIRCerts_OverBudgetIsAggregateAcrossCerts(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: credA, Amount: new(big.Int).SetUint64(600)},
@@ -1315,7 +1316,7 @@ func TestApplyMIRCerts_OverBudgetIsAggregateAcrossCerts(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		300,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: credB, Amount: new(big.Int).SetUint64(600)},
@@ -1368,7 +1369,7 @@ func TestApplyMIRCerts_BudgetExcludesUnregisteredCredentials(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		500,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: registered, Amount: new(big.Int).SetUint64(400)},
@@ -1419,7 +1420,7 @@ func TestApplyMIRCerts_OverBudgetTreasuryBlocksReservesDistribution(
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: reservesCred, Amount: new(big.Int).SetUint64(100)},
@@ -1428,7 +1429,7 @@ func TestApplyMIRCerts_OverBudgetTreasuryBlocksReservesDistribution(
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotTreasury,
+		epochengine.MIRPotTreasury,
 		300,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: treasuryCred, Amount: new(big.Int).SetUint64(9_000)},
@@ -1477,11 +1478,11 @@ func TestApplyMIRCerts_PotTransferCountsTowardAvailablePot(t *testing.T) {
 
 	cred := mirCred28(0x69)
 	// Treasury alone cannot cover 900, but gains 500 from reserves first.
-	seedMIRPotTransfer(t, db, mirPotReserves, 500, 200)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotReserves, 500, 200)
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotTreasury,
+		epochengine.MIRPotTreasury,
 		300,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(900)},
@@ -1526,11 +1527,11 @@ func TestApplyMIRCerts_OverBudgetDropsPotTransfer(t *testing.T) {
 	ls, db, _ := newMIRTestLedger(t)
 
 	cred := mirCred28(0x6a)
-	seedMIRPotTransfer(t, db, mirPotReserves, 500, 200)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotReserves, 500, 200)
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		300,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: new(big.Int).SetUint64(5_000)},
@@ -1574,7 +1575,7 @@ func TestApplyMIRCerts_PotTransferLargerThanPotIsNoOp(t *testing.T) {
 
 	ls, db, _ := newMIRTestLedger(t)
 
-	seedMIRPotTransfer(t, db, mirPotReserves, 5_000, 200)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotReserves, 5_000, 200)
 	require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 800, 50, nil))
 
 	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
@@ -1608,7 +1609,7 @@ func TestApplyMIRCerts_NegativeDeltaReducesEarlierCredit(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: big.NewInt(1_000)},
@@ -1617,7 +1618,7 @@ func TestApplyMIRCerts_NegativeDeltaReducesEarlierCredit(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		400,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: big.NewInt(-400)},
@@ -1677,7 +1678,7 @@ func TestApplyMIRCerts_NegativeDeltaCancellingCreditWritesNothing(
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: big.NewInt(500)},
@@ -1686,7 +1687,7 @@ func TestApplyMIRCerts_NegativeDeltaCancellingCreditWritesNothing(
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		400,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: big.NewInt(-500)},
@@ -1733,7 +1734,7 @@ func TestApplyMIRCerts_NegativeDeltaExcludedFromBudget(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: big.NewInt(900)},
@@ -1742,7 +1743,7 @@ func TestApplyMIRCerts_NegativeDeltaExcludedFromBudget(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		400,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: big.NewInt(-400)},
@@ -1790,14 +1791,14 @@ func TestApplyMIRCerts_NetNegativeDeltaDiscardsBoundary(t *testing.T) {
 	seedMIRDistribution(
 		t,
 		db,
-		mirPotReserves,
+		epochengine.MIRPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: negativeCred, Amount: big.NewInt(-100)},
 			{Credential: otherCred, Amount: big.NewInt(300)},
 		},
 	)
-	seedMIRPotTransfer(t, db, mirPotTreasury, 250, 300)
+	seedMIRPotTransfer(t, db, epochengine.MIRPotTreasury, 250, 300)
 	for _, cred := range [][]byte{negativeCred, otherCred} {
 		require.NoError(
 			t,
@@ -1853,7 +1854,7 @@ func TestApplyMIRCerts_NetBeyondUint64DiscardsBoundary(t *testing.T) {
 			{Credential: validCred, Amount: big.NewInt(100)},
 		},
 	} {
-		seedMIRDistribution(t, db, mirPotReserves, slot, rewards)
+		seedMIRDistribution(t, db, epochengine.MIRPotReserves, slot, rewards)
 	}
 	for _, cred := range [][]byte{overflowCred, validCred} {
 		require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
@@ -1928,7 +1929,7 @@ func TestLedgerView_MIRPending_PinnedSurvivesConcurrentRollover(
 	)
 
 	cred := mirCred28(0x7A)
-	seedMIRDistribution(t, db, mirPotReserves, 150,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: big.NewInt(10)},
 		})
@@ -1943,7 +1944,7 @@ func TestLedgerView_MIRPending_PinnedSurvivesConcurrentRollover(
 		ls.Unlock()
 
 		pending, err := pinned.PendingInstantaneousRewards(
-			mirPotReserves, mirTestCredential(0, 0x7A),
+			epochengine.MIRPotReserves, mirTestCredential(0, 0x7A),
 		)
 		require.NoError(t, err)
 		assert.Equal(
@@ -1954,7 +1955,7 @@ func TestLedgerView_MIRPending_PinnedSurvivesConcurrentRollover(
 		)
 
 		fresh, err := ls.NewView(txn).PendingInstantaneousRewards(
-			mirPotReserves, mirTestCredential(0, 0x7A),
+			epochengine.MIRPotReserves, mirTestCredential(0, 0x7A),
 		)
 		require.NoError(t, err)
 		assert.Nil(
@@ -1974,11 +1975,11 @@ func TestLedgerView_MIRTotals_SeparatesPots(t *testing.T) {
 
 	ls, db, _ := newMIRTestLedger(t)
 	cred := mirCred28(0x79)
-	seedMIRDistribution(t, db, mirPotReserves, 150,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: big.NewInt(100)},
 		})
-	seedMIRDistribution(t, db, mirPotTreasury, 150,
+	seedMIRDistribution(t, db, epochengine.MIRPotTreasury, 150,
 		[]models.MoveInstantaneousRewardsReward{
 			{Credential: cred, Amount: big.NewInt(-50)},
 		})
@@ -1986,9 +1987,9 @@ func TestLedgerView_MIRTotals_SeparatesPots(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		lv := mirReaderView(ls, txn, 100, 5)
-		reserves, err := lv.InstantaneousRewardsTotal(mirPotReserves)
+		reserves, err := lv.InstantaneousRewardsTotal(epochengine.MIRPotReserves)
 		require.NoError(t, err)
-		treasury, err := lv.InstantaneousRewardsTotal(mirPotTreasury)
+		treasury, err := lv.InstantaneousRewardsTotal(epochengine.MIRPotTreasury)
 		require.NoError(t, err)
 		assert.Equal(t, "100", reserves.String(),
 			"the reserves cert must not be netted against the treasury cert")

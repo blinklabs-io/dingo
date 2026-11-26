@@ -129,7 +129,7 @@ func TestTxValidationSessionTicksEpochBoundary(t *testing.T) {
 	)
 
 	requireTreasuryValue(t, fixture.ls, nil, oldTreasury)
-	nextEpoch, err := fixture.db.Metadata().GetEpoch(
+	nextEpoch, err := fixture.ls.ledgerDB().GetEpoch(
 		fixture.currentEpoch.EpochId+1,
 		nil,
 	)

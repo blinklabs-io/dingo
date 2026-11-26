@@ -25,8 +25,8 @@ func (d *Database) GetEpoch(
 	epochId uint64,
 	txn *Txn,
 ) (*models.Epoch, error) {
-	if d.FamilyDrained(nodesettings.FamilyEpochs) {
-		epochs, err := d.drainedEpochs()
+	if d.metadata == nil {
+		epochs, err := d.sourceEpochs()
 		if err != nil {
 			return nil, err
 		}
@@ -47,8 +47,8 @@ func (d *Database) GetEpochsByEra(
 	eraId uint,
 	txn *Txn,
 ) ([]models.Epoch, error) {
-	if d.FamilyDrained(nodesettings.FamilyEpochs) {
-		epochs, err := d.drainedEpochs()
+	if d.metadata == nil {
+		epochs, err := d.sourceEpochs()
 		if err != nil {
 			return nil, err
 		}
@@ -88,8 +88,8 @@ func EpochBySlot(d *Database, slot uint64, txn *Txn) (models.Epoch, error) {
 }
 
 func (d *Database) GetEpochs(txn *Txn) ([]models.Epoch, error) {
-	if d.FamilyDrained(nodesettings.FamilyEpochs) {
-		return d.drainedEpochs()
+	if d.metadata == nil {
+		return d.sourceEpochs()
 	}
 	if txn == nil {
 		return d.epochStore().GetEpochs(nil)
@@ -101,12 +101,12 @@ func (d *Database) GetEpochBySlot(
 	slot uint64,
 	txn *Txn,
 ) (*models.Epoch, error) {
-	if d.FamilyDrained(nodesettings.FamilyEpochs) {
-		epochs, err := d.drainedEpochs()
+	if d.metadata == nil {
+		epochs, err := d.sourceEpochs()
 		if err != nil {
 			return nil, err
 		}
-		return drainedEpochBySlot(epochs, slot), nil
+		return sourceEpochBySlot(epochs, slot), nil
 	}
 	if txn == nil {
 		return d.epochStore().GetEpochBySlot(slot, nil)
@@ -118,8 +118,8 @@ func (d *Database) DeleteEpochsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyEpochs) {
-		return drainedWrite(nodesettings.FamilyEpochs)
+	if d.metadata == nil {
+		return errNoMetadataStore(nodesettings.FamilyEpochs)
 	}
 	if txn == nil {
 		return d.epochStore().DeleteEpochsAfterSlot(slot, nil)
@@ -136,8 +136,8 @@ func (d *Database) SetEpoch(
 	era, slotLength, lengthInSlots uint,
 	txn *Txn,
 ) error {
-	if d.FamilyDrained(nodesettings.FamilyEpochs) {
-		return drainedWrite(nodesettings.FamilyEpochs)
+	if d.metadata == nil {
+		return errNoMetadataStore(nodesettings.FamilyEpochs)
 	}
 	if txn == nil {
 		return d.epochStore().SetEpoch(

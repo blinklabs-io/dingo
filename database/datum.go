@@ -34,6 +34,9 @@ func (d *Database) SetDatum(
 	// Compute Blake2b-256 hash
 	datumHash := lcommon.Blake2b256Hash(rawDatum)
 
+	if err := d.requireStore("SetDatum"); err != nil {
+		return err
+	}
 	if txn == nil {
 		return d.metadata.SetDatum(datumHash, rawDatum, addedSlot, nil)
 	}
@@ -56,6 +59,9 @@ func (d *Database) GetDatum(
 	tmpHash, err := lcommon.NewBlake2b256Checked(hash)
 	if err != nil {
 		return nil, fmt.Errorf("datum hash: %w", err)
+	}
+	if err := d.requireStore("GetDatum"); err != nil {
+		return nil, err
 	}
 	ret, err := d.metadata.GetDatum(tmpHash, txn.Metadata())
 	if err != nil {

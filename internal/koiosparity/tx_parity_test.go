@@ -712,7 +712,7 @@ func TestCacheTxInfoIgnoresRowsWithoutReferenceInputs(t *testing.T) {
 func TestDatabaseSourceTransactionSampleAPIModeWalksEpochBlocks(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir:     t.TempDir(),
 		StorageMode: types.StorageModeAPI,
 	})
@@ -851,7 +851,7 @@ func sampleStoredTxParityBlock(
 ) []DingoTransaction {
 	t.Helper()
 	ctx := context.Background()
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{
 		DataDir:     t.TempDir(),
 		StorageMode: types.StorageModeAPI,
 	})
@@ -944,7 +944,7 @@ func storeTxParityBlock(
 	).ComputeOffsets(blockCbor, block)
 	require.NoError(t, err)
 	point := ocommon.NewPoint(txParityBlockSlot, hash)
-	acc := historyDB.NewValidatedBlockBatchAccumulator()
+	acc := historyDB.NewBatchAccumulator()
 	require.NotNil(t, acc)
 	txn := historyDB.Transaction(ctx, true)
 	for i, tx := range txs {
@@ -1003,7 +1003,7 @@ func TestDatabaseSourceTransactionSampleReadsTheIndexerDB(t *testing.T) {
 
 	source, err := NewDatabaseSource(consensus)
 	require.NoError(t, err)
-	source = source.WithTransactionHistory(indexerDB)
+	source = source.WithIndexerDB(indexerDB)
 
 	// The block is indexed but the tip has not passed the epoch: a later
 	// read could return more, so neither phase may take this as the sample.
