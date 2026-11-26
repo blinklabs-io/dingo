@@ -197,9 +197,8 @@ func (d *Database) MaterializeBlockUtxos(
 	slot uint64,
 	hash []byte,
 ) (int, error) {
-	utxoRefs, err := d.offsetUtxoRefsAtSlot(ctx, slot)
-	if err != nil || len(utxoRefs) == 0 {
-		return 0, err
+	if d.metadata == nil || d.liveUtxo {
+		return 0, ctx.Err()
 	}
 	var materialized int
 	// An IndexerDB writes its entries in its metadata transaction.
@@ -210,7 +209,47 @@ func (d *Database) MaterializeBlockUtxos(
 		blobTxn = d.BlockBlobTxn()
 	}
 	if err := blobTxn.Do(func(txn *Txn) error {
-		n, err := d.materializeUtxosTxn(ctx, txn, slot, hash, utxoRefs)
+		blobStore := txn.BlobStore()
+		if blobStore == nil {
+			return types.ErrBlobStoreUnavailable
+		}
+		blockCbor, blockMeta, err := blobStore.GetBlock(txn.Blob(), slot, hash)
+		if err != nil {
+			return fmt.Errorf(
+				"materialize block UTxOs (slot=%d): get block: %w",
+				slot,
+				err,
+			)
+		}
+		block, err := models.DecodeBlockCbor(blockMeta.Type, blockCbor)
+		if err != nil {
+			return fmt.Errorf(
+				"materialize block UTxOs (slot=%d): decode block: %w",
+				slot,
+				err,
+			)
+		}
+		offsets, err := NewBlockIndexer(slot, hash).ComputeOffsets(
+			blockCbor,
+			block,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"materialize block UTxOs (slot=%d): compute offsets: %w",
+				slot,
+				err,
+			)
+		}
+		refs := make([]models.UtxoId, 0, len(offsets.UtxoOffsets))
+		for ref := range offsets.UtxoOffsets {
+			refs = append(refs, models.UtxoId{
+				Hash: ref.TxId[:],
+				Idx:  ref.OutputIdx,
+			})
+		}
+		n, err := d.materializeUtxosTxnBlock(
+			ctx, txn, slot, hash, blockCbor, refs,
+		)
 		materialized = n
 		return err
 	}); err != nil {
@@ -278,6 +317,24 @@ func (d *Database) materializeUtxosTxn(
 			slot,
 			err,
 		)
+	}
+	return d.materializeUtxosTxnBlock(ctx, txn, slot, hash, blockCbor, refs)
+}
+
+func (d *Database) materializeUtxosTxnBlock(
+	ctx context.Context,
+	txn *Txn,
+	slot uint64,
+	hash []byte,
+	blockCbor []byte,
+	refs []models.UtxoId,
+) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	blobStore := txn.BlobStore()
+	if blobStore == nil {
+		return 0, types.ErrBlobStoreUnavailable
 	}
 	materialized := 0
 	for _, ref := range refs {

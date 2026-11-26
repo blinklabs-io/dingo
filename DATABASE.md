@@ -8288,9 +8288,12 @@ older than the ledger stability window:
   IndexerDB tip, so it never expires a body the writer has not read, nor the
   tip block the writer re-reads to resume. The IndexerDB keeps its own
   `DOFF` entries, in its `utxo_offset` table, which the ledger's `PruneBlock`
-  does not see, so the pruner's `BeforeExpire` first rewrites them as raw CBOR
-  (`Database.MaterializeBlockUtxos` on the IndexerDB, in one IndexerDB
-  transaction), spent outputs included.
+  does not see. Before expiry, `Database.MaterializeBlockUtxos` decodes the
+  block's output offsets and checks each output identity against the IndexerDB
+  entries, then rewrites matching `DOFF` values as raw CBOR in one IndexerDB
+  transaction. Deriving identities from the block also covers Dijkstra
+  subtransaction outputs and offsets retained across rollback, which are not
+  always discoverable from the IndexerDB's `utxo` rows.
 - A node with `historyExpiry.enabled` runs no ImmutableDB: block bodies stay
   in the blob store and are never promoted, Mithril chunk adoption is skipped
   so bootstrap copies bodies, and a database written by v0.94.2 with expiry on
