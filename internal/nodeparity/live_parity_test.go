@@ -23,6 +23,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -294,17 +295,20 @@ func TestLiveNodeParityWatch(t *testing.T) {
 	}
 	ctx := liveContext(t)
 	logger := liveLogger(t, slog.LevelInfo)
-	var completed int
+	// The incremental callbacks run on the full-check worker and the
+	// ChainSync goroutine, and one can still be in flight when
+	// RunIncremental returns.
+	var completed atomic.Int64
 	switch mode {
 	case "full":
-		completed = liveWatchFull(
+		completed.Store(int64(liveWatchFull(
 			ctx,
 			t,
 			target,
 			liveDuration(t, liveEnvFallbackInterval, defaultLiveFallbackInterval),
 			liveDuration(t, liveEnvCheckTimeout, defaultLiveCheckTimeout),
 			logger,
-		).completed
+		).completed))
 	case "incremental":
 		cursorFile := os.Getenv(liveEnvCursorFile)
 		if cursorFile == "" {
@@ -327,11 +331,11 @@ func TestLiveNodeParityWatch(t *testing.T) {
 			) {
 				t.Logf("full checkpoint (%s)", reason)
 				if liveHandleCheck(t, result, err) {
-					completed++
+					completed.Add(1)
 				}
 			},
 			OnBlockCheck: func(tip Tip, diff Diff) {
-				completed++
+				completed.Add(1)
 				if !diff.Empty() {
 					t.Errorf("block %d (slot %d) diverged: %s",
 						tip.BlockNumber, tip.Slot,
@@ -346,7 +350,7 @@ func TestLiveNodeParityWatch(t *testing.T) {
 	default:
 		t.Fatalf("%s must be full or incremental, got %q", liveEnvWatch, mode)
 	}
-	if err := liveWatchVerdict(mode, completed); err != nil {
+	if err := liveWatchVerdict(mode, completed.Load()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -354,7 +358,7 @@ func TestLiveNodeParityWatch(t *testing.T) {
 // liveWatchVerdict fails a watch that never completed a comparison. Check
 // errors are only logged so a transient hiccup does not end the watch, which
 // would otherwise let an unreachable node pass as validated.
-func liveWatchVerdict(mode string, completed int) error {
+func liveWatchVerdict(mode string, completed int64) error {
 	if completed == 0 {
 		return fmt.Errorf("%s watch completed no comparison", mode)
 	}

@@ -151,7 +151,7 @@ func TestLiveWatchFullStalledPeerBoundedByCheckTimeout(t *testing.T) {
 	assert.GreaterOrEqual(t, tally.attempts, 1)
 	assert.LessOrEqual(t, tally.attempts, 2)
 	assert.Zero(t, tally.completed)
-	require.Error(t, liveWatchVerdict("full", tally.completed))
+	require.Error(t, liveWatchVerdict("full", int64(tally.completed)))
 }
 
 func TestResetFallbackTimerNotYetFiredGetsFullInterval(t *testing.T) {
