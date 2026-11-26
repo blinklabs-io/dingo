@@ -40,8 +40,10 @@ case "$pkg" in
 JSON
   ;;
 */ledgerrulesconformance)
-  cat >"$DINGO_CONFORMANCE_OUTPUT" <<'JSON' || exit 1
+  [ -n "${DINGO_CONFORMANCE_REVISION:-}" ] || exit 1
+  cat >"$DINGO_CONFORMANCE_OUTPUT" <<JSON || exit 1
 {"version":"1","scenario":"ledger-rules","generated_at":"2026-01-01T00:00:00Z",
+ "dataset_commit":"$DINGO_CONFORMANCE_REVISION",
  "implementation":{"name":"dingo"},"scenarios":[]}
 JSON
   ;;
@@ -50,7 +52,7 @@ esac
 """
 
 LEDGER_FIXTURES = Path(
-    ".conformance/node-diversity-conformance/scenarios/ledger-rules/fixtures"
+    ".conformance/amaru/crates/amaru-ledger/tests/data/transaction"
 )
 
 
@@ -74,17 +76,8 @@ class ConformanceReportsTest(unittest.TestCase):
         dataset = self.work / ".conformance" / "cardano-cbor-dataset"
         (dataset / "dataset" / "conway").mkdir(parents=True)
         (self.work / LEDGER_FIXTURES).mkdir(parents=True)
-        git = ["git", "-C", str(dataset)]
-        subprocess.run([*git, "init", "-q"], check=True)
-        subprocess.run(
-            [*git, "-c", "user.name=t", "-c", "user.email=t@example.com",
-             "-c", "commit.gpgsign=false",
-             "commit", "-q", "--allow-empty", "-m", "x"],
-            check=True,
-        )
-        revision = subprocess.run(
-            [*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-        ).stdout.strip()
+        revision = self.init_checkout(dataset)
+        amaru_revision = self.init_checkout(self.work / ".conformance" / "amaru")
 
         self.log = self.tmp / "go.log"
         self.env = {
@@ -94,11 +87,27 @@ class ConformanceReportsTest(unittest.TestCase):
             "RELEASE_TAG": "v0.0.1",
             "CBOR_DATASET_DIR": ".conformance/cardano-cbor-dataset",
             "CBOR_DATASET_REVISION": revision,
+            "AMARU_LEDGER_REVISION": amaru_revision,
             "UPLC_CORPUS_SHA256": "0" * 64,
             "TURBO_CORPUS_SHA256": "0" * 64,
         }
         for name in ("DIST_DIR", "CONFORMANCE_DIR"):
             self.env.pop(name, None)
+
+    @staticmethod
+    def init_checkout(path):
+        """Make path a one-commit git checkout and return its commit."""
+        git = ["git", "-C", str(path)]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run(
+            [*git, "-c", "user.name=t", "-c", "user.email=t@example.com",
+             "-c", "commit.gpgsign=false",
+             "commit", "-q", "--allow-empty", "-m", "x"],
+            check=True,
+        )
+        return subprocess.run(
+            [*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
 
     def run_script(self):
         subprocess.run(
@@ -126,6 +135,19 @@ class ConformanceReportsTest(unittest.TestCase):
             self.assertNotIn("error", report)
 
         self.assertNotIn("go run", self.log.read_text())
+
+    def test_ledger_report_names_the_amaru_commit_it_ran_against(self):
+        self.run_script()
+
+        report = self.read_report("ledger-rules")
+        self.assertEqual(report["dataset_commit"], self.env["AMARU_LEDGER_REVISION"])
+
+    def test_ledger_error_report_when_the_checkout_is_not_the_pinned_revision(self):
+        self.env["AMARU_LEDGER_REVISION"] = "0" * 40
+        self.run_script()
+
+        report = self.read_report("ledger-rules")
+        self.assertIn("does not match the pinned revision", report["error"])
 
     def test_error_report_carries_the_test_failure(self):
         (self.work / LEDGER_FIXTURES).rmdir()
