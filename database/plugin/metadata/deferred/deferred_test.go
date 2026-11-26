@@ -64,26 +64,6 @@ func TestManifestEntriesHaveResolvableName(t *testing.T) {
 	}
 }
 
-// TestCriticalManifestNotEmpty ensures CriticalManifest returns a
-// non-empty slice and that every entry in it also appears in Manifest.
-func TestCriticalManifestNotEmpty(t *testing.T) {
-	critical := CriticalManifest()
-	if len(critical) == 0 {
-		t.Fatal("CriticalManifest returned empty slice")
-	}
-	// Every critical entry must exist in the full manifest.
-	full := map[string]bool{}
-	for _, idx := range Manifest {
-		full[fmt.Sprintf("%s:%s", idx.Table, idx.Name)] = true
-	}
-	for _, idx := range critical {
-		key := fmt.Sprintf("%s:%s", idx.Table, idx.Name)
-		if !full[key] {
-			t.Errorf("critical entry %q not found in full Manifest", key)
-		}
-	}
-}
-
 func TestManifestKeepsImportIdempotencyIndexes(t *testing.T) {
 	want := map[string]string{
 		"idx_key_witness_transaction_id":         "key_witness",

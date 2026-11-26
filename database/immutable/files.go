@@ -37,15 +37,16 @@ type File struct {
 	Size  int64
 }
 
-// ParseFileName returns the chunk number of a chunk, primary or secondary file
-// name, and false for anything else in the directory.
+// ParseFileName returns the chunk number of a chunk, primary, secondary or
+// archive file name, and false for anything else in the directory.
 func ParseFileName(name string) (uint64, bool) {
 	base, ext, ok := strings.Cut(name, ".")
 	if !ok || !isCanonicalChunkName(base) {
 		return 0, false
 	}
 	switch "." + ext {
-	case chunkFileExtension, primaryFileExtension, secondaryFileExtension:
+	case chunkFileExtension, primaryFileExtension, secondaryFileExtension,
+		ArchiveExtension:
 	default:
 		return 0, false
 	}
@@ -56,8 +57,8 @@ func ParseFileName(name string) (uint64, bool) {
 	return num, true
 }
 
-// ListFiles returns the chunk, primary and secondary files in dir, ordered by
-// chunk number and then name. A missing directory has none.
+// ListFiles returns the chunk, primary, secondary and archive files in dir,
+// ordered by chunk number and then name. A missing directory has none.
 func ListFiles(dir string) ([]File, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

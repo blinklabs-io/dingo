@@ -377,7 +377,7 @@ func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
 // in-process counterpart of dingo_db_test.go's
 // TestGetPoolEpochDataMapTracksChangingPoolParams. Both implementations of
 // RewardParitySource must resolve the same field-to-epoch mapping, and only
-// this one runs inside the node — the standalone CLI reads SQLite directly.
+// this one runs inside the node — DingoDB reads SQL directly.
 //
 // The two drifted once: the param-epoch fix landed in DingoDB while
 // DatabaseSource kept reading Margin/FixedCost from the param epoch, so the
@@ -684,7 +684,7 @@ INSERT INTO pool_retirement (
 // exactly them: DingoDB carried synthetic_ret while the store query did not,
 // so a node bootstrapped from a ledger-state snapshot — where ImportPool and
 // RetirePools write a registration and a certificate_id = 0 retirement in one
-// slot — would have the standalone CLI and the in-process observer classify
+// slot — would have DingoDB and the in-process observer classify
 // the same pool differently.
 func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
 	t.Parallel()
@@ -875,8 +875,8 @@ func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
 // TestGetRewardSnapshotImplementationsAgree is
 // TestGetPoolsRetiredByEpochImplementationsAgree's counterpart for the
 // zero-stake completeness proof: DatabaseSource (the live in-process observer's
-// path, node_koiosparity.go's NewDatabaseSource) and DingoDB (the standalone
-// CLI's) must read the same reward_snapshot row identically, including the
+// path, node_koiosparity.go's NewDatabaseSource) and DingoDB (the SQL
+// implementation) must read the same reward_snapshot row identically, including the
 // known-zero vs. unknown (NULL, pre-tracking) ExcludedActiveStake
 // distinction and the absent-row case.
 func TestGetRewardSnapshotImplementationsAgree(t *testing.T) {

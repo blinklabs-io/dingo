@@ -4018,7 +4018,7 @@ Readers outside the ledger's LedgerDB:
 |---|---|
 | MCP tools | With a ledger state the tools read through its LedgerDB. On a node with an IndexerDB, `get_utxos` pages exact addresses from it; on a core node it pages them from the live UTxO set (`LedgerState.UtxosByAddressBoundedPage`). On a node with an IndexerDB, `get_epoch_summary` counts an epoch's blocks from the IndexerDB's `block_nonce` rows, which it keeps for every block it indexes; without one the count covers the ledger's retained window and says so. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
 | `internal/node` backfill | Runs on the IndexerDB. |
-| `internal/koiosparity` | `DatabaseSource` reads current ledger state through the ledger's LedgerDB, and the reward tables and transaction sample from the IndexerDB when the node has one. `DingoDB` queries the IndexerDB's SQL tables directly (the `koios-parity` commands open `<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
+| `internal/koiosparity` | `DatabaseSource` reads current ledger state through the ledger's LedgerDB, and the reward tables and transaction sample from the IndexerDB when the node has one. `DingoDB` queries the IndexerDB's SQL tables directly (`<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
 | `api/blockfrost` | Reads the IndexerDB, and protocol parameters through `Database.GetPParamRows`. |
 | `api/mesh` | Reads blocks, address UTxOs and transaction history from the IndexerDB through `mesh.MeshDatabase`, which the node builds over it. |
 | `api/utxorpc` | Reads through `utxorpc.QueryDatabase`. On an API node that is the IndexerDB. On a core node, `utxorpc.NewLedgerQueryDatabase` reads UTxOs by reference and address and inline datums from the live UTxO set, and refuses a transaction lookup with `ErrQueryNeedsAPIStorage`. |
@@ -5562,8 +5562,9 @@ PostgreSQL and MySQL retain the single-transaction rebuild path.
 The batched API import path skips replay-cleanup deletes when a transaction
 hash inserts a fresh transaction row: its generated ID cannot yet have detail
 rows. Replays still run the deletes to preserve idempotency. Transaction-detail
-query-only API indexes are deferred during bulk import; critical indexes
-are rebuilt before API or rollback traffic. The transaction-id indexes used by
+query-only API indexes are deferred during bulk import; the IndexerDB writer
+rebuilds the whole manifest before the IndexerDB serves the API. The
+transaction-id indexes used by
 per-transaction cleanup remain resident, as do unique indexes used by
 `ON CONFLICT`. `idx_utxo_staking_deleted_amount` also remains
 resident because every API backfill batch uses it to refresh live stake;
@@ -5604,9 +5605,9 @@ handoff buffer. In-memory SQLite and other metadata providers keep the ordered
 path without this prefetch.
 
 Indexes used by per-transaction cleanup remain resident during import.
-Critical API-query and rollback indexes are rebuilt before the node serves
-traffic. The unused mint/burn fingerprint, datum-slot, certificate-query, and
-script-type indexes remain lazy. The separate
+The IndexerDB writer rebuilds the whole manifest before the IndexerDB serves
+traffic, including the mint/burn fingerprint, datum-slot, certificate-query,
+and script-type indexes no API query uses. The separate
 `idx_utxo_staking_deleted_amount` remains in `deferred.Retained`, and every
 drop and rebuild path creates it if absent before touching the manifest.
 
@@ -5618,7 +5619,8 @@ identity delete look up `utxo` by transaction id, which the unique
 `(tx_id, output_idx)` index serves; it is never deferred, so no rollback scans
 the whole `utxo` table. Every column that names a transaction row id is
 indexed for the same reason, and `TestTransactionForeignKeyChildColumnsAreIndexed`
-checks it after the deferred-index drop and the critical rebuild.
+checks that the critical manifest entries cover it after the deferred-index
+drop.
 InnoDB requires an index on every
 foreign-key child column and refuses to drop it, so only the SQLite (and
 PostgreSQL) dialects can reach the state where it is missing.
@@ -8126,6 +8128,23 @@ written.
   chunks exist as empty trios. A Byron epoch boundary block takes relative slot
   0 with `BlockOrEbb` set to the epoch. Writing a block appends the chunk bytes,
   then the secondary entry, then the primary offsets.
+- **Compressed chunks.** The local `chunkfile` provider's `compression: mithril`
+  keeps each chunk it completes as `NNNNN.tar.zst`: the chunk's `.chunk`,
+  `.primary` and `.secondary` files, named `immutable/NNNNN.*`, in one
+  zstd-compressed USTAR archive, the layout of a Mithril immutable archive. The
+  open chunk stays in plain files. A chunk is archived when the store moves past
+  it, and a chunk taken in from Mithril once its markers commit: the archive is
+  written under a temporary name, fsynced and renamed into place before the plain
+  files are removed, and startup removes a leftover temporary file and the plain
+  files of a chunk whose archive is in place. A chunk with a file over 1 GiB,
+  the largest entry the reader accepts, stays plain. Truncating into an archived chunk,
+  or reopening with an archived chunk highest, returns it to plain files first.
+  Existing chunks keep their form, and every reader takes either, so a store can
+  hold both. Block reads decompress an archived chunk into a cache of
+  decompressed chunks bounded by `archiveCacheMb` (256 MiB unless set). Database
+  snapshots copy archives as they are, and a Mithril snapshot made from one
+  publishes each stored archive unchanged, with digests taken from its
+  decompressed files. The S3 and GCS providers do not compress.
 - **Durability order.** A promotion step appends and fsyncs the three files and
   the directory, and only then commits one blob transaction that swaps the
   markers in and advances `im_state`. Advancing into a new chunk fsyncs the
@@ -8288,9 +8307,12 @@ older than the ledger stability window:
   IndexerDB tip, so it never expires a body the writer has not read, nor the
   tip block the writer re-reads to resume. The IndexerDB keeps its own
   `DOFF` entries, in its `utxo_offset` table, which the ledger's `PruneBlock`
-  does not see, so the pruner's `BeforeExpire` first rewrites them as raw CBOR
-  (`Database.MaterializeBlockUtxos` on the IndexerDB, in one IndexerDB
-  transaction), spent outputs included.
+  does not see. Before expiry, `Database.MaterializeBlockUtxos` decodes the
+  block's output offsets and checks each output identity against the IndexerDB
+  entries, then rewrites matching `DOFF` values as raw CBOR in one IndexerDB
+  transaction. Deriving identities from the block also covers Dijkstra
+  subtransaction outputs and offsets retained across rollback, which are not
+  always discoverable from the IndexerDB's `utxo` rows.
 - A node with `historyExpiry.enabled` runs no ImmutableDB: block bodies stay
   in the blob store and are never promoted, Mithril chunk adoption is skipped
   so bootstrap copies bodies, and a database written by v0.94.2 with expiry on
@@ -10574,8 +10596,8 @@ WHERE lrt.epoch <= $epoch
 ```
 
 The Koios parity checker reaches this through `RewardParitySource`, which has
-two implementations: `DatabaseSource` calls this store method directly, and the
-standalone-CLI `DingoDB` runs the same SQL against a separately synced metadata
+two implementations: `DatabaseSource` calls this store method directly, and
+`DingoDB` runs the same SQL against a separately synced metadata
 database. Both feed `poolDepartedAtParamEpoch`, which treats membership in this
 result as proof of departure and so downgrades a missing K+1 `reward_pool_input`
 row from `dingo_db_missing` to the informational `pool_departed`.
@@ -10998,7 +11020,8 @@ full sweep. Ordinary same-tip rollback remains a no-op.
 
 # Koios parity cache significant counts
 
-The observer and standalone parity tool share a separate SQLite reference cache.
+The Koios parity observer keeps its own SQLite reference cache, separate from
+Dingo's databases.
 Its `check_epoch_status` table stores `significant_mismatch_count` alongside
 `mismatch_count`, plus `aggregate_significant_mismatch_count` and
 `account_significant_mismatch_count`. Significant counts exclude informational
@@ -11010,7 +11033,8 @@ stored `check_mismatches` categories and scopes. Total counts and mismatch rows
 are preserved. Reopening an upgraded cache does not rerun the backfill. Observer
 retry selection uses the ERROR status of its own phase even when Koios reference
 timestamps have not changed, allowing a later check to observe newly committed
-Dingo state. CLI freshness selection is unchanged. Fetch/check errors update
+Dingo state. New work is still selected by Koios reference freshness
+(`GetEpochsNeedingCheck`). Fetch/check errors update
 only the failed queue's persisted status. The other queue's verdict, check
 timestamp, comparison counts, pool metadata, mismatch evidence, and Koios
 reference rows remain intact. This makes retries survive reopening the cache
