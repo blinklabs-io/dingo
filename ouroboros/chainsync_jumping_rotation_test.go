@@ -311,6 +311,62 @@ func TestChainsyncJumpingDynamoStallCheck(t *testing.T) {
 		testutil.RequireReceive(t, done, testutil.AsyncWait,
 			"the parked callback did not return")
 	})
+	t.Run("a streamer elected while its header is parked is kept", func(t *testing.T) {
+		t.Parallel()
+		h, dynamo, clock, recycles := setup(t, func(c *ChainsyncJumpingConfig) {
+			c.Held = func(ouroboros.ConnectionId) bool { return true }
+		})
+		streamer := h.addPeer("streamer", 100)
+		h.promote(streamer)
+		h.o.csjNoteStreaming(streamer.connId)
+		// The catch-up band parks the streamer's header on its callback
+		// before the dynamo leaves, so the header was sent before the
+		// streamer's election and is still unverified after it.
+		parked := make(chan struct{})
+		release := make(chan struct{})
+		h.o.config.ChainsyncIngressEligible = func(ouroboros.ConnectionId) bool {
+			return true
+		}
+		h.o.config.ChainsyncAwaitCatchUpBand = func(
+			ctx context.Context,
+			_ ouroboros.ConnectionId,
+			_ ochainsync.Tip,
+		) error {
+			close(parked)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- h.o.chainsyncClientRollForward(
+				ochainsync.CallbackContext{ConnectionId: streamer.connId},
+				0,
+				newTestBlockHeader(200, 10, 0xd2),
+				ochainsync.Tip{
+					Point:       ocommon.NewPoint(400, []byte("peer-tip")),
+					BlockNumber: 20,
+				},
+			)
+		}()
+		testutil.RequireReceive(t, parked, testutil.AsyncWait,
+			"the streamer's header did not reach the catch-up band wait")
+		h.closeConn(dynamo.connId)
+		require.Eventually(t, func() bool {
+			return h.o.csjIsDynamo(streamer.connId)
+		}, testutil.AsyncWait, time.Millisecond,
+			"the streamer was not elected dynamo")
+		h.o.csjCheckDynamoStall(at(clock, timeout-time.Second))
+		h.o.csjCheckDynamoStall(at(clock, timeout+time.Second))
+		testutil.RequireNoReceive(t, recycles, 50*time.Millisecond,
+			"a dynamo was recycled while the node waited on the header it sent as a streamer")
+		close(release)
+		testutil.RequireReceive(t, done, testutil.AsyncWait,
+			"the parked callback did not return")
+	})
 	t.Run("a delivery by a replaced dynamo does not excuse its successor", func(t *testing.T) {
 		t.Parallel()
 		h, dynamo, clock, recycles := setup(t, func(c *ChainsyncJumpingConfig) {

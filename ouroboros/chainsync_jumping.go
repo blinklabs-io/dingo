@@ -122,7 +122,8 @@ type ChainsyncJumpingConfig struct {
 	// Held reports whether the selector holds the connection's header stream
 	// on purpose (the Limit on Eagerness or the catch-up band). A held dynamo
 	// is not recycled for its silence once it has sent a header since its
-	// election, verified or still parked. Optional.
+	// election, verified or still parked, or while a header it sent before
+	// its election is still parked. Optional.
 	Held func(ouroboros.ConnectionId) bool
 }
 
@@ -193,6 +194,12 @@ type chainsyncJumping struct {
 	// Only then can a hold of its stream be the node's own wait on that
 	// header rather than the peer's silence.
 	dynamoSentHeader bool
+	// headersInFlight counts, per connection, the headers whose ChainSync
+	// callback has not returned, parked or not. It follows the connection,
+	// not its role: a streamer elected while one of its headers is parked
+	// has sent nothing since its election, yet the node is still busy with
+	// that header.
+	headersInFlight map[ouroboros.ConnectionId]int
 
 	now func() time.Time
 
@@ -803,18 +810,34 @@ func (o *Ouroboros) csjOnAwaitReply(connId ouroboros.ConnectionId) {
 
 // csjObserveHeaderSent runs, from the ChainSync callback, for every header a
 // connection sends, before the callback can park it unverified (header
-// capacity, the catch-up band, the future-header wait). A parked header is
-// not yet a delivery, but the node, not the peer, is then the one waiting.
-func (o *Ouroboros) csjObserveHeaderSent(connId ouroboros.ConnectionId) {
+// capacity, the catch-up band, the future-header and forecast-horizon waits).
+// A parked header is not yet a delivery, but the node, not the peer, is then
+// the one waiting. The returned function must run when the callback returns.
+func (o *Ouroboros) csjObserveHeaderSent(
+	connId ouroboros.ConnectionId,
+) func() {
 	j := o.csj
 	if j == nil {
-		return
+		return func() {}
 	}
 	j.mu.Lock()
 	if j.hasDynamo && j.dynamo == connId {
 		j.dynamoSentHeader = true
 	}
+	if j.headersInFlight == nil {
+		j.headersInFlight = make(map[ouroboros.ConnectionId]int)
+	}
+	j.headersInFlight[connId]++
 	j.mu.Unlock()
+	return func() {
+		j.mu.Lock()
+		defer j.mu.Unlock()
+		if j.headersInFlight[connId] <= 1 {
+			delete(j.headersInFlight, connId)
+			return
+		}
+		j.headersInFlight[connId]--
+	}
 }
 
 // csjObserveDelivery runs for every header delivered on any connection, from
@@ -1371,12 +1394,14 @@ func (o *Ouroboros) csjCheckDynamoStall(now time.Time) {
 		j.mu.Unlock()
 		return
 	}
-	// A hold excuses the dynamo only once it has sent a header: the
-	// reference pauses the Limit on Patience only while the node itself is
-	// busy with a header the peer sent, and leaves a peer that has sent
+	// A hold excuses the dynamo only once it has sent a header since its
+	// election, or while a header it sent in any role is still in flight:
+	// the reference pauses the Limit on Patience only while the node itself
+	// is busy with a header the peer sent, and leaves a peer that has sent
 	// none to the timeouts. A hold before any header would otherwise keep
 	// a silent dynamo, and every jumper waiting on it, in place for good.
-	if (held && j.dynamoSentHeader) || (j.markSeen && mark != j.progressMark) {
+	busy := j.dynamoSentHeader || j.headersInFlight[dynamo] > 0
+	if (held && busy) || (j.markSeen && mark != j.progressMark) {
 		j.progressAt = now
 	}
 	j.markSeen = true
