@@ -27,7 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 )
 
-// IndexerService runs the split layout's writer: a DatabaseSource over the
+// IndexerService runs the IndexerDB's writer: a DatabaseSource over the
 // ledger database, the Backfill row writer over the IndexerDB, the ledger
 // fact deriver, and the genesis seed.
 type IndexerService struct {

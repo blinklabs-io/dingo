@@ -44,14 +44,6 @@ type Config struct {
 	Dir        string
 	Logger     *slog.Logger
 	Registerer prometheus.Registerer
-	// Only marks the set as the only copy of the UTxO set: the metadata
-	// store has none to rebuild it from, so Reconcile rebuilds only at
-	// origin, where the set is empty.
-	Only bool
-	// Authoritative marks the set as what validation reads instead of the
-	// metadata store, so a set that is ahead of the ledger is rolled back
-	// from its journal rather than rebuilt. Only implies it.
-	Authoritative bool
 	// HistorySlots is how far behind the tip the rollback journal reaches:
 	// the stability window, past which no rollback goes. Zero keeps the
 	// whole journal.
@@ -94,14 +86,10 @@ type Set struct {
 	resuming atomic.Bool
 	history  uint64
 	commits  uint64
-	only     bool
-	// migrating is set while an existing database with a metadata UTxO set
-	// moves its ledger state into the set: the metadata store still holds the
-	// UTxO set, so the set can be rebuilt from it whatever only says.
+	// migrating is set while the v0.94.2 migration moves a database's ledger
+	// state into the set: only then does a metadata store hold the state the
+	// set can be rebuilt or loaded from.
 	migrating atomic.Bool
-	// noSQLSource is set by ServeLedgerOnly: no metadata store can rebuild
-	// the set, whatever Only says.
-	noSQLSource atomic.Bool
 	// ckptDir, ckptKeep and ckptMu describe where checkpoints are written;
 	// ckptWrite serializes writers.
 	ckptMu    sync.Mutex
@@ -125,8 +113,6 @@ type Set struct {
 	scratchReimport atomic.Pointer[ScratchReimportFunc]
 	// dir is the set's directory.
 	dir string
-	// rollBackAhead rolls a set ahead of the ledger back from its journal.
-	rollBackAhead bool
 	// pruneJournal trims the rollback journal; a field so a test can fail
 	// it, which a healthy store never does right after a commit.
 	pruneJournal func(beforeSlot uint64) error
@@ -176,7 +162,6 @@ func (s *Set) SnapshotUtxoSet() (ledger.UtxoSetWriter, func(), error) {
 		logger:  s.logger,
 		m:       s.m,
 		history: s.history,
-		only:    s.only,
 	}
 	return view, func() { _ = store.Close() }, nil
 }
@@ -283,10 +268,7 @@ func Open(cfg Config) (*Set, error) {
 		m:            m,
 		unregister:   unregister,
 		history:      cfg.HistorySlots,
-		only:         cfg.Only,
 		pruneJournal: store.PruneJournal,
-
-		rollBackAhead: cfg.Only || cfg.Authoritative,
 	}
 	set.SetCheckpointDir(cfg.CheckpointDir, cfg.CheckpointKeep)
 	return set, nil
@@ -745,18 +727,6 @@ func (s *Set) Count() (uint64, error) {
 // after it are applied again. It reports whether it did.
 type ResumeFunc func(ctx context.Context, point ocommon.Point) (bool, error)
 
-// ServeLedgerOnly records that the set is the ledger's only copy of its
-// state, with no metadata store behind it: Reconcile never rebuilds the set
-// from a store, so a set behind the ledger resumes by replaying blocks or
-// stops with an error, and a failure mark that cannot be rewound stops the
-// node. Family loads are refused, since a load would replace the set's rows
-// with a source's that holds none; a release that changes a family's layout
-// migrates the set's rows in place.
-func (s *Set) ServeLedgerOnly() {
-	s.noSQLSource.Store(true)
-	s.store.RefuseLoads()
-}
-
 // Reconcile makes the set equal to the ledger's live set before the ledger
 // applies anything. The set's tip is always a point at which it equalled the
 // ledger, so a set at the ledger tip is already equal. A set behind it is
@@ -765,11 +735,15 @@ func (s *Set) ServeLedgerOnly() {
 // only copy of the ledger state, so ldb supplies only the ledger's tip. While
 // the ledger stands at origin the set holds no state: it starts empty, with
 // every family loaded empty.
+//
+// Outside the v0.94.2 migration no store holds the rows a family load would
+// replace the set's with, so Reconcile refuses family loads from then on.
 func (s *Set) Reconcile(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
 	resume ResumeFunc,
 ) error {
+	s.store.RefuseLoads()
 	if err := s.beginReconcile(ctx); err != nil {
 		return err
 	}
@@ -1060,8 +1034,7 @@ func (s *Set) reconcileOutputs(
 		return fmt.Errorf("utxoset: read format: %w", err)
 	}
 	if stale {
-		if s.noSQLSource.Load() ||
-			(!s.migrating.Load() && !isOrigin(ledgerTip)) {
+		if !s.migrating.Load() {
 			return s.recoverUnreachable(ctx, resume, ledgerTip, s.layoutError())
 		}
 		return s.rebuild(ctx, ldb, resume, ledgerTip, ok, setTip)
@@ -1152,7 +1125,7 @@ func (s *Set) reconcileTip(
 	if ok && samePoint(setTip, ledgerTip) {
 		return nil
 	}
-	if ok && s.rollBackAhead && setTip.Slot > ledgerTip.Slot {
+	if ok && setTip.Slot > ledgerTip.Slot {
 		restorable, err := s.store.HasJournalPoint(ledgerTip)
 		if err != nil {
 			return fmt.Errorf("utxoset: search the journal: %w", err)
@@ -1207,7 +1180,7 @@ func (s *Set) unrecoverable(
 	setTip ocommon.Point,
 	cause error,
 ) error {
-	if !s.migrating.Load() || s.noSQLSource.Load() {
+	if !s.migrating.Load() {
 		return s.recoverUnreachable(ctx, resume, ledgerTip, fmt.Errorf(
 			"utxoset: the live UTxO set cannot be rewound before the commit the ledger failed to apply, and no copy of the ledger state from before that commit is retained: %w",
 			cause,
@@ -1239,11 +1212,9 @@ func (s *Set) rebuild(
 	hadTip bool,
 	setTip ocommon.Point,
 ) error {
-	noSource := s.noSQLSource.Load()
 	// Outside the migration the set is the only copy of every family, so
 	// only a ledger past origin needs a base.
-	if (s.migrating.Load() && noSource) ||
-		(!s.migrating.Load() && !isOrigin(ledgerTip)) {
+	if !s.migrating.Load() && !isOrigin(ledgerTip) {
 		recovered, err := s.recoverFromJournal(ctx, resume, ledgerTip)
 		if err != nil {
 			return err
@@ -1253,7 +1224,7 @@ func (s *Set) rebuild(
 		}
 		return s.recoverUnreachable(
 			ctx, resume, ledgerTip,
-			s.noBaseError(noSource, hadTip, setTip, ledgerTip),
+			s.noBaseError(hadTip, setTip, ledgerTip),
 		)
 	}
 	if !s.migrating.Load() {
@@ -1405,24 +1376,20 @@ func (s *Set) layoutError() error {
 
 // noBaseError reports a set that no retained state can bring to the ledger.
 func (s *Set) noBaseError(
-	noSource, hadTip bool,
+	hadTip bool,
 	setTip, ledgerTip ocommon.Point,
 ) error {
 	floor := "its tip"
 	if p, ok, err := s.store.JournalFloor(); err == nil && ok {
 		floor = fmt.Sprintf("slot %d", p.Slot)
 	}
-	why := "the metadata store holds no UTxO set to rebuild it from"
-	if noSource {
-		why = "no metadata store holds an earlier copy of the ledger state"
-	}
 	relation := "cannot be caught up to"
 	if hadTip && setTip.Slot > ledgerTip.Slot {
 		relation = "is ahead of"
 	}
 	return fmt.Errorf(
-		"utxoset: the live UTxO set at slot %d %s the ledger at slot %d: its rollback journal reaches back only to %s and the ledger cannot resume from any point it holds, and %s",
-		setTip.Slot, relation, ledgerTip.Slot, floor, why,
+		"utxoset: the live UTxO set at slot %d %s the ledger at slot %d: its rollback journal reaches back only to %s and the ledger cannot resume from any point it holds, and no metadata store holds an earlier copy of the ledger state",
+		setTip.Slot, relation, ledgerTip.Slot, floor,
 	)
 }
 

@@ -641,7 +641,7 @@ func Run(
 	if err != nil {
 		return err
 	}
-	if cfg.SplitIndexer() {
+	if cfg.HasIndexerDB() {
 		logger.Info(
 			"API endpoints read the IndexerDB and answer 503 until it is ready",
 		)

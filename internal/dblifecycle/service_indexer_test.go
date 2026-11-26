@@ -41,17 +41,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func splitConfig(dataDir string) *config.Config {
+func indexerDBConfig(dataDir string) *config.Config {
 	cfg := testConfig(dataDir)
 	cfg.StorageMode = "api"
 	cfg.Indexer = config.IndexerConfig{MaxReadyLagBlocks: 10}
 	return cfg
 }
 
-// seedSplitDir builds a split data directory: a ledger with numBlocks blocks
-// and, unless indexerTip is negative, an IndexerDB whose tip is block index
-// indexerTip. It returns the block points.
-func seedSplitDir(
+// seedIndexerDBDir builds an API node's data directory: a ledger with numBlocks
+// blocks and, unless indexerTip is negative, an IndexerDB whose tip is block
+// index indexerTip. It returns the block points.
+func seedIndexerDBDir(
 	t *testing.T,
 	cfg *config.Config,
 	numBlocks, indexerTip int,
@@ -64,7 +64,7 @@ func seedSplitDir(
 	}
 	dbConfig := &database.Config{
 		DataDir: cfg.DatabasePath, StorageMode: "core",
-		Network: cfg.Network, IndexerLayout: config.IndexerLayoutSplit,
+		Network: cfg.Network, IndexerLayout: config.IndexerLayoutIndexerDB,
 		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 	}
@@ -128,9 +128,8 @@ func seedSplitDir(
 	return points
 }
 
-// indexerTipOf opens the IndexerDB of a split data directory and returns its
-// tip.
-// withIndexerOf opens cfg's ledger database and its IndexerDB for fn.
+// indexerTipOf opens the IndexerDB of an API node's data directory and returns
+// its tip. withIndexerOf opens cfg's ledger database and its IndexerDB for fn.
 func withIndexerOf(
 	t *testing.T,
 	cfg *config.Config,
@@ -142,7 +141,7 @@ func withIndexerOf(
 	}
 	dbConfig := &database.Config{
 		DataDir: cfg.DatabasePath, StorageMode: "core",
-		Network: cfg.Network, IndexerLayout: config.IndexerLayoutSplit,
+		Network: cfg.Network, IndexerLayout: config.IndexerLayoutIndexerDB,
 		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 	}
@@ -177,10 +176,10 @@ func indexerTipOf(t *testing.T, cfg *config.Config) indexerdb.Tip {
 	return tip
 }
 
-func TestServiceSnapshotAndRestoreCarryTheIndexerDBOnSplit(t *testing.T) {
+func TestServiceSnapshotAndRestoreCarryTheIndexerDB(t *testing.T) {
 	t.Parallel()
-	srcCfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
-	points := seedSplitDir(t, srcCfg, 8, 4)
+	srcCfg := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
+	points := seedIndexerDBDir(t, srcCfg, 8, 4)
 	snapDir := filepath.Join(testutil.OwnerOnlyTempDir(t), "snap")
 
 	manifest, err := dblifecycle.NewService(srcCfg, nil, nil).Snapshot(
@@ -196,7 +195,7 @@ func TestServiceSnapshotAndRestoreCarryTheIndexerDBOnSplit(t *testing.T) {
 	require.Equal(t, points[4].Slot, payload.TipSlot)
 	require.LessOrEqual(t, payload.TipSlot, manifest.TipSlot)
 
-	dstCfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"))
+	dstCfg := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"))
 	_, err = dblifecycle.NewService(dstCfg, nil, nil).Restore(
 		t.Context(), snapDir,
 	)
@@ -232,12 +231,12 @@ func forgedPayloadSnapshot(
 	return dir
 }
 
-func TestServiceRestoreOnSplitChecksThePayloadTipAgainstTheLedger(
+func TestServiceRestoreWithIndexerDBChecksThePayloadTipAgainstTheLedger(
 	t *testing.T,
 ) {
 	t.Parallel()
-	srcCfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
-	points := seedSplitDir(t, srcCfg, 6, 3)
+	srcCfg := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
+	points := seedIndexerDBDir(t, srcCfg, 6, 3)
 	snapDir := filepath.Join(testutil.OwnerOnlyTempDir(t), "snap")
 	_, err := dblifecycle.NewService(srcCfg, nil, nil).Snapshot(
 		t.Context(), snapDir, "", "",
@@ -252,7 +251,7 @@ func TestServiceRestoreOnSplitChecksThePayloadTipAgainstTheLedger(
 			},
 		)
 		parent := testutil.OwnerOnlyTempDir(t)
-		dstCfg := splitConfig(filepath.Join(parent, "dst"))
+		dstCfg := indexerDBConfig(filepath.Join(parent, "dst"))
 		_, err := dblifecycle.NewService(dstCfg, nil, nil).Restore(
 			t.Context(), forged,
 		)
@@ -270,7 +269,7 @@ func TestServiceRestoreOnSplitChecksThePayloadTipAgainstTheLedger(
 			},
 		)
 		parent := testutil.OwnerOnlyTempDir(t)
-		dstCfg := splitConfig(filepath.Join(parent, "dst"))
+		dstCfg := indexerDBConfig(filepath.Join(parent, "dst"))
 		_, err := dblifecycle.NewService(dstCfg, nil, nil).Restore(
 			t.Context(), forged,
 		)
@@ -279,20 +278,20 @@ func TestServiceRestoreOnSplitChecksThePayloadTipAgainstTheLedger(
 	})
 	t.Run("a payload whose IndexerDB had no tip", func(t *testing.T) {
 		t.Parallel()
-		empty := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
-		seedSplitDir(t, empty, 6, -1)
+		empty := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
+		seedIndexerDBDir(t, empty, 6, -1)
 		require.True(t, indexerTipOf(t, empty).IsZero())
 		snapshot := filepath.Join(testutil.OwnerOnlyTempDir(t), "empty-indexer")
 		_, err := dblifecycle.NewService(empty, nil, nil).Snapshot(t.Context(), snapshot, "", "")
 		require.NoError(t, err)
-		dstCfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"))
+		dstCfg := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"))
 		_, err = dblifecycle.NewService(dstCfg, nil, nil).Restore(t.Context(), snapshot)
 		require.NoError(t, err)
 		require.Zero(t, indexerTipOf(t, dstCfg).Slot)
 	})
 	t.Run("a tip on the ledger's chain", func(t *testing.T) {
 		t.Parallel()
-		dstCfg := splitConfig(
+		dstCfg := indexerDBConfig(
 			filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"),
 		)
 		_, err := dblifecycle.NewService(dstCfg, nil, nil).Restore(
@@ -303,7 +302,7 @@ func TestServiceRestoreOnSplitChecksThePayloadTipAgainstTheLedger(
 	})
 }
 
-func TestServiceSnapshotOnSplitRefusesWhatTheIndexerDBCannotFollow(
+func TestServiceSnapshotWithIndexerDBRefusesWhatTheIndexerDBCannotFollow(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -320,10 +319,10 @@ func TestServiceSnapshotOnSplitRefusesWhatTheIndexerDBCannotFollow(
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			cfg := splitConfig(
+			cfg := indexerDBConfig(
 				filepath.Join(testutil.OwnerOnlyTempDir(t), "src"),
 			)
-			seedSplitDir(t, cfg, 3, 1)
+			seedIndexerDBDir(t, cfg, 3, 1)
 			mutate(cfg)
 			snapDir := filepath.Join(testutil.OwnerOnlyTempDir(t), "snap")
 			_, err := dblifecycle.NewService(cfg, nil, nil).Snapshot(
@@ -335,8 +334,8 @@ func TestServiceSnapshotOnSplitRefusesWhatTheIndexerDBCannotFollow(
 	}
 	t.Run("no IndexerDB yet", func(t *testing.T) {
 		t.Parallel()
-		cfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
-		seedSplitDir(t, cfg, 3, -1)
+		cfg := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
+		seedIndexerDBDir(t, cfg, 3, -1)
 		snapDir := filepath.Join(testutil.OwnerOnlyTempDir(t), "snap")
 		_, err := dblifecycle.NewService(cfg, nil, nil).Snapshot(
 			t.Context(), snapDir, "", "",
@@ -346,10 +345,10 @@ func TestServiceSnapshotOnSplitRefusesWhatTheIndexerDBCannotFollow(
 	})
 }
 
-func TestServiceRestoreOnSplitRefusesBeforeChangingAnything(t *testing.T) {
+func TestServiceRestoreWithIndexerDBRefusesBeforeChangingAnything(t *testing.T) {
 	t.Parallel()
-	srcCfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
-	seedSplitDir(t, srcCfg, 5, 2)
+	srcCfg := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
+	seedIndexerDBDir(t, srcCfg, 5, 2)
 	snapDir := filepath.Join(testutil.OwnerOnlyTempDir(t), "snap")
 	_, err := dblifecycle.NewService(srcCfg, nil, nil).Snapshot(
 		t.Context(), snapDir, "", "",
@@ -361,13 +360,13 @@ func TestServiceRestoreOnSplitRefusesBeforeChangingAnything(t *testing.T) {
 		sharedCfg := testConfig(
 			filepath.Join(testutil.OwnerOnlyTempDir(t), "shared"),
 		)
-		seedSplitDir(t, sharedCfg, 3, -1)
+		seedIndexerDBDir(t, sharedCfg, 3, -1)
 		ledgerOnly := filepath.Join(testutil.OwnerOnlyTempDir(t), "ledger-only")
 		_, err := dblifecycle.NewService(sharedCfg, nil, nil).Snapshot(
 			t.Context(), ledgerOnly, "", "",
 		)
 		require.NoError(t, err)
-		dstCfg := splitConfig(
+		dstCfg := indexerDBConfig(
 			filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"),
 		)
 		_, err = dblifecycle.NewService(dstCfg, nil, nil).Restore(
@@ -386,7 +385,7 @@ func TestServiceRestoreOnSplitRefusesBeforeChangingAnything(t *testing.T) {
 		require.NoError(t, err)
 		raw[len(raw)/2] ^= 0xff
 		require.NoError(t, os.WriteFile(path, raw, 0o600))
-		dstCfg := splitConfig(
+		dstCfg := indexerDBConfig(
 			filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"),
 		)
 		_, err = dblifecycle.NewService(dstCfg, nil, nil).Restore(
@@ -397,7 +396,7 @@ func TestServiceRestoreOnSplitRefusesBeforeChangingAnything(t *testing.T) {
 	})
 	t.Run("a trust key", func(t *testing.T) {
 		t.Parallel()
-		dstCfg := splitConfig(
+		dstCfg := indexerDBConfig(
 			filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"),
 		)
 		dstCfg.DatabaseLifecycle.SnapshotTrustKeyFile = "/nonexistent"
@@ -409,7 +408,7 @@ func TestServiceRestoreOnSplitRefusesBeforeChangingAnything(t *testing.T) {
 	})
 	t.Run("a remote snapshot", func(t *testing.T) {
 		t.Parallel()
-		dstCfg := splitConfig(
+		dstCfg := indexerDBConfig(
 			filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"),
 		)
 		_, err := dblifecycle.NewService(dstCfg, nil, nil).Restore(
@@ -420,11 +419,11 @@ func TestServiceRestoreOnSplitRefusesBeforeChangingAnything(t *testing.T) {
 	})
 }
 
-func TestServiceTruncateOnSplitRollsTheIndexerBackFirst(t *testing.T) {
+func TestServiceTruncateWithIndexerDBRollsTheIndexerBackFirst(t *testing.T) {
 	t.Parallel()
 	const target = 3
-	cfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "db"))
-	points := seedSplitDir(t, cfg, 8, 6)
+	cfg := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "db"))
+	points := seedIndexerDBDir(t, cfg, 8, 6)
 	var ledgerHadBlocks atomic.Bool
 	var rolledTo atomic.Uint64
 	svc := dblifecycle.NewService(cfg, nil, nil)
@@ -468,8 +467,8 @@ func TestServiceTruncateOfAnAPINodeTruncatesTheIndexerMidnightJournals(
 ) {
 	t.Parallel()
 	const target = 3
-	cfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "db"))
-	points := seedSplitDir(t, cfg, 8, 6)
+	cfg := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "db"))
+	points := seedIndexerDBDir(t, cfg, 8, 6)
 	var targetNumber atomic.Uint64
 	svc := dblifecycle.NewService(cfg, nil, nil)
 	svc.SetIndexerRollbackFactory(func(
@@ -521,12 +520,12 @@ func (f rollerFunc) RollbackTo(ctx context.Context, to indexerdb.Tip) error {
 	return f(ctx, to)
 }
 
-func TestServiceTruncateOnSplitRefusalsLeaveTheLedgerWhole(t *testing.T) {
+func TestServiceTruncateWithIndexerDBRefusalsLeaveTheLedgerWhole(t *testing.T) {
 	t.Parallel()
 	t.Run("no writer wired", func(t *testing.T) {
 		t.Parallel()
-		cfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "db"))
-		points := seedSplitDir(t, cfg, 5, 3)
+		cfg := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "db"))
+		points := seedIndexerDBDir(t, cfg, 5, 3)
 		slot := points[1].Slot
 		_, err := dblifecycle.NewService(cfg, nil, nil).Truncate(
 			t.Context(), dblifecycle.TruncateTarget{Slot: &slot},
@@ -536,8 +535,8 @@ func TestServiceTruncateOnSplitRefusalsLeaveTheLedgerWhole(t *testing.T) {
 	})
 	t.Run("the rollback is refused", func(t *testing.T) {
 		t.Parallel()
-		cfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "db"))
-		points := seedSplitDir(t, cfg, 5, 3)
+		cfg := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "db"))
+		points := seedIndexerDBDir(t, cfg, 5, 3)
 		svc := dblifecycle.NewService(cfg, nil, nil)
 		svc.SetIndexerRollbackFactory(func(
 			_, _ *database.Database,
@@ -557,12 +556,12 @@ func TestServiceTruncateOnSplitRefusalsLeaveTheLedgerWhole(t *testing.T) {
 
 // A target below the live UTxO set's journal floor is refused before the
 // IndexerDB rolls back, so the IndexerDB and the ledger stay at one tip.
-func TestServiceTruncateOnSplitChecksTheUtxoSetBeforeTheIndexerRollsBack(
+func TestServiceTruncateWithIndexerDBChecksTheUtxoSetBeforeTheIndexerRollsBack(
 	t *testing.T,
 ) {
 	t.Parallel()
-	cfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "db"))
-	points := seedSplitDir(t, cfg, 8, 6)
+	cfg := indexerDBConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "db"))
+	points := seedIndexerDBDir(t, cfg, 8, 6)
 	store, err := badgerutxo.Open(badgerutxo.DirFor(cfg.DatabasePath))
 	require.NoError(t, err)
 	for i, p := range points[4:] {

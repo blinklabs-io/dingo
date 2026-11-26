@@ -22,7 +22,7 @@ import (
 
 // API storage mode always serves the API from the IndexerDB while the
 // consensus store runs in core mode, so API servers gate on the layout.
-func TestAPIStorageModeOnSplitLayout(t *testing.T) {
+func TestAPIStorageModeOpensAnIndexerDB(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name         string
@@ -43,9 +43,9 @@ func TestAPIStorageModeOnSplitLayout(t *testing.T) {
 			)
 			n := &Node{config: c}
 			require.Equal(t, tt.want, n.apiStorageMode())
-			split := tt.mode == StorageModeAPI
-			require.Equal(t, split, n.splitIndexer())
-			if split {
+			hasIndexerDB := tt.mode == StorageModeAPI
+			require.Equal(t, hasIndexerDB, n.hasIndexerDB())
+			if hasIndexerDB {
 				require.Equal(t, StorageModeCore, c.storageMode,
 					"the ledger's own store holds no API rows")
 			}

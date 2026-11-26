@@ -39,7 +39,7 @@ type barrierQueryer struct {
 }
 
 func (q barrierQueryer) barrier(ctx context.Context, query string) error {
-	if o := q.accumulator.overlay; o != nil && o.retainHistory && !o.flushing &&
+	if o := q.accumulator.overlay; o != nil && !o.flushing &&
 		(readsOverlayTables(query) || containsIdentifier(query, "utxo_address") || readsAssetTables(query) ||
 			(containsIdentifier(query, "account") && !deletesAccountRows(query))) {
 		if err := sqlreadonly.ValidateSQLite(query); err != nil {
@@ -53,22 +53,16 @@ func (q barrierQueryer) barrier(ctx context.Context, query string) error {
 		}
 	}
 	if deletesAccountRows(query) {
-		// The live-stake replay reads an account's existence at each
-		// block's end from created_slot, which only holds while no account
-		// row is deleted inside the batch.
+		// The live-stake replay reads an account's existence once for
+		// every block of the batch, which only holds while no account row
+		// is deleted inside it.
 		err := errOverlayAccountDelete
 		if o := q.accumulator.overlay; o != nil && o.err == nil {
 			o.err = err
 		}
 		return err
 	}
-	if err := q.store.overlayTransactionBarrier(
-		ctx, q.queryer, q.accumulator, query,
-	); err != nil {
-		return err
-	}
 	retainedRead := q.accumulator.overlay != nil &&
-		q.accumulator.overlay.retainHistory &&
 		(containsIdentifier(query, "utxo_address") || readsAssetTables(query))
 	if !readsOverlayTables(query) && !retainedRead {
 		return nil
@@ -76,7 +70,7 @@ func (q barrierQueryer) barrier(ctx context.Context, query string) error {
 	return q.store.overlayBarrier(ctx, q.queryer, q.accumulator)
 }
 
-// readsAssetTables reports whether query names a table a retained overlay
+// readsAssetTables reports whether query names a table the overlay
 // queues rows for: holdings, or the identities they resolve against.
 func readsAssetTables(query string) bool {
 	return containsIdentifier(query, "asset_holding") ||
@@ -122,9 +116,8 @@ func (q barrierQueryer) QueryContext(
 // QueryRowContext cannot return the barrier's error; the overlay records it
 // and FlushBatch returns it, so the batch fails before commit. A read or
 // write that fails earlier because the barrier did not write -- a missing
-// row, or a foreign key naming a transaction row that failed to insert --
-// gets the recorded error joined to its own by the ledger, through the
-// accumulator's BatchUtxoOverlayError.
+// row -- gets the recorded error joined to its own by the ledger, through
+// the accumulator's BatchUtxoOverlayError.
 func (q barrierQueryer) QueryRowContext(
 	ctx context.Context,
 	query string,

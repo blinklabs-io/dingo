@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"cmp"
 	"errors"
-	"fmt"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -367,13 +366,6 @@ func (ls *LedgerState) epochStateReader(
 		ls.epochStateSetLoaded.Store(true)
 	}
 	return r, mode
-}
-
-func sameEpochs(a, b []models.Epoch) bool {
-	return slices.EqualFunc(a, b, func(x, y models.Epoch) bool {
-		x.ID, y.ID = 0, 0
-		return fmt.Sprintf("%+v", x) == fmt.Sprintf("%+v", y)
-	})
 }
 
 func (s stagingLedgerDB) GetEpochs(txn ledgerdb.Txn) ([]models.Epoch, error) {

@@ -47,7 +47,7 @@ type ProviderDependencies struct {
 	Logger             *slog.Logger
 	Host               string
 	CORSAllowedOrigins []string
-	// Ready gates the IndexerDB-backed routes on a split layout. Nil serves
+	// Ready gates the IndexerDB-backed routes with an IndexerDB. Nil serves
 	// every route.
 	Ready apiready.Check
 }

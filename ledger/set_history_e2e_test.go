@@ -33,13 +33,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// serveLedgerOnly makes the harness's set the ledger's only copy of its
-// state, as a node's startup does.
-func serveLedgerOnly(t *testing.T, h *p5Harness) {
-	t.Helper()
-	h.set.ServeLedgerOnly()
-}
-
 // releasedFactsRun builds the harness over a set that takes over the reward
 // input facts a v0.94.2 database left in its metadata store, with the rest of
 // the harness's state written to the set.
@@ -49,13 +42,13 @@ func serveLedgerOnly(t *testing.T, h *p5Harness) {
 // validator, as a node always does.
 func releasedFactsRun(
 	t *testing.T,
-	drive func(h *p5Harness) func() []string,
-) (map[string][]string, *p5Harness) {
+	drive func(h *setHarness) func() []string,
+) (map[string][]string, *setHarness) {
 	t.Helper()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	h := &p5Harness{set: set}
+	h := &setHarness{set: set}
 	h.scenario = ledger.NewSeededBoundaryEpochStateScenarioForTest(
 		t, set, nil, func(db *database.Database) {
 			seedRewardInputFacts(t, db.Metadata())
@@ -75,7 +68,7 @@ func releasedFactsRun(
 	require.Len(t, h.refs, 2, "the harness has two accounts")
 	s := h.scenario
 	s.ConfigureLeiosValidator()
-	s.InstallDrainedSources()
+	s.InstallSetSources()
 	cur := s.CurrentPoint().Slot
 	s.WriteNonces([]models.BlockNonce{{
 		Slot: cur + 1, Hash: bytes.Repeat([]byte{byte(cur + 1)}, 32),
@@ -105,7 +98,7 @@ func releasedFactsRun(
 
 // The pool scenario: a registration, a VRF key rotation, a retirement and its
 // reap at the boundary, a rollback and a replay.
-func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
+func TestSetServesPoolHistory(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -113,7 +106,7 @@ func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 	var refunds []models.PoolRetirementRefund
 	var tip ochainsync.Tip
 	var err error
-	apply := func(h *p5Harness) {
+	apply := func(h *setHarness) {
 		slots = h.scenario.Pools(func() {
 			epochs, err := h.scenario.LedgerDB().GetEpochs(nil)
 			require.NoError(t, err)
@@ -131,7 +124,7 @@ func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 	}
 	out, h := releasedFactsRun(
 		t,
-		func(h *p5Harness) func() []string {
+		func(h *setHarness) func() []string {
 			// The op-cert write keeps the pool row's counter in step in
 			// the metadata store, which holds no row of the family.
 			ops := h.scenario.OpCerts()
@@ -142,7 +135,7 @@ func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 				if first {
 					tip, err = h.scenario.DB.GetTip(nil)
 					require.NoError(t, err)
-					requireDrainedPoolAnswers(
+					requireSetPoolAnswers(
 						t, h.scenario.LedgerDB(), slots,
 					)
 				}
@@ -217,7 +210,7 @@ func TestBoundaryRewardCaptureSurvivesRollbackAndReplay(
 	t.Parallel()
 	r := newRewardBoundaryRun(t)
 	s := r.scenario
-	s.InstallDrainedSources()
+	s.InstallSetSources()
 	out := map[string]string{}
 	read := func(name string) {
 		inputs := s.Inputs(6)

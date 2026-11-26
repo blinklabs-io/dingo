@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -222,15 +221,12 @@ func TestEpochCaptureBlockCountsIncludeOverlaySlotsFromTheSet(t *testing.T) {
 	}
 }
 
-// With the family drained and the set holding no rows for it, the reward
-// round's fee read fails rather than answer from the emptied tables.
-func TestRewardBlockFeesFailWhenTheDrainedSetHasNoRows(t *testing.T) {
+// With the set holding no rows for the family, the reward
+// round's fee read fails rather than answer nothing.
+func TestRewardBlockFeesFailWhenTheSetHasNoRows(t *testing.T) {
 	t.Parallel()
 	r := newRewardBlocksRun(t, "set", nil, false)
 	r.write()
-	r.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyRewardBlocksFees),
-	)
 	// Epoch 2 is outside the window the set loaded.
 	_, err := r.scenario.Fees(2)
 	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)

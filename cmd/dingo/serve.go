@@ -86,7 +86,14 @@ func runServePreflight(
 	cfg *config.Config,
 	logger *slog.Logger,
 	probe *boundHealthProbe,
-) error {
+) (err error) {
+	// Whichever step a shutdown signal interrupts, the cancelled context
+	// surfaces as that step's error; report it as a requested shutdown.
+	defer func() {
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			err = errShutdownRequested
+		}
+	}()
 	server := serveHealthProbe(logger, "startup", probe)
 	var debugServer *debugPprofServer
 	// Release both listeners before the node binds its runtime listeners.
@@ -103,7 +110,6 @@ func runServePreflight(
 			logger.Warn("stopping preflight listeners", "error", err)
 		}
 	}()
-	var err error
 	debugServer, err = startDebugPprofServer(logger, cfg, "startup")
 	if err != nil {
 		logger.Warn(

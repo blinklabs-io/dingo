@@ -271,8 +271,8 @@ type Config struct {
 	// malformedPluginSelections are capabilities WithPluginSelection could
 	// not store. The option cannot return an error, so New reports them.
 	malformedPluginSelections []hostplugin.Capability
-	// splitIndexer is set when the IndexerDB holds the API rows.
-	splitIndexer                    bool
+	// hasIndexerDB is set when the IndexerDB holds the API rows.
+	hasIndexerDB                    bool
 	bindAddr                        string
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
 	network                         string
@@ -1024,7 +1024,7 @@ func (c *Config) syncCompatFields() {
 	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
 	// storageMode is the ledger's own store's mode, which is core when the
 	// IndexerDB holds the API rows.
-	c.splitIndexer = c.cfg.SplitIndexer()
+	c.hasIndexerDB = c.cfg.HasIndexerDB()
 	c.runMode, c.startEra, c.storageMode = string(
 		c.cfg.RunMode,
 	), c.cfg.StartEra, StorageMode(
@@ -2764,12 +2764,12 @@ type IndexerWriterDeps struct {
 	Fatal func(error)
 }
 
-// IndexerWriterFactory builds the writer of a split layout. It is a seam
+// IndexerWriterFactory builds the writer of an IndexerDB layout. It is a seam
 // because the writer's block indexing lives in a package that imports this
 // one.
 type IndexerWriterFactory func(IndexerWriterDeps) (IndexerWriter, error)
 
-// WithIndexerWriterFactory sets the writer a split layout runs.
+// WithIndexerWriterFactory sets the writer an IndexerDB layout runs.
 func WithIndexerWriterFactory(f IndexerWriterFactory) ConfigOptionFunc {
 	return func(c *Config) {
 		if c.cfg == nil {
@@ -2780,7 +2780,7 @@ func WithIndexerWriterFactory(f IndexerWriterFactory) ConfigOptionFunc {
 }
 
 // WithIndexerMaxReadyLagBlocks sets how far behind the ledger tip the
-// IndexerDB may be while current-state endpoints are ready (split layout).
+// IndexerDB may be while current-state endpoints are ready (IndexerDB layout).
 func WithIndexerMaxReadyLagBlocks(blocks uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		if c.cfg == nil {

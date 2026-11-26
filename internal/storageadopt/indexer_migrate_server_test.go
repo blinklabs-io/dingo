@@ -127,7 +127,7 @@ func resolveReleasedStores(
 func seedServerMigration(
 	t *testing.T,
 	provider string,
-) (*splitMigration, ocommon.Point) {
+) (*indexerMigration, ocommon.Point) {
 	t.Helper()
 	cfg := &config.Config{
 		RunMode:      config.RunModeServe,
@@ -145,7 +145,7 @@ func seedServerMigration(
 			},
 		},
 	}
-	m := &splitMigration{
+	m := &indexerMigration{
 		cfg:         cfg,
 		logger:      migrateTestLogger(),
 		hostFactory: serverMigrationHost(t, provider),
@@ -156,7 +156,7 @@ func seedServerMigration(
 	require.NoError(t, err)
 	// The released layout: one API store on the configured database.
 	released := m.selections()
-	released.SplitIndexer = false
+	released.IndexerDB = false
 	stores := resolveReleasedStores(t, host, released, deps)
 	db, err := database.New(t.Context(), m.databaseConfig("api", ""), stores)
 	require.NoError(t, err)
@@ -278,7 +278,7 @@ func TestServerMigrationResumesAndKeepsLedgerStateInPlace(t *testing.T) {
 				var gate int
 				require.NoError(t, target.QueryRow(
 					"SELECT count(*) FROM sync_state WHERE sync_key = ?",
-					database.UtxoSetOnlySyncKey,
+					database.UtxoSetMigratedSyncKey,
 				).Scan(&gate))
 				require.Zero(t, gate)
 				_, err = target.Exec("UPDATE tip SET slot=slot+10 WHERE id=1")
@@ -398,7 +398,7 @@ func TestServerMigrationRefusesAnInterruptedBackfill(t *testing.T) {
 // an interrupted adoption is refused.
 func TestCheckServerAdoptedRefusesAReleasedStore(t *testing.T) {
 	t.Parallel()
-	check := func(t *testing.T, m *splitMigration) error {
+	check := func(t *testing.T, m *indexerMigration) error {
 		t.Helper()
 		host, err := m.newHost()
 		require.NoError(t, err)
@@ -436,7 +436,7 @@ func TestCheckServerAdoptedRefusesAReleasedStore(t *testing.T) {
 				Metadata: plugin.Selection{Provider: "postgres"},
 			}},
 		}
-		m := &splitMigration{cfg: cfg, hostFactory: serverMigrationHost(t, "postgres")}
+		m := &indexerMigration{cfg: cfg, hostFactory: serverMigrationHost(t, "postgres")}
 		require.NoError(t, check(t, m))
 	})
 }
@@ -495,9 +495,9 @@ func TestAdoptionRefusesAReleasedInterruptedBackfillUntouched(t *testing.T) {
 func releasedServerMigration(
 	t *testing.T,
 	provider, dir string,
-) *splitMigration {
+) *indexerMigration {
 	t.Helper()
-	return &splitMigration{
+	return &indexerMigration{
 		cfg: &config.Config{
 			RunMode:      config.RunModeServe,
 			StorageMode:  "api",

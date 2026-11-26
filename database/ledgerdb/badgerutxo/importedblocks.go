@@ -108,12 +108,8 @@ func DecodeImportedBlockValue(
 }
 
 // LoadImportedBlocks replaces the store's imported block rows with the ones
-// feed supplies, each as a primary key and value, and marks them loaded. A
-// store from before it kept them reloads them in place. When the metadata
-// store had drained the counts before they could be read, lost is set and the
-// marker records that the rows are gone, which ImportedBlocksLost reports.
+// feed supplies, each as a primary key and value, and marks them loaded.
 func (s *Store) LoadImportedBlocks(
-	lost bool,
 	feed func(
 		put func(k, v []byte) error,
 		tombstone func(slot uint64, prefix []byte) error,
@@ -138,7 +134,7 @@ func (s *Store) LoadImportedBlocks(
 		return fmt.Errorf("badgerutxo: load imported blocks: %w", err)
 	}
 	return s.update(func(txn *badger.Txn) error {
-		return txn.Set(importedBlocksKey, markerValue(lost))
+		return txn.Set(importedBlocksKey, loadedMarker)
 	})
 }
 
@@ -146,13 +142,6 @@ func (s *Store) LoadImportedBlocks(
 // rows of every epoch a snapshot import carried them for.
 func (s *Store) ImportedBlocksLoaded() (bool, error) {
 	return s.hasMarker(importedBlocksKey)
-}
-
-// ImportedBlocksLost reports whether the metadata store had drained the
-// imported block counts before the store could load them, so the counts a
-// snapshot import carried are gone.
-func (s *Store) ImportedBlocksLost() (bool, error) {
-	return s.markerLost(importedBlocksKey)
 }
 
 // ReplaceImportedBlocks replaces the imported block rows of epoch with the

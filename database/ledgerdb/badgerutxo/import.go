@@ -241,9 +241,11 @@ func (s *Store) loadNoRows(missingOnly bool) error {
 		{rewardOutputsKey, func() error { return s.LoadRewardOutputs(none) }},
 		{opCertsKey, func() error { return s.LoadOpCerts(none) }},
 		{rewardBlocksKey, func() error { return s.LoadRewardBlocks(none) }},
-		{importedBlocksKey, func() error { return s.LoadImportedBlocks(false, noneSlots) }},
+		{importedBlocksKey, func() error { return s.LoadImportedBlocks(noneSlots) }},
 		{rewardRecordsKey, func() error {
-			return s.LoadRewardRecords(func(func(RewardRecord) error) error { return nil })
+			return s.LoadRewardRecords(
+				func(func(RewardRecord) error) error { return nil },
+			)
 		}},
 		{rewardInputsKey, func() error { return s.LoadRewardInputs(noneSlots) }},
 		{rewardDerivedKey, func() error { return s.LoadRewardDerived(noneSlots) }},

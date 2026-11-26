@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package storageadopt migrates existing API stores to the split layout.
+// Package storageadopt migrates existing API stores to the IndexerDB layout.
 package storageadopt
 
 import (
@@ -54,10 +54,10 @@ const (
 	migrateStepLatched = "latched"
 )
 
-// MigrateToSplit adopts an API database in place. The caller must recover
+// MigrateToIndexerDB adopts an API database in place. The caller must recover
 // interrupted restores before adopting active storage.
-func MigrateToSplit(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
-	m := &splitMigration{cfg: cfg, logger: logger}
+func MigrateToIndexerDB(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
+	m := &indexerMigration{cfg: cfg, logger: logger}
 	return m.run(ctx)
 }
 
@@ -83,7 +83,7 @@ func AdoptStagedAPI(
 	stagingDir string,
 ) error {
 	cfg.DatabasePath = stagingDir
-	m := &splitMigration{cfg: &cfg, logger: logger, genesis: genesis}
+	m := &indexerMigration{cfg: &cfg, logger: logger, genesis: genesis}
 	switch cfg.Plugins.Storage.Metadata.Provider {
 	case "sqlite":
 		return m.migrate(ctx)
@@ -94,7 +94,7 @@ func AdoptStagedAPI(
 	}
 }
 
-type splitMigration struct {
+type indexerMigration struct {
 	hostFactory func() (*plugin.Host, error)
 	cfg         *config.Config
 	logger      *slog.Logger
@@ -107,25 +107,25 @@ type splitMigration struct {
 	availableBytes func(path string) (uint64, error)
 }
 
-func (m *splitMigration) newHost() (*plugin.Host, error) {
+func (m *indexerMigration) newHost() (*plugin.Host, error) {
 	if m.hostFactory != nil {
 		return m.hostFactory()
 	}
 	return internalplugins.NewHost()
 }
 
-func (m *splitMigration) step(name string) error {
+func (m *indexerMigration) step(name string) error {
 	if m.afterStep == nil {
 		return nil
 	}
 	return m.afterStep(name)
 }
 
-func (m *splitMigration) selections() internalplugins.StorageSelections {
+func (m *indexerMigration) selections() internalplugins.StorageSelections {
 	return internalplugins.ConfiguredStorageSelections(m.cfg)
 }
 
-func (m *splitMigration) databaseConfig(
+func (m *indexerMigration) databaseConfig(
 	storageMode, layout string,
 ) *database.Config {
 	cfg := m.cfg
@@ -148,7 +148,7 @@ func (m *splitMigration) databaseConfig(
 	}
 }
 
-func (m *splitMigration) dependencies(
+func (m *indexerMigration) dependencies(
 	storageMode string,
 ) (internalplugins.StorageDependencies, error) {
 	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
@@ -169,13 +169,13 @@ func (m *splitMigration) dependencies(
 	}, nil
 }
 
-func (m *splitMigration) run(ctx context.Context) error {
+func (m *indexerMigration) run(ctx context.Context) error {
 	cfg := m.cfg
 	if cfg.Plugins.Storage.Metadata.Provider == "postgres" ||
 		cfg.Plugins.Storage.Metadata.Provider == "mysql" {
 		return m.migrateServer(ctx)
 	}
-	if !cfg.SplitIndexer() ||
+	if !cfg.HasIndexerDB() ||
 		cfg.Plugins.Storage.Metadata.Provider != "sqlite" {
 		return nil
 	}
@@ -223,7 +223,7 @@ func (m *splitMigration) run(ctx context.Context) error {
 	return m.migrate(ctx)
 }
 
-func (m *splitMigration) migrate(ctx context.Context) (err error) {
+func (m *indexerMigration) migrate(ctx context.Context) (err error) {
 	cfg := m.cfg
 	selections := m.selections()
 	deps, err := m.dependencies("api")
@@ -241,7 +241,7 @@ func (m *splitMigration) migrate(ctx context.Context) (err error) {
 	)
 	if err != nil {
 		return fmt.Errorf(
-			"open the API-mode database for migration to the split "+
+			"open the API-mode database for migration to the IndexerDB "+
 				"layout: %w", err,
 		)
 	}
@@ -294,7 +294,7 @@ func (m *splitMigration) migrate(ctx context.Context) (err error) {
 			)
 		}
 		m.logger.Info(
-			"completing the interrupted migration to the split layout",
+			"completing the interrupted migration to the IndexerDB layout",
 			"component", "indexer", "indexer_dir", indexerDir,
 		)
 		return m.latchConsensus(ctx, db, closeSource)
@@ -307,7 +307,7 @@ func (m *splitMigration) migrate(ctx context.Context) (err error) {
 	)
 }
 
-func (m *splitMigration) copyAndPublish(
+func (m *indexerMigration) copyAndPublish(
 	ctx context.Context,
 	db *database.Database,
 	closeSource func() error,
@@ -335,7 +335,7 @@ func (m *splitMigration) copyAndPublish(
 		return err
 	}
 	m.logger.Info(
-		"migrating the API-mode database to the split layout: copying "+
+		"migrating the API-mode database to the IndexerDB layout: copying "+
 			"the metadata store",
 		"component", "indexer",
 		"slot", ledgerTip.Slot, "block", ledgerTip.BlockNumber,
@@ -369,19 +369,19 @@ func (m *splitMigration) copyAndPublish(
 	return m.latchConsensus(ctx, db, closeSource)
 }
 
-// latchConsensus latches the split layout in the consensus store, closes it
+// latchConsensus latches the IndexerDB layout in the consensus store, closes it
 // and reopens it as a core store, which latches core mode and shows the
 // result opens.
-func (m *splitMigration) latchConsensus(
+func (m *indexerMigration) latchConsensus(
 	ctx context.Context,
 	db *database.Database,
 	closeSource func() error,
 ) error {
 	if err := db.SetNodeSettingsGates(
 		ctx,
-		nodesettings.Values{"indexer_layout": config.IndexerLayoutSplit},
+		nodesettings.Values{"indexer_layout": config.IndexerLayoutIndexerDB},
 	); err != nil {
-		return fmt.Errorf("latch the split layout: %w", err)
+		return fmt.Errorf("latch the IndexerDB layout: %w", err)
 	}
 	if err := closeSource(); err != nil {
 		return fmt.Errorf("close the database: %w", err)
@@ -395,7 +395,7 @@ func (m *splitMigration) latchConsensus(
 	}
 	reopened, err := internalplugins.OpenDatabase(
 		ctx,
-		m.databaseConfig("core", config.IndexerLayoutSplit),
+		m.databaseConfig("core", config.IndexerLayoutIndexerDB),
 		m.selections(),
 		coreDeps,
 	)
@@ -406,7 +406,7 @@ func (m *splitMigration) latchConsensus(
 		return err
 	}
 	m.logger.Info(
-		"migrated the database to the split layout",
+		"migrated the database to the IndexerDB layout",
 		"component", "indexer",
 	)
 	return nil
@@ -440,7 +440,7 @@ func refuseInterruptedBackfill(store metadata.MetadataStore) error {
 }
 
 // removeStaleWork deletes the work directories an interrupted copy left.
-func (m *splitMigration) removeStaleWork() error {
+func (m *indexerMigration) removeStaleWork() error {
 	entries, err := os.ReadDir(m.cfg.DatabasePath)
 	if err != nil {
 		return err
@@ -464,7 +464,7 @@ func (m *splitMigration) removeStaleWork() error {
 
 // checkSpace refuses when the volume cannot hold a second copy of the
 // metadata store.
-func (m *splitMigration) checkSpace() error {
+func (m *indexerMigration) checkSpace() error {
 	var size uint64
 	for _, name := range []string{
 		"metadata.sqlite", "metadata.sqlite-wal",
@@ -487,7 +487,7 @@ func (m *splitMigration) checkSpace() error {
 	if avail < need {
 		return fmt.Errorf(
 			"not enough free disk space to migrate the database to the "+
-				"split layout: the copy of the %d-byte metadata store "+
+				"IndexerDB layout: the copy of the %d-byte metadata store "+
 				"needs %d bytes and %d are available in %s",
 			size, need, avail, m.cfg.DatabasePath,
 		)
@@ -497,8 +497,8 @@ func (m *splitMigration) checkSpace() error {
 
 // prepareCopy opens the copy under tmpRoot as an IndexerDB over the source's
 // blob store, records the ledger tip as its tip and checkpoint, and latches
-// the split layout in it.
-func (m *splitMigration) prepareCopy(
+// the IndexerDB layout in it.
+func (m *indexerMigration) prepareCopy(
 	ctx context.Context,
 	source *database.Database,
 	selections internalplugins.StorageSelections,
@@ -552,10 +552,10 @@ func (m *splitMigration) prepareCopy(
 	}
 	if err := idx.Metadata().SetNodeSettingsGates(
 		ctx,
-		nodesettings.Values{"indexer_layout": config.IndexerLayoutSplit},
+		nodesettings.Values{"indexer_layout": config.IndexerLayoutIndexerDB},
 		epoch, tip.Slot,
 	); err != nil {
-		return fmt.Errorf("latch the split layout in the copy: %w", err)
+		return fmt.Errorf("latch the IndexerDB layout in the copy: %w", err)
 	}
 	return nil
 }
@@ -571,7 +571,7 @@ const offsetCopyBatch = 1000
 // as genesis outputs, exist only in the blob store. The entries are keyed by
 // identity, so copying one that is already there rewrites the same value and
 // a repeated copy is safe.
-func (m *splitMigration) copyOffsetEntries(
+func (m *indexerMigration) copyOffsetEntries(
 	ctx context.Context,
 	source, idx *database.Database,
 ) error {
@@ -684,7 +684,7 @@ var migrationCheckpointOffsets = []uint64{
 
 // checkpointsBelow returns the canonical blocks at the migration offsets
 // below tip, skipping offsets beyond the start of the chain.
-func (m *splitMigration) checkpointsBelow(
+func (m *indexerMigration) checkpointsBelow(
 	ctx context.Context,
 	source *database.Database,
 	tip indexerdb.Tip,
@@ -711,8 +711,9 @@ func (m *splitMigration) checkpointsBelow(
 }
 
 // indexerCopyIsLatched opens the published IndexerDB and reports whether it
-// carries the split latch and a tip, which only a finished copy does.
-func (m *splitMigration) indexerCopyIsLatched(
+// carries the IndexerDB layout latch and a tip, which only a finished copy
+// does.
+func (m *indexerMigration) indexerCopyIsLatched(
 	ctx context.Context,
 	source *database.Database,
 	deps internalplugins.StorageDependencies,
@@ -745,6 +746,6 @@ func (m *splitMigration) indexerCopyIsLatched(
 	if err != nil {
 		return false, err
 	}
-	return gates["indexer_layout"] == config.IndexerLayoutSplit &&
+	return gates["indexer_layout"] == config.IndexerLayoutIndexerDB &&
 		!tip.IsZero(), nil
 }

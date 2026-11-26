@@ -25,8 +25,8 @@ import (
 )
 
 // With the set failed, the LedgerDB fails every read and write rather than
-// answer from the empty SQL tables.
-func TestDrainedGovernanceReadsFailWhenTheSetCannotServe(t *testing.T) {
+// answer nothing.
+func TestGovernanceReadsFailWhenTheSetCannotServe(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)

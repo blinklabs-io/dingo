@@ -46,7 +46,7 @@ func releasedOpen(
 	cfg := parityConfig(dir)
 	dbConfig := &database.Config{
 		DataDir: dir, StorageMode: "core", Network: "preview",
-		IndexerLayout:  config.IndexerLayoutSplit,
+		IndexerLayout:  config.IndexerLayoutIndexerDB,
 		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 	}
@@ -107,7 +107,7 @@ func readMigratedSet(t *testing.T, dir string) migratedSetState {
 func adoptedReleasedDatabase(t *testing.T) string {
 	t.Helper()
 	dir := unpackLegacyDatabase(t, legacyParityArchive)
-	require.NoError(t, MigrateToSplit(
+	require.NoError(t, MigrateToIndexerDB(
 		t.Context(), parityConfig(dir),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
@@ -126,7 +126,7 @@ func TestReleasedMigrationResumesAfterAStopAtEachStep(t *testing.T) {
 	refCfg := parityConfig(refDir)
 	refDBConfig := &database.Config{
 		DataDir: refDir, StorageMode: "core", Network: "preview",
-		IndexerLayout:  config.IndexerLayoutSplit,
+		IndexerLayout:  config.IndexerLayoutIndexerDB,
 		BlobPlugin:     refCfg.Plugins.Storage.Blob.Provider,
 		MetadataPlugin: refCfg.Plugins.Storage.Metadata.Provider,
 	}
@@ -169,7 +169,7 @@ func TestReleasedMigrationResumesAfterAStopAtEachStep(t *testing.T) {
 				t.Context(),
 				&database.Config{
 					DataDir: dir, StorageMode: "core", Network: "preview",
-					IndexerLayout: config.IndexerLayoutSplit,
+					IndexerLayout: config.IndexerLayoutIndexerDB,
 				},
 				internalplugins.StorageSelections{
 					Blob:     parityConfig(dir).Plugins.Storage.Blob,
@@ -203,7 +203,7 @@ func TestReleasedMigrationLeavesAStoreV0942Refuses(t *testing.T) {
 	dir := unpackLegacyDatabase(t, legacyParityArchive)
 	_, err := dbtest.ReleasedMetadataSyncStatus(dir)
 	require.NoError(t, err, "v0.94.2 opens the store it wrote")
-	require.NoError(t, MigrateToSplit(
+	require.NoError(t, MigrateToIndexerDB(
 		t.Context(), parityConfig(dir),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
@@ -223,7 +223,7 @@ func TestReleasedMigrationReadsPromotedBlocks(t *testing.T) {
 	dbConfig := &database.Config{
 		Role:    database.RoleReleased,
 		DataDir: dir, StorageMode: "core", Network: "preview",
-		IndexerLayout:  config.IndexerLayoutSplit,
+		IndexerLayout:  config.IndexerLayoutIndexerDB,
 		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 		Immutable:      database.ImmutableConfig{Enabled: true, ChunkSlots: 4320, CanContainEBB: true},

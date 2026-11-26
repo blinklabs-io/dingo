@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
@@ -89,15 +88,12 @@ func TestRewardInputsAcrossABoundaryRollbackAndReplay(t *testing.T) {
 	require.Zero(t, reached(), "a read reached the metadata store")
 }
 
-// With the family drained and the set holding no rows for an epoch, the
-// reward round's reads fail rather than answer from the emptied tables, and
+// With the set holding no rows for an epoch, the
+// reward round's reads fail rather than answer nothing, and
 // a fallback snapshot capture is refused.
-func TestRewardInputsFailWhenTheDrainedSetServesNothing(t *testing.T) {
+func TestRewardInputsFailWhenTheSetServesNothing(t *testing.T) {
 	t.Parallel()
 	r := newRewardBlocksRun(t, "set", nil, false)
-	r.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyRewardInputs),
-	)
 	reached, hide := r.scenario.HideStoreReads(rewardInputReadNames...)
 	a := r.scenario.Inputs(6)
 	hide(false)

@@ -77,20 +77,20 @@ func (n *Node) apiReadiness() apiready.Check {
 // The consensus store always runs in core mode; an API node serves the APIs
 // from its IndexerDB.
 func (n *Node) apiStorageMode() StorageMode {
-	if n.splitIndexer() {
+	if n.hasIndexerDB() {
 		return StorageModeAPI
 	}
 	return StorageModeCore
 }
 
-func (n *Node) splitIndexer() bool {
-	return n.config.splitIndexer
+func (n *Node) hasIndexerDB() bool {
+	return n.config.hasIndexerDB
 }
 
 // indexerLayout is the layout recorded in the database's node settings.
 func (n *Node) indexerLayout() string {
-	if n.storageSelections().SplitIndexer {
-		return internalconfig.IndexerLayoutSplit
+	if n.storageSelections().IndexerDB {
+		return internalconfig.IndexerLayoutIndexerDB
 	}
 	return internalconfig.IndexerLayoutShared
 }
@@ -98,7 +98,7 @@ func (n *Node) indexerLayout() string {
 // openIndexerWriter opens the IndexerDB beside the consensus database and
 // builds the writer that fills it. It does nothing on a core node.
 func (n *Node) openIndexerWriter(ctx context.Context) error {
-	if !n.splitIndexer() {
+	if !n.hasIndexerDB() {
 		return nil
 	}
 	// A quiesce that failed without closing storage resumes through here
@@ -187,7 +187,7 @@ func (n *Node) rollbackIndexerForTruncate(
 	target models.Block,
 	opts ...lifecycle.TruncateOption,
 ) error {
-	if !n.splitIndexer() {
+	if !n.hasIndexerDB() {
 		return nil
 	}
 	// The ledger's refusals, including the live UTxO set's, run first: a
@@ -319,7 +319,7 @@ func (n *Node) utxorpcQueryDatabase() utxorpc.QueryDatabase {
 }
 
 // checkServerAdopted refuses a PostgreSQL or MySQL API store a release
-// without the split layout wrote and startup has not adopted. The dingo
+// without the IndexerDB layout wrote and startup has not adopted. The dingo
 // command adopts it before any store opens; Run alone does not.
 func (n *Node) checkServerAdopted(
 	ctx context.Context,

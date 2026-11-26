@@ -20,14 +20,14 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
-// drainedEpochSource serves a rollback's epoch and era switch reads, and the
+// setEpochSource serves a rollback's epoch and era switch reads, and the
 // database's own epoch reads, from the set. It reads the committed set with no transaction: a
 // rollback runs before the set applies its own.
-type drainedEpochSource struct {
+type setEpochSource struct {
 	ls *LedgerState
 }
 
-func (d drainedEpochSource) Epochs() ([]models.Epoch, error) {
+func (d setEpochSource) Epochs() ([]models.Epoch, error) {
 	r, _ := d.ls.epochStateReader(nil)
 	if r == nil {
 		return nil, ledgerStateUnserved(nodesettings.FamilyEpochs)
@@ -39,7 +39,7 @@ func (d drainedEpochSource) Epochs() ([]models.Epoch, error) {
 	return sortedEpochs(view, nil), nil
 }
 
-func (d drainedEpochSource) EraSwitch() (*database.MidEpochEraSwitch, error) {
+func (d setEpochSource) EraSwitch() (*database.MidEpochEraSwitch, error) {
 	r, _ := d.ls.epochStateReader(nil)
 	if r == nil {
 		return nil, ledgerStateUnserved(nodesettings.FamilyEraSwitch)
@@ -52,6 +52,6 @@ func (d drainedEpochSource) EraSwitch() (*database.MidEpochEraSwitch, error) {
 // the reads and rollbacks it runs.
 func (ls *LedgerState) installEpochSource() {
 	if ls.db != nil {
-		ls.db.SetEpochSource(drainedEpochSource{ls})
+		ls.db.SetEpochSource(setEpochSource{ls})
 	}
 }

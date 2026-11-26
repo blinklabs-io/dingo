@@ -330,7 +330,7 @@ func TestCheckSyncStateDevModeAgreesWithTheNodeOpen(t *testing.T) {
 
 		run := *cfg
 		run.ApplyRunModeOverrides(run.RunMode)
-		require.True(t, run.SplitIndexer(), "dev mode serves the APIs")
+		require.True(t, run.HasIndexerDB(), "dev mode serves the APIs")
 		mode := run.ConsensusStorageMode()
 		runtime, err := internalplugins.OpenDatabase(
 			t.Context(),

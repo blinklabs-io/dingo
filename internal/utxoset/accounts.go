@@ -100,7 +100,7 @@ func (s *Set) ensureAccounts(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 
 // ensureAccountInactivityActivation upgrades legacy set account rows with the
 // CIP-0163 activation membership and floor. The SQL relation is authoritative
-// when retained; a set that activated after the account family was drained
+// when retained; a set that activated after it alone held the accounts
 // reconstructs the same membership from its rollback state immediately before
 // the activation boundary.
 func (s *Set) ensureAccountInactivityActivation(
@@ -151,16 +151,14 @@ func (s *Set) ensureAccountInactivityActivation(
 	}); err != nil {
 		return fmt.Errorf("utxoset: list accounts for activation provenance: %w", err)
 	}
-	if !s.store.LoadsRefused() {
-		for start := 0; start < len(refs); start += 400 {
-			end := min(start+400, len(refs))
-			batch, err := ldb.AccountInactivityActivationMembership(ctx, refs[start:end], txn)
-			if err != nil {
-				return fmt.Errorf("utxoset: read account activation membership: %w", err)
-			}
-			for key := range batch {
-				members[key] = struct{}{}
-			}
+	for start := 0; start < len(refs); start += 400 {
+		end := min(start+400, len(refs))
+		batch, err := ldb.AccountInactivityActivationMembership(ctx, refs[start:end], txn)
+		if err != nil {
+			return fmt.Errorf("utxoset: read account activation membership: %w", err)
+		}
+		for key := range batch {
+			members[key] = struct{}{}
 		}
 	}
 	if boundary > 0 {

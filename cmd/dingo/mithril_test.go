@@ -164,10 +164,10 @@ func TestServeAllowsInactivityGateAfterStream(t *testing.T) {
 
 // Not t.Parallel: swaps the package-level runMithrilSyncForCommand seam.
 //
-// TestMithrilSyncRunsOnTheSplitLayout pins that `mithril sync` reaches the
+// TestMithrilSyncFillsTheIndexerDB pins that `mithril sync` reaches the
 // bootstrap for an API node instead of refusing, and that the bootstrap
 // records the layout gate.
-func TestMithrilSyncRunsOnTheSplitLayout(t *testing.T) {
+func TestMithrilSyncFillsTheIndexerDB(t *testing.T) {
 	origRun := runMithrilSyncForCommand
 	t.Cleanup(func() { runMithrilSyncForCommand = origRun })
 	ran := false
@@ -183,7 +183,7 @@ func TestMithrilSyncRunsOnTheSplitLayout(t *testing.T) {
 	cmd.SetContext(config.WithContext(context.Background(), cfg))
 
 	require.NoError(t, mithrilSyncRunE(cmd, nil))
-	require.True(t, ran, "the split layout must not stop mithril sync")
+	require.True(t, ran, "the IndexerDB layout must not stop mithril sync")
 
 	require.Equal(t, "split", mithrilSyncIndexerLayout(cfg))
 	require.Empty(

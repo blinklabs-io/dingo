@@ -28,9 +28,6 @@ import (
 // pool, snapshot and pots rows are kept for good.
 const RewardInputEpochWindow = 3
 
-// rewardSnapshotMark is the only snapshot type reward calculation reads.
-const rewardSnapshotMark = "mark"
-
 // RewardInputKind is what a RewardInputChange does.
 type RewardInputKind uint8
 

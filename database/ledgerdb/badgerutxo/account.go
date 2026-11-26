@@ -701,7 +701,7 @@ func (s *Store) LoadRewardRecords(
 		return fmt.Errorf("badgerutxo: load reward records: %w", err)
 	}
 	return s.update(func(txn *badger.Txn) error {
-		return txn.Set(rewardRecordsKey, []byte{1})
+		return txn.Set(rewardRecordsKey, loadedMarker)
 	})
 }
 

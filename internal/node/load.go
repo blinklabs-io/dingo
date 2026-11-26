@@ -223,11 +223,11 @@ func Load(
 }
 
 // loadIndexerLayout is the layout a load freezes into a new database: the
-// split layout's gate must be filled while the database has no chain state, or
-// the node refuses to start over the loaded blocks.
+// IndexerDB layout's gate must be filled while the database has no chain
+// state, or the node refuses to start over the loaded blocks.
 func loadIndexerLayout(cfg *config.Config) string {
-	if cfg.SplitIndexer() || cfg.ServerCoreNamespace {
-		return config.IndexerLayoutSplit
+	if cfg.HasIndexerDB() || cfg.ServerCoreNamespace {
+		return config.IndexerLayoutIndexerDB
 	}
 	return ""
 }
@@ -721,8 +721,8 @@ func LoadWithDB(
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	// The snapshot manager writes through the ledger's LedgerDB, so its
-	// snapshot rows reach the live UTxO set, where the drained reward-input
-	// families live.
+	// snapshot rows reach the live UTxO set, where the reward-input families
+	// live.
 	snapshotMgr := snapshot.NewManager(ls.LedgerDB(), nil, logger)
 	// Mirror the CIP-0163 reward-account inactivity gate into snapshot capture
 	// so replay matches serve mode (node.go) on the same DB.

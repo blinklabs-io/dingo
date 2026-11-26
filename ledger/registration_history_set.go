@@ -362,13 +362,6 @@ func sameDepositPtr(a, b *uint64) bool {
 	return *a == *b
 }
 
-func sameHistoryRow(a, b models.AccountRegistrationHistoryRow) bool {
-	return a.AddedSlot == b.AddedSlot && a.BlockIndex == b.BlockIndex &&
-		a.CertIndex == b.CertIndex && bytes.Equal(a.TxHash, b.TxHash) &&
-		a.Action == b.Action && sameDepositPtr(a.Deposit, b.Deposit) &&
-		a.TxSlot == b.TxSlot && bytes.Equal(a.BlockHash, b.BlockHash)
-}
-
 // registrationServing returns the set's registration history reader when
 // those reads are answered from it and the set holds
 // the history.

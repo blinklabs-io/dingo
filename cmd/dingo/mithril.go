@@ -606,7 +606,6 @@ func runMithrilSyncWithRepair(
 	utxoSet, err := utxoset.Open(utxoset.Config{
 		Dir:    utxoset.DirFor(cfg.DatabasePath),
 		Logger: logger,
-		Only:   true,
 	})
 	if err != nil {
 		return fmt.Errorf("open live UTxO set: %w", err)
@@ -657,8 +656,8 @@ func runMithrilSyncWithRepair(
 // alone, and an API node's IndexerDB replays the blocks into itself once it
 // runs.
 func mithrilSyncIndexerLayout(cfg *config.Config) string {
-	if cfg.SplitIndexer() {
-		return config.IndexerLayoutSplit
+	if cfg.HasIndexerDB() {
+		return config.IndexerLayoutIndexerDB
 	}
 	return ""
 }

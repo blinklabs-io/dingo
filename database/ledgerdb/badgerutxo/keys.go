@@ -280,7 +280,7 @@ var (
 	// grow: a rollback removes rows but never lowers them.
 	governanceSeqKey = []byte("mgvseq")
 	// rewardRecordsKey is set once the store holds the reward records of the
-	// metadata store's journal up to its tip.
+	// journal up to its tip.
 	rewardRecordsKey = []byte("mrwrecs")
 	drepsKey         = []byte("mdreps")
 	poolsKey         = []byte("mpools")
@@ -377,3 +377,6 @@ var (
 		{retiredSnapshotSlotTag}, {retiredDRepHistoryTag}, []byte("mrwq"),
 	}
 )
+
+// loadedMarker is the value of a family's load marker.
+var loadedMarker = []byte{1}

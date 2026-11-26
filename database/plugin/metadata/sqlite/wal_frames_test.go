@@ -28,7 +28,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -40,11 +39,8 @@ import (
 
 // walWorkload describes a block mix applied through the store's write path.
 type walWorkload struct {
-	name        string
-	storageMode string
-	// overlay selects the trusted batch UTxO overlay, which is what genesis
-	// sync uses on core-mode SQLite.
-	overlay       bool
+	name          string
+	storageMode   string
 	txsPerBlock   int
 	inputsPerTx   int
 	outputsPerTx  int
@@ -320,28 +316,6 @@ func runWALWorkload(t *testing.T, w walWorkload) walFrameResult {
 	apply := func(blocks [][]walTx, measure bool) {
 		txn := store.Transaction(ctx)
 		acc := store.NewBatchAccumulator()
-		if w.overlay {
-			produced := map[string]struct{}{}
-			var inputs []models.UtxoId
-			for _, blk := range blocks {
-				for _, tx := range blk {
-					for _, in := range tx.tx.Consumed() {
-						if _, ok := produced[string(in.Id().Bytes())+"/"+strconv.Itoa(int(in.Index()))]; ok {
-							continue
-						}
-						inputs = append(inputs, models.UtxoId{
-							Hash: in.Id().Bytes(), Idx: in.Index(),
-						})
-					}
-					for _, u := range tx.tx.Produced() {
-						produced[string(u.Id.Id().Bytes())+"/"+strconv.Itoa(int(u.Id.Index()))] = struct{}{}
-					}
-				}
-			}
-			enabled, err := store.EnableBatchUtxoOverlay(acc, txn, inputs, nil, nil)
-			require.NoError(t, err)
-			require.True(t, enabled)
-		}
 		for _, blk := range blocks {
 			slot += 20
 			blockHash := gen.hash()
@@ -460,20 +434,14 @@ func walWorkloads() []walWorkload {
 	perTxn := walEnvInt("DINGO_WAL_BLOCKS_PER_TXN", 1)
 	return []walWorkload{
 		{
-			name: "byron-core-overlay", storageMode: types.StorageModeCore,
-			overlay: true, txsPerBlock: 10, inputsPerTx: 2, outputsPerTx: 2,
-			blocksPerTxn: perTxn, freshAddrProb: 0.9, addrPool: 2000,
-			warmTxs: warm, measureBlocks: blocks,
-		},
-		{
 			name: "byron-core-perrow", storageMode: types.StorageModeCore,
 			txsPerBlock: 10, inputsPerTx: 2, outputsPerTx: 2,
 			blocksPerTxn: perTxn, freshAddrProb: 0.9, addrPool: 2000,
 			warmTxs: warm, measureBlocks: blocks,
 		},
 		{
-			name: "alonzo-core-overlay", storageMode: types.StorageModeCore,
-			overlay: true, txsPerBlock: 20, inputsPerTx: 2, outputsPerTx: 3,
+			name: "alonzo-core-perrow", storageMode: types.StorageModeCore,
+			txsPerBlock: 20, inputsPerTx: 2, outputsPerTx: 3,
 			blocksPerTxn: perTxn, freshAddrProb: 0.2, addrPool: 5000,
 			stakeProb: 0.8, scriptProb: 0.3, invalidProb: 0.03,
 			warmTxs: warm, measureBlocks: blocks,

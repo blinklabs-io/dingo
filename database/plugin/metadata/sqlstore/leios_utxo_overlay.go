@@ -173,7 +173,6 @@ SELECT EXISTS(SELECT 1 FROM utxo_pointer WHERE utxo_id IN (` + placeholders + `)
 		}
 	}
 	overlay := &utxoOverlay{
-		retainHistory:   true,
 		apiInputs:       make(map[overlayKey]models.Utxo, len(inputs)),
 		apiTransactions: allowed,
 		created:         make(map[overlayKey]*overlayOutput, len(transactions)),
@@ -252,7 +251,7 @@ func (s *Store) PrepareLeiosClosureBatch(
 		return len(transactions), nil
 	}
 	if overlay := acc.overlay; overlay != nil {
-		if !overlay.retainHistory || len(overlay.apiTransactions) != 0 {
+		if len(overlay.apiTransactions) != 0 {
 			return 0, errors.New("previous closure window is incomplete")
 		}
 		if err := s.FlushBatch(acc, txn); err != nil {
@@ -375,11 +374,7 @@ func retainedOverlayFromQueryer(db queryer) *utxoOverlay {
 	for {
 		switch q := db.(type) {
 		case barrierQueryer:
-			o := q.accumulator.overlay
-			if o != nil && o.retainHistory {
-				return o
-			}
-			return nil
+			return q.accumulator.overlay
 		case countingQueryer:
 			db = q.queryer
 		case dialectQueryer:

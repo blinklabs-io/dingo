@@ -22,59 +22,35 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
-// p5Harness is a boundary scenario in set read mode whose statement guard is
-// armed for every family drained before the scenario's writes run.
-type p5Harness struct {
+// setHarness is a boundary scenario in set read mode.
+type setHarness struct {
 	scenario ledger.BoundaryEpochStateScenario
 	set      *utxoset.Set
-	// store is the metadata store's own LedgerDB, whose answers are the
-	// reference an undrained run's reads are rendered from.
-	store    ledgerdb.LedgerDB
-	drainErr error
+	// store is the v0.94.2 metadata store's LedgerDB the set loads from.
+	store ledgerdb.LedgerDB
 	// refs and pool are the harness's accounts and the pool the first one
-	// delegates to, read from the metadata store before any drain.
+	// delegates to.
 	refs []models.StakeCredentialRef
 	pool []byte
 }
 
-// newP5Harness opens the scenario, loads the set from the metadata store and
-// drains families in the order given, independent of the release's drain
-// order.
-// corrupt runs after the set is loaded and before the drain.
-func newP5Harness(
-	t *testing.T,
-	drain []nodesettings.Family,
-	corrupt func(*database.Database),
-) *p5Harness {
-	t.Helper()
-	return newSeededP5Harness(t, drain, corrupt, nil)
-}
-
-// newSeededP5Harness is newP5Harness with seed run on the metadata store
-// before the live UTxO set loads it, so the rows seed writes reach the set the
-// way a load of an existing store does.
-func newSeededP5Harness(
-	t *testing.T,
-	drain []nodesettings.Family,
-	corrupt func(*database.Database),
-	seed func(*database.Database),
-) *p5Harness {
+// newSetHarness opens the scenario and loads the set from its v0.94.2
+// metadata store.
+func newSetHarness(t *testing.T) *setHarness {
 	t.Helper()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	h := &p5Harness{
+	h := &setHarness{
 		set: set,
 		scenario: ledger.NewGuardedBoundaryEpochStateScenarioForTest(
 			t, set, nil,
@@ -90,39 +66,18 @@ func newSeededP5Harness(
 			}
 			return nil
 		}))
-	if seed != nil {
-		seed(h.scenario.DB)
-	}
 	require.NoError(t, set.LoadLedgerState(t.Context(), h.store))
-	if len(drain) == 0 {
-		return h
-	}
-	if corrupt != nil {
-		corrupt(h.scenario.DB)
-	}
-	set.ServeLedgerOnly()
 	return h
 }
 
 // reads is the LedgerDB the scenario's reads are rendered from.
-func (h *p5Harness) reads(bool) ledgerdb.LedgerDB {
+func (h *setHarness) reads() ledgerdb.LedgerDB {
 	return h.scenario.LedgerDB()
 }
 
-// requireDrained requires every table of the drained families to be empty,
-// the latch bit set, and no statement to have touched a drained table.
-func (h *p5Harness) requireDrained(
-	t *testing.T,
-	families []nodesettings.Family,
-	tables map[nodesettings.Family][]string,
-) {
-	t.Helper()
-	require.NoError(t, h.drainErr)
-}
-
-// With the set failed, the LedgerDB fails the read rather than answer from
-// the empty SQL table.
-func TestMIRGenesisDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
+// With the set failed, the LedgerDB fails the read rather than answer
+// nothing.
+func TestMIRGenesisReadsFailWhenTheSetCannotServe(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
@@ -141,12 +96,12 @@ func TestMIRGenesisDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 }
 
-var p5DRepKeys = [][]byte{
+var setDRepKeys = [][]byte{
 	bytes.Repeat([]byte{0x5d}, 28), bytes.Repeat([]byte{0x5e}, 28),
 }
 
-// p5Touched is what a drive wrote beyond the accounts the harness holds.
-type p5Touched struct {
+// setTouched is what a drive wrote beyond the accounts the harness holds.
+type setTouched struct {
 	refs  []models.StakeCredentialRef
 	dreps [][]byte
 }
@@ -171,8 +126,8 @@ func drepText(d *models.Drep) string {
 func accountDRepReads(
 	t *testing.T,
 	ldb ledgerdb.LedgerDB,
-	h *p5Harness,
-	touched p5Touched,
+	h *setHarness,
+	touched setTouched,
 ) []string {
 	t.Helper()
 	ctx := t.Context()
@@ -247,87 +202,66 @@ func accountDRepReads(
 	return out
 }
 
-type p5Drive struct {
+type setDrive struct {
 	name  string
-	drive func(t *testing.T, h *p5Harness) p5Touched
+	drive func(t *testing.T, h *setHarness) setTouched
 }
 
-var p5Drives = []p5Drive{
-	{"governance before v10", func(t *testing.T, h *p5Harness) p5Touched {
+var setDrives = []setDrive{
+	{"governance before v10", func(t *testing.T, h *setHarness) setTouched {
 		h.scenario.Governance(h.refs[0], 9)
-		return p5Touched{dreps: p5DRepKeys[:2]}
+		return setTouched{dreps: setDRepKeys[:2]}
 	}},
-	{"governance from v10", func(t *testing.T, h *p5Harness) p5Touched {
+	{"governance from v10", func(t *testing.T, h *setHarness) setTouched {
 		h.scenario.Governance(h.refs[0], 10)
-		return p5Touched{dreps: p5DRepKeys[:2]}
+		return setTouched{dreps: setDRepKeys[:2]}
 	}},
 	{
 		"reward credit and withdrawal",
-		func(t *testing.T, h *p5Harness) p5Touched {
+		func(t *testing.T, h *setHarness) setTouched {
 			h.scenario.Credit(h.refs[0], 100)
 			require.NoError(t, h.scenario.Withdraw(h.refs[0], 40))
 			h.scenario.FoldForWithdrawal(h.refs[0])
-			return p5Touched{dreps: p5DRepKeys[:2]}
+			return setTouched{dreps: setDRepKeys[:2]}
 		},
 	},
-	{"delegation reap", func(t *testing.T, h *p5Harness) p5Touched {
+	{"delegation reap", func(t *testing.T, h *setHarness) setTouched {
 		h.scenario.Reap(h.pool)
-		return p5Touched{dreps: p5DRepKeys[:2]}
+		return setTouched{dreps: setDRepKeys[:2]}
 	}},
-	{"CIP-0163 expiry", func(t *testing.T, h *p5Harness) p5Touched {
+	{"CIP-0163 expiry", func(t *testing.T, h *setHarness) setTouched {
 		h.scenario.ExpireAtBoundary(h.refs[0])
-		return p5Touched{dreps: p5DRepKeys[:2]}
+		return setTouched{dreps: setDRepKeys[:2]}
 	}},
-	{"registrations", func(t *testing.T, h *p5Harness) p5Touched {
+	{"registrations", func(t *testing.T, h *setHarness) setTouched {
 		s := h.scenario.Registrations()
 		out := []models.StakeCredentialRef{s.Imported}
 		for _, k := range [][]byte{s.K, s.L, s.M} {
 			out = append(out, models.NewStakeCredentialRef(0, k))
 		}
-		return p5Touched{refs: out, dreps: [][]byte{s.D, s.E}}
+		return setTouched{refs: out, dreps: [][]byte{s.D, s.E}}
 	}},
 }
 
-// p5AccountsRun drives one scenario through a rollback with the families
-// drained first, rendering the account and DRep reads after each step.
-func p5AccountsRun(
+// accountsRun drives one scenario through a rollback, rendering the account
+// and DRep reads after each step.
+func accountsRun(
 	t *testing.T,
-	drain []nodesettings.Family,
-	corrupt func(*database.Database),
-	d p5Drive,
-) (map[string][]string, *p5Harness) {
+	d setDrive,
+) (map[string][]string, *setHarness) {
 	t.Helper()
-	h := newP5Harness(t, drain, corrupt)
+	h := newSetHarness(t)
 	out := map[string][]string{}
-	if h.drainErr != nil {
-		return out, h
-	}
-	drained := len(drain) > 0
 	touched := d.drive(t, h)
-	out["applied"] = accountDRepReads(t, h.reads(drained), h, touched)
+	out["applied"] = accountDRepReads(t, h.reads(), h, touched)
 	h.scenario.RollbackBeforeBoundary()
-	out["rolled back"] = accountDRepReads(
-		t, h.reads(drained), h, touched,
-	)
+	out["rolled back"] = accountDRepReads(t, h.reads(), h, touched)
 	return out, h
 }
 
-var p5AccountTables = map[nodesettings.Family][]string{
-	nodesettings.FamilyDReps: {
-		"drep", "drep_delegator", "drep_expiry_history",
-		"drep_dormancy_history", "drep_dormancy_state", "drep_expiry_epoch_event",
-		"account_drep_clear",
-	},
-	nodesettings.FamilyAccounts: {
-		"account", "account_reward_delta", "account_withdrawal_witness",
-		"account_import_baseline", "registration", "deregistration",
-		"stake_registration", "stake_deregistration",
-	},
-}
-
-// With the set failed, the LedgerDB fails the read rather than answer from
-// the empty SQL tables.
-func TestAccountsAndDRepsDrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
+// With the set failed, the LedgerDB fails the read rather than answer
+// nothing.
+func TestAccountAndDRepReadsFailWhenTheSetCannotServe(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)

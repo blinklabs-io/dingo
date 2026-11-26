@@ -128,7 +128,7 @@ func TestAdoptedServerStoreRollsBackBelowItsAdoptedTip(t *testing.T) {
 					},
 				},
 			}
-			m := &splitMigration{
+			m := &indexerMigration{
 				cfg:         cfg,
 				logger:      logger,
 				hostFactory: serverMigrationHost(t, provider),
@@ -151,7 +151,7 @@ func TestAdoptedServerStoreRollsBackBelowItsAdoptedTip(t *testing.T) {
 			require.NoError(t, err)
 			stores := resolveReleasedStores(t, host, m.selections(), deps)
 			consensus, err := database.New(
-				ctx, m.databaseConfig("core", config.IndexerLayoutSplit), stores,
+				ctx, m.databaseConfig("core", config.IndexerLayoutIndexerDB), stores,
 			)
 			require.NoError(t, err)
 			set, _, err := nodestorage.OpenUtxoSet(nodestorage.UtxoSetConfig{
