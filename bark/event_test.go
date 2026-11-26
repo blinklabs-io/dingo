@@ -675,7 +675,12 @@ func TestEventAckKeepsInitialPositionWhenReadyIsLost(t *testing.T) {
 		return eventPosition(f.hub) == 2
 	}, eventTestWait, 5*time.Millisecond)
 
-	second := f.client.SubscribeWithAck(ctx)
+	secondCtx, secondCancel := context.WithTimeout(
+		context.Background(),
+		eventTestWait,
+	)
+	t.Cleanup(secondCancel)
+	second := f.client.SubscribeWithAck(secondCtx)
 	require.NoError(t, second.Send(start))
 	resp, err = second.Receive()
 	require.NoError(t, err)
