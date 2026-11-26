@@ -147,3 +147,45 @@ func TestFromCBOROtherTypesUnchanged(t *testing.T) {
 	require.Equal(t, uint64(len(data)), txsize.FromCBOR(0, data))
 	require.Equal(t, uint64(len(data)), txsize.FromCBOR(99, data))
 }
+
+// A component is measured by its received bytes, a tag in front of its item
+// included: the reference re-encodes each component as the bytes it was
+// decoded from. Only the outer array framing is replaced.
+func TestFromCBORCountsComponentTags(t *testing.T) {
+	t.Parallel()
+	selfDescribe := []byte{0xd9, 0xd9, 0xf7}
+	taggedWitnesses := append(append([]byte{}, selfDescribe...), testWitnesses...)
+	want := uint64(1 + len(testBody) + len(taggedWitnesses) + len(auxNull))
+	for _, txType := range []int{
+		ledger.TxTypeShelley, ledger.TxTypeAllegra, ledger.TxTypeMary,
+		ledger.TxTypeAlonzo, ledger.TxTypeBabbage, ledger.TxTypeConway,
+		ledger.TxTypeDijkstra,
+	} {
+		for _, framing := range framings {
+			t.Run(fmt.Sprintf("%d/%s", txType, framing), func(t *testing.T) {
+				t.Parallel()
+				data := frame(t, framing, testBody, taggedWitnesses, auxNull)
+				require.Equal(t, want, txsize.FromCBOR(uint(txType), data))
+			})
+		}
+	}
+}
+
+// A tag around the whole transaction is not an outer array, so the received
+// length is kept rather than measuring the tagged array's components.
+func TestFromCBORTaggedOuterArrayKeepsReceivedLength(t *testing.T) {
+	t.Parallel()
+	data := append(
+		[]byte{0xd9, 0xd9, 0xf7},
+		frame(t, "definite", testBody, testWitnesses, auxNull)...,
+	)
+	for _, txType := range []int{
+		ledger.TxTypeShelley, ledger.TxTypeAlonzo, ledger.TxTypeConway,
+		ledger.TxTypeDijkstra,
+	} {
+		require.Equal(
+			t, uint64(len(data)), txsize.FromCBOR(uint(txType), data),
+			"type %d", txType,
+		)
+	}
+}
