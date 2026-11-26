@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -438,4 +440,120 @@ func TestCheckpointWALSchedulesTruncateEveryNthTick(t *testing.T) {
 		},
 		modes,
 	)
+}
+
+// TestCheckpointWALResetsWALUnderSaturatedWriter drives the TRUNCATE tick
+// against a writer that runs one write transaction after another, as the
+// IndexerDB catch-up writer does. TRUNCATE needs an instant with no write
+// transaction open; a tick that only tries finds the writer lock held every
+// time, PASSIVE copies every frame, and the WAL is never reset, so it grows
+// with the whole catch-up. After each tick the WAL may hold only the frames
+// committed since that tick began.
+func TestCheckpointWALResetsWALUnderSaturatedWriter(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	store, writeDB, _, err := openSQLStore(
+		Config{DataDir: dataDir},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+	_, err = writeDB.ExecContext(
+		t.Context(),
+		"CREATE TABLE saturated_probe (n INTEGER, payload BLOB)",
+	)
+	require.NoError(t, err)
+
+	const (
+		rowsPerCommit = 4
+		// Every page a commit touches is one frame: the payload's overflow
+		// pages, the b-tree pages and the freelist. The bound is several
+		// times what a commit of rowsPerCommit rows writes.
+		maxFramesPerCommit = 64
+		pageSize           = 4096
+		ticks              = 8
+		commitsPerTick     = 30
+	)
+	var commits atomic.Int64
+	stop := make(chan struct{})
+	writerDone := make(chan error, 1)
+	go func() {
+		payload := make([]byte, pageSize)
+		for {
+			select {
+			case <-stop:
+				writerDone <- nil
+				return
+			default:
+			}
+			tx, beginErr := writeDB.BeginTx(context.Background(), nil)
+			if beginErr != nil {
+				writerDone <- beginErr
+				return
+			}
+			for i := range rowsPerCommit {
+				if _, execErr := tx.ExecContext(
+					context.Background(),
+					"INSERT INTO saturated_probe (n, payload) VALUES (?, ?)",
+					i,
+					payload,
+				); execErr != nil {
+					_ = tx.Rollback()
+					writerDone <- execErr
+					return
+				}
+			}
+			if commitErr := tx.Commit(); commitErr != nil {
+				writerDone <- commitErr
+				return
+			}
+			commits.Add(1)
+		}
+	}()
+	var stopOnce sync.Once
+	var writerErr error
+	stopWriter := func() error {
+		stopOnce.Do(func() {
+			close(stop)
+			writerErr = <-writerDone
+		})
+		return writerErr
+	}
+	t.Cleanup(func() { _ = stopWriter() })
+
+	var logs bytes.Buffer
+	tick := checkpointWALRunnerHoldingWriter(
+		sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite")),
+		writeDB,
+		slog.New(slog.NewTextHandler(&logs, nil)),
+	)
+	for i := range ticks {
+		want := commits.Load() + commitsPerTick
+		testutil.WaitForCondition(
+			t,
+			func() bool { return commits.Load() >= want },
+			30*time.Second,
+			"the writer stopped committing",
+		)
+		before := commits.Load()
+		require.NoError(t, tick(t.Context(), true))
+		info, statErr := os.Stat(
+			filepath.Join(dataDir, "metadata.sqlite-wal"),
+		)
+		require.NoError(t, statErr)
+		after := commits.Load()
+		require.LessOrEqual(
+			t,
+			info.Size(),
+			(after-before+1)*maxFramesPerCommit*pageSize,
+			"tick %d left the WAL holding frames committed before it began; "+
+				"TRUNCATE did not reset it (%s)",
+			i,
+			logs.String(),
+		)
+	}
+	require.NoError(t, stopWriter())
 }
