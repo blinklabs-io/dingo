@@ -545,10 +545,14 @@ type LedgerBatch struct {
 	RewardBlocks []RewardBlockOp
 }
 
-// ApplyLedgerBatch is ApplyBatch for a whole ledger commit: the nonces and
-// the nonce prune are written in the same transaction as the UTxO changes.
-// A rollback deletes the nonces above the point it restores, so nonces need
-// no journal.
+// ApplyLedgerBatch is ApplyBatch for a whole ledger commit: the nonces are
+// written with the UTxO changes. The nonce prune is not: after any
+// RowPut.WipePrefix delete, the non-checkpoint nonces before
+// PruneNoncesBefore are deleted in transactions of their own, ahead of the
+// UTxO changes and the tip. An error after that leaves the prune committed
+// and the tip and UTxOs unchanged; the next prune deletes any nonces it
+// left. A rollback deletes the nonces above the point it restores, so nonces
+// need no journal.
 func (s *Store) ApplyLedgerBatch(
 	tip *ocommon.Point,
 	batch LedgerBatch,
