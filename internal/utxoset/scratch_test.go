@@ -47,8 +47,7 @@ func openScratchTestSet(t *testing.T) (*utxoset.Set, string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "set")
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: dir, Only: true,
-		CheckpointDir:  filepath.Join(t.TempDir(), "checkpoints"),
+		Dir: dir, CheckpointDir: filepath.Join(t.TempDir(), "checkpoints"),
 		CheckpointKeep: 2,
 	})
 	require.NoError(t, err)

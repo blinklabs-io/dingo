@@ -40,8 +40,7 @@ var handlerProgressWarnInterval = 30 * time.Second
 // report anywhere in (interval, 2*interval]: a handler that stops returning
 // just after a sample has been stuck for a hair under one interval at the next
 // one, is skipped, and waits a whole further period. Sampling twice per
-// interval bounds the first report at 1.5 intervals, which is what event/doc.go
-// and ARCHITECTURE.md state.
+// interval bounds the first report at 1.5 intervals, as specified in doc.go.
 //
 // The repeat rate is unaffected: warnStuckHandler still suppresses a report
 // within one interval of the last one for the same invocation.

@@ -92,7 +92,7 @@ func TestCheckSyncStateRepairsLegacyAlonzoPParamsUnit(t *testing.T) {
 		nodesettings.AlonzoPParamsUnitLegacyByteV0
 	require.NoError(t, dbinfo.WriteGates(dir, info.Gates))
 
-	require.NoError(t, checkSyncState(cfg, logger))
+	require.NoError(t, checkSyncState(t.Context(), cfg, logger))
 
 	reopened, err := openConfiguredDatabase(
 		context.Background(),
@@ -171,7 +171,7 @@ func TestCheckSyncStateAllowsInterruptedRewardRepairToResume(t *testing.T) {
 	))
 	require.NoError(t, runtime.Close(context.Background()))
 
-	require.NoError(t, checkSyncState(cfg, logger),
+	require.NoError(t, checkSyncState(t.Context(), cfg, logger),
 		"serve must resume an interrupted in-place repair before node startup")
 }
 
@@ -197,7 +197,7 @@ func TestCheckSyncStateAllowsTheNodesOwnReimportToResume(t *testing.T) {
 	))
 	require.NoError(t, runtime.Close(context.Background()))
 
-	require.NoError(t, checkSyncState(cfg, logger),
+	require.NoError(t, checkSyncState(t.Context(), cfg, logger),
 		"serve must let the node run its own interrupted re-import")
 
 	// The same status without the re-import mark is still an incomplete sync.
@@ -210,7 +210,7 @@ func TestCheckSyncStateAllowsTheNodesOwnReimportToResume(t *testing.T) {
 	require.NoError(t, runtime.Close(context.Background()))
 	require.ErrorContains(
 		t,
-		checkSyncState(cfg, logger),
+		checkSyncState(t.Context(), cfg, logger),
 		"incomplete sync detected",
 	)
 }
@@ -239,7 +239,7 @@ func TestCheckSyncStateDoesNotIgnoreOtherInterruptedSyncForRewardRepair(
 	))
 	require.NoError(t, runtime.Close(context.Background()))
 
-	err = checkSyncState(cfg, logger)
+	err = checkSyncState(t.Context(), cfg, logger)
 	require.ErrorContains(t, err, "incomplete sync detected")
 }
 
@@ -321,11 +321,16 @@ func TestCheckSyncStateDevModeAgreesWithTheNodeOpen(t *testing.T) {
 	seedMigratedMetadata(t, cfg)
 	for start := range 2 {
 		preflight := *cfg
-		require.NoError(t, checkSyncState(&preflight, logger), "start %d", start)
+		require.NoError(
+			t,
+			checkSyncState(t.Context(), &preflight, logger),
+			"start %d",
+			start,
+		)
 
 		run := *cfg
 		run.ApplyRunModeOverrides(run.RunMode)
-		require.True(t, run.SplitIndexer(), "dev mode serves the APIs")
+		require.True(t, run.HasIndexerDB(), "dev mode serves the APIs")
 		mode := run.ConsensusStorageMode()
 		runtime, err := internalplugins.OpenDatabase(
 			t.Context(),
@@ -362,7 +367,7 @@ func TestServeAcceptsInNodeModeFreshDB(t *testing.T) {
 	}
 	cfg.Mithril.Enabled = true
 	seedMigratedMetadata(t, cfg)
-	require.NoError(t, checkSyncState(cfg, logger),
+	require.NoError(t, checkSyncState(t.Context(), cfg, logger),
 		"an empty database must pass with node-managed Mithril")
 
 	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
@@ -371,7 +376,7 @@ func TestServeAcceptsInNodeModeFreshDB(t *testing.T) {
 		"sync_status", syncStatusInProgress, nil,
 	))
 	require.NoError(t, runtime.Close(context.Background()))
-	require.ErrorContains(t, checkSyncState(cfg, logger),
+	require.ErrorContains(t, checkSyncState(t.Context(), cfg, logger),
 		"incomplete sync detected")
 }
 
@@ -399,7 +404,7 @@ func TestServeAcceptsInterruptedSnapshotRestore(t *testing.T) {
 		"sync_status", syncStatusInProgress, nil,
 	))
 	require.NoError(t, runtime.Close(context.Background()))
-	require.ErrorContains(t, checkSyncState(cfg, logger),
+	require.ErrorContains(t, checkSyncState(t.Context(), cfg, logger),
 		"incomplete sync detected", "a manual sync's interruption passed")
 
 	runtime, err = openConfiguredDatabase(context.Background(), cfg, logger, 1)
@@ -408,18 +413,18 @@ func TestServeAcceptsInterruptedSnapshotRestore(t *testing.T) {
 		"mithril_snapshot_restore_active", "1", nil,
 	))
 	require.NoError(t, runtime.Close(context.Background()))
-	require.NoError(t, checkSyncState(cfg, logger))
+	require.NoError(t, checkSyncState(t.Context(), cfg, logger))
 
 	// Refused elsewhere, but pointed at the in-node resume: no sync
 	// command can finish the node's restore.
 	cfg.DelegatorInactivityEnabled = true
-	err = checkSyncState(cfg, logger)
+	err = checkSyncState(t.Context(), cfg, logger)
 	require.ErrorContains(t, err, "node's own interrupted Mithril snapshot")
 	require.NotContains(t, err.Error(), "dingo sync")
 	cfg.DelegatorInactivityEnabled = false
 
 	cfg.HistoryExpiry.Enabled = false
-	err = checkSyncState(cfg, logger)
+	err = checkSyncState(t.Context(), cfg, logger)
 	require.ErrorContains(t, err, "node's own interrupted Mithril snapshot",
 		"stream mode resumed a snapshot restore")
 	require.NotContains(t, err.Error(), "dingo sync")

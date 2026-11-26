@@ -16,29 +16,11 @@ package ledger
 
 import (
 	"bytes"
-	"errors"
-	"fmt"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 )
-
-var errImportedBlocksLost = errors.New(
-	"the imported block counts were drained before the set loaded them",
-)
-
-// importedBlocksFor lists the set's imported block counts for the table
-// named, refusing when the set lost them.
-func (ls *LedgerState) importedBlocksFor(
-	table metadata.FactTable,
-) (map[uint64]ImportedBlockEpoch, error) {
-	rows, err := ls.importedBlocks()
-	if errors.Is(err, errImportedBlocksLost) {
-		return nil, fmt.Errorf("%w: %s: %w", ErrFactTableUnserved, table.Name, err)
-	}
-	return rows, err
-}
 
 // importedBlocks lists the imported block counts the set retains, by epoch.
 func (ls *LedgerState) importedBlocks() (map[uint64]ImportedBlockEpoch, error) {
@@ -48,17 +30,6 @@ func (ls *LedgerState) importedBlocks() (map[uint64]ImportedBlockEpoch, error) {
 	r, ok := ls.readSet(nil).(ImportedBlocksReader)
 	if !ok {
 		return nil, ledgerStateUnserved(nodesettings.FamilyRewardBlocksFees)
-	}
-	if l, ok := r.(interface{ ImportedBlocksLost() (bool, error) }); ok {
-		lost, err := l.ImportedBlocksLost()
-		if err != nil {
-			return nil, err
-		}
-		if lost {
-			// The counts were drained before the set could load them, so
-			// an empty export would pass for the epochs having none.
-			return nil, errImportedBlocksLost
-		}
 	}
 	ls.utxoSetApplyMu.RLock()
 	defer ls.utxoSetApplyMu.RUnlock()
@@ -83,7 +54,7 @@ func (ls *LedgerState) importedEpochBlockTotalFactRows(
 	table metadata.FactTable,
 	from, through uint64,
 ) (metadata.FactRows, error) {
-	rows, err := ls.importedBlocksFor(table)
+	rows, err := ls.importedBlocks()
 	if err != nil {
 		return metadata.FactRows{}, err
 	}
@@ -103,7 +74,7 @@ func (ls *LedgerState) importedPoolBlockCountFactRows(
 	table metadata.FactTable,
 	from, through uint64,
 ) (metadata.FactRows, error) {
-	rows, err := ls.importedBlocksFor(table)
+	rows, err := ls.importedBlocks()
 	if err != nil {
 		return metadata.FactRows{}, err
 	}

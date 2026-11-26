@@ -291,8 +291,7 @@ var (
 	// rewardSeqKey holds the next reward record sequence number.
 	rewardSeqKey = []byte("mrwseq")
 	// rewardRecordsKey is set once the store holds the reward records of the
-	// metadata store's journal up to its tip, or marks them lost when the
-	// journal was drained before they could be read.
+	// journal up to its tip.
 	rewardRecordsKey = []byte("mrwrecs")
 	// rewardConsumerKey is present while a reader that copies the reward
 	// records needs them; rewardConsumedKey holds the sequence number below
@@ -307,6 +306,13 @@ var (
 	// rewardIndexedKey is set once every record has a number and an entry.
 	rewardSeqIndexPrefix = []byte("mrwq")
 	rewardIndexedKey     = []byte("mrwindexed")
+	// addressIndexPrefix keys the output index, a derived row family under
+	// the marker namespace (see address_index.go); addressIndexedKey is set
+	// once every live output has its index rows, and addressIndexAfterKey
+	// holds the last output a build wrote.
+	addressIndexPrefix   = []byte("mai")
+	addressIndexedKey    = []byte("mxaidone")
+	addressIndexAfterKey = []byte("mxaiafter")
 	drepsKey             = []byte("mdreps")
 	poolsKey             = []byte("mpools")
 	// poolHistoryKey is set once the store holds every pool certificate event
@@ -328,7 +334,7 @@ var (
 	// up to its tip, and witnessSlotsKey once it holds every witness slot.
 	importBaselinesKey = []byte("mbaseline")
 	// importBaselineDelegationsKey is set once the import baselines carry the
-	// delegations the import recorded, or marked lost when they cannot.
+	// delegations the import recorded.
 	importBaselineDelegationsKey = []byte("mbasedelegs")
 	// witnessSlotsKey is set once the witness rows carry the effective slot
 	// of a closure's witness. legacyWitnessSlotsKey marked rows without it,

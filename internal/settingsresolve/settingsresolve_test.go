@@ -538,10 +538,10 @@ func TestApplyPreservesExplicitMidnightFieldOnResumedNetwork(t *testing.T) {
 	)
 }
 
-// On the split layout the consensus store persists core while the
+// On the IndexerDB layout the consensus store persists core while the
 // configuration says api, because the IndexerDB is the API store. A restart
 // must compare the store against the consensus mode, not the configured one.
-func TestApplyAcceptsASplitNodeRestart(t *testing.T) {
+func TestApplyAcceptsAnAPINodeRestart(t *testing.T) {
 	for name, source := range map[string]config.Source{
 		"configured":   config.SourceFlag,
 		"by default":   config.SourceDefault,
@@ -551,7 +551,7 @@ func TestApplyAcceptsASplitNodeRestart(t *testing.T) {
 			isolateConfigSnapshot(t)
 			dir := seedDatabase(t, map[string]string{
 				"storage_mode":   "core",
-				"indexer_layout": config.IndexerLayoutSplit,
+				"indexer_layout": config.IndexerLayoutIndexerDB,
 			})
 			cfg := config.GetConfig()
 			cfg.DatabasePath = dir
@@ -564,8 +564,8 @@ func TestApplyAcceptsASplitNodeRestart(t *testing.T) {
 	}
 }
 
-// A split layout still refuses to move a consensus store back from core.
-func TestApplyOnSplitStillRefusesTheWrongNetwork(t *testing.T) {
+// A IndexerDB layout still refuses to move a consensus store back from core.
+func TestApplyWithIndexerDBStillRefusesTheWrongNetwork(t *testing.T) {
 	isolateConfigSnapshot(t)
 	dir := seedDatabase(t, map[string]string{
 		"storage_mode": "core", "network": "preprod",

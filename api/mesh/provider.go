@@ -51,7 +51,7 @@ type ProviderDependencies struct {
 	Database    MeshDatabase
 	Chain       MeshChain
 	Mempool     MeshMempool
-	// Ready gates the IndexerDB-backed routes on a split layout. Nil serves
+	// Ready gates the IndexerDB-backed routes with an IndexerDB. Nil serves
 	// everything.
 	Ready              apiready.Check
 	Host               string
@@ -68,6 +68,10 @@ func RegisterProvider(host *plugin.Host) error {
 			Capability:  plugin.CapabilityAPIMesh,
 			Name:        "builtin",
 			Description: "built-in Mesh-compatible Rosetta HTTP API",
+			Storage: plugin.StorageRequirements{
+				Tier:     plugin.StorageTierAPI,
+				Features: []plugin.StorageFeature{plugin.StorageFeatureMesh},
+			},
 		},
 		providerDefaults,
 		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (*Server, plugin.Instance, error) {

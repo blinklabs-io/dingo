@@ -531,15 +531,22 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			// UTxORPC/Blockfrost/Kupo/Mesh/Midnight bind only under API storage
-			// mode; in core mode their ports never bind, so even an
+			// Blockfrost/Kupo/Mesh/Midnight bind only under API storage mode;
+			// in core mode their ports never bind, so even an
 			// out-of-range or privileged value must not be rejected.
 			name: "core mode skips inactive API port validation",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeCore
-				setPluginPort(&c.Plugins.API.Utxorpc, 99999999)
 				setPluginPort(&c.Plugins.API.Blockfrost, 443)
 			},
+		},
+		{
+			name: "core mode validates active UTxORPC port",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeCore
+				setPluginPort(&c.Plugins.API.Utxorpc, 99999999)
+			},
+			wantErr: "invalid plugins.api.utxorpc.config.port",
 		},
 		{
 			// An API port colliding with an active serving port is not a
@@ -1432,16 +1439,14 @@ func TestValidatePledgeLeverage(t *testing.T) {
 }
 
 // TestValidateMidnightEnabled pins the contradiction check: the Midnight
-// indexer needs the api-mode indexes to function, so midnight.enabled
-// requires storageMode "api". Dev mode is exempted because node.Run
-// force-upgrades storage mode to api at startup regardless of what is
-// configured (see TestValidateMidnightEnabledAllowedInDevMode).
+// The composition layer owns storage-tier compatibility so it can report all
+// incompatible consumers together. Parsing and field validation must leave
+// that decision to Node.New.
 func TestValidateMidnightEnabled(t *testing.T) {
 	tests := []struct {
 		name        string
 		enabled     bool
 		storageMode string
-		wantErr     string
 	}{
 		{
 			name:        "disabled with core mode",
@@ -1462,13 +1467,11 @@ func TestValidateMidnightEnabled(t *testing.T) {
 			name:        "enabled with core mode",
 			enabled:     true,
 			storageMode: storageModeCore,
-			wantErr:     `midnight.enabled requires storageMode "api"`,
 		},
 		{
 			name:        "enabled with unset storage mode",
 			enabled:     true,
 			storageMode: "",
-			wantErr:     `midnight.enabled requires storageMode "api"`,
 		},
 	}
 	for _, tt := range tests {
@@ -1477,21 +1480,13 @@ func TestValidateMidnightEnabled(t *testing.T) {
 			cfg.Midnight.Enabled = tt.enabled
 			cfg.StorageMode = tt.storageMode
 			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
-			if tt.wantErr == "" {
-				assert.NoError(t, err)
-				return
-			}
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.NoError(t, err)
 		})
 	}
 }
 
-// TestValidateMidnightEnabledAllowedInDevMode verifies that dev mode's
-// storage-mode force-upgrade (node.Run) is honored the same way it already
-// is for the API listener ports above: midnight.enabled with a configured
-// core storage mode must not be rejected when runMode is dev, because the
-// node will actually start in api mode.
+// TestValidateMidnightEnabledAllowedInDevMode keeps the configuration-layer
+// contract consistent when dev mode later selects the API tier.
 func TestValidateMidnightEnabledAllowedInDevMode(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.RunMode = RunModeDev
@@ -1530,11 +1525,10 @@ func TestValidateMidnightServerPolicy(t *testing.T) {
 			},
 		},
 		{
-			name: "enabled server requires api storage",
+			name: "enabled server tier check belongs to composition",
 			configure: func(c *Config) {
 				c.Midnight.ServerEnabled = true
 			},
-			wantErr: `midnight.serverEnabled requires storageMode "api"`,
 		},
 		{
 			name: "enabled server requires a port",

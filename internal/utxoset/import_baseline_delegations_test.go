@@ -110,7 +110,7 @@ func allBaselines(t *testing.T, set *utxoset.Set) []ledger.ImportBaseline {
 
 // A set that first loads the import baselines takes the delegations the
 // import recorded along with the registration, so an imported account's
-// delegation at the anchor survives the metadata store drain.
+// delegation at the anchor survives the migration.
 func TestSetLoadsTheDelegationsOfItsImportBaselines(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{})
@@ -125,9 +125,6 @@ func TestSetLoadsTheDelegationsOfItsImportBaselines(t *testing.T) {
 
 	loadBaselines(t, set, db)
 
-	lost, err := set.ImportBaselineDelegationsLost()
-	require.NoError(t, err)
-	require.False(t, lost)
 	deposit := uint64(2_000_000)
 	require.Equal(t, []ledger.ImportBaseline{
 		{Ref: baselineRef(1), Active: true, AddedSlot: 9, Deposit: &deposit,
@@ -152,33 +149,7 @@ func TestSetReloadsLegacyImportBaselinesWhileTheRowsExist(t *testing.T) {
 
 	loadBaselines(t, set, db)
 
-	lost, err := set.ImportBaselineDelegationsLost()
-	require.NoError(t, err)
-	require.False(t, lost)
 	got := allBaselines(t, set)
 	require.Len(t, got, 1)
 	require.Equal(t, pool, got[0].Pool)
-}
-
-// Once the metadata store has drained the rows, the delegations of a legacy
-// baseline are in neither store: the set keeps the baseline it has and marks
-// the delegations lost rather than reading them as none.
-func TestSetMarksLegacyImportBaselineDelegationsLostOnceDrained(t *testing.T) {
-	t.Parallel()
-	set := legacySet(t, baselineRef(1))
-	applySlots(t, set, 8)
-	db := releasedAt(t, slotPoint(8))
-	set.ServeLedgerOnly()
-
-	loadBaselines(t, set, db)
-
-	lost, err := set.ImportBaselineDelegationsLost()
-	require.NoError(t, err)
-	require.True(t, lost)
-	b, err := set.ImportBaseline(baselineRef(1))
-	require.NoError(t, err)
-	deposit := uint64(2_000_000)
-	require.Equal(t, &ledger.ImportBaseline{
-		Ref: baselineRef(1), Active: true, AddedSlot: 9, Deposit: &deposit,
-	}, b, "the registration the set held is still served")
 }

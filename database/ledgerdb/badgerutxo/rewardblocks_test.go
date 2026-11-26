@@ -168,9 +168,10 @@ func TestRewardBlockOpsCountOncePerSlotAndRollBack(t *testing.T) {
 	}
 }
 
-// Pruning deletes the rows of every epoch below the bound and only those,
-// and leaves nothing for a rollback to restore.
-func TestRewardBlockPruneDropsOlderEpochsWithoutAJournal(t *testing.T) {
+// Pruning deletes the rows of every epoch below the bound and only those. A
+// rollback that keeps the prune keeps them deleted; one below the prune's
+// slot restores them as they stood at the rollback target.
+func TestRewardBlockPruneDropsOlderEpochsUntilARollbackBelowIt(t *testing.T) {
 	t.Parallel()
 	pool := bytes.Repeat([]byte{0xa1}, 28)
 	s := open(t, t.TempDir())
@@ -187,6 +188,8 @@ func TestRewardBlockPruneDropsOlderEpochsWithoutAJournal(t *testing.T) {
 	}
 	applyBlockOps(t, s, 45,
 		badgerutxo.RewardBlockOp{Slot: 45, PruneBelow: 3})
+	applyBlockOps(t, s, 46,
+		badgerutxo.RewardBlockOp{Slot: 46, Epoch: 4, Fee: 1})
 	for epoch := uint64(1); epoch <= 2; epoch++ {
 		require.Equal(t, blockRows{pools: map[string]uint64{}},
 			readBlockRows(t, s, epoch, nil), "epoch %d", epoch)
@@ -194,16 +197,70 @@ func TestRewardBlockPruneDropsOlderEpochsWithoutAJournal(t *testing.T) {
 	for epoch := uint64(3); epoch <= 4; epoch++ {
 		got := readBlockRows(t, s, epoch, nil)
 		require.True(t, got.hasTotal, "epoch %d", epoch)
-		require.Equal(t, epoch, got.fees, "epoch %d", epoch)
 	}
-	_, err := s.Rollback(point(11, 0x0b))
+	_, err := s.Rollback(point(45, 45))
 	require.NoError(t, err)
 	for epoch := uint64(1); epoch <= 2; epoch++ {
 		require.False(t, readBlockRows(t, s, epoch, nil).hasTotal,
-			"epoch %d was pruned, not restored", epoch)
+			"epoch %d stays pruned by a rollback that keeps the prune", epoch)
 	}
+	_, err = s.Rollback(point(11, 0x0b))
+	require.NoError(t, err)
+	got := readBlockRows(t, s, 1, nil)
+	require.True(t, got.hasTotal, "epoch 1 is restored below the prune")
+	require.Equal(t, uint64(1), got.total)
+	require.Equal(t, uint64(1), got.fees)
+	require.False(t, readBlockRows(t, s, 2, nil).hasTotal,
+		"epoch 2 opened after the rollback target")
 	require.False(t, readBlockRows(t, s, 3, nil).hasTotal,
 		"epoch 3 opened after the rollback target")
+}
+
+// The window keeps the performance epoch of the next boundary's reward round,
+// so a rollback that crosses two boundaries, as replay recovery's descent
+// does on a chain whose journal reaches that far, must leave that epoch's
+// counts known when the boundary is re-crossed. Pruning without a journal
+// left them unknown, and the re-run reward round halted the node.
+func TestRewardBlockRollbackAcrossTwoBoundariesKeepsThePerformanceEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+	pool := bytes.Repeat([]byte{0xa2}, 28)
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(1, 0x01))
+	// Each epoch opens as the ledger stages it: the open, then the prune of
+	// the epochs two below it.
+	for epoch := uint64(1); epoch <= 4; epoch++ {
+		slot := 10 * epoch
+		ops := []badgerutxo.RewardBlockOp{
+			{Slot: slot, Epoch: epoch, Open: true},
+		}
+		if epoch > 2 {
+			ops = append(ops,
+				badgerutxo.RewardBlockOp{Slot: slot, PruneBelow: epoch - 2})
+		}
+		applyBlockOps(t, s, slot, ops...)
+		applyBlockOps(t, s, slot+1,
+			badgerutxo.RewardBlockOp{Slot: slot + 1, Epoch: epoch, Pool: pool},
+		)
+	}
+	require.False(t, readBlockRows(t, s, 1, nil).hasTotal,
+		"opening epoch 4 prunes epoch 1")
+
+	asOf := uint64(21)
+	viewed := readBlockRows(t, s, 1, &asOf)
+	require.True(t, viewed.hasTotal,
+		"a read as of epoch 2 sees epoch 1's counts")
+	require.Equal(t, uint64(1), viewed.pools[string(pool)])
+
+	_, err := s.Rollback(point(21, 21))
+	require.NoError(t, err)
+	got := readBlockRows(t, s, 1, nil)
+	require.True(t, got.hasTotal,
+		"the 2-to-3 reward round reads epoch 1's counts after the rollback")
+	require.Equal(t, uint64(1), got.total)
+	require.Equal(t, uint64(1), got.pools[string(pool)])
 }
 
 // The loaded marker and the rows a load supplies come back, a key outside

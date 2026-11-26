@@ -336,10 +336,6 @@ type stateMetrics struct {
 	// value on a Mithril-bootstrapped node explains a stake shortfall; a
 	// rising value on any node is a live divergence from the network.
 	skippedStakeRewardRounds prometheus.Counter
-	// Incremented each time a trusted batch's UTxO overlay hit a write
-	// conflict and the batch was applied again on the per-row path. Each
-	// increment is a batch that ran at the slower per-row speed; a rising
-	// value means the store holds rows the overlay does not expect.
 	// Incremented each time GetStakeDistribution or GetPoolDistr2 omits a
 	// pool that holds stake at the queried snapshot but has no resolvable
 	// registration/VRF key hash on record. This is a deliberate fallback

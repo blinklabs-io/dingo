@@ -43,9 +43,6 @@ func TestSetLoadsTheMetadataStoresRewardJournal(t *testing.T) {
 
 	require.NoError(t, set.LoadLedgerState(t.Context(), dbadapter.New(db)))
 
-	lost, err := set.RewardRecordsLost()
-	require.NoError(t, err)
-	require.False(t, lost)
 	recs, err := set.RewardRecordsIn(0, 100)
 	require.NoError(t, err)
 	require.Len(t, recs, 3)

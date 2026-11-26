@@ -2550,106 +2550,6 @@ func (a Adapter) SetLeiosEB(
 	return a.db.SetLeiosEB(slot, hash, manifestRaw, txsRaw)
 }
 
-func (a Adapter) CountTransactionsByAddress(
-	ctx context.Context,
-	addr lcommon.Address,
-	from *models.AddressTransactionPosition,
-	to *models.AddressTransactionPosition,
-	txn ledgerdb.Txn,
-) (int, error) {
-	return a.db.CountTransactionsByAddress(ctx, addr, from, to, dbTxn(txn))
-}
-
-func (a Adapter) CountTransactionsByMetadataLabel(
-	ctx context.Context,
-	label uint64,
-	txn ledgerdb.Txn,
-) (int, error) {
-	return a.db.CountTransactionsByMetadataLabel(ctx, label, dbTxn(txn))
-}
-
-func (a Adapter) GetDatums(
-	ctx context.Context,
-	hashes [][]byte,
-) ([]*models.Datum, error) {
-	return a.db.GetDatums(ctx, hashes)
-}
-
-func (a Adapter) GetExistingTransactionHashes(
-	ctx context.Context,
-	hashes [][]byte,
-) ([][]byte, error) {
-	return a.db.GetExistingTransactionHashes(ctx, hashes)
-}
-
-func (a Adapter) GetTransactionsByAddress(
-	ctx context.Context,
-	addr lcommon.Address,
-	limit int,
-	offset int,
-	txn ledgerdb.Txn,
-) ([]models.Transaction, error) {
-	return a.db.GetTransactionsByAddress(ctx, addr, limit, offset, dbTxn(txn))
-}
-
-func (a Adapter) GetTransactionsByAddressWithOrder(
-	ctx context.Context,
-	addr lcommon.Address,
-	limit int,
-	offset int,
-	order string,
-	from *models.AddressTransactionPosition,
-	to *models.AddressTransactionPosition,
-	txn ledgerdb.Txn,
-) ([]models.Transaction, error) {
-	return a.db.GetTransactionsByAddressWithOrder(
-		ctx,
-		addr,
-		limit,
-		offset,
-		order,
-		from,
-		to,
-		dbTxn(txn),
-	)
-}
-
-func (a Adapter) GetTransactionsByBlockHash(
-	ctx context.Context,
-	blockHash []byte,
-	txn ledgerdb.Txn,
-) ([]models.Transaction, error) {
-	return a.db.GetTransactionsByBlockHash(ctx, blockHash, dbTxn(txn))
-}
-
-func (a Adapter) ScanUtxosByAddress(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-	visit func([]models.UtxoWithOrdering) error,
-) (chainsync.Tip, error) {
-	return a.db.ScanUtxosByAddress(ctx, q, maxCandidates, maxBytes, visit)
-}
-
-func (a Adapter) UtxoBalanceByAddressAtSlot(
-	ctx context.Context,
-	address lcommon.Address,
-	slot uint64,
-	txn ledgerdb.Txn,
-) (models.AddressBalance, error) {
-	return a.db.UtxoBalanceByAddressAtSlot(ctx, address, slot, dbTxn(txn))
-}
-
-func (a Adapter) UtxosByAddressBoundedPage(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-) (models.UtxoAddressPage, error) {
-	return a.db.UtxosByAddressBoundedPage(ctx, q, maxCandidates, maxBytes)
-}
-
 func (a Adapter) GetAccountsActiveAtSlot(
 	stakeCredentials []models.StakeCredentialRef,
 	slot uint64,
@@ -2660,15 +2560,6 @@ func (a Adapter) GetAccountsActiveAtSlot(
 	}
 	return a.db.Metadata().
 		GetAccountsActiveAtSlot(stakeCredentials, slot, metaTxn(txn))
-}
-
-// EachRewardLiveStake lists the metadata store's reward_live_stake rows for
-// the drain's comparison.
-func (a Adapter) EachRewardLiveStake(
-	txn ledgerdb.Txn,
-	fn func(*models.RewardLiveStake) error,
-) error {
-	return a.db.EachRewardLiveStake(dbTxn(txn), fn)
 }
 
 func (a Adapter) MergeImportedPoolBlockCounts(

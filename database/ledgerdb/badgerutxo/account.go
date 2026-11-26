@@ -970,7 +970,6 @@ func (s *Store) RewardConsumedSlot() (slot uint64, held bool, err error) {
 // from before it kept the records, numbering them in the order feed supplies
 // them, and marks them loaded.
 func (s *Store) LoadRewardRecords(
-	lost bool,
 	feed func(put func(RewardRecord) error) error,
 ) error {
 	var batch []RewardRecord
@@ -998,7 +997,7 @@ func (s *Store) LoadRewardRecords(
 		return fmt.Errorf("badgerutxo: load reward records: %w", err)
 	}
 	return s.update(func(txn *badger.Txn) error {
-		return txn.Set(rewardRecordsKey, markerValue(lost))
+		return txn.Set(rewardRecordsKey, loadedMarker)
 	})
 }
 
@@ -1006,19 +1005,6 @@ func (s *Store) LoadRewardRecords(
 // the metadata store's journal.
 func (s *Store) RewardRecordsLoaded() (bool, error) {
 	return s.hasMarker(rewardRecordsKey)
-}
-
-// RewardRecordsLost reports whether the journal had been drained before the
-// store could load it, so the records before the load are gone.
-func (s *Store) RewardRecordsLost() (bool, error) {
-	return s.markerLost(rewardRecordsKey)
-}
-
-// MarkRewardRecordsLost marks the records as lost to a drain that came first.
-func (s *Store) MarkRewardRecordsLost() error {
-	return s.update(func(txn *badger.Txn) error {
-		return txn.Set(rewardRecordsKey, markerValue(true))
-	})
 }
 
 // dropAccountJournal deletes the state journal entries of account rows, which

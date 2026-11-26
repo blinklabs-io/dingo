@@ -484,13 +484,13 @@ func gateBindings() []gateBinding {
 			name:       "storage_mode",
 			provenance: []string{"StorageMode"},
 			// The gate belongs to the consensus store, which is core on the
-			// split layout whatever StorageMode says: that value is the
+			// IndexerDB layout whatever StorageMode says: that value is the
 			// IndexerDB's.
 			configuredValue: func(cfg *config.Config) (string, bool) {
 				return cfg.ConsensusStorageMode(), true
 			},
 			applyEffective: func(cfg *config.Config, value string) {
-				if cfg.SplitIndexer() {
+				if cfg.HasIndexerDB() {
 					return
 				}
 				cfg.StorageMode = value

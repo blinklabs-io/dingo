@@ -40,7 +40,7 @@ func TestRestoredReleasedSnapshotMigratesOnItsFirstOpen(t *testing.T) {
 		&database.Config{
 			Role:    database.RoleReleased,
 			DataDir: src, StorageMode: "core", Network: "preview",
-			IndexerLayout: config.IndexerLayoutSplit,
+			IndexerLayout: config.IndexerLayoutIndexerDB,
 		},
 		internalplugins.StorageSelections{
 			Blob:     cfg.Plugins.Storage.Blob,

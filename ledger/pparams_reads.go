@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"bytes"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -96,13 +95,6 @@ func latestPParams(rows []models.PParams, epoch uint64) *models.PParams {
 		}
 	}
 	return best
-}
-
-func samePParamsRows(a, b []models.PParams) bool {
-	return slices.EqualFunc(a, b, func(x, y models.PParams) bool {
-		return x.AddedSlot == y.AddedSlot && x.Epoch == y.Epoch &&
-			x.EraId == y.EraId && bytes.Equal(x.Cbor, y.Cbor)
-	})
 }
 
 func (s stagingLedgerDB) GetPParams(

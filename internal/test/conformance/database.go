@@ -81,11 +81,9 @@ func openLedgerBackend(dataDir string) (*ledgerBackend, error) {
 		return nil, fmt.Errorf("construct database: %w", err)
 	}
 	set, err := utxoset.Open(utxoset.Config{
-		Dir:           utxoset.DirFor(dataDir),
-		Logger:        logger,
-		Only:          true,
-		Authoritative: true,
-		MemTableSize:  8 << 20,
+		Dir:          utxoset.DirFor(dataDir),
+		Logger:       logger,
+		MemTableSize: 8 << 20,
 	})
 	if err != nil {
 		return nil, errors.Join(

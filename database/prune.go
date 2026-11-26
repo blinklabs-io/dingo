@@ -186,12 +186,12 @@ func (d *Database) PruneBlock(
 	return materialized, nil
 }
 
-// MaterializeBlockUtxos rewrites, as raw CBOR, every UTxO blob entry of d
-// that is an offset into the block at (slot, hash), as PruneBlock does before
-// it expires the block, without expiring it. An IndexerDB keeps its own
-// offset entries over the ledger's block store, which the ledger's PruneBlock
-// does not see, so they are materialized through it before the ledger expires
-// the block. It returns the number of entries rewritten.
+// MaterializeBlockUtxos rewrites, as raw CBOR, every UTxO entry of d that is
+// an offset into the block at (slot, hash), as PruneBlock does before it
+// expires the block, without expiring it. An IndexerDB keeps its UTxO entries
+// in its own metadata store, which the ledger's PruneBlock does not see, so
+// they are materialized through it before the ledger expires the block. It
+// returns the number of entries rewritten.
 func (d *Database) MaterializeBlockUtxos(
 	ctx context.Context,
 	slot uint64,
@@ -202,7 +202,13 @@ func (d *Database) MaterializeBlockUtxos(
 		return 0, err
 	}
 	var materialized int
-	blobTxn := d.BlockBlobTxn()
+	// An IndexerDB writes its entries in its metadata transaction.
+	var blobTxn *Txn
+	if d.isIndexer() {
+		blobTxn = d.Transaction(ctx, true)
+	} else {
+		blobTxn = d.BlockBlobTxn()
+	}
 	if err := blobTxn.Do(func(txn *Txn) error {
 		n, err := d.materializeUtxosTxn(ctx, txn, slot, hash, utxoRefs)
 		materialized = n
