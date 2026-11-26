@@ -17,14 +17,8 @@ package ledger
 import (
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
-
-// networkStateLister lists every network state row a set holds.
-type networkStateLister interface {
-	NetworkStates() ([]models.NetworkState, error)
-}
 
 // FamilyLoaded reports whether set holds every marker of family's records.
 func FamilyLoaded(
@@ -199,16 +193,6 @@ func accountsLoaded(set UtxoSetWriter) (bool, error) {
 		}
 	}
 	return true, nil
-}
-
-// drepLister walks every DRep a set holds.
-type drepLister interface {
-	DRepReader
-}
-
-// accountLister walks every account a set holds.
-type accountLister interface {
-	Accounts(fn func(*models.Account) error) error
 }
 
 // liveStakeLoaded reports whether set holds the accounts and the reward rows

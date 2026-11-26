@@ -173,32 +173,3 @@ func (s *Store) ReplaceImportedBlocks(
 	_, err := s.ApplyLedgerBatch(nil, LedgerBatch{Rows: rows})
 	return err
 }
-
-func markerValue(lost bool) []byte {
-	if lost {
-		return []byte{markerLost}
-	}
-	return []byte{1}
-}
-
-// markerLost is the value of a load marker whose rows the metadata store had
-// already drained.
-const markerLost byte = 2
-
-func (s *Store) markerLost(marker []byte) (bool, error) {
-	var lost bool
-	err := s.view(func(txn *badger.Txn) error {
-		item, err := txn.Get(marker)
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		return item.Value(func(v []byte) error {
-			lost = len(v) == 1 && v[0] == markerLost
-			return nil
-		})
-	})
-	return lost, err
-}
