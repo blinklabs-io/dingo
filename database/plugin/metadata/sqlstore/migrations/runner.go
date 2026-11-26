@@ -355,12 +355,16 @@ func (r *Runner) runBackfill(
 }
 
 func (r *Runner) validateDatabase(states map[int]state) error {
-	target := len(r.Registry)
-	versions := make([]bool, target+1)
+	target := r.Registry[len(r.Registry)-1].Version
+	registered := make(map[int]Migration, len(r.Registry))
+	for _, migration := range r.Registry {
+		registered[migration.Version] = migration
+	}
 	for version, migrationState := range states {
-		if version > target {
+		migration, exists := registered[version]
+		if !exists {
 			return fmt.Errorf(
-				"%w: database version %d, binary version %d",
+				"%w: database migration version %d is not registered (highest binary version %d)",
 				ErrNewerSchema,
 				version,
 				target,
@@ -372,8 +376,6 @@ func (r *Runner) validateDatabase(states map[int]state) error {
 				version,
 			)
 		}
-		versions[version] = true
-		migration := r.Registry[version-1]
 		checksum := migration.checksum()
 		if migrationState.name != migration.Name ||
 			migrationState.checksum != checksum {
@@ -398,19 +400,6 @@ func (r *Runner) validateDatabase(states map[int]state) error {
 			return fmt.Errorf(
 				"metadata migration version %d has inconsistent "+
 					"completed state",
-				version,
-			)
-		}
-	}
-	seenGap := false
-	for version := 1; version <= target; version++ {
-		if !versions[version] {
-			seenGap = true
-			continue
-		}
-		if seenGap {
-			return fmt.Errorf(
-				"metadata migration state is noncontiguous at version %d",
 				version,
 			)
 		}

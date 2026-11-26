@@ -725,6 +725,14 @@ single-column marker is not used by the new store. `v1alpha1` also creates the
 `node_settings_gate` table described below: the schema is unreleased, so a new
 table belongs in the initial version rather than in a version of its own.
 
+Migration versions 1 through 75 are the released sequential history and remain
+unchanged. New migration versions use `migrations.StableVersion` with the
+immutable migration name; this gives independent branches distinct identifiers
+without reserving the next integer. The registry sorts by version before
+execution, accepts gaps, and validates stored versions by identifier and
+checksum. Keep migration names unique and never change a released migration's
+name, version, SQL, or backfill revision.
+
 Collateral inputs are stored in the `utxo_collateral_edge` association table,
 keyed by `(utxo_id, tx_id)` (`utxo_collateral_input` keyed by hash until
 schema version 61). This is the authoritative many-to-many

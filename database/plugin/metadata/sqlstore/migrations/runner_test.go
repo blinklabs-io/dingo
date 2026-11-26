@@ -368,15 +368,48 @@ func TestRunnerRejectsUnversionedDatabase(t *testing.T) {
 	require.Zero(t, stateTables)
 }
 
-func TestValidateRegistryRequiresContiguousVersions(t *testing.T) {
+func TestValidateRegistryAllowsStableSparseVersions(t *testing.T) {
 	t.Parallel()
-	migration := testMigration(nil)
-	migration.Version = 2
-	require.ErrorIs(
-		t,
-		validateRegistry([]Migration{migration}, "sqlite"),
-		ErrInvalidRegistry,
-	)
+	first := testMigration(nil)
+	second := Migration{
+		Version:          StableVersion("independent_branch_migration"),
+		Name:             "independent_branch_migration",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {Expand: []string{"CREATE TABLE independent_migration (id INTEGER)"}},
+		},
+	}
+	registry := []Migration{first, second}
+	require.NoError(t, validateRegistry(registry, "sqlite"))
+
+	registry[1].Version = first.Version
+	require.ErrorIs(t, validateRegistry(registry, "sqlite"), ErrInvalidRegistry)
+
+	registry[1] = second
+	registry[1].Version = lastSequentialVersion + 1
+	require.ErrorIs(t, validateRegistry(registry, "sqlite"), ErrInvalidRegistry)
+	require.Greater(t, StableVersion(second.Name), lastSequentialVersion)
+}
+
+func TestRunnerAppliesStableSparseVersions(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	first := testMigration(nil)
+	second := Migration{
+		Version:          StableVersion("independent_branch_migration"),
+		Name:             "independent_branch_migration",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {Expand: []string{"CREATE TABLE independent_migration (id INTEGER)"}},
+		},
+	}
+	runner := testRunner(db, first)
+	runner.Registry = []Migration{first, second}
+	require.NoError(t, runner.Run(context.Background()))
+	require.NoError(t, runner.Run(context.Background()))
+	var count int
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count))
+	require.Equal(t, 2, count)
 }
 
 func TestProcessLockerCancellation(t *testing.T) {

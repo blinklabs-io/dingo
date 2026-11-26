@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,8 @@ import (
 )
 
 const DefaultBatchSize = 1000
+
+const lastSequentialVersion = 75
 
 // SQL contains idempotent DDL statements for one migration phase.
 type SQL struct {
@@ -112,21 +115,55 @@ func (m Migration) checksum() string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
+// StableVersion gives new migrations an immutable, deterministic identifier
+// derived from their release name. The high bit range keeps these identifiers
+// after the historical sequential versions while allowing independent
+// branches to register migrations without choosing the same next integer.
+// Registry validation detects the (extremely unlikely) hash collision.
+func StableVersion(name string) int {
+	digest := sha256.Sum256([]byte(name))
+	const stableVersionPrefix int64 = 1 << 62
+	const stableVersionMask uint64 = (1 << 62) - 1
+	return int(stableVersionPrefix | int64(binary.BigEndian.Uint64(digest[:8])&stableVersionMask))
+}
+
 func validateRegistry(registry []Migration, dialect string) error {
 	if len(registry) == 0 {
 		return ErrEmptyRegistry
 	}
 	seenNames := make(map[string]struct{}, len(registry))
+	seenVersions := make(map[int]struct{}, len(registry))
 	for idx, migration := range registry {
-		expected := idx + 1
-		if migration.Version != expected {
+		if migration.Version < 1 {
 			return fmt.Errorf(
-				"%w: expected version %d, found %d",
+				"%w: invalid version %d",
 				ErrInvalidRegistry,
-				expected,
 				migration.Version,
 			)
 		}
+		if migration.Version > lastSequentialVersion &&
+			migration.Version != StableVersion(migration.Name) {
+			return fmt.Errorf(
+				"%w: version %d must be derived from its migration name",
+				ErrInvalidRegistry,
+				migration.Version,
+			)
+		}
+		if idx > 0 && migration.Version <= registry[idx-1].Version {
+			return fmt.Errorf(
+				"%w: versions are not strictly increasing at %d",
+				ErrInvalidRegistry,
+				migration.Version,
+			)
+		}
+		if _, exists := seenVersions[migration.Version]; exists {
+			return fmt.Errorf(
+				"%w: duplicate version %d",
+				ErrInvalidRegistry,
+				migration.Version,
+			)
+		}
+		seenVersions[migration.Version] = struct{}{}
 		if migration.Name == "" {
 			return fmt.Errorf(
 				"%w: version %d has an empty name",

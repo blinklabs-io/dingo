@@ -25,6 +25,7 @@ import (
 	"io/fs"
 	"net"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -127,6 +128,10 @@ const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
 const alonzoEraID = 4
 
 // schemaVersions names every migration in ascending version order.
+// schemaVersions keeps the released sequential identifiers 1 through 75
+// unchanged. New entries use StableVersion(name) and a directory derived from
+// that identifier, so parallel branches do not compete for a next version.
+// registryForDialect sorts entries by identifier before applying them.
 var schemaVersions = []struct {
 	Version int
 	Name    string
@@ -331,7 +336,15 @@ func MySQLRegistry() ([]Migration, error) {
 }
 
 func registryForDialect(dialect string) ([]Migration, error) {
-	loaded := make([]SQL, 0, len(schemaVersions))
+	versions := append([]struct {
+		Version int
+		Name    string
+		Dir     string
+	}(nil), schemaVersions...)
+	sort.Slice(versions, func(i, j int) bool {
+		return versions[i].Version < versions[j].Version
+	})
+	loaded := make([]SQL, 0, len(versions))
 	// Every CREATE TABLE lives in the initial version, and MySQL's translation
 	// reads them to learn which columns are blobs. A later version indexing an
 	// existing blob column carries no CREATE TABLE of its own, so it is
@@ -339,7 +352,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 	// statements -- otherwise MySQL would be handed a BLOB key with no prefix
 	// length, which it rejects.
 	var wholeSchema []string
-	for _, version := range schemaVersions {
+	for _, version := range versions {
 		expand, err := loadSQL(version.Dir + "/sqlite/expand.sql")
 		if err != nil {
 			return nil, err
@@ -353,8 +366,8 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		wholeSchema = append(wholeSchema, contract...)
 	}
 
-	ret := make([]Migration, 0, len(schemaVersions))
-	for index, version := range schemaVersions {
+	ret := make([]Migration, 0, len(versions))
+	for index, version := range versions {
 		sqlForDialect := loaded[index]
 		if dialect != "sqlite" {
 			nativeExpand, nativeExpandErr := loadOptionalSQL(
