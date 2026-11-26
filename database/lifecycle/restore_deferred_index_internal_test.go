@@ -205,8 +205,7 @@ type plainIndexManager struct {
 	built int
 }
 
-func (m *plainIndexManager) DropDeferredIndexes() error          { return nil }
-func (m *plainIndexManager) BuildCriticalDeferredIndexes() error { return nil }
+func (m *plainIndexManager) DropDeferredIndexes() error { return nil }
 func (m *plainIndexManager) BuildDeferredIndexes() error {
 	m.built++
 	return nil

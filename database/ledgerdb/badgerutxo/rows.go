@@ -1420,7 +1420,7 @@ func (s *Store) LoadImportBaselines(
 		return err
 	}
 	return s.update(func(txn *badger.Txn) error {
-		return txn.Set(importBaselineDelegationsKey, markerValue(false))
+		return txn.Set(importBaselineDelegationsKey, loadedMarker)
 	})
 }
 
@@ -1430,26 +1430,10 @@ func (s *Store) ImportBaselinesLoaded() (bool, error) {
 	return s.hasMarker(importBaselinesKey)
 }
 
-// ImportBaselineDelegationsLoaded reports whether the store has settled what
-// its import baselines say about delegations: they hold them, or
-// ImportBaselineDelegationsLost says they cannot.
+// ImportBaselineDelegationsLoaded reports whether the store's import
+// baselines hold the delegations the import recorded.
 func (s *Store) ImportBaselineDelegationsLoaded() (bool, error) {
 	return s.hasMarker(importBaselineDelegationsKey)
-}
-
-// ImportBaselineDelegationsLost reports whether the import baselines were
-// written before the store kept their delegations, and the metadata store had
-// drained the rows they come from.
-func (s *Store) ImportBaselineDelegationsLost() (bool, error) {
-	return s.markerLost(importBaselineDelegationsKey)
-}
-
-// MarkImportBaselineDelegationsLost records that the import baselines have no
-// delegations and no source to take them from.
-func (s *Store) MarkImportBaselineDelegationsLost() error {
-	return s.update(func(txn *badger.Txn) error {
-		return txn.Set(importBaselineDelegationsKey, markerValue(true))
-	})
 }
 
 // RowsAfter calls fn with the key and value of at most limit rows under

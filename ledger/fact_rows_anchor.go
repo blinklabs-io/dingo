@@ -48,9 +48,6 @@ type ImportBaselinePager interface {
 		after *models.StakeCredentialRef,
 		limit int,
 	) ([]ImportBaseline, *models.StakeCredentialRef, error)
-	// ImportBaselineDelegationsLost reports baselines whose delegations the
-	// set never held and the metadata store drained.
-	ImportBaselineDelegationsLost() (bool, error)
 }
 
 // RewardRecordStreamer serves the reward records a live UTxO set holds
@@ -60,50 +57,24 @@ type RewardRecordStreamer interface {
 }
 
 // AnchorStateReady implements metadata.AnchorStateSource. The accounts are
-// served from the set's import baselines and reward records, which the set
-// holds only when it loaded them while the metadata store still held the rows
-// they come from.
+// served from the set's import baselines and reward records.
 func (ls *LedgerState) AnchorStateReady(ctx context.Context) error {
 	if ls.accountReader(nil) == nil {
 		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	set := ls.readSet(nil)
-	pager, ok := set.(ImportBaselinePager)
-	if !ok {
+	if _, ok := set.(ImportBaselinePager); !ok {
 		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
-	lost, err := pager.ImportBaselineDelegationsLost()
-	if err != nil {
-		return err
-	}
-	if lost {
-		return fmt.Errorf(
-			"%w: the import baselines were written before the set kept the "+
-				"delegations they record, and the rows were drained first",
-			ledgerStateUnserved(nodesettings.FamilyAccounts),
-		)
-	}
-	keeper, ok := set.(RewardRecordRetainer)
-	if !ok {
+	if _, ok := set.(RewardRecordRetainer); !ok {
 		return ledgerStateUnserved(nodesettings.FamilyAccounts)
-	}
-	lost, err = keeper.RewardRecordsLost()
-	if err != nil {
-		return err
-	}
-	if lost {
-		return fmt.Errorf(
-			"%w: the reward journal was drained before the set held it, and "+
-				"its entries before then are in neither store",
-			ledgerStateUnserved(nodesettings.FamilyAccounts),
-		)
 	}
 	return nil
 }
 
 // anchorView is where an anchor read takes its rows from. The live view reads
-// the ledger as it moves, one lock hold per call; a pinned view reads a fixed
-// point and decides once whether the accounts are in the set or the store.
+// the ledger as it moves, one lock hold per call; a pinned view reads a set
+// snapshot of one point.
 type anchorView struct {
 	ls *LedgerState
 	// pinned is set for a view over one point, whose source never changes
@@ -135,8 +106,7 @@ func (v *anchorView) lock() func() {
 	return v.ls.utxoSetApplyMu.RUnlock
 }
 
-// AnchorStateView implements metadata.AnchorStateViewer. Accounts in the
-// metadata store are read in one read transaction; accounts in the set are
+// AnchorStateView implements metadata.AnchorStateViewer. The accounts are
 // read from a set snapshot taken under the apply lock, so the reward records
 // and the balances are of the same applied block.
 func (ls *LedgerState) AnchorStateView(

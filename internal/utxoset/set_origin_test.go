@@ -44,7 +44,7 @@ func TestReconcileAtOriginStartsTheEmptyLedgerState(t *testing.T) {
 	require.NoError(t, err)
 
 	fromReleased := t.TempDir()
-	set, err := utxoset.Open(utxoset.Config{Dir: fromReleased, Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: fromReleased})
 	require.NoError(t, err)
 	require.NoError(t, set.ReconcileReleased(
 		t.Context(), dbadapter.New(released),
@@ -52,7 +52,7 @@ func TestReconcileAtOriginStartsTheEmptyLedgerState(t *testing.T) {
 	require.NoError(t, set.Close())
 
 	started := t.TempDir()
-	set, err = utxoset.Open(utxoset.Config{Dir: started, Only: true})
+	set, err = utxoset.Open(utxoset.Config{Dir: started})
 	require.NoError(t, err)
 	require.NoError(t, set.Reconcile(
 		t.Context(), dbadapter.New(ledgerDB),
@@ -77,10 +77,9 @@ func TestReconcileAtOriginStartsEmptyWithEveryFamilyServedByTheSet(
 		t, &database.Config{DataDir: t.TempDir()},
 	)
 	require.NoError(t, err)
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	set.ServeLedgerOnly()
 
 	require.NoError(t, set.Reconcile(
 		t.Context(), dbadapter.New(ledgerDB),
@@ -123,7 +122,7 @@ func dumpBadger(t *testing.T, dir string) []string {
 // lacks a family there stops the node instead of loading it.
 func TestReconcileRefusesASetPastOriginThatLacksAFamily(t *testing.T) {
 	t.Parallel()
-	set := openRecoverySet(t, utxoset.Config{Only: true})
+	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 3)
 	db := ledgerAt(t, slotPoint(3))
 	err := set.Reconcile(t.Context(), dbadapter.New(db), neverResume)

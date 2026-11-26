@@ -120,3 +120,10 @@ type ChunkUnpublisher interface {
 type LocalChunkReleaser interface {
 	ReleaseChunk(num uint64) error
 }
+
+// ChunkArchiver lets a provider that compresses completed chunks archive one
+// that reached the ImmutableDB without passing through its Store, such as a
+// chunk taken in from Mithril, once its database markers are durable.
+type ChunkArchiver interface {
+	ArchiveChunk(num uint64) error
+}

@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -114,12 +115,12 @@ func TestAPIDatabaseFollowsTheLayout(t *testing.T) {
 	indexer := &database.Database{}
 	store, err := indexerdb.NewStore(indexer, indexer, 10)
 	require.NoError(t, err)
-	split := &Node{db: consensus, indexerDB: indexer, indexerStore: store}
-	require.Same(t, indexer, split.apiDatabase())
-	require.NotNil(t, split.apiReadiness())
+	apiNode := &Node{db: consensus, indexerDB: indexer, indexerStore: store}
+	require.Same(t, indexer, apiNode.apiDatabase())
+	require.NotNil(t, apiNode.apiReadiness())
 }
 
-func TestMeshReportsTheIndexerTipOnTheSplitLayout(t *testing.T) {
+func TestMeshReportsTheIndexerTip(t *testing.T) {
 	t.Parallel()
 	ledgerDB, err := dbtest.NewDatabase(t, &database.Config{})
 	require.NoError(t, err)
@@ -174,4 +175,27 @@ func TestHistoryExpiryCeilingFollowsTheIndexerTip(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, uint64(49), ceiling)
+}
+
+// A core node has no IndexerDB, so the APIs that read UTxOs read the ledger's
+// live UTxO set; an API node reads its IndexerDB. Reading the consensus
+// database instead finds no UTxO rows on a core node.
+func TestCoreNodeReadsUtxosFromTheLiveSet(t *testing.T) {
+	t.Parallel()
+	core := &Node{ledgerState: &ledger.LedgerState{}}
+	require.Equal(t,
+		"*utxorpc.ledgerQueryDatabase",
+		fmt.Sprintf("%T", core.utxorpcQueryDatabase()),
+	)
+	require.NotNil(t, core.mcpAddressLookup())
+
+	api := &Node{
+		ledgerState: &ledger.LedgerState{},
+		indexerDB:   &database.Database{},
+	}
+	require.Equal(t,
+		"*utxorpc.indexerQueryDatabase",
+		fmt.Sprintf("%T", api.utxorpcQueryDatabase()),
+	)
+	require.Nil(t, api.mcpAddressLookup())
 }

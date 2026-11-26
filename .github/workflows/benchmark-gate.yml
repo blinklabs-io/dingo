@@ -90,7 +90,7 @@ jobs:
         id: tooling
         run: |
           if [[ -x base/.github/scripts/bench-gate.sh \
-            && -f base/internal/benchci/cmd/benchgate/main.go ]]; then
+            && -f base/internal/benchci/files_test.go ]]; then
             echo "dir=base" >> "$GITHUB_OUTPUT"
           else
             echo "dir=head" >> "$GITHUB_OUTPUT"
@@ -108,11 +108,18 @@ jobs:
           TOOLING: ${{ steps.tooling.outputs.dir }}
         run: |
           set +e
-          (cd "$TOOLING" && go run ./internal/benchci/cmd/benchgate \
-            "$RUNNER_TEMP/bench/base.txt" "$RUNNER_TEMP/bench/head.txt" \
-            "$RUNNER_TEMP/bench/report.md")
+          (cd "$TOOLING" && \
+            BENCHCI_BASE_FILE="$RUNNER_TEMP/bench/base.txt" \
+            BENCHCI_HEAD_FILE="$RUNNER_TEMP/bench/head.txt" \
+            BENCHCI_REPORT="$RUNNER_TEMP/bench/report.md" \
+            go test ./internal/benchci -run '^TestGateFiles$' -count=1 -v)
           status=$?
           set -e
+          # A skipped test (inputs unset, -run matching nothing) exits 0
+          # without writing a report; that must not pass the gate.
+          if [[ "$status" -eq 0 && ! -f "$RUNNER_TEMP/bench/report.md" ]]; then
+            status=1
+          fi
           {
             echo "## Benchmark gate"
             echo

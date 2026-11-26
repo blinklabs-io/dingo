@@ -894,7 +894,7 @@ func TestByronShelleyBoundaryClosesReadResultDoneOnEpochRolloverFailure(
 // TestByronShelleyBoundarySeedsEpochNonceOnProductionPath pins the multi-era
 // epoch-nonce seeding fix through the same production path as
 // TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams: without the
-// pre-rollover Byron-to-Shelley translation, calculateEpochNonce sees Byron
+// pre-rollover Byron-to-Shelley translation, CalculateEpochNonce sees Byron
 // and returns a nil nonce instead of seeding the Shelley genesis hash, and the
 // transitioned epoch is persisted with no nonce at all. That existing test
 // only asserts on era, pparams, and tip, so it still passes with the

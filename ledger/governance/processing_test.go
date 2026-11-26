@@ -257,10 +257,8 @@ func TestGovernanceEffectsRejectOverwideCostModelLanguageIDs(t *testing.T) {
 				0,
 				1,
 				20,
-				nil,
 				dbadapter.New(db),
 				nil,
-				&validated,
 			)
 		},
 		"live transaction effects": func(db *database.Database, tx lcommon.Transaction) error {
@@ -289,8 +287,6 @@ func TestGovernanceEffectsRejectOverwideCostModelLanguageIDs(t *testing.T) {
 				20,
 				dbadapter.New(db),
 				nil,
-				nil,
-				&validated,
 			)
 		},
 	}

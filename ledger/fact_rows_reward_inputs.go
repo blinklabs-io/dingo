@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 )
 
 // rewardSnapshotTypes are the snapshot types a reward snapshot header or seed
@@ -471,7 +472,7 @@ func (ls *LedgerState) RewardPrecomputeCursors() (map[uint64]string, error) {
 	out := make(map[uint64]string, len(epochs))
 	for _, epoch := range epochs {
 		raw, err := ls.ledgerDB().GetSyncState(
-			rewardPrecomputeCursorKey(epoch), nil,
+			epochengine.RewardPrecomputeCursorKey(epoch), nil,
 		)
 		if err != nil {
 			return nil, err

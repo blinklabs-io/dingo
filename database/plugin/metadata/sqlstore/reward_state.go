@@ -1321,7 +1321,7 @@ WHERE credential_tag = ? AND staking_key = ?
 
 // rewardPotWithoutOutputsResetQuery clears the reward pot of every pots-epoch
 // row whose round has no pool outputs. A round's snapshot epoch is two below
-// its pots epoch (stakeRewardEpochsForNewEpoch); the bootstrap rounds below
+// its pots epoch (StakeRewardEpochsForNewEpoch); the bootstrap rounds below
 // that mapping are always recalculated and keep their pot.
 const rewardPotWithoutOutputsResetQuery = `UPDATE reward_ada_pots
 SET rewards = '0'
@@ -1554,26 +1554,6 @@ func (s *Store) DeleteRewardStateBeforeEpoch(
 	if err := s.DeleteRewardStakeInputBeforeEpoch(ctx, epoch, txn); err != nil {
 		return err
 	}
-	if err := s.pruneRewardRowsBeforeEpoch(
-		ctx,
-		"reward_account_output",
-		rewardAccountOutputPrunePredicate,
-		epoch,
-		txn,
-	); err != nil {
-		return fmt.Errorf("delete reward account outputs before epoch: %w", err)
-	}
-	return nil
-}
-
-// DeleteRewardAccountOutputsBeforeEpoch prunes reward_account_output below
-// epoch as DeleteRewardStateBeforeEpoch does, without touching
-// reward_stake_input, for a database that drained it.
-func (s *Store) DeleteRewardAccountOutputsBeforeEpoch(
-	ctx context.Context,
-	epoch uint64,
-	txn types.Txn,
-) error {
 	if err := s.pruneRewardRowsBeforeEpoch(
 		ctx,
 		"reward_account_output",

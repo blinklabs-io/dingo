@@ -24,14 +24,17 @@ import (
 
 // Estimated cost of one output in a transaction, deliberately above the
 // real one: a plan that is too coarse only makes more transactions, while one
-// that is too fine fails the commit. The entry cost counts the output row
-// and its running-sum update; the byte cost adds the key, the journal
-// operation and the prior value a removed output records.
+// that is too fine fails the commit. The entry cost counts the output row,
+// its running-sum update and its index rows, at most three (payment or
+// address, stake credential, inline datum hash); the byte cost adds the key,
+// the journal operation and the prior value a removed output records.
 const (
-	outputEntries = 2
+	outputEntries = 5
 	keyBytes      = refLen + 1
 	sumBytes      = 64
-	journalBytes  = refLen + 5
+	// indexBytes covers the index rows of one output, which carry no value.
+	indexBytes   = 3 * (refLen + 40)
+	journalBytes = refLen + 5
 	// removedBytes stands for the prior value a removed output keeps in the
 	// journal, which is not known until the removal is applied.
 	removedBytes = 512
@@ -93,13 +96,13 @@ func pointUnits(changes []Change) []pointUnit {
 			for _, o := range c.Added {
 				u.cost.entries += outputEntries
 				u.cost.bytes += int64(
-					keyBytes + len(o.Cbor) + sumBytes + journalBytes,
+					keyBytes + len(o.Cbor) + sumBytes + journalBytes + indexBytes,
 				)
 			}
 			for range c.Removed {
 				u.cost.entries += outputEntries
 				u.cost.bytes += int64(
-					keyBytes + sumBytes + journalBytes + removedBytes,
+					keyBytes + sumBytes + journalBytes + removedBytes + indexBytes,
 				)
 			}
 		}
@@ -110,9 +113,11 @@ func pointUnits(changes []Change) []pointUnit {
 }
 
 // familyCost estimates the batch's rows other than UTxO changes, which all
-// go in the last transaction with the tip.
+// go in the last transaction with the tip. The snapshot and reward block ops
+// are not in it: opsCost weighs them, since a delete is as heavy as the rows
+// it finds.
 func familyCost(b LedgerBatch) cost {
-	rows := len(b.Epochs) + len(b.SnapshotOps) + len(b.Summaries) +
+	rows := len(b.Epochs) + len(b.Summaries) +
 		len(b.NetworkStates) + len(b.Donations) + len(b.PParams) +
 		len(b.Nonces)
 	c := cost{
@@ -123,11 +128,6 @@ func familyCost(b LedgerBatch) cost {
 	if b.EraSwitch != nil {
 		c.entries++
 	}
-	// A reward block op writes at most a total, a count and their journal
-	// entries. A prune deletes one row per pool of an epoch, a few thousand
-	// at most, which the transaction's half of Badger's limit absorbs.
-	c.entries += int64(len(b.RewardBlocks) * 2 * familyEntriesPerRow)
-	c.bytes += int64(len(b.RewardBlocks) * 2 * rowBytes)
 	for _, r := range b.Rows {
 		c.entries += familyEntriesPerRow
 		c.bytes += int64(len(r.Key) + len(r.Value) + rowBytes)
@@ -186,19 +186,52 @@ func (s *Store) applyChunked(
 	)
 	accounts, records = []AccountPut{}, []RewardRecord{}
 	mark := failSlot(tip, batch)
+	// A batch without a tip, changes or slotted rows writes no failure mark:
+	// no journaled commit lies before slot 0, so startup could never rewind
+	// a mark there.
+	unmarked := mark == 0 && tip == nil && len(batch.Changes) == 0
 	var rowsTotal cost
 	for _, r := range batch.Rows {
 		rowsTotal = rowsTotal.add(rowCost(r))
 	}
 	rowsTotal = rowsTotal.add(accountsCost(batch.Accounts)).
 		add(recordsCost(batch.RewardRecords))
-	if !rowsTotal.fits(entries, bytes) {
+	opsTotal, err := s.opsCost(batch.SnapshotOps, batch.RewardBlocks)
+	if err != nil {
+		return err
+	}
+	// Snapshot and reward block ops that do not fit beside the family rows go
+	// in transactions of their own, in order, after the batch's rollback. A
+	// delete among them runs in as many transactions as its rows need. The
+	// rows go ahead of them as well, since a reward block op reads the rows
+	// the batch wrote before it.
+	extractOps := len(batch.SnapshotOps)+len(batch.RewardBlocks) > 0
+	if extractOps {
+		stripped := stripOps(batch)
+		if !rowsTotal.fits(entries, bytes) {
+			stripped.Rows, stripped.Accounts, stripped.RewardRecords =
+				nil, nil, nil
+		}
+		extractOps = !opsTotal.add(familyCost(stripped)).fits(entries, bytes)
+	}
+	if extractOps || !rowsTotal.fits(entries, bytes) {
 		rows, leadRollback = batch.Rows, batch.DeleteNoncesAfter
 		accounts, records = batch.Accounts, batch.RewardRecords
 		batch.Rows, batch.DeleteNoncesAfter = nil, nil
 		batch.Accounts, batch.RewardRecords = nil, nil
 	}
-	family := familyCost(batch)
+	var (
+		snaps  = []SnapshotOp{}
+		blocks = []RewardBlockOp{}
+		family cost
+	)
+	if extractOps {
+		snaps, blocks = batch.SnapshotOps, batch.RewardBlocks
+		batch = stripOps(batch)
+		family = familyCost(batch)
+	} else {
+		family = familyCost(batch).add(opsTotal)
+	}
 	var (
 		chain  = chainState{advances: tip != nil}
 		chunks int
@@ -219,6 +252,7 @@ func (s *Store) applyChunked(
 		// when all of them fit together; any other takes as many points as
 		// fit.
 		last := len(rows) == 0 && len(accounts) == 0 && len(records) == 0 &&
+			len(snaps) == 0 && len(blocks) == 0 &&
 			(len(units) == 0 ||
 				(!familyAlone && family.add(sumUnits(units)).fits(entries, bytes)))
 		n := len(units)
@@ -226,6 +260,13 @@ func (s *Store) applyChunked(
 			rowChunk     []RowPut
 			accountChunk []AccountPut
 			recordChunk  []RewardRecord
+			snapChunk    []SnapshotOp
+			blockChunk   []RewardBlockOp
+			// bulk deletes up to limit rows of the delete op at the
+			// front of snaps or blocks and reports whether more remain.
+			bulk      func(txn *badger.Txn, limit int64) (bool, error)
+			bulkLimit int64
+			bulkMore  bool
 		)
 		switch {
 		case len(accounts) > 0:
@@ -241,10 +282,39 @@ func (s *Store) applyChunked(
 			recordChunk = records[:takeCount(
 				len(records), recordCost(), entries, bytes,
 			)]
+		case len(snaps) > 0:
+			n = 0
+			if k := takeSnapshotOps(snaps, entries, bytes); k > 0 {
+				snapChunk = snaps[:k]
+			} else if chunks == 0 {
+				// The batch's rollback goes first, alone.
+				snapChunk = snaps[:0]
+			} else {
+				op := snaps[0]
+				bulkLimit = max(entries/snapshotDeleteEntries, 1)
+				bulk = func(txn *badger.Txn, limit int64) (bool, error) {
+					return deleteSnapshotLimited(txn, op, limit)
+				}
+			}
+		case len(blocks) > 0:
+			n = 0
+			if k := takeRewardBlockOps(blocks, entries, bytes); k > 0 {
+				blockChunk = blocks[:k]
+			} else if chunks == 0 {
+				blockChunk = blocks[:0]
+			} else {
+				below := blocks[0].PruneBelow
+				bulkLimit = max(entries/rewardDeleteEntries, 1)
+				bulk = func(txn *badger.Txn, limit int64) (bool, error) {
+					return pruneRewardBlocksLimited(txn, below, limit)
+				}
+			}
 		case !last:
 			n = takeUnits(units, cost{}, entries, bytes)
 		}
-		leading := rowChunk != nil || accountChunk != nil || recordChunk != nil
+		leading := rowChunk != nil || accountChunk != nil ||
+			recordChunk != nil || snapChunk != nil || blockChunk != nil ||
+			bulk != nil
 		taken := units[:n]
 		var changes []Change
 		for _, u := range taken {
@@ -286,6 +356,7 @@ func (s *Store) applyChunked(
 		if leading {
 			next.Rows, next.Accounts, next.RewardRecords =
 				rowChunk, accountChunk, recordChunk
+			next.SnapshotOps, next.RewardBlocks = snapChunk, blockChunk
 			if chunks == 0 {
 				next.DeleteNoncesAfter = leadRollback
 			}
@@ -299,7 +370,11 @@ func (s *Store) applyChunked(
 		err := s.update(func(txn *badger.Txn) error {
 			var err error
 			if first {
-				prior, hadPrior, err = markInFlight(txn, mark)
+				if unmarked {
+					prior, hadPrior, err = readFailed(txn)
+				} else {
+					prior, hadPrior, err = markInFlight(txn, mark)
+				}
 				if err != nil {
 					return err
 				}
@@ -313,6 +388,12 @@ func (s *Store) applyChunked(
 					return err
 				}
 			}
+			if bulk != nil {
+				var err error
+				if bulkMore, err = bulk(txn, bulkLimit); err != nil {
+					return err
+				}
+			}
 			return s.applyLedgerTxn(
 				txn,
 				nextTip,
@@ -323,7 +404,10 @@ func (s *Store) applyChunked(
 			)
 		})
 		if errors.Is(err, badger.ErrTxnTooBig) &&
-			max(len(rowChunk), len(accountChunk), len(recordChunk)) > 1 {
+			max(
+				len(rowChunk), len(accountChunk), len(recordChunk),
+				len(snapChunk), len(blockChunk), int(bulkLimit),
+			) > 1 {
 			entries, bytes = max(entries/2, 1), max(bytes/2, 1)
 			continue
 		}
@@ -345,6 +429,15 @@ func (s *Store) applyChunked(
 		rows = rows[len(rowChunk):]
 		accounts = accounts[len(accountChunk):]
 		records = records[len(recordChunk):]
+		snaps = snaps[len(snapChunk):]
+		blocks = blocks[len(blockChunk):]
+		if bulk != nil && !bulkMore {
+			if len(snaps) > 0 && len(snapChunk) == 0 {
+				snaps = snaps[1:]
+			} else {
+				blocks = blocks[1:]
+			}
+		}
 		chunks++
 		if last {
 			return nil
@@ -417,8 +510,8 @@ func takeRows(rows []RowPut, entries, bytes int64) int {
 
 // failSlot is the slot a chunked batch's failure mark records: the first
 // change's, else the tip's, else the lowest slot a row carries. A row with no
-// slot, such as a prefix wipe, says nothing: a mark at slot 0 would rewind
-// the whole journal.
+// slot, such as a prefix wipe, says nothing, and a batch where nothing
+// carries one writes no mark.
 func failSlot(tip *ocommon.Point, batch LedgerBatch) uint64 {
 	switch {
 	case len(batch.Changes) > 0:
@@ -440,6 +533,9 @@ func failSlot(tip *ocommon.Point, batch LedgerBatch) uint64 {
 	}
 	for _, r := range batch.RewardRecords {
 		note(r.Slot)
+	}
+	for _, op := range batch.RewardBlocks {
+		note(op.Slot)
 	}
 	return lowest
 }
@@ -473,4 +569,10 @@ func restoreFailedMark(txn *badger.Txn, prior uint64, had bool) error {
 		return txn.Delete(failedKey)
 	}
 	return txn.Set(failedKey, binary.BigEndian.AppendUint64(nil, prior))
+}
+
+// stripOps is batch without the ops opsCost weighs.
+func stripOps(batch LedgerBatch) LedgerBatch {
+	batch.SnapshotOps, batch.RewardBlocks = nil, nil
+	return batch
 }

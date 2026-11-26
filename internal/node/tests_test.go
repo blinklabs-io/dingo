@@ -16,185 +16,20 @@ package node
 
 import (
 	"bytes"
-	"context"
-	"database/sql"
 	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/chainsync"
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/config"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
-// rollbackCascadeIndex is the child index for fk_utxo_spent_at_tx, the foreign
-// key the rollback's delete of a transaction's identity row is checked
-// against.
-const rollbackCascadeIndex = "idx_utxo_spent_at_tx_id"
-
-// seedClearedMarkerWithMissingCriticalIndex leaves the database in the state
-// two Mithril-bootstrapped preview nodes were found in: a critical manifest
-// index absent, and no pending marker to say so.
-//
-// Mithril sync produced it: BuildCritical leaves the marker set for the lazy
-// remainder, and updateMithrilReadyState previously deleted that marker
-// during sync-state cleanup (fixed for new syncs in
-// mithril/sync_import.go; databases bootstrapped before that fix stay in this
-// state). The migration that created the index is recorded complete, so its
-// CREATE INDEX IF NOT EXISTS never runs again. Dropping the index directly is
-// the only way to reproduce it here: no store method can express "manifest
-// incomplete, cycle finished".
-func seedClearedMarkerWithMissingCriticalIndex(
-	t *testing.T,
-	db *database.Database,
-) *sql.DB {
-	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec("DROP INDEX IF EXISTS " + rollbackCascadeIndex)
-	require.NoError(t, err)
-	require.False(
-		t,
-		dbtest.MetadataIndexExists(t, raw, rollbackCascadeIndex),
-		"%s must be absent for this to test the repair",
-		rollbackCascadeIndex,
-	)
-	_, err = raw.Exec(
-		"DELETE FROM sync_state WHERE sync_key = ?",
-		deferred.SyncStateKey,
-	)
-	require.NoError(t, err)
-	return raw
-}
-
-func TestDeferredIndexRebuilderCriticalBuildHonoursCancellation(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newIndexerTestDB(t)
-	ctx, cancel := context.WithCancel(t.Context())
-	rebuilder := NewDeferredIndexRebuilder(
-		ctx,
-		db,
-		slog.New(slog.DiscardHandler),
-	)
-	rebuilder.Drop()
-	cancel()
-
-	require.ErrorIs(t, rebuilder.BuildCritical(), context.Canceled)
-	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
-	require.True(t, ok)
-	missing, err := manager.(metadata.MissingCriticalDeferredIndexLister).
-		MissingCriticalDeferredIndexes()
-	require.NoError(t, err)
-	require.NotEmpty(t, missing)
-}
-
-// namedMissingManager is a DeferredIndexManager that also lists its missing
-// critical entries, and records what had already been logged when the rebuild
-// was entered.
-type namedMissingManager struct {
-	missing []string
-	logged  string
-	log     *bytes.Buffer
-}
-
-func (m *namedMissingManager) DropDeferredIndexes() error { return nil }
-
-func (m *namedMissingManager) BuildCriticalDeferredIndexes() error {
-	m.logged = m.log.String()
-	return nil
-}
-
-func (m *namedMissingManager) BuildDeferredIndexes() error { return nil }
-
-func (m *namedMissingManager) HasDeferredIndexesPending() (bool, error) {
-	return false, nil
-}
-
-func (m *namedMissingManager) MissingCriticalDeferredIndexes() (
-	[]string,
-	error,
-) {
-	return m.missing, nil
-}
-
-// TestDeferredIndexRebuilderBuildCriticalNamesMissingBeforeBuilding pins the
-// ordering: the names are logged before the rebuild is entered, not after it
-// returns.
-//
-// A rebuild of one index on a multi-million-row table takes minutes and emits
-// nothing while it runs. The assertion reads the log as the rebuild sees it,
-// so a message moved below the build fails here.
-func TestDeferredIndexRebuilderBuildCriticalNamesMissingBeforeBuilding(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	manager := &namedMissingManager{
-		missing: []string{rollbackCascadeIndex, "idx_utxo_added_slot"},
-		log:     &buf,
-	}
-
-	require.NoError(t, (&DeferredIndexRebuilder{
-		ctx:     t.Context(),
-		manager: manager,
-		logger:  logger,
-	}).BuildCritical())
-
-	require.Contains(
-		t,
-		manager.logged,
-		"rebuilding missing critical deferred metadata indexes",
-		"the rebuild must be announced before it starts",
-	)
-	require.Contains(t, manager.logged, rollbackCascadeIndex)
-	require.Contains(t, manager.logged, "idx_utxo_added_slot")
-	require.Contains(
-		t,
-		buf.String(),
-		"critical deferred metadata index check complete",
-		"the completion line still reports the outcome",
-	)
-	require.Contains(
-		t,
-		buf.String(),
-		"duration_covers",
-		"the reported duration must say what it covers: the rebuild "+
-			"runs inside withDeferredIndexWrite, which restores missing "+
-			"retained indexes in the same write transaction",
-	)
-}
-
-// TestEnsureCriticalDeferredIndexesQuietWhenManifestComplete keeps the healthy
-// path silent: a complete manifest is one catalog lookup per entry and must
-// not add a startup log line.
-func TestEnsureCriticalDeferredIndexesQuietWhenManifestComplete(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	manager := &namedMissingManager{log: &buf}
-
-	require.NoError(t, ensureCriticalDeferredIndexes(
-		t.Context(), manager, logger,
-	))
-
-	require.Empty(t, buf.String())
-}
-
 // namedMissingAllManager answers the full-manifest lister and records the log
-// as BuildDeferredIndexes sees it, so the ordering assertion below reads the
-// same "before the build" evidence its critical-subset sibling does.
+// as BuildDeferredIndexes sees it, so the ordering assertion below reads what
+// was logged before the build.
 type namedMissingAllManager struct {
 	missing []string
 	logged  string
@@ -202,10 +37,6 @@ type namedMissingAllManager struct {
 }
 
 func (m *namedMissingAllManager) DropDeferredIndexes() error { return nil }
-
-func (m *namedMissingAllManager) BuildCriticalDeferredIndexes() error {
-	return nil
-}
 
 func (m *namedMissingAllManager) BuildDeferredIndexes() error {
 	m.logged = m.log.String()
@@ -222,8 +53,8 @@ func (m *namedMissingAllManager) MissingDeferredIndexes() ([]string, error) {
 
 // TestEnsureAllDeferredIndexesNamesMissingBeforeBuilding covers the repair a
 // restored database takes: the full manifest is rebuilt, and that rebuild is
-// as silent while it runs as the critical subset's, with more entries to get
-// through. The names must reach the log before the build is entered.
+// silent while it runs. The names must reach the log before the build is
+// entered.
 func TestEnsureAllDeferredIndexesNamesMissingBeforeBuilding(t *testing.T) {
 	t.Parallel()
 

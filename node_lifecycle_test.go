@@ -65,11 +65,12 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
+	mockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -131,8 +132,22 @@ type liveNodeOption func(*liveNodeSeed)
 type liveNodeSeed struct {
 	livedIn bool
 	legacy  bool
+	alonzo  bool
 	host    *plugin.Host
+	// holdSeed runs while the seed ledger is open, between Start and Close.
+	holdSeed func()
 }
+
+// withSeedLedgerHold runs hold while the seed ledger that writes the epoch rows
+// is open, so a test can give it time to apply loaded blocks.
+func withSeedLedgerHold(hold func()) liveNodeOption {
+	return func(seed *liveNodeSeed) { seed.holdSeed = hold }
+}
+
+// withAlonzoBlocks seeds the chain with Alonzo blocks, the era of the ledger
+// the harness builds from the genesis files, so a test that validates blocks
+// against that ledger has parents of an era it can extend.
+func withAlonzoBlocks(seed *liveNodeSeed) { seed.alonzo = true }
 
 // withPluginHost runs the node on host instead of a fresh built-in one.
 func withPluginHost(host *plugin.Host) liveNodeOption {
@@ -157,6 +172,7 @@ func seedLedgerEpochsForLoadedBlocks(
 	t *testing.T,
 	n *Node,
 	points []ocommon.Point,
+	hold func(),
 ) {
 	t.Helper()
 	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
@@ -166,6 +182,10 @@ func seedLedgerEpochsForLoadedBlocks(
 		return
 	}
 	cfg := n.ledgerStateConfig()
+	// Without this the seed ledger replays the loaded blocks from the origin
+	// between Start and Close, writing epoch rows and UTxO state up to an
+	// arbitrary slot before the fixture derives the rest.
+	cfg.ManualBlockProcessing = true
 	// The node's own set, loaded at the origin as a node's first start loads
 	// it, so its journal still reaches back to the first block.
 	tip, err := n.db.GetTip(nil)
@@ -176,6 +196,15 @@ func seedLedgerEpochsForLoadedBlocks(
 	seedLedger, err := ledger.NewLedgerState(cfg)
 	require.NoError(t, err)
 	require.NoError(t, seedLedger.Start(context.Background()))
+	if hold != nil {
+		hold()
+	}
+	// A ledger that applied any loaded block moved off the origin; the epoch
+	// row count alone would miss blocks that stay within the genesis epoch.
+	require.Equal(
+		t, uint64(0), seedLedger.Tip().Point.Slot,
+		"seed ledger applied a loaded block before Close",
+	)
 	require.NoError(t, seedLedger.Close())
 	epochs, err := set.Epochs()
 	require.NoError(t, err)
@@ -274,7 +303,7 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	)
 
 	points := loadLiveLifecycleTestBlocksAtBlock(
-		t, db, cm.PrimaryChain(), numBlocks, startBlockNumber,
+		t, db, cm.PrimaryChain(), numBlocks, startBlockNumber, seed.alonzo,
 	)
 	finalTip := ochainsync.Tip{
 		Point:       points[len(points)-1],
@@ -325,7 +354,7 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	// restore/truncate is compared against identical production wiring on
 	// both sides rather than against a harness config that happens to omit
 	// the field under test.
-	seedLedgerEpochsForLoadedBlocks(t, n, points)
+	seedLedgerEpochsForLoadedBlocks(t, n, points, seed.holdSeed)
 	if storageMode == StorageModeCore && !seed.legacy {
 		seedLiveUtxoSet(t, db, tmpDir, points, finalTip, seed.livedIn,
 			uint64(n.config.cardanoNodeConfig.ShelleyGenesis().EpochLength))
@@ -441,7 +470,7 @@ func loadLiveLifecycleTestBlocks(
 	numBlocks int,
 ) []ocommon.Point {
 	t.Helper()
-	return loadLiveLifecycleTestBlocksAtBlock(t, db, c, numBlocks, 1)
+	return loadLiveLifecycleTestBlocksAtBlock(t, db, c, numBlocks, 1, false)
 }
 
 func loadLiveLifecycleTestBlocksAtBlock(
@@ -450,11 +479,21 @@ func loadLiveLifecycleTestBlocksAtBlock(
 	c *chain.Chain,
 	numBlocks int,
 	startBlockNumber uint64,
+	alonzoBlocks bool,
 ) []ocommon.Point {
 	t.Helper()
-	blocks, err := testfixtures.GenerateBabbageChainAt(
-		startBlockNumber, 2, numBlocks,
-	)
+	generate := testfixtures.GenerateBabbageChainAt
+	if alonzoBlocks {
+		generate = func(
+			startBlockNumber, startSlot uint64,
+			count int,
+		) ([]gledger.Block, error) {
+			return mockfixtures.GenerateAlonzoChain(
+				startBlockNumber, lcommon.Blake2b256{}, startSlot, 20, count,
+			)
+		}
+	}
+	blocks, err := generate(startBlockNumber, 2, numBlocks)
 	require.NoError(t, err)
 
 	var points []ocommon.Point
@@ -788,6 +827,7 @@ func newGenesisSelectionTestNode(
 		genesisForkTestCardanoNodeConfig(t, keys),
 		disabledLiveLifecycleTestWorkerPoolCfg,
 		withLivedInUtxoSet,
+		withAlonzoBlocks,
 	)
 	// Reuse the connection manager the harness ouroboros was built with, so
 	// the ledger's liveness gate and its blockfetch requests resolve the
@@ -918,7 +958,31 @@ func registerGenesisForkTestPeer(
 	return oConn.Id()
 }
 
-// generateValidatedConwayForkChain is fixtures.GenerateConwayChain's
+// alonzoEmptyBody returns the body hash and declared size of an Alonzo block
+// with no transactions, the way the header commits to them.
+func alonzoEmptyBody(t testing.TB) (lcommon.Blake2b256, uint64) {
+	t.Helper()
+	tmp, err := cbor.Encode(&alonzo.AlonzoBlock{
+		BlockHeader: &alonzo.AlonzoBlockHeader{},
+	})
+	require.NoError(t, err)
+	var comps []cbor.RawMessage
+	_, err = cbor.Decode(tmp, &comps)
+	require.NoError(t, err)
+	require.Len(t, comps, 5)
+	var concat []byte
+	var size uint64
+	for _, c := range comps[1:] {
+		h := lcommon.Blake2b256Hash(c)
+		concat = append(concat, h.Bytes()...)
+		size += uint64(len(c))
+	}
+	return lcommon.Blake2b256Hash(concat), size
+}
+
+// generateValidatedAlonzoForkChain builds Alonzo blocks, the era of the test
+// ledger, so the full candidate validation accepts them. It is
+// fixtures.GenerateConwayChain's
 // structural counterpart with genuine VRF/KES crypto: header admission
 // requires real cryptographic verification (previously
 // skipped whenever ValidateHistorical was disabled, the ordinary bulk-sync
@@ -936,7 +1000,7 @@ func registerGenesisForkTestPeer(
 // match the given epoch nonce -- so any real, non-degenerate keypair
 // suffices, and this chains multiple blocks by real prevHash/hash linkage
 // the way a peer's actual fork would.
-func generateValidatedConwayForkChain(
+func generateValidatedAlonzoForkChain(
 	t *testing.T,
 	keys genesisForkTestKeys,
 	epochNonce []byte,
@@ -955,7 +1019,7 @@ func generateValidatedConwayForkChain(
 	binary.BigEndian.PutUint64(opCertBody[40:48], uint64(opCertKesPeriod))
 	opCertSig := ed25519.Sign(keys.coldPrivKey, opCertBody[:])
 
-	bodyHash := testutil.ConwayEmptyBodyHash(t)
+	bodyHash, bodySize := alonzoEmptyBody(t)
 
 	var issuerVkey lcommon.IssuerVkey
 	copy(issuerVkey[:], keys.coldPubKey)
@@ -966,30 +1030,40 @@ func generateValidatedConwayForkChain(
 		slot := startSlot + uint64(i)*slotIncrement
 		blockNumber := startBlockNumber + uint64(i)
 
-		vrfInput, err := vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+		nonceSeed, err := vrf.MkSeedTPraos(
+			int64(slot), epochNonce, vrf.SeedEta(), //nolint:gosec
+		)
 		require.NoError(t, err)
-		vrfProof, vrfOutput, err := vrf.Prove(keys.vrfSk, vrfInput)
+		nonceProof, nonceOutput, err := vrf.Prove(keys.vrfSk, nonceSeed)
+		require.NoError(t, err)
+		leaderSeed, err := vrf.MkSeedTPraos(
+			int64(slot), epochNonce, vrf.SeedL(), //nolint:gosec
+		)
+		require.NoError(t, err)
+		leaderProof, leaderOutput, err := vrf.Prove(keys.vrfSk, leaderSeed)
 		require.NoError(t, err)
 
-		headerBody := babbage.BabbageBlockHeaderBody{
+		headerBody := shelley.ShelleyBlockHeaderBody{
 			BlockNumber: blockNumber,
 			Slot:        slot,
 			PrevHash:    currentPrev,
 			IssuerVkey:  issuerVkey,
 			VrfKey:      keys.vrfPk,
-			VrfResult: lcommon.VrfResult{
-				Output: vrfOutput,
-				Proof:  vrfProof,
+			NonceVrf: lcommon.VrfResult{
+				Output: nonceOutput,
+				Proof:  nonceProof,
 			},
-			BlockBodySize: testutil.ConwayEmptyBodySize(t),
-			BlockBodyHash: bodyHash,
-			OpCert: babbage.BabbageOpCert{
-				HotVkey:        keys.kesPk,
-				SequenceNumber: opCertSeqNum,
-				KesPeriod:      opCertKesPeriod,
-				Signature:      opCertSig,
+			LeaderVrf: lcommon.VrfResult{
+				Output: leaderOutput,
+				Proof:  leaderProof,
 			},
-			ProtoVersion: babbage.BabbageProtoVersion{Major: 10},
+			BlockBodySize:        bodySize,
+			BlockBodyHash:        bodyHash,
+			OpCertHotVkey:        keys.kesPk,
+			OpCertSequenceNumber: opCertSeqNum,
+			OpCertKesPeriod:      opCertKesPeriod,
+			OpCertSignature:      opCertSig,
+			ProtoMajorVersion:    6,
 		}
 		headerBodyCbor, err := cbor.Encode(headerBody)
 		require.NoError(t, err)
@@ -1004,9 +1078,9 @@ func generateValidatedConwayForkChain(
 		)
 		require.NoError(t, err)
 
-		block := &conway.ConwayBlock{
-			BlockHeader: &conway.ConwayBlockHeader{
-				BabbageBlockHeader: babbage.BabbageBlockHeader{
+		block := &alonzo.AlonzoBlock{
+			BlockHeader: &alonzo.AlonzoBlockHeader{
+				ShelleyBlockHeader: shelley.ShelleyBlockHeader{
 					Body:      headerBody,
 					Signature: kesSig,
 				},
@@ -1015,7 +1089,7 @@ func generateValidatedConwayForkChain(
 		raw, err := cbor.Encode(block)
 		require.NoError(t, err)
 
-		decoded, err := conway.NewConwayBlockFromCbor(raw)
+		decoded, err := alonzo.NewAlonzoBlockFromCbor(raw)
 		require.NoError(t, err)
 
 		blocks = append(blocks, decoded)
@@ -1054,6 +1128,8 @@ func requireGenesisDeepForkWins(
 	t.Helper()
 	require.Greater(t, len(points), ancestorIdx+1)
 	ancestor := points[ancestorIdx]
+	ancestorBlock, err := n.ledgerState.GetBlock(ancestor)
+	require.NoError(t, err)
 	localTipBefore := n.ledgerState.Tip()
 	require.Greater(
 		t,
@@ -1085,11 +1161,11 @@ func requireGenesisDeepForkWins(
 	const genesisOverlaySlotInterval = uint64(10)
 	startSlot := (ancestor.Slot/genesisOverlaySlotInterval + 1) *
 		genesisOverlaySlotInterval
-	forkBlocks := generateValidatedConwayForkChain(
+	forkBlocks := generateValidatedAlonzoForkChain(
 		t,
 		keys,
 		epochNonce,
-		uint64(ancestorIdx)+1,
+		ancestorBlock.Number+1,
 		lcommon.NewBlake2b256(ancestor.Hash),
 		startSlot,
 		genesisOverlaySlotInterval,
@@ -1117,6 +1193,57 @@ func requireGenesisDeepForkWins(
 	}
 
 	connId := registerGenesisForkTestPeer(t, n)
+	// The ledger fetches the candidate's bodies and validates them before it
+	// rolls back, so serve them the way the peer's blockfetch would.
+	var requestID atomic.Uint64
+	serve := func(
+		id gouroboros.ConnectionId,
+		start ocommon.Point,
+		end ocommon.Point,
+	) (uint64, error) {
+		reqID := requestID.Add(1)
+		go func() {
+			serving := false
+			for _, blk := range forkBlocks {
+				point := ocommon.NewPoint(blk.SlotNumber(), blk.Hash().Bytes())
+				if point.Slot == start.Slot {
+					serving = true
+				}
+				if serving {
+					n.eventBus.Publish(
+						ledger.BlockfetchEventType,
+						event.NewEvent(
+							ledger.BlockfetchEventType,
+							ledger.BlockfetchEvent{
+								ConnectionId: id,
+								Block:        blk,
+								Point:        point,
+								Type:         uint(blk.Type()),
+								RequestId:    reqID,
+							},
+						),
+					)
+				}
+				if point.Slot == end.Slot {
+					break
+				}
+			}
+			n.eventBus.Publish(
+				ledger.BlockfetchEventType,
+				event.NewEvent(
+					ledger.BlockfetchEventType,
+					ledger.BlockfetchEvent{
+						ConnectionId: id,
+						BatchDone:    true,
+						RequestId:    reqID,
+					},
+				),
+			)
+		}()
+		return reqID, nil
+	}
+	n.blockfetchRangeOverride.Store(&serve)
+	t.Cleanup(func() { n.blockfetchRangeOverride.Store(nil) })
 	for _, blk := range forkBlocks {
 		verificationGeneration, err := n.ledgerState.
 			ValidateChainSelectionHeaderCryptoWithGeneration(blk.Header())
@@ -1138,19 +1265,30 @@ func requireGenesisDeepForkWins(
 		)
 	}
 
+	// The candidate's bodies are already validated and fetched, so the ledger
+	// applies them right after the rollback: the intersection tip is only a
+	// transient. Ending on the fork tip, which is behind and shorter than
+	// the local chain, proves the fork won.
 	require.EventuallyWithT(
 		t,
 		func(collect *assert.CollectT) {
+			tip := n.ledgerState.Tip().Point
 			assert.Equal(
 				collect,
-				ancestor.Slot,
-				n.ledgerState.Tip().Point.Slot,
+				forkTipBlock.SlotNumber(),
+				tip.Slot,
 				"current ledger tip slot",
+			)
+			assert.Equal(
+				collect,
+				forkTipBlock.Hash().Bytes(),
+				tip.Hash,
+				"current ledger tip hash",
 			)
 		},
 		10*time.Second,
 		20*time.Millisecond,
-		"ledger did not roll back to the Genesis-selected fork intersection at slot %d",
+		"ledger did not switch to the Genesis-selected fork rooted at slot %d",
 		ancestor.Slot,
 	)
 }
@@ -2299,6 +2437,21 @@ func TestWaitForEpochTransitionWindowResetsOnProgress(t *testing.T) {
 	})
 }
 
+// requireLedgerAtChainTip waits for the ledger to apply every block on the
+// primary chain. The harness and a live truncate both start a ledger that
+// catches up from its stored tip in the background, so an epoch-boundary
+// test that truncates or adds blocks without this wait acts on whatever
+// prefix has been applied. A boundary block then finds the ledger still
+// in an earlier epoch and skips an epoch in one rollover, which publishes no
+// block-based transition event.
+func requireLedgerAtChainTip(t *testing.T, n *Node) {
+	t.Helper()
+	testutil.WaitForCondition(t, func() bool {
+		return n.ledgerState.Tip().Point.Slot ==
+			n.chainManager.PrimaryChain().Tip().Point.Slot
+	}, testutil.AsyncWait, "the ledger must apply the primary chain")
+}
+
 // addBlocksSerially waits for each block-based epoch transition to commit
 // before entering the next epoch. This orders ledger commits only; snapshot
 // events run in their own serial loop and reward precomputation coalesces
@@ -2310,6 +2463,7 @@ func addBlocksSerially(
 	epochLength uint64,
 ) {
 	t.Helper()
+	requireLedgerAtChainTip(t, n)
 	// With no upstream connection and reachedTip unlatched, the ledger loop
 	// holds each lone new block for about two seconds waiting for more. A
 	// live truncate or restore builds a new ledger with the flag clear, so
@@ -2385,6 +2539,7 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	// (block 20, slot 402), whose block-based epoch event confirms every
 	// preceding block committed.
 	target1 := points[9].Slot
+	requireLedgerAtChainTip(t, n)
 	_, err := n.Truncate(
 		context.Background(),
 		dblifecycle.TruncateTarget{Slot: &target1},
@@ -2561,8 +2716,7 @@ func seedLiveUtxoSetJournal(
 	t.Helper()
 	require.Positive(t, epochLength)
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(dataDir), Only: true, Authoritative: true,
-		CheckpointDir: utxoset.CheckpointDirFor(dataDir),
+		Dir: utxoset.DirFor(dataDir), CheckpointDir: utxoset.CheckpointDirFor(dataDir),
 	})
 	require.NoError(t, err)
 	// The first commit has no tip before it, and a journal reaches back only
@@ -2647,9 +2801,7 @@ func loadLiveUtxoSetFamiliesAtOrigin(
 	dataDir string,
 ) {
 	t.Helper()
-	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(dataDir), Only: true, Authoritative: true,
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: utxoset.DirFor(dataDir)})
 	require.NoError(t, err)
 	require.NoError(t, set.Reconcile(t.Context(), dbadapter.New(db), nil))
 	require.NoError(t, set.Close())
@@ -2666,6 +2818,9 @@ func TestReinitializeAPIServersPreservesListenerFactory(t *testing.T) {
 	)
 	WithStorageMode(StorageModeAPI)(&n.config)
 	n.config.syncCompatFields()
+	storageFeatures, err := n.storagePlan()
+	require.NoError(t, err)
+	n.config.storageFeatures = storageFeatures
 	indexer, err := dbtest.NewDatabase(t, &database.Config{})
 	require.NoError(t, err)
 	store, err := indexerdb.NewStore(indexer, indexer, 10)

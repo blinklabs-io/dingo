@@ -62,8 +62,13 @@ type AccountInactivityActivationReader interface {
 
 // failAccountStaging stops the live UTxO set from following the ledger
 // when it cannot apply an account change the metadata store accepted: the
-// two disagree, and startup rebuilds or resumes the set.
-func (ls *LedgerState) failAccountStaging(err error) {
+// two disagree, and startup rebuilds or resumes the set. A fork candidate
+// validation that fails this way rejects the candidate instead: its staging
+// is discarded and must never stop the live set.
+func (ls *LedgerState) failAccountStaging(txn ledgerdb.Txn, err error) {
+	if ls.recordValidationFailure(txn, err) {
+		return
+	}
 	ls.failUtxoSet(
 		0,
 		"live UTxO set cannot apply an account change; it stops following the ledger until startup resumes it",
@@ -71,11 +76,11 @@ func (ls *LedgerState) failAccountStaging(err error) {
 	)
 }
 
-// failDrainedAccountStaging stops the set when an account change cannot be
+// failUnservedAccountStaging stops the set when an account change cannot be
 // staged: the set is the only copy, so the change would be lost.
-func (ls *LedgerState) failDrainedAccountStaging() {
+func (ls *LedgerState) failUnservedAccountStaging(txn ledgerdb.Txn) {
 	if !ls.utxoSetFailed.Load() {
-		ls.failAccountStaging(ledgerStateUnserved(nodesettings.FamilyAccounts))
+		ls.failAccountStaging(txn, ledgerStateUnserved(nodesettings.FamilyAccounts))
 	}
 }
 
@@ -184,7 +189,7 @@ func (ls *LedgerState) stageRewardCreditsAs(
 ) {
 	r := ls.accountReader(txn)
 	if r == nil || ls.utxoSetFailed.Load() {
-		ls.failDrainedAccountStaging()
+		ls.failUnservedAccountStaging(txn)
 		return
 	}
 	for _, c := range credits {
@@ -199,7 +204,7 @@ func (ls *LedgerState) stageRewardCreditsAs(
 			PostSnapshot: postSnapshot,
 		}, c.Amount)
 		if err != nil {
-			ls.failAccountStaging(err)
+			ls.failAccountStaging(txn, err)
 			return
 		}
 	}
@@ -316,7 +321,7 @@ func (ls *LedgerState) stageAccountTransaction(
 		return nil
 	}
 	if r == nil || ls.utxoSetFailed.Load() {
-		ls.failDrainedAccountStaging()
+		ls.failUnservedAccountStaging(txn)
 		return nil
 	}
 	err := ls.stageAccountTransactionErr(
@@ -326,7 +331,7 @@ func (ls *LedgerState) stageAccountTransaction(
 		return err
 	}
 	if err != nil {
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 	}
 	return nil
 }
@@ -671,23 +676,23 @@ func (ls *LedgerState) stagePoolReap(
 		return
 	}
 	if r == nil || ls.utxoSetFailed.Load() {
-		ls.failDrainedAccountStaging()
+		ls.failUnservedAccountStaging(txn)
 		return
 	}
 	refs, err := r.AccountsByPool(pool)
 	if err != nil {
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 		return
 	}
 	refs, err = ls.accountCandidates(r, txn, refs, refSet(refs))
 	if err != nil {
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 		return
 	}
 	for _, ref := range refs {
 		a, err := ls.accountView(r, txn, ref.Tag, ref.Key)
 		if err != nil {
-			ls.failAccountStaging(err)
+			ls.failAccountStaging(txn, err)
 			return
 		}
 		if a == nil || !bytes.Equal(a.Pool, pool) {
@@ -737,7 +742,7 @@ func (ls *LedgerState) stageAccountExpirationsWithActivation(
 	if r == nil {
 		// The set is the only copy, so an expiration it cannot take would
 		// be lost.
-		ls.failAccountStaging(ledgerStateUnserved(nodesettings.FamilyAccounts))
+		ls.failAccountStaging(txn, ledgerStateUnserved(nodesettings.FamilyAccounts))
 		return nil
 	}
 	if ls.utxoSetFailed.Load() {
@@ -747,12 +752,12 @@ func (ls *LedgerState) stageAccountExpirationsWithActivation(
 	if activeOnly {
 		committed, err := r.ActiveAccountRefs()
 		if err != nil {
-			ls.failAccountStaging(err)
+			ls.failAccountStaging(txn, err)
 			return nil
 		}
 		committed, err = ls.accountCandidates(r, txn, committed, refSet(committed))
 		if err != nil {
-			ls.failAccountStaging(err)
+			ls.failAccountStaging(txn, err)
 			return nil
 		}
 		refs = committed
@@ -761,7 +766,7 @@ func (ls *LedgerState) stageAccountExpirationsWithActivation(
 	for _, ref := range refs {
 		a, err := ls.accountView(r, txn, ref.Tag, ref.Key)
 		if err != nil {
-			ls.failAccountStaging(err)
+			ls.failAccountStaging(txn, err)
 			return nil
 		}
 		if a == nil || (activeOnly && !a.Active) {

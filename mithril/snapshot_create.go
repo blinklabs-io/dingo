@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
@@ -138,7 +139,7 @@ func CreateSnapshot(
 	}
 
 	lastNum := uint64(certifiedTrios - 1) // #nosec G115 -- count is positive
-	digests, digestByName, immutableBytes, err := digestImmutables(
+	digests, digestByName, archiveSums, immutableBytes, err := digestImmutables(
 		root, certifiedTrios,
 	)
 	if err != nil {
@@ -235,6 +236,7 @@ func CreateSnapshot(
 	for num := range lastNum + 1 {
 		if err := putImmutableArchive(
 			ctx, cfg.Store, root, artifact.Hash, num, digestByName,
+			archiveSums,
 		); err != nil {
 			return nil, err
 		}
@@ -483,23 +485,37 @@ func removeIncompleteSnapshot(
 func digestImmutables(
 	root *os.Root,
 	count int,
-) ([]CardanoDatabaseDigestEntry, map[string]string, int64, error) {
-	immutable, err := root.OpenRoot(immutableDirName)
+) ([]CardanoDatabaseDigestEntry, map[string]string, map[uint64]string, int64, error) {
+	immutableRoot, err := root.OpenRoot(immutableDirName)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf(
+		return nil, nil, nil, 0, fmt.Errorf(
 			"opening immutable directory: %w", err,
 		)
 	}
-	defer immutable.Close()
+	defer immutableRoot.Close()
 	entries := make([]CardanoDatabaseDigestEntry, 0, 3*count)
 	byName := make(map[string]string, 3*count)
+	archiveSums := map[uint64]string{}
 	var total int64
-	for num := range count {
+	for num := range uint64(count) { // #nosec G115 -- count is non-negative
+		files, archiveSum, err := archivedImmutableFiles(immutableRoot, num)
+		if err != nil {
+			return nil, nil, nil, 0, err
+		}
+		if files != nil {
+			archiveSums[num] = archiveSum
+		}
 		for _, ext := range immutableFileExtensions {
 			name := fmt.Sprintf("%05d.%s", num, ext)
-			sum, size, err := sha256FileInRoot(immutable, name)
+			var sum string
+			var size int64
+			if files != nil {
+				sum, size, err = sha256Reader(bytes.NewReader(files[ext]), name)
+			} else {
+				sum, size, err = sha256FileInRoot(immutableRoot, name)
+			}
 			if err != nil {
-				return nil, nil, 0, fmt.Errorf(
+				return nil, nil, nil, 0, fmt.Errorf(
 					"digesting %s: %w", name, err,
 				)
 			}
@@ -511,7 +527,40 @@ func digestImmutables(
 			total += size
 		}
 	}
-	return entries, byName, total, nil
+	return entries, byName, archiveSums, total, nil
+}
+
+// archivedImmutableFiles returns the three files of immutable number num,
+// keyed by extension, and the SHA-256 of its archive when the ImmutableDB
+// keeps it as an archive (see immutable.ArchiveExtension). It returns nil
+// when the files are plain.
+func archivedImmutableFiles(
+	immutableRoot *os.Root,
+	num uint64,
+) (map[string][]byte, string, error) {
+	plain := fmt.Sprintf("%05d.%s", num, immutableFileExtensions[0])
+	if _, err := immutableRoot.Stat(plain); err == nil {
+		return nil, "", nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, "", err
+	}
+	name := immutable.ArchiveName(num)
+	data, err := immutableRoot.ReadFile(name)
+	if err != nil {
+		return nil, "", fmt.Errorf("reading %s: %w", name, err)
+	}
+	chunk, primary, secondary, err := immutable.ReadChunkArchive(
+		bytes.NewReader(data), num,
+	)
+	if err != nil {
+		return nil, "", fmt.Errorf("decoding %s: %w", name, err)
+	}
+	sum := sha256.Sum256(data)
+	return map[string][]byte{
+		"chunk":     chunk,
+		"primary":   primary,
+		"secondary": secondary,
+	}, hex.EncodeToString(sum[:]), nil
 }
 
 // countImmutableTrios returns how many immutable file numbers the immutable
@@ -526,6 +575,15 @@ func countImmutableTrios(root *os.Root) (int, error) {
 	for _, e := range entries {
 		num, ok := immutableFileNumberFromName(e.Name())
 		if !ok || e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), immutable.ArchiveExtension) {
+			if byNum[num] == nil {
+				byNum[num] = map[string]bool{}
+			}
+			for _, ext := range immutableFileExtensions {
+				byNum[num][ext] = true
+			}
 			continue
 		}
 		ext := strings.TrimPrefix(path.Ext(e.Name()), ".")
@@ -673,7 +731,11 @@ func putImmutableArchive(
 	prefix string,
 	num uint64,
 	digests map[string]string,
+	archiveSums map[uint64]string,
 ) error {
+	if want, ok := archiveSums[num]; ok {
+		return putStoredArchive(ctx, store, root, prefix, num, want)
+	}
 	entries := make([]tarEntry, 0, len(immutableFileExtensions))
 	for _, ext := range immutableFileExtensions {
 		rel := immutableDirName + "/" + fmt.Sprintf("%05d.%s", num, ext)
@@ -689,6 +751,41 @@ func putImmutableArchive(
 		return fmt.Errorf("writing immutable archive %05d: %w", num, err)
 	}
 	return checkArchived(entries, digests)
+}
+
+// putStoredArchive uploads the archive the ImmutableDB already keeps for
+// immutable number num as it is, and fails when its bytes are no longer the
+// ones digested, so a rewritten archive cannot be published under digests
+// that do not describe it.
+func putStoredArchive(
+	ctx context.Context,
+	store ArtifactStore,
+	root *os.Root,
+	prefix string,
+	num uint64,
+	want string,
+) error {
+	rel := immutableDirName + "/" + immutable.ArchiveName(num)
+	f, err := root.Open(rel)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", rel, err)
+	}
+	defer f.Close()
+	hasher := sha256.New()
+	if err := store.Put(
+		ctx,
+		path.Join(prefix, immutableArchiveName(num)),
+		io.TeeReader(f, hasher),
+	); err != nil {
+		return fmt.Errorf("writing immutable archive %05d: %w", num, err)
+	}
+	if got := hex.EncodeToString(hasher.Sum(nil)); got != want {
+		return fmt.Errorf(
+			"%s changed while archiving: digested %s, archived %s",
+			rel, want, got,
+		)
+	}
+	return nil
 }
 
 // checkArchived reports a file whose archived bytes differ from the digest

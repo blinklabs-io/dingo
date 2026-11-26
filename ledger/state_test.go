@@ -8508,7 +8508,7 @@ func TestHealEmptyLabNoncesSkipsMissingCandidateBeforeBoundaryLookup(
 // not "repair" the first Praos epoch's nil lab to the last pre-Praos (Byron)
 // block's parent hash. cardano-ledger initializes praosStateLastEpochBlockNonce
 // to NeutralNonce at the Praos start (initialChainDepState csLabNonce =
-// NeutralNonce), and the initial-epoch branch of calculateEpochNonce stores a
+// NeutralNonce), and the initial-epoch branch of CalculateEpochNonce stores a
 // nil lab — rewriting it would diverge the next boundary's eta on any chain
 // with a Byron era (mainnet, preprod).
 func TestHealEmptyLabNoncesLeavesFirstPraosEpochLabNeutral(t *testing.T) {
@@ -10524,9 +10524,9 @@ func TestLedgerReadChainIteratorHoldsGatherMutexAcrossCoalesceWait(
 }
 
 // TestLedgerReadChainIteratorTakesNoLedgerLockInsideGatherSpan pins the other
-// half of that bound. ARCHITECTURE.md states a worst case for how long a
-// rollback blocked on blockPipelineGatherMutex waits, derived purely from
-// batchSize, gatherCoalesceMaxAttempts and gatherCoalesceRetryInterval. That
+// half of the coalescing bound: a rollback's wait on blockPipelineGatherMutex
+// is derived from batchSize, gatherCoalesceMaxAttempts and
+// gatherCoalesceRetryInterval. That
 // figure only holds if nothing inside the held span can block on anything
 // else. ls.isNearTip reaches calculateStabilityWindow, which takes ls.RLock,
 // and Go's RWMutex parks a reader behind a pending writer -- so evaluating it
@@ -10652,7 +10652,7 @@ func (p *gatherSpanLockProbe) counts() (int, int, int) {
 // (clientConnIdMutex), and ConnectionLiveFunc reaches
 // ConnectionManager.GetConnectionById (connectionsMutex). Evaluating it inside
 // the span that holds blockPipelineGatherMutex therefore folds three more
-// mutexes into a figure ARCHITECTURE.md derives purely from batchSize and the
+// mutexes into a bound derived purely from batchSize and the
 // gatherCoalesce* settings.
 //
 // The upstream tip is read once per gather pass, alongside the stability
@@ -10730,7 +10730,7 @@ func TestLedgerReadChainIteratorTakesNoConnectionLocksInsideGatherSpan(
 		"UpstreamTipSlot ran with blockPipelineGatherMutex held, so the "+
 			"liveLifecycleMu, clientConnIdMutex and connectionsMutex "+
 			"acquisitions it makes are inside the span whose wait "+
-			"ARCHITECTURE.md bounds from batchSize and the gatherCoalesce* "+
+			"coalescing bounds from batchSize and the gatherCoalesce* "+
 			"settings alone",
 	)
 }
@@ -10876,7 +10876,7 @@ func readCommitBatchBlocksSampleCount(
 // was held. A real iterator's Next takes chain.Chain's tip mutex and the
 // chain manager's read lock (chain.Chain.iterNext), so each in-span probe is
 // one acquisition of the lock the block-append path holds -- the term
-// ARCHITECTURE.md's coalescing bound has to account for separately from the
+// the coalescing bound has to account for separately from the
 // sleeping, because unlike the near-tip terms it cannot be hoisted out of
 // the span.
 type countingGapLedgerReadIterator struct {
@@ -10923,7 +10923,7 @@ func (c *countingGapLedgerReadIterator) counts() (int, int) {
 }
 
 // TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass pins the
-// multiplier in the coalescing bound ARCHITECTURE.md states. The sleeping is
+// multiplier in the coalescing bound. The sleeping is
 // bounded by the gatherCoalesce* settings, but each retry also re-probes the
 // iterator while blockPipelineGatherMutex is still held, and that probe
 // reaches chain.Chain.iterNext's c.mutex -- the lock addBlockInternal and
@@ -10982,7 +10982,7 @@ func TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass(
 	require.Equal(
 		t, attempts+1, probes,
 		"a gap that never resolves must cost one chain probe to find the "+
-			"tip plus one per allowed retry; ARCHITECTURE.md's worst case "+
+			"tip plus one per allowed retry; the worst case "+
 			"counts gatherCoalesceMaxAttempts probes per pass on that basis",
 	)
 	require.Equal(
@@ -11265,7 +11265,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			require.NoError(t, err)
 			ls.metrics.init(prometheus.NewRegistry())
 			t.Cleanup(func() { require.NoError(t, ls.Close()) })
-			cutoff, err := ls.rewardPrefilterSlot(ls.ledgerDB(), nil, 3)
+			cutoff, err := ls.engine().RewardPrefilterSlot(ls.ledgerDB(), nil, 3)
 			require.NoError(t, err)
 			ancestor := chain.RawBlock{
 				Slot: cutoff + 1, Hash: testHashBytes("reward-ancestor"),
@@ -11304,7 +11304,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			require.Equal(t, uint64(1_200), outputs[0].BoundarySlot)
 			txn := db.Transaction(context.Background(), false)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				app, ok, err := ls.precomputedStakeRewardApplication(
+				app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 					context.Background(),
 					txn,
 					4,

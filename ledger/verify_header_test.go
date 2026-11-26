@@ -43,6 +43,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ledgersnapshot "github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -6185,11 +6186,11 @@ func TestGenesisOverlayUnresolvablePParamsDefers(t *testing.T) {
 // TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover
 // mirrors the basic bootstrap scenario but exercises the header
 // verification path (advanceEpochCache → computeEpochNonceForSlot)
-// instead of the rollover path (calculateEpochNonce). The two paths
+// instead of the rollover path (CalculateEpochNonce). The two paths
 // must agree: header verification of any block in the new epoch
 // uses the cached epoch-nonce computed by computeEpochNonceForSlot,
 // while the persisted epoch row written by processEpochRollover uses
-// calculateEpochNonce. Disagreement means peer headers verifying
+// CalculateEpochNonce. Disagreement means peer headers verifying
 // against one nonce while we recompute another — the freeze pattern
 // seen when cached and calculated nonces diverge.
 func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
@@ -6309,7 +6310,7 @@ func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 		t,
 		db.Transaction(context.Background(), true).
 			Do(func(txn *database.Txn) error {
-				n, ev, c, lab, err := ls.calculateEpochNonce(
+				n, ev, c, lab, err := ls.engine().CalculateEpochNonce(
 					context.Background(),
 					txn,
 					epochEnd,
@@ -6541,7 +6542,7 @@ func TestEnsureEpochForSlotJumpsEmptyEpochsOnce(t *testing.T) {
 	require.Equal(t, candidate, target.CandidateNonce)
 	require.Equal(t, carriedLab, target.LastEpochBlockNonce)
 
-	expectedNonce, err := assembleEpochNonce(candidate, carriedLab, nil)
+	expectedNonce, err := epochengine.AssembleEpochNonce(candidate, carriedLab, nil)
 	require.NoError(t, err)
 	require.Equal(t, expectedNonce, target.Nonce)
 	require.Len(t, ls.loadConsensusSnapshot().epochCache, 2,
@@ -6613,7 +6614,7 @@ func TestComputeEpochNonceAfterSparseJumpKeepsPublishedExtraEntropy(
 		cache[1],
 	)
 	require.NoError(t, err)
-	want, err := assembleEpochNonce(candidate, lab, entropy)
+	want, err := epochengine.AssembleEpochNonce(candidate, lab, entropy)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 }
@@ -6749,7 +6750,7 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 		t,
 		db.Transaction(context.Background(), true).
 			Do(func(txn *database.Txn) error {
-				n, _, c, lab, err := ls.calculateEpochNonce(
+				n, _, c, lab, err := ls.engine().CalculateEpochNonce(
 					context.Background(),
 					txn,
 					epochEnd,
@@ -6873,7 +6874,7 @@ func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
 		t,
 		db.Transaction(context.Background(), true).
 			Do(func(txn *database.Txn) error {
-				n, ev, c, lab, err := ls.calculateEpochNonce(
+				n, ev, c, lab, err := ls.engine().CalculateEpochNonce(
 					context.Background(),
 					txn,
 					500,
@@ -7077,7 +7078,7 @@ func TestComputeEpochNonceForSlotFoldsExtraEntropy(t *testing.T) {
 // the imported (frozen) CandidateNonce — NOT the imported EvolvingNonce,
 // and NOT a value re-derived from a pre-cutoff block (there are none with
 // stored nonces; pre-cutoff blocks were imported as immutable). Both the
-// rollover path (calculateEpochNonce) and the header-verification path
+// rollover path (CalculateEpochNonce) and the header-verification path
 // (computeEpochNonceForSlot) must agree, because the first header of the
 // new epoch is verified against the eagerly-cached value.
 func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
@@ -7202,7 +7203,7 @@ func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
 		t,
 		db.Transaction(context.Background(), true).
 			Do(func(txn *database.Txn) error {
-				n, ev, c, lab, err := ls.calculateEpochNonce(
+				n, ev, c, lab, err := ls.engine().CalculateEpochNonce(
 					context.Background(),
 					txn,
 					epochEnd,
@@ -7696,7 +7697,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		ls.epochCache[1].EraId,
 	)
 	require.NoError(t, err)
-	forkEpochNonce, err := assembleEpochNonce(
+	forkEpochNonce, err := epochengine.AssembleEpochNonce(
 		forkCandidate,
 		ls.epochCache[0].LastEpochBlockNonce,
 		extraEntropy,
@@ -7926,7 +7927,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		),
 		BlockNumber: lateAnchor.block.BlockNumber(),
 	})
-	frozenEpochNonce, err := assembleEpochNonce(
+	frozenEpochNonce, err := epochengine.AssembleEpochNonce(
 		localCandidate,
 		ls.epochCache[0].LastEpochBlockNonce,
 		extraEntropy,
@@ -8224,7 +8225,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		ls.epochCache[2].EraId,
 	)
 	require.NoError(t, err)
-	multiEpochTargetNonce, err := assembleEpochNonce(
+	multiEpochTargetNonce, err := epochengine.AssembleEpochNonce(
 		middleCandidateNonce,
 		lateAnchor.block.Header().PrevHash().Bytes(),
 		epoch7ExtraEntropy,
@@ -8306,7 +8307,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		postCutoffHeader.block.Header(),
 	)
 	require.NoError(t, err)
-	epoch8CutoffNonce, err := assembleEpochNonce(
+	epoch8CutoffNonce, err := epochengine.AssembleEpochNonce(
 		middleCandidateNonce,
 		lateAnchor.block.Header().PrevHash().Bytes(),
 		epoch7ExtraEntropy,
@@ -8333,7 +8334,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		ls.epochCache[3].EraId,
 	)
 	require.NoError(t, err)
-	epoch8Nonce, err := assembleEpochNonce(
+	epoch8Nonce, err := epochengine.AssembleEpochNonce(
 		epoch7CandidateNonce,
 		multiEpochForkMiddle.block.Hash().Bytes(),
 		epoch8ExtraEntropy,
@@ -10050,4 +10051,13 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsDistributionFrozenByAnEmptyEp
 		assert.LessOrEqual(t, seenBefore, uint64(39),
 			"%s: mark[39], the frozen distribution, must be retained", tc.name)
 	}
+}
+
+// consumeDeferredHeaderValidation removes point's deferred marker and reports
+// whether there was one.
+func (ls *LedgerState) consumeDeferredHeaderValidation(
+	point ocommon.Point,
+) bool {
+	_, ok := ls.takeDeferredHeaderValidation(point)
+	return ok
 }

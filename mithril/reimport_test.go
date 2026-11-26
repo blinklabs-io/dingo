@@ -38,7 +38,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// reimportFixture is a drained database whose set holds the ledger state at
+// reimportFixture is a database whose set holds the ledger state at
 // slot 1000, with a fake aggregator listing the artifacts a re-import tries.
 type reimportFixture struct {
 	db       *database.Database
@@ -82,9 +82,7 @@ func newReimportFixtureWith(
 	if setup != nil {
 		setup(db)
 	}
-	set, err := utxoset.Open(utxoset.Config{
-		Dir: t.TempDir(), Only: true, Authoritative: true,
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	f := &reimportFixture{
@@ -100,7 +98,6 @@ func newReimportFixtureWith(
 	)
 	require.NoError(t, err)
 	require.NoError(t, set.LoadLedgerState(t.Context(), dbadapter.New(db)))
-	set.ServeLedgerOnly()
 	return f
 }
 
@@ -149,7 +146,7 @@ func (f *reimportFixture) config(t *testing.T, localTip uint64) ReimportConfig {
 
 // TestReimportLedgerStateImportsTheNewestStateOnTheLocalChain requires a
 // re-import to skip a state that is not a block of the local chain, load the
-// next one into the drained database's set, download no immutable file, and
+// next one into the database's set, download no immutable file, and
 // leave the latch and the marks as an import does.
 func TestReimportLedgerStateImportsTheNewestStateOnTheLocalChain(t *testing.T) {
 	t.Parallel()

@@ -656,8 +656,7 @@ func TestDecodeReadChainBatchStalledSequenceBoundsValidation(
 // TestRecordBlockPipelineErrorClassificationDeferredIsNotUnexpected is a
 // regression test for an observability gap:
 // errHeaderVerificationDeferred (the pipeline's epoch cache has not yet
-// caught up with an already-committed block -- ARCHITECTURE.md's
-// "resolves once the epoch cache catches up" case) must be counted
+// caught up with an already-committed block) must be counted
 // separately from genuine decode/validate/apply problems, not folded into
 // blockPipelineUnexpectedErrors alongside them.
 func TestRecordBlockPipelineErrorClassificationDeferredIsNotUnexpected(

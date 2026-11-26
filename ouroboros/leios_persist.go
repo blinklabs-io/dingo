@@ -243,20 +243,23 @@ func (o *Ouroboros) startLeiosPersistenceGC(
 	o.leiosPersistGCOnce.Do(func() {
 		stop := make(chan struct{})
 		done := make(chan struct{})
+		ctx, cancel := context.WithCancel(o.leiosValidationCtx)
 		o.leiosPersistGCMu.Lock()
 		o.leiosPersistMu.Lock()
 		if o.leiosPersistClosed {
 			o.leiosPersistMu.Unlock()
 			o.leiosPersistGCMu.Unlock()
+			cancel()
 			return
 		}
 		o.leiosPersistGCStop = stop
+		o.leiosPersistGCCancel = cancel
 		o.leiosPersistGCDone = done
 		o.leiosPersistGCStarted.Store(true)
 		o.leiosPersistMu.Unlock()
 		o.leiosPersistGCMu.Unlock()
 		go o.leiosPersistGCLoop(
-			o.leiosValidationCtx,
+			ctx,
 			stop,
 			done,
 			initialMaxSlot,
@@ -274,27 +277,13 @@ func (o *Ouroboros) leiosPersistenceGCDisabled() bool {
 }
 
 func (o *Ouroboros) leiosPersistGCLoop(
-	parentCtx context.Context,
+	ctx context.Context,
 	stop <-chan struct{},
 	done chan<- struct{},
 	initialMaxSlot uint64,
 	initialMaxKnown bool,
 ) {
 	defer close(done)
-	ctx, cancel := context.WithCancel(parentCtx)
-	watcherDone := make(chan struct{})
-	go func() {
-		select {
-		case <-stop:
-			cancel()
-		case <-watcherDone:
-		}
-	}()
-	defer func() {
-		close(watcherDone)
-		cancel()
-	}()
-
 	var initialMax *uint64
 	if initialMaxKnown {
 		initialMax = &initialMaxSlot
@@ -308,6 +297,8 @@ func (o *Ouroboros) leiosPersistGCLoop(
 	for {
 		select {
 		case <-stop:
+			return
+		case <-ctx.Done():
 			return
 		case <-signal:
 			o.runLeiosPersistenceGC(ctx, nil)
@@ -529,9 +520,14 @@ func (o *Ouroboros) requestLeiosPersistenceGCStop() (<-chan struct{}, bool) {
 	}
 	o.leiosPersistGCMu.Lock()
 	stop := o.leiosPersistGCStop
+	cancel := o.leiosPersistGCCancel
 	done := o.leiosPersistGCDone
 	o.leiosPersistGCStopOnce.Do(func() { close(stop) })
 	o.leiosPersistGCMu.Unlock()
+	// Cancel here rather than waiting for the worker to schedule a watcher.
+	if cancel != nil {
+		cancel()
+	}
 	return done, true
 }
 

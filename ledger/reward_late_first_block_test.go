@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -34,20 +35,20 @@ import (
 func TestLateFirstRewardBlock(t *testing.T) {
 	t.Parallel()
 	// RUPD waits while slot <= start + window.
-	require.False(t, lateFirstRewardBlock(340, 300, 40))
-	require.True(t, lateFirstRewardBlock(341, 300, 40))
-	require.False(t, lateFirstRewardBlock(500, 300, 0))
+	require.False(t, epochengine.LateFirstRewardBlock(340, 300, 40))
+	require.True(t, epochengine.LateFirstRewardBlock(341, 300, 40))
+	require.False(t, epochengine.LateFirstRewardBlock(500, 300, 0))
 }
 
 func TestReplayedStakeRewardFees(t *testing.T) {
 	t.Parallel()
-	got, err := replayedStakeRewardFees(0, 3_000, 2_400)
+	got, err := epochengine.ReplayedStakeRewardFees(0, 3_000, 2_400)
 	require.NoError(t, err)
 	require.Equal(t, uint64(600), got)
-	got, err = replayedStakeRewardFees(500, 3_000, 2_400)
+	got, err = epochengine.ReplayedStakeRewardFees(500, 3_000, 2_400)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1_100), got)
-	_, err = replayedStakeRewardFees(100, 200, 301)
+	_, err = epochengine.ReplayedStakeRewardFees(100, 200, 301)
 	require.Error(t, err)
 }
 
@@ -98,7 +99,7 @@ func newLateFirstBlockTestLedger(
 		}, nil),
 	)))
 	ls.config.CardanoNodeConfig = cfg
-	require.Equal(t, uint64(40), ls.rewardUpdateStabilityWindow())
+	require.Equal(t, uint64(40), ls.engine().RewardUpdateStabilityWindow())
 	return ls, db
 }
 
@@ -241,7 +242,7 @@ func setupLateFirstBlockBoundaryFive(
 	}, nil))
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 4, 400, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 4, 400, false)
 	}))
 	settleRewardCredits(t, ls)
 	require.NoError(t, seedDB(t, db).SetEpoch(
@@ -279,7 +280,7 @@ func applyBoundaryFive(t *testing.T, ls *LedgerState) {
 	t.Helper()
 	txn := ls.db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 5, 500, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 5, 500, false)
 	}))
 	settleRewardCredits(t, ls)
 }
@@ -317,7 +318,7 @@ func TestApplyStakeRewardsReplaysRoundAfterLateFirstBlock(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		ended, err := ls.ledgerDB().GetEpoch(4, txn)
 		require.NoError(t, err)
-		return ls.saveRewardAdaPotsForEpoch(txn, 5, *ended, 500)
+		return ls.engine().SaveRewardAdaPotsForEpoch(txn, 5, *ended, 500)
 	}))
 	pots, err = seedDB(t, db).GetRewardAdaPots(5, nil)
 	require.NoError(t, err)
@@ -344,7 +345,7 @@ func TestApplyStakeRewardsEarlyFirstBlockAppliesOwnRound(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		ended, err := ls.ledgerDB().GetEpoch(4, txn)
 		require.NoError(t, err)
-		return ls.saveRewardAdaPotsForEpoch(txn, 5, *ended, 500)
+		return ls.engine().SaveRewardAdaPotsForEpoch(txn, 5, *ended, 500)
 	}))
 	pots, err := seedDB(t, db).GetRewardAdaPots(5, nil)
 	require.NoError(t, err)
@@ -365,7 +366,7 @@ func TestReplaysPreviousStakeRewardRoundNeedsContiguousEpochs(t *testing.T) {
 	seedLateFirstBlockBlocks(t, db, 250, 450)
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		replay, err := ls.replaysPreviousStakeRewardRound(txn, 5)
+		replay, err := ls.engine().ReplaysPreviousStakeRewardRound(txn, 5)
 		require.NoError(t, err)
 		require.False(t, replay)
 		return nil
@@ -389,14 +390,14 @@ func TestReplaysPreviousStakeRewardRoundReadsBlocksInTransaction(
 	require.NoError(t, rtxn.Do(func(txn *database.Txn) error {
 		require.NotNil(t, txn.Blob())
 		seedLateFirstBlockBlocks(t, db, 350, 450)
-		replay, err := ls.replaysPreviousStakeRewardRound(txn, 5)
+		replay, err := ls.engine().ReplaysPreviousStakeRewardRound(txn, 5)
 		require.NoError(t, err)
 		require.False(t, replay)
 		return nil
 	}))
 	ftxn := db.Transaction(context.Background(), false)
 	require.NoError(t, ftxn.Do(func(txn *database.Txn) error {
-		replay, err := ls.replaysPreviousStakeRewardRound(txn, 5)
+		replay, err := ls.engine().ReplaysPreviousStakeRewardRound(txn, 5)
 		require.NoError(t, err)
 		require.True(t, replay)
 		return nil
@@ -451,7 +452,7 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 5, 500, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 5, 500, false)
 	}))
 	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
@@ -474,14 +475,14 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 	rtxn := db.Transaction(context.Background(), false)
 	require.NoError(t, rtxn.Do(func(txn *database.Txn) error {
 		var err error
-		replay, err = ls.replaysPreviousStakeRewardRound(txn, 6)
+		replay, err = ls.engine().ReplaysPreviousStakeRewardRound(txn, 6)
 		return err
 	}))
 	require.True(t, replay)
 
 	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 6, 600, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 6, 600, false)
 	}))
 	state, err = seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
@@ -493,7 +494,7 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		ended, err := ls.ledgerDB().GetEpoch(5, txn)
 		require.NoError(t, err)
-		return ls.saveRewardAdaPotsForEpoch(txn, 6, *ended, 600)
+		return ls.engine().SaveRewardAdaPotsForEpoch(txn, 6, *ended, 600)
 	}))
 	pots, err := seedDB(t, db).GetRewardAdaPots(6, nil)
 	require.NoError(t, err)

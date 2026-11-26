@@ -38,22 +38,22 @@ import (
 // StorageSelections identifies the providers and provider-owned
 // configuration for the selectable storage capabilities.
 type StorageSelections struct {
-	// SplitIndexer keeps a client/server API database in place as IndexerDB
+	// IndexerDB keeps a client/server API database in place as IndexerDB
 	// and selects the provider-owned consensus namespace beside it.
-	SplitIndexer bool
-	Blob         plugin.Selection
-	Metadata     plugin.Selection
+	IndexerDB bool
+	Blob      plugin.Selection
+	Metadata  plugin.Selection
 }
 
 // ConfiguredStorageSelections returns the storage selections of cfg. Every
 // open of a node's own stores goes through it: a selection that omits
-// SplitIndexer opens an adopted PostgreSQL or MySQL IndexerDB as the
+// IndexerDB opens an adopted PostgreSQL or MySQL IndexerDB as the
 // consensus store, which latches core mode into it.
 func ConfiguredStorageSelections(cfg *config.Config) StorageSelections {
 	return StorageSelections{
-		SplitIndexer: cfg.SplitIndexer() || cfg.ServerCoreNamespace,
-		Blob:         cfg.Plugins.Storage.Blob,
-		Metadata:     cfg.Plugins.Storage.Metadata,
+		IndexerDB: cfg.HasIndexerDB() || cfg.ServerCoreNamespace,
+		Blob:      cfg.Plugins.Storage.Blob,
+		Metadata:  cfg.Plugins.Storage.Metadata,
 	}
 }
 
@@ -76,10 +76,12 @@ type StorageDependencies struct {
 	// MigrateReleased, when set, is run by OpenDatabase before it opens a
 	// ledger database: it moves the ledger state of a v0.94.2 database out of
 	// the metadata store openMetadata opens (see nodestorage.ReleasedMigration).
+	// The resolved stores include the provider needed by existing ImmutableDB
+	// markers; their lifecycle remains owned by the host.
 	// Without it, a v0.94.2 database fails to open.
 	MigrateReleased func(
 		ctx context.Context,
-		blobStore blob.BlobStore,
+		stores database.Stores,
 		openMetadata func(context.Context) (metadata.MetadataStore, func() error, error),
 	) error
 }
@@ -165,7 +167,7 @@ func ResolveMetadata(
 		selections.Metadata.Provider,
 		selections.Metadata.Config,
 		metadata.ProviderDependencies{
-			CoreNamespace: selections.SplitIndexer &&
+			CoreNamespace: selections.IndexerDB &&
 				(selections.Metadata.Provider == "postgres" || selections.Metadata.Provider == "mysql"),
 			DataDir:             deps.DataDir,
 			StorageMode:         deps.StorageMode,
@@ -223,7 +225,7 @@ const IndexerDirName = "indexer"
 // from the released metadata selection. SQLite gets its own directory. On
 // server stores the released database remains the IndexerDB while
 // ResolveStorage selects the provider-owned consensus namespace, so a
-// selection without SplitIndexer would share its tables with the consensus
+// selection without IndexerDB would share its tables with the consensus
 // store and is refused.
 func IndexerMetadataSelection(
 	selections StorageSelections,
@@ -241,7 +243,7 @@ func IndexerMetadataSelection(
 		if dataDir != "" {
 			indexerDir = filepath.Join(dataDir, IndexerDirName)
 		}
-	} else if !selections.SplitIndexer {
+	} else if !selections.IndexerDB {
 		return plugin.Selection{}, "", fmt.Errorf(
 			"the %s IndexerDB needs the consensus store in its own "+
 				"namespace: the storage selection does not select it",
@@ -298,13 +300,13 @@ const (
 )
 
 // OpenIndexerDatabase composes the IndexerDB: its own metadata store, opened
-// in API mode on host, over the consensus database's blob store. The blob
-// view is read-only for blocks and keeps the IndexerDB's offsets under their
-// own key prefix. Its metrics carry role="indexer" and an indexer_ name prefix so they register beside
-// the consensus database's.
+// in API mode on host, which also keeps its UTxO and transaction CBOR
+// entries, reading blocks from the consensus database's block store. Its
+// metrics carry role="indexer" and an indexer_ name prefix so they register
+// beside the consensus database's.
 //
 // The caller closes the returned database before the host stops, and before
-// the consensus database closes the blob store it reads.
+// the consensus database closes the block store it reads.
 func OpenIndexerDatabase(
 	ctx context.Context,
 	host *plugin.Host,
@@ -332,8 +334,12 @@ func OpenIndexerDatabase(
 	cfg.Role = database.RoleIndexer
 	cfg.StorageMode = "api"
 	cfg.PromRegistry = deps.PromRegistry
+	blocks, err := database.NewIndexerBlobStore(consensus.Blob(), store)
+	if err != nil {
+		return nil, err
+	}
 	db, err := database.New(ctx, &cfg, database.Stores{
-		Blob:     blob.NewIndexerStore(consensus.Blob()),
+		Blob:     blocks,
 		Metadata: store,
 	})
 	if err != nil {
@@ -398,7 +404,7 @@ func OpenDatabase(
 	}
 	if deps.MigrateReleased != nil && dbConfig != nil && dbConfig.Role == "" {
 		if err := deps.MigrateReleased(
-			ctx, stores.Blob, ReleasedMetadataOpener(selections, deps),
+			ctx, stores, ReleasedMetadataOpener(selections, deps),
 		); err != nil {
 			return nil, errors.Join(
 				fmt.Errorf("migrate the v0.94.2 ledger state: %w", err),

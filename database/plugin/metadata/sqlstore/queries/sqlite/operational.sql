@@ -49,6 +49,34 @@ ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value;
 DELETE FROM sync_state
 WHERE sync_key = ?;
 
+-- name: GetUtxoOffset :one
+SELECT data
+FROM utxo_offset
+WHERE tx_id = ? AND output_idx = ?;
+
+-- name: SetUtxoOffset :exec
+INSERT INTO utxo_offset (tx_id, output_idx, data)
+VALUES (?, ?, ?)
+ON CONFLICT (tx_id, output_idx) DO UPDATE SET data = excluded.data;
+
+-- name: DeleteUtxoOffset :exec
+DELETE FROM utxo_offset
+WHERE tx_id = ? AND output_idx = ?;
+
+-- name: GetTransactionOffset :one
+SELECT data
+FROM transaction_offset
+WHERE hash = ?;
+
+-- name: SetTransactionOffset :exec
+INSERT INTO transaction_offset (hash, data)
+VALUES (?, ?)
+ON CONFLICT (hash) DO UPDATE SET data = excluded.data;
+
+-- name: DeleteTransactionOffset :exec
+DELETE FROM transaction_offset
+WHERE hash = ?;
+
 -- name: GetEpoch :one
 SELECT id, epoch_id, start_slot, nonce, evolving_nonce, candidate_nonce,
        last_epoch_block_nonce, era_id, slot_length, length_in_slots
@@ -683,9 +711,6 @@ DELETE FROM reward_account_output WHERE captured_slot > ?;
 
 -- name: DeleteRewardStakeInputsBeforeEpoch :exec
 DELETE FROM reward_stake_input WHERE epoch < ?;
-
--- name: DeleteRewardAccountOutputsBeforeEpoch :exec
-DELETE FROM reward_account_output WHERE epoch < ?;
 
 -- name: CreateMidnightAssetCreate :one
 INSERT INTO midnight_asset_creates (

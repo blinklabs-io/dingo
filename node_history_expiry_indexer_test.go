@@ -15,13 +15,13 @@
 package dingo
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,27 +64,41 @@ func TestHistoryExpiryKeepsIndexerOutputsReadable(t *testing.T) {
 	idx, err := dbtest.NewIndexerDatabase(t, ledgerDB, dbtest.IndexerOptions{})
 	require.NoError(t, err)
 
-	const slot uint64 = 100
-	payload := []byte("indexer-output-cbor")
-	blockHash := bytes.Repeat([]byte{0xb7}, 32)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(1)
+	require.NoError(t, err)
+	block := blocks[0]
+	slot := block.SlotNumber()
+	blockHash := block.Hash().Bytes()
+	blockCbor := block.Cbor()
+	produced := block.Transactions()[0].Produced()
+	require.NotEmpty(t, produced)
+	txID := produced[0].Id.Id().Bytes()
+	outputIndex := produced[0].Id.Index()
+	offsets, err := database.NewBlockIndexer(slot, blockHash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
+	require.NoError(t, err)
+	var txHash [32]byte
+	copy(txHash[:], txID)
+	outputOffset, ok := offsets.UtxoOffsets[database.UtxoRef{
+		TxId:      txHash,
+		OutputIdx: produced[0].Id.Index(),
+	}]
+	require.True(t, ok)
+	payload := blockCbor[outputOffset.ByteOffset : outputOffset.ByteOffset+outputOffset.ByteLength]
+	encodedOffset := database.EncodeUtxoOffset(&outputOffset)
 	require.NoError(t, ledgerDB.BlockCreate(models.Block{
-		Slot: slot, Hash: blockHash, Cbor: payload, Type: 1,
+		Slot: slot, Hash: blockHash, Cbor: blockCbor, Type: uint(block.Type()),
 	}, nil))
-	txID := bytes.Repeat([]byte{0xa7}, 32)
-	var hashArr [32]byte
-	copy(hashArr[:], blockHash)
-	offset := database.EncodeUtxoOffset(&database.CborOffset{
-		BlockSlot:  slot,
-		BlockHash:  hashArr,
-		ByteLength: uint32(len(payload)),
-	})
 	require.NoError(t, idx.BlobTxn(true).Do(func(txn *database.Txn) error {
-		return idx.Blob().SetUtxo(txn.Blob(), txID, 0, offset)
+		return idx.Blob().SetUtxo(txn.Blob(), txID, outputIndex, encodedOffset)
 	}))
 	require.NoError(t, idx.MetadataTxn(t.Context(), true).Do(
 		func(txn *database.Txn) error {
 			return idx.Metadata().CreateUtxo(txn.Metadata(), &models.Utxo{
 				TxId:        txID,
+				OutputIdx:   outputIndex,
 				AddedSlot:   slot,
 				DeletedSlot: slot + 50,
 				Amount:      types.Uint64(1),
@@ -101,7 +115,7 @@ func TestHistoryExpiryKeepsIndexerOutputsReadable(t *testing.T) {
 
 	txn := idx.BlobTxn(false)
 	defer txn.Release()
-	got, err := idx.Blob().GetUtxo(txn.Blob(), txID, 0)
+	got, err := idx.Blob().GetUtxo(txn.Blob(), txID, outputIndex)
 	require.NoError(t, err)
 	require.Equal(t, payload, got)
 }

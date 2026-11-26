@@ -521,7 +521,7 @@ func (s stagingLedgerDB) SetGovernanceProposal(
 	proposal *models.GovernanceProposal,
 	txn ledgerdb.Txn,
 ) error {
-	return s.setDrainedProposal(proposal, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	return s.stageProposal(proposal, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 }
 
 func (s stagingLedgerDB) ClearGovernanceProposalRatification(
@@ -531,7 +531,7 @@ func (s stagingLedgerDB) ClearGovernanceProposalRatification(
 	transitionSlot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	return s.clearDrainedRatification( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	return s.stageRatificationClear( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		txHash, actionIndex, transitionSlot, txn,
 	)
 }
@@ -560,7 +560,7 @@ func (s stagingLedgerDB) SetGovernanceVote(
 	vote *models.GovernanceVote,
 	txn ledgerdb.Txn,
 ) error {
-	return s.setDrainedVote(vote, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	return s.stageVote(vote, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 }
 
 func (s stagingLedgerDB) DeleteGovernanceVotesForDrep(
@@ -791,7 +791,7 @@ func (s stagingLedgerDB) GetRatifiedGovernanceProposals(
 func (ls *LedgerState) governanceServing(
 	txn ledgerdb.Txn,
 ) (GovernanceReader, error) {
-	return ls.drainedGovernanceReader(txn)
+	return ls.setGovernanceReader(txn)
 }
 
 // GetLastEnactedGovernanceProposal is answered from the set.

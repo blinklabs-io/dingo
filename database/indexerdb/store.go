@@ -12,10 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package indexerdb is the IndexerDB: chain history and the address and asset
-// projections that serve the APIs. Validation never consults it. It follows
-// the ledger on its own schedule and records its own tip, committed in the
-// same transaction as the rows that tip covers.
 package indexerdb
 
 import (

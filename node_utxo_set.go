@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
@@ -62,20 +61,21 @@ func (n *Node) utxoSetConfig() nodestorage.UtxoSetConfig {
 		DataDir:             n.config.dataDir,
 		Logger:              n.config.logger,
 		CardanoNodeConfig:   n.config.cardanoNodeConfig,
-		RetainRewardRecords: n.splitIndexer(),
+		RetainRewardRecords: n.hasIndexerDB(),
 		CheckpointKeep:      n.config.ledgerUtxoCheckpointKeep,
 	}
 }
 
 // migrateReleasedLedger moves a v0.94.2 database's ledger state out of its
-// metadata store before the ledger's database opens over blobStore.
+// metadata store before the ledger's database opens over the resolved stores.
 func (n *Node) migrateReleasedLedger(
 	ctx context.Context,
-	blobStore blob.BlobStore,
+	stores database.Stores,
 	deps internalplugins.StorageDependencies,
 ) error {
 	m := n.releasedMigration()
-	m.Blob = blobStore
+	m.Blob = stores.Blob
+	m.Immutable = stores.Immutable
 	m.OpenMetadata = internalplugins.ReleasedMetadataOpener(
 		n.storageSelections(), deps,
 	)

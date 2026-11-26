@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -104,13 +105,13 @@ func newNonMyopicFixture(t *testing.T, complete bool) *nonMyopicFixture {
 		Point: ocommon.NewPoint(60, tipHash),
 	}, nil))
 
-	likelihood := rewardPoolLikelihood(1, 100, 0.05)
-	encoded, err := encodeRewardLikelihood(likelihood)
+	likelihood := epochengine.RewardPoolLikelihood(1, 100, 0.05)
+	encoded, err := epochengine.EncodeRewardLikelihood(likelihood)
 	require.NoError(t, err)
-	perfA, err := rewardPerformanceEstimate(likelihood)
+	perfA, err := epochengine.RewardPerformanceEstimate(likelihood)
 	require.NoError(t, err)
-	perfDefault, err := rewardPerformanceEstimate(
-		make([]float32, rewardLikelihoodSampleCount),
+	perfDefault, err := epochengine.RewardPerformanceEstimate(
+		make([]float32, epochengine.RewardLikelihoodSampleCount),
 	)
 	require.NoError(t, err)
 	require.NotEqual(t, perfA, perfDefault)

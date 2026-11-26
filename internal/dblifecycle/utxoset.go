@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
+	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -31,7 +32,9 @@ import (
 // OpenUtxoSet opens the live UTxO set under dataDir for an offline lifecycle
 // operation. It returns a nil store when the directory does not exist, so a
 // node that never kept the set is unaffected. The directory is locked by a
-// running node, which makes the open fail instead of sharing it.
+// running node, which makes the open fail instead of sharing it. The set is
+// opened with the aggregator and indexer the node keeps, so a rollback here
+// restores the running sums and the output index with the outputs.
 func OpenUtxoSet(dataDir string) (*badgerutxo.Store, error) {
 	dir := badgerutxo.DirFor(dataDir)
 	if _, err := os.Stat(dir); err != nil {
@@ -40,7 +43,11 @@ func OpenUtxoSet(dataDir string) (*badgerutxo.Store, error) {
 		}
 		return nil, fmt.Errorf("inspect live UTxO set directory: %w", err)
 	}
-	store, err := badgerutxo.Open(dir)
+	store, err := badgerutxo.Open(
+		dir,
+		badgerutxo.WithAggregator(ledger.UtxoStakeOf),
+		badgerutxo.WithIndexer(ledger.UtxoIndexBodies),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("open live UTxO set: %w", err)
 	}

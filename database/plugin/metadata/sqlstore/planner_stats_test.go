@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/prometheus/client_golang/prometheus"
@@ -686,4 +687,43 @@ SELECT tx_id, output_idx + ?, staking_key, credential_tag,
 	full := poolPlans(t, store.writeDB, 1)[0]
 	require.Contains(t, full, "idx_utxo_tx_id_output_idx")
 	require.Equal(t, full, resumed)
+}
+
+// TestCheckpointRunsDuringPlannerStatsPass holds a planner-statistics pass
+// open. On a large store a pass runs for minutes, so a WAL checkpoint must not
+// wait for it, or the WAL grows for as long as passes keep running. A bulk-mode
+// transition still waits for the pass, which must never cross one.
+func TestCheckpointRunsDuringPlannerStatsPass(t *testing.T) {
+	t.Parallel()
+	store := newFilePlannerStatsStore(t, nil)
+	var checkpoints atomic.Int64
+	store.checkpoint = func(context.Context) error {
+		checkpoints.Add(1)
+		return nil
+	}
+
+	bulk, unlock := store.lockPlannerStatsPass()
+	require.False(t, bulk)
+	checkpointed := make(chan error, 1)
+	go func() { checkpointed <- store.runCheckpoint(t.Context()) }()
+	select {
+	case err := <-checkpointed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		unlock()
+		t.Fatal("a WAL checkpoint waited for the planner-statistics pass")
+	}
+	require.Equal(t, int64(1), checkpoints.Load())
+
+	transitioned := make(chan error, 1)
+	go func() { transitioned <- store.SetBulkLoadPragmas() }()
+	select {
+	case <-transitioned:
+		unlock()
+		t.Fatal("bulk mode started during a planner-statistics pass")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlock()
+	require.NoError(t, <-transitioned)
+	require.NoError(t, store.RestoreNormalPragmas())
 }

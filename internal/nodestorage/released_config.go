@@ -21,7 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/config"
 )
@@ -38,15 +37,15 @@ func MigrateReleased(
 	logger *slog.Logger,
 ) func(
 	context.Context,
-	blob.BlobStore,
+	database.Stores,
 	func(context.Context) (metadata.MetadataStore, func() error, error),
 ) error {
 	return func(
 		ctx context.Context,
-		blobStore blob.BlobStore,
+		stores database.Stores,
 		openMetadata func(context.Context) (metadata.MetadataStore, func() error, error),
 	) error {
-		state, err := database.ReadLedgerStoreState(blobStore)
+		state, err := database.ReadLedgerStoreState(stores.Blob)
 		if err != nil || state != database.LedgerStoreReleased {
 			return err
 		}
@@ -57,13 +56,14 @@ func MigrateReleased(
 		}
 		_, err = ReleasedMigration{
 			Config:       dbConfig,
-			Blob:         blobStore,
+			Blob:         stores.Blob,
+			Immutable:    stores.Immutable,
 			OpenMetadata: openMetadata,
 			UtxoSet: UtxoSetConfig{
 				DataDir:             cfg.DatabasePath,
 				Logger:              logger,
 				CardanoNodeConfig:   nodeCfg,
-				RetainRewardRecords: cfg.SplitIndexer() || cfg.ServerCoreNamespace,
+				RetainRewardRecords: cfg.HasIndexerDB() || cfg.ServerCoreNamespace,
 			},
 			Logger:                     logger,
 			RewindBlocks:               SecurityParam(nodeCfg),

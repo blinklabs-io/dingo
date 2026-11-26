@@ -31,7 +31,6 @@ import (
 // the DRep delegation clears.
 type DRepHistoryReader interface {
 	DRepHistoryLoaded() (bool, error)
-	DRepHistoryLost() (bool, error)
 	DRepHistory() (ledgerdb.DRepHistoryRows, error)
 }
 
@@ -43,8 +42,8 @@ type DRepHistoryRangeReader interface {
 }
 
 // drepHistory lists the DRep history rows the set holds for table. It refuses
-// when the set does not hold them all: a set that loaded before the history
-// was drained holds none, which an export would pass off as an empty history.
+// when the set has not loaded them, which an export would pass off as an
+// empty history.
 func (ls *LedgerState) drepHistory(
 	table metadata.FactTable,
 	from, through uint64,
@@ -61,14 +60,10 @@ func (ls *LedgerState) drepHistory(
 	if err != nil {
 		return ledgerdb.DRepHistoryRows{}, err
 	}
-	lost, err := h.DRepHistoryLost()
-	if err != nil {
-		return ledgerdb.DRepHistoryRows{}, err
-	}
-	if !loaded || lost {
+	if !loaded {
 		return ledgerdb.DRepHistoryRows{}, fmt.Errorf(
 			"%w: %s: %w", ErrFactTableUnserved, table.Name,
-			errors.New("the DRep history was drained before the set loaded it"),
+			errors.New("the live UTxO set has not loaded the DRep history"),
 		)
 	}
 	ls.utxoSetApplyMu.RLock()

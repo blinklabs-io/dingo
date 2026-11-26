@@ -58,9 +58,7 @@ func bootSetNode(
 		DataDir: dir, StorageMode: types.StorageModeCore,
 	})
 	require.NoError(t, err)
-	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(dir), Only: true, Authoritative: true,
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: utxoset.DirFor(dir)})
 	require.NoError(t, err)
 	bus := event.NewEventBus(nil, logger)
 	cm, err := chain.NewManager(t.Context(), db, bus)
@@ -76,7 +74,9 @@ func bootSetNode(
 		UtxoSet:           set,
 	})
 	require.NoError(t, err)
-	n = &Node{db: db, utxoSet: set, ledgerState: ls, chainManager: cm}
+	n = &Node{
+		db: db, utxoSet: set, ledgerState: ls, chainManager: cm, eventBus: bus,
+	}
 	n.config.logger = logger
 	n.config.dataDir = dir
 	n.config.cardanoNodeConfig = nodeCfg

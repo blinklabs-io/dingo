@@ -21,8 +21,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Once the set serves the ledger alone, a reload over held rows is refused
-// and changes nothing: no metadata store holds the rows a load would read.
+// Once RefuseLoads is called, a reload over held rows is refused and changes
+// nothing: outside the v0.94.2 migration no store holds the rows a load would
+// read.
 func TestRefuseLoadsRefusesALoadOverHeldRows(t *testing.T) {
 	t.Parallel()
 	s := open(t, t.TempDir())

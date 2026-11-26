@@ -288,7 +288,7 @@ func TestFencedPrecomputeChunkDoesNotWrite(t *testing.T) {
 	t.Parallel()
 	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 7, 4, 7)
 	ls.rewardPrecomputeChunkPoolsOverride = 2
-	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	round, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		survivalNewEpoch, survivalCapturedSlot, survivalBoundarySlot,
 	)
 	require.NoError(t, err)
@@ -315,7 +315,7 @@ func TestPendingRewardStakeInputsHoldBackTheRound(t *testing.T) {
 			ls.ledgerDB(), txn, survivalSnapshotEpoch, 100,
 		)
 	}))
-	_, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	_, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		survivalNewEpoch, survivalCapturedSlot, survivalBoundarySlot,
 	)
 	require.NoError(t, err)
