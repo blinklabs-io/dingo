@@ -730,13 +730,14 @@ single-column marker is not used by the new store. `v1alpha1` also creates the
 table belongs in the initial version rather than in a version of its own.
 
 Migration versions 1 through 75 are the released sequential history and remain
-unchanged. Each later migration has its own JSON manifest under
+unchanged. The one later migration, `active-payload-indexes`, is listed in
+`schemaVersions` with its SQL under `v76/<dialect>/`; its version comes from
+`migrations.StableVersion` as an `int64`, which stays intact on 32-bit builds.
+A migration added after it declares its `version`, `name`, and `after`
+(predecessor) in a JSON manifest under
 `database/plugin/metadata/sqlstore/migrations/migration-manifests/`, with SQL
-under the matching `v<version>/<dialect>/` directory. Its stable version comes
-from `migrations.StableVersion` as an `int64`; the manifest records its version,
-immutable name, and predecessor. The int64 identifier remains intact on 32-bit
-builds. This lets independent branches add migrations without
-editing a shared registry list.
+under the matching `v<version>/<dialect>/` directory, so independent branches
+add migrations without editing a shared registry list.
 Migrations with the same predecessor are ordered by stable version, and each
 predecessor is applied before its descendants. A database may already have one
 such sibling applied when another is added; the runner retains the completed
