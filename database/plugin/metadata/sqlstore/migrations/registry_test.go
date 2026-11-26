@@ -16,8 +16,10 @@ package migrations
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
@@ -46,12 +48,62 @@ func TestOrderedSchemaVersionsFollowsPredecessorsNotIDs(t *testing.T) {
 		ordered[2].Version,
 	})
 
+	nameC, nameD := "sibling_a", "sibling_b"
+	versionC, versionD := StableVersion(nameC), StableVersion(nameD)
+	if versionC > versionD {
+		nameC, nameD = nameD, nameC
+		versionC, versionD = versionD, versionC
+	}
+	ordered, err = orderedSchemaVersions([]schemaVersion{
+		first,
+		{Version: versionD, Name: nameD, Dir: "b", After: 1},
+		{Version: versionC, Name: nameC, Dir: "a", After: 1},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []int{1, versionC, versionD}, []int{
+		ordered[0].Version,
+		ordered[1].Version,
+		ordered[2].Version,
+	})
+
 	_, err = orderedSchemaVersions([]schemaVersion{
 		first,
-		{Version: versionA, Name: nameA, Dir: "a", After: 1},
-		{Version: versionB, Name: nameB, Dir: "b", After: 1},
+		{Version: versionC, Name: nameC, Dir: "orphan", After: versionD},
 	})
 	require.ErrorIs(t, err, ErrInvalidRegistry)
+}
+
+func TestSchemaVersionsDiscoverIndependentManifests(t *testing.T) {
+	t.Parallel()
+	nameA, nameB := "manifest_migration_a", "manifest_migration_b"
+	versionA, versionB := StableVersion(nameA), StableVersion(nameB)
+	resources := fstest.MapFS{
+		fmt.Sprintf("migration-manifests/%d.json", versionA): &fstest.MapFile{
+			Data: []byte(fmt.Sprintf(
+				`{"version":%d,"name":%q,"after":1}`,
+				versionA,
+				nameA,
+			)),
+		},
+		fmt.Sprintf("migration-manifests/%d.json", versionB): &fstest.MapFile{
+			Data: []byte(fmt.Sprintf(
+				`{"version":%d,"name":%q,"after":1}`,
+				versionB,
+				nameB,
+			)),
+		},
+	}
+	versions, err := schemaVersionsFrom(resources, []schemaVersion{
+		{Version: 1, Name: "initial", Dir: "v1"},
+	})
+	require.NoError(t, err)
+	ordered, err := orderedSchemaVersions(versions)
+	require.NoError(t, err)
+	require.Equal(t, []int{1, min(versionA, versionB), max(versionA, versionB)}, []int{
+		ordered[0].Version,
+		ordered[1].Version,
+		ordered[2].Version,
+	})
 }
 
 func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {

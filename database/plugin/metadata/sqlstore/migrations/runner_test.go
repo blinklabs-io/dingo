@@ -455,6 +455,51 @@ func TestRunnerAppendsLowerStableVersionAfterAppliedMigration(t *testing.T) {
 	require.Equal(t, 3, count)
 }
 
+func TestRunnerAppliesMergedSiblingAfterPreviouslyAppliedSibling(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	parent := testMigration(nil)
+	nameA, nameB := "parallel_migration_a", "parallel_migration_b"
+	versionA, versionB := StableVersion(nameA), StableVersion(nameB)
+	require.NotEqual(t, versionA, versionB)
+	if versionA > versionB {
+		nameA, nameB = nameB, nameA
+		versionA, versionB = versionB, versionA
+	}
+	makeSibling := func(version int, name, table string) Migration {
+		return Migration{
+			Version:          version,
+			After:            parent.Version,
+			Name:             name,
+			BackfillRevision: "1",
+			SQL: map[string]SQL{
+				"sqlite": {Expand: []string{"CREATE TABLE " + table + " (id INTEGER)"}},
+			},
+		}
+	}
+	previouslyApplied := makeSibling(versionB, nameB, "previously_applied")
+	runner := testRunner(db, parent)
+	runner.Registry = []Migration{parent, previouslyApplied}
+	require.NoError(t, runner.Run(context.Background()))
+
+	newlyMerged := makeSibling(versionA, nameA, "newly_merged")
+	runner.Registry = []Migration{parent, newlyMerged, previouslyApplied}
+	require.NoError(t, runner.Run(context.Background()))
+	require.NoError(t, runner.Run(context.Background()))
+
+	var count int
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count))
+	require.Equal(t, 3, count)
+	for _, table := range []string{"previously_applied", "newly_merged"} {
+		var exists int
+		require.NoError(t, db.QueryRow(
+			"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+			table,
+		).Scan(&exists))
+		require.Equal(t, 1, exists)
+	}
+}
+
 func TestProcessLockerCancellation(t *testing.T) {
 	t.Parallel()
 	locker := NewProcessLocker()

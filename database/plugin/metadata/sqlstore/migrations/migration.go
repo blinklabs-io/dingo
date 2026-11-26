@@ -73,8 +73,8 @@ type Backfill func(context.Context, Batch) (BatchResult, error)
 type Migration struct {
 	Version int
 	// After identifies the migration that must finish before this one starts.
-	// New migrations form one stable, append-only chain even when independent
-	// branches allocate their version identifiers at the same time.
+	// Independent migrations may share a predecessor; the registry orders those
+	// siblings by stable version.
 	After            int
 	Name             string
 	BackfillRevision string
@@ -140,7 +140,8 @@ func validateRegistry(registry []Migration, dialect string) error {
 	}
 	seenNames := make(map[string]struct{}, len(registry))
 	seenVersions := make(map[int]struct{}, len(registry))
-	for idx, migration := range registry {
+	versions := make([]schemaVersion, 0, len(registry))
+	for _, migration := range registry {
 		if migration.Version < 1 {
 			return fmt.Errorf(
 				"%w: invalid version %d",
@@ -156,18 +157,20 @@ func validateRegistry(registry []Migration, dialect string) error {
 				migration.Version,
 			)
 		}
-		expectedAfter := 0
-		if idx > 0 {
-			expectedAfter = registry[idx-1].Version
-		}
-		if migration.After != expectedAfter {
+		if migration.Version <= lastSequentialVersion &&
+			migration.After != migration.Version-1 {
 			return fmt.Errorf(
 				"%w: version %d must follow version %d",
 				ErrInvalidRegistry,
 				migration.Version,
-				expectedAfter,
+				migration.Version-1,
 			)
 		}
+		versions = append(versions, schemaVersion{
+			Version: migration.Version,
+			Name:    migration.Name,
+			After:   migration.After,
+		})
 		if _, exists := seenVersions[migration.Version]; exists {
 			return fmt.Errorf(
 				"%w: duplicate version %d",
@@ -211,6 +214,19 @@ func validateRegistry(registry []Migration, dialect string) error {
 				"%w: version %d has a negative batch size",
 				ErrInvalidRegistry,
 				migration.Version,
+			)
+		}
+	}
+	ordered, err := orderedSchemaVersions(versions)
+	if err != nil {
+		return err
+	}
+	for i := range ordered {
+		if ordered[i].Version != registry[i].Version {
+			return fmt.Errorf(
+				"%w: registry is not in deterministic predecessor order at version %d",
+				ErrInvalidRegistry,
+				registry[i].Version,
 			)
 		}
 	}

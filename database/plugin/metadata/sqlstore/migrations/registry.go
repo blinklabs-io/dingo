@@ -25,6 +25,7 @@ import (
 	"io/fs"
 	"net"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -38,7 +39,7 @@ import (
 
 // migrationSQL contains immutable, versioned migration resources.
 //
-//go:embed v*/*/*.sql
+//go:embed v*/*/*.sql migration-manifests
 var migrationSQL embed.FS
 
 const (
@@ -126,12 +127,10 @@ const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
 // renumbering must not silently reclassify rows this backfill already read.
 const alonzoEraID = 4
 
-// schemaVersions names every migration in ascending version order.
 // schemaVersions keeps the released sequential identifiers 1 through 75
-// unchanged. New entries use StableVersion(name) and a directory derived from
-// that identifier, so parallel branches do not compete for a next version.
-// New entries also name their predecessor in After. Parallel additions that
-// share a predecessor must be linked in order before they can enter a release.
+// unchanged. Each later migration declares its name, stable version, and
+// predecessor in its own manifest, so parallel additions do not edit a shared
+// registry list.
 type schemaVersion struct {
 	Version int
 	Name    string
@@ -322,7 +321,7 @@ var schemaVersions = []schemaVersion{
 }
 
 func orderedSchemaVersions(versions []schemaVersion) ([]schemaVersion, error) {
-	children := make(map[int]schemaVersion, len(versions))
+	byVersion := make(map[int]schemaVersion, len(versions))
 	seenVersions := make(map[int]struct{}, len(versions))
 	for _, version := range versions {
 		if version.Version <= 0 {
@@ -345,31 +344,108 @@ func orderedSchemaVersions(versions []schemaVersion) ([]schemaVersion, error) {
 			after = version.Version - 1
 		}
 		version.After = after
-		if _, exists := children[after]; exists {
-			return nil, fmt.Errorf(
-				"%w: multiple migrations follow version %d",
-				ErrInvalidRegistry,
-				after,
-			)
-		}
-		children[after] = version
+		byVersion[version.Version] = version
 	}
 
-	ordered := make([]schemaVersion, 0, len(versions))
-	previous := 0
-	for len(ordered) < len(versions) {
-		version, exists := children[previous]
-		if !exists {
-			return nil, fmt.Errorf(
-				"%w: migration chain has no successor after version %d",
-				ErrInvalidRegistry,
-				previous,
-			)
+	children := make(map[int][]schemaVersion, len(versions))
+	for _, version := range byVersion {
+		if version.After != 0 {
+			if _, exists := byVersion[version.After]; !exists {
+				return nil, fmt.Errorf(
+					"%w: version %d follows unregistered version %d",
+					ErrInvalidRegistry,
+					version.Version,
+					version.After,
+				)
+			}
 		}
+		children[version.After] = append(children[version.After], version)
+	}
+	for parent := range children {
+		sort.Slice(children[parent], func(i, j int) bool {
+			return children[parent][i].Version < children[parent][j].Version
+		})
+	}
+
+	roots := children[0]
+	if len(roots) != 1 {
+		return nil, fmt.Errorf(
+			"%w: migration registry must have one initial version, got %d",
+			ErrInvalidRegistry,
+			len(roots),
+		)
+	}
+	if roots[0].Version != 1 {
+		return nil, fmt.Errorf(
+			"%w: initial migration must have version 1, got %d",
+			ErrInvalidRegistry,
+			roots[0].Version,
+		)
+	}
+	ordered := make([]schemaVersion, 0, len(versions))
+	ready := append([]schemaVersion(nil), roots...)
+	for len(ready) > 0 {
+		sort.Slice(ready, func(i, j int) bool {
+			return ready[i].Version < ready[j].Version
+		})
+		version := ready[0]
+		ready = ready[1:]
 		ordered = append(ordered, version)
-		previous = version.Version
+		ready = append(ready, children[version.Version]...)
+	}
+	if len(ordered) != len(versions) {
+		return nil, fmt.Errorf(
+			"%w: migration predecessors contain a cycle",
+			ErrInvalidRegistry,
+		)
 	}
 	return ordered, nil
+}
+
+type schemaManifest struct {
+	Version int    `json:"version"`
+	Name    string `json:"name"`
+	After   int    `json:"after"`
+}
+
+func allSchemaVersions() ([]schemaVersion, error) {
+	return schemaVersionsFrom(migrationSQL, schemaVersions)
+}
+
+func schemaVersionsFrom(
+	resources fs.FS,
+	base []schemaVersion,
+) ([]schemaVersion, error) {
+	versions := append([]schemaVersion(nil), base...)
+	manifests, err := fs.Glob(resources, "migration-manifests/*.json")
+	if err != nil {
+		return nil, fmt.Errorf("list schema migration manifests: %w", err)
+	}
+	for _, manifestPath := range manifests {
+		data, err := fs.ReadFile(resources, manifestPath)
+		if err != nil {
+			return nil, fmt.Errorf("read migration manifest %s: %w", manifestPath, err)
+		}
+		var manifest schemaManifest
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			return nil, fmt.Errorf("parse migration manifest %s: %w", manifestPath, err)
+		}
+		if manifest.Version <= lastSequentialVersion {
+			return nil, fmt.Errorf(
+				"%w: migration manifest %s uses reserved version %d",
+				ErrInvalidRegistry,
+				manifestPath,
+				manifest.Version,
+			)
+		}
+		versions = append(versions, schemaVersion{
+			Version: manifest.Version,
+			Name:    manifest.Name,
+			Dir:     fmt.Sprintf("v%d", manifest.Version),
+			After:   manifest.After,
+		})
+	}
+	return versions, nil
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -390,7 +466,11 @@ func MySQLRegistry() ([]Migration, error) {
 }
 
 func registryForDialect(dialect string) ([]Migration, error) {
-	versions, err := orderedSchemaVersions(schemaVersions)
+	registeredVersions, err := allSchemaVersions()
+	if err != nil {
+		return nil, err
+	}
+	versions, err := orderedSchemaVersions(registeredVersions)
 	if err != nil {
 		return nil, err
 	}
@@ -562,6 +642,9 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BatchSize = assetIdentityHoldingsBatchSize
 		}
 		ret = append(ret, migration)
+	}
+	if err := validateRegistry(ret, dialect); err != nil {
+		return nil, err
 	}
 	return ret, nil
 }

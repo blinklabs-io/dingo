@@ -122,19 +122,17 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 		}
 	}
 
-	target := r.Registry[len(r.Registry)-1].Version
-	current := 0
+	completed := 0
 	for _, migration := range r.Registry {
 		migrationState, exists := states[migration.Version]
-		if !exists || migrationState.phase != PhaseComplete {
-			break
+		if exists && migrationState.phase == PhaseComplete {
+			completed++
 		}
-		current = migration.Version
 	}
 	r.Logger.Info(
 		"metadata schema upgrade check",
-		"current_version", current,
-		"target_version", target,
+		"completed_migrations", completed,
+		"target_migrations", len(r.Registry),
 	)
 
 	for _, migration := range r.Registry {
@@ -357,20 +355,12 @@ func (r *Runner) runBackfill(
 
 func (r *Runner) validateDatabase(states map[int]state) error {
 	target := r.Registry[len(r.Registry)-1].Version
-	type registeredMigration struct {
-		migration Migration
-		position  int
+	registered := make(map[int]Migration, len(r.Registry))
+	for _, migration := range r.Registry {
+		registered[migration.Version] = migration
 	}
-	registered := make(map[int]registeredMigration, len(r.Registry))
-	for position, migration := range r.Registry {
-		registered[migration.Version] = registeredMigration{
-			migration: migration,
-			position:  position,
-		}
-	}
-	seen := make([]bool, len(r.Registry)+1)
 	for version, migrationState := range states {
-		registeredItem, exists := registered[version]
+		migration, exists := registered[version]
 		if !exists {
 			return fmt.Errorf(
 				"%w: database migration version %d is not registered (latest binary version %d)",
@@ -385,8 +375,6 @@ func (r *Runner) validateDatabase(states map[int]state) error {
 				version,
 			)
 		}
-		seen[registeredItem.position+1] = true
-		migration := registeredItem.migration
 		checksum := migration.checksum()
 		if migrationState.name != migration.Name ||
 			migrationState.checksum != checksum {
@@ -415,16 +403,18 @@ func (r *Runner) validateDatabase(states map[int]state) error {
 			)
 		}
 	}
-	seenGap := false
-	for position := 1; position < len(seen); position++ {
-		if !seen[position] {
-			seenGap = true
+	for version, migrationState := range states {
+		migration := registered[version]
+		if migration.After == 0 {
 			continue
 		}
-		if seenGap {
+		predecessor, exists := states[migration.After]
+		if !exists || (migrationState.phase != PhaseComplete &&
+			predecessor.phase != PhaseComplete) {
 			return fmt.Errorf(
-				"metadata migration state is noncontiguous at position %d",
-				position,
+				"metadata migration state for version %d has no completed predecessor %d",
+				version,
+				migration.After,
 			)
 		}
 	}
