@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"slices"
 	"strconv"
 
@@ -302,7 +301,8 @@ func (d *Deriver) initialize(
 	return nil
 }
 
-// genesisReserves is the maximum supply less the genesis outputs.
+// genesisReserves is the maximum supply less the genesis outputs, checked the
+// way the ledger checks them when it seeds genesis.
 func genesisReserves(cfg *cardano.CardanoNodeConfig) (uint64, error) {
 	byron, err := cfg.ByronGenesis().GenesisUtxos()
 	if err != nil {
@@ -316,18 +316,15 @@ func genesisReserves(cfg *cardano.CardanoNodeConfig) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("shelley genesis outputs: %w", err)
 	}
-	circulating := new(big.Int)
-	for _, u := range slices.Concat(byron, shelley) {
-		if u.Output == nil {
-			return 0, errors.New("genesis output without a value")
-		}
-		circulating.Add(circulating, u.Output.Amount())
+	utxos := slices.Concat(byron, shelley)
+	if err := epochengine.RejectDuplicateGenesisUtxos(utxos); err != nil {
+		return 0, fmt.Errorf("validate genesis UTxOs: %w", err)
 	}
-	supply := new(big.Int).SetUint64(g.MaxLovelaceSupply)
-	if circulating.Cmp(supply) > 0 {
-		return 0, errors.New("genesis outputs exceed the maximum supply")
+	reserves, err := epochengine.GenesisReserveBalance(g.MaxLovelaceSupply, utxos)
+	if err != nil {
+		return 0, fmt.Errorf("calculate genesis reserves: %w", err)
 	}
-	return supply.Sub(supply, circulating).Uint64(), nil
+	return reserves, nil
 }
 
 func genesisBlockHash(cfg *cardano.CardanoNodeConfig) ([]byte, error) {

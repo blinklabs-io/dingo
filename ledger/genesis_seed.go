@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -76,10 +77,10 @@ func buildGenesisUtxoSet(
 		)
 	}
 	genesisUtxos := slices.Concat(byronGenesisUtxos, shelleyGenesisUtxos)
-	if err := rejectDuplicateGenesisUtxos(genesisUtxos); err != nil {
+	if err := epochengine.RejectDuplicateGenesisUtxos(genesisUtxos); err != nil {
 		return nil, fmt.Errorf("validate genesis UTxOs: %w", err)
 	}
-	reserves, err := genesisReserveBalance(
+	reserves, err := epochengine.GenesisReserveBalance(
 		shelleyGenesis.MaxLovelaceSupply, genesisUtxos,
 	)
 	if err != nil {

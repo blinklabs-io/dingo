@@ -41,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/tracing"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -9036,7 +9037,7 @@ func (ls *LedgerState) ensureGenesisNetworkState() error {
 	if err != nil {
 		return fmt.Errorf("generate Shelley genesis UTxOs: %w", err)
 	}
-	reserves, err := genesisReserveBalance(
+	reserves, err := epochengine.GenesisReserveBalance(
 		shelleyGenesis.MaxLovelaceSupply,
 		slices.Concat(byronUtxos, shelleyUtxos),
 	)
