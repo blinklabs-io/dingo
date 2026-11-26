@@ -163,3 +163,118 @@ func TestRollbackOverASplitPointIsPendingUntilDone(t *testing.T) {
 	require.True(t, resumed)
 	requireBigPointRolledBack(t, s, start)
 }
+
+// A block whose estimate fits the plan but whose transaction Badger still
+// refuses is cut into parts until each commits.
+func TestOnePointOverTheLimitSplitsWhenItsEstimateFits(t *testing.T) {
+	t.Parallel()
+	s := smallLimitStore(t, t.TempDir())
+	defer s.Close()
+	start := point(0, 0)
+	bootstrap(t, s, start)
+	// A plan budget far above the real limit makes the block's estimate
+	// fit one transaction.
+	s.SetBudgetForTest(1<<24, 1<<34)
+	tip := applyBigPoint(t, s)
+	requireTip(t, s, tip)
+	requireCount(t, s, bigPointOutputs)
+	requireBigOutputs(t, s, true)
+	points, err := s.JournalPoints()
+	require.NoError(t, err)
+	require.Len(t, points, 1)
+	_, err = s.Rollback(start)
+	require.NoError(t, err)
+	requireBigPointRolledBack(t, s, start)
+}
+
+// A stop after a later part of a block leaves records past the tip that
+// continue the block. The startup rewind they lead to is itself pending, so
+// a stop part way through it is finished at the next start.
+func TestOnePointStoppedAfterALaterPartRewindsAcrossRestarts(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := smallLimitStore(t, dir)
+	start := point(0, 0)
+	bootstrap(t, s, start)
+	stop := errors.New("stopped between transactions")
+	s.SetAfterChunkForTest(func(done int) error {
+		if done == 3 {
+			return stop
+		}
+		return nil
+	})
+	changes := bigChanges(1, bigPointOutputs)
+	tip := changes[0].Point
+	_, err := s.ApplyBatch(&tip, changes)
+	require.ErrorIs(t, err, stop)
+	s.SetAfterChunkForTest(nil)
+	mid, err := s.MidBatchStateForTest()
+	require.NoError(t, err)
+	require.True(t, mid.Failed)
+	require.Equal(t, start.Slot, mid.Tip.Slot)
+
+	before, found, err := s.PointBefore(mid.FailedAt)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, start.Slot, before.Slot)
+	s.SetAfterRollbackStepForTest(func(done int) error {
+		if done == 1 {
+			return stop
+		}
+		return nil
+	})
+	_, err = s.Rollback(before)
+	require.ErrorIs(t, err, stop)
+	require.NoError(t, s.Close())
+
+	s = smallLimitStore(t, dir)
+	defer s.Close()
+	target, pending, err := s.PendingRollbackForTest()
+	require.NoError(t, err)
+	require.True(t, pending, "a part-undone rewind left no mark")
+	require.Equal(t, start.Slot, target.Slot)
+	resumed, err := s.ResumeRollback()
+	require.NoError(t, err)
+	require.True(t, resumed)
+	requireBigPointRolledBack(t, s, start)
+	_, found, err = s.PointBefore(mid.FailedAt)
+	require.NoError(t, err)
+	require.False(t, found, "the rewind left a part of the block behind")
+}
+
+// A block that spends outputs it created itself keeps that order across its
+// parts, and the records of the parts, undone newest first, restore the set
+// before it.
+func TestOnePointSpendingItsOwnOutputsAcrossParts(t *testing.T) {
+	t.Parallel()
+	s := smallLimitStore(t, t.TempDir())
+	defer s.Close()
+	start := point(0, 0)
+	bootstrap(t, s, start)
+	const half = bigPointOutputs / 2
+	tip := point(1, 1)
+	created := badgerutxo.Change{Point: tip}
+	spent := badgerutxo.Change{Point: tip}
+	for i := range uint32(half) {
+		created.Added = append(created.Added, bigOut(i))
+		spent.Removed = append(spent.Removed, bigOut(i).Ref)
+		spent.Added = append(spent.Added, bigOut(half+i))
+	}
+	res, err := s.ApplyBatch(&tip, []badgerutxo.Change{created, spent})
+	require.NoError(t, err)
+	require.Empty(t, res.Missing)
+	require.Empty(t, res.Duplicate)
+	requireTip(t, s, tip)
+	requireCount(t, s, half)
+	for _, i := range []uint32{0, half - 1} {
+		_, ok, err := s.Get(bigOut(i).Ref)
+		require.NoError(t, err)
+		require.False(t, ok, "spent output %d", i)
+		_, ok, err = s.Get(bigOut(half + i).Ref)
+		require.NoError(t, err)
+		require.True(t, ok, "created output %d", half+i)
+	}
+	_, err = s.Rollback(start)
+	require.NoError(t, err)
+	requireBigPointRolledBack(t, s, start)
+}
