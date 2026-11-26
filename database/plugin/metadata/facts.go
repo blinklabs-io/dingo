@@ -52,14 +52,6 @@ type FactRows struct {
 	LastID int64
 }
 
-// CommitSyncer is an optional capability of a metadata store whose commits
-// are not durable when they return. SyncCommits returns only once every commit
-// that returned before it began survives a crash of the host. A store without
-// it commits durably.
-type CommitSyncer interface {
-	SyncCommits(ctx context.Context) error
-}
-
 // FactRowStore reads and removes fact rows. It is an optional capability of a
 // metadata store: an IndexerDB's rollback removes its derived facts through it,
 // and the ledger's SQL LedgerDB reads rows through it.
