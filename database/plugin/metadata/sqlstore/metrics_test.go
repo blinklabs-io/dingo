@@ -484,23 +484,22 @@ func TestSQLQueryDurationHistogramObservesCachedAndUncachedQueries(
 	)
 }
 
-// TestMissingCriticalDeferredIndexesIsCounted is the regression test for
+// TestMissingDeferredIndexesIsCounted is the regression test for
 // dingo_database_sql_operations_total's Help text claim that it covers
-// every domain query: MissingCriticalDeferredIndexes used to call
+// every domain query: the missing-index lister once called
 // newDialectQueryer directly instead of instrumentedQueryer, so its
 // per-index existence checks bypassed the counter entirely. It runs one
-// SELECT per deferred.CriticalManifest() entry regardless of whether the
-// index is actually missing (a freshly migrated store has every deferred
-// index already present -- the manifest only matters to bulk-load's
-// drop/rebuild cycle), so the counter delta this asserts is exactly
-// len(deferred.CriticalManifest()); without the fix it stays 0.
-func TestMissingCriticalDeferredIndexesIsCounted(t *testing.T) {
+// SELECT per deferred.Manifest entry regardless of whether the index is
+// actually missing (a freshly migrated store has every deferred index
+// already present -- the manifest only matters to bulk-load's drop/rebuild
+// cycle), so the counter delta this asserts is exactly len(deferred.Manifest).
+func TestMissingDeferredIndexesIsCounted(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	store := newMigratedSQLiteStoreWithRegistry(t, reg)
 
 	before := counterValue(t, reg, "select")
-	missing, err := store.MissingCriticalDeferredIndexes()
+	missing, err := store.MissingDeferredIndexes()
 	require.NoError(t, err)
 	require.Empty(
 		t,
@@ -509,9 +508,9 @@ func TestMissingCriticalDeferredIndexesIsCounted(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		before+float64(len(deferred.CriticalManifest())),
+		before+float64(len(deferred.Manifest)),
 		counterValue(t, reg, "select"),
-		"expected MissingCriticalDeferredIndexes' per-index checks to be counted",
+		"expected MissingDeferredIndexes' per-index checks to be counted",
 	)
 }
 

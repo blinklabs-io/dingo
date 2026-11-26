@@ -294,6 +294,32 @@ func validateBlockProducerPool(p BlockProducerPool, prefix string) []error {
 	return errs
 }
 
+// ValidateBarkEventSources checks the nodes this node follows: every source
+// needs a unique name and an http or https URL.
+func ValidateBarkEventSources(sources []BarkEventSource) []error {
+	var errs []error
+	seen := make(map[string]struct{}, len(sources))
+	for i, src := range sources {
+		key := fmt.Sprintf("barkEventSources[%d]", i)
+		if src.Name == "" {
+			errs = append(errs, fmt.Errorf("%s: name is required", key))
+		} else if _, dup := seen[src.Name]; dup {
+			errs = append(errs, fmt.Errorf(
+				"%s: duplicate name %q", key, src.Name,
+			))
+		}
+		seen[src.Name] = struct{}{}
+		u, err := url.Parse(src.URL)
+		if err != nil || u.Host == "" ||
+			(u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, fmt.Errorf(
+				"%s: url must be an http or https URL, got %q", key, src.URL,
+			))
+		}
+	}
+	return errs
+}
+
 // validateBlockProducerPools checks the pools a block producer forges for:
 // the top-level key settings, or the blockProducerPools list, never both.
 func (c *Config) validateBlockProducerPools() []error {
@@ -988,6 +1014,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			))
 		}
 	}
+	errs = append(errs, ValidateBarkEventSources(c.BarkEventSources)...)
 	if serving && c.BarkEventEnabled && c.BarkPort == 0 {
 		errs = append(
 			errs,

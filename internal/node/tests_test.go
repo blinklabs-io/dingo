@@ -38,10 +38,6 @@ type namedMissingAllManager struct {
 
 func (m *namedMissingAllManager) DropDeferredIndexes() error { return nil }
 
-func (m *namedMissingAllManager) BuildCriticalDeferredIndexes() error {
-	return nil
-}
-
 func (m *namedMissingAllManager) BuildDeferredIndexes() error {
 	m.logged = m.log.String()
 	return nil

@@ -859,15 +859,6 @@ func (q *Queries) DeleteRewardAccountOutputsAfterSlot(ctx context.Context, captu
 	return err
 }
 
-const deleteRewardAccountOutputsBeforeEpoch = `-- name: DeleteRewardAccountOutputsBeforeEpoch :exec
-DELETE FROM reward_account_output WHERE epoch < ?
-`
-
-func (q *Queries) DeleteRewardAccountOutputsBeforeEpoch(ctx context.Context, epoch int64) error {
-	_, err := q.db.ExecContext(ctx, deleteRewardAccountOutputsBeforeEpoch, epoch)
-	return err
-}
-
 const deleteRewardAccountOutputsForEpoch = `-- name: DeleteRewardAccountOutputsForEpoch :exec
 DELETE FROM reward_account_output WHERE epoch = ?
 `
