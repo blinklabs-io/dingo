@@ -1851,7 +1851,8 @@ func (c *Cache) RecordObserverError(
 }
 
 // GetEpochsNeedingRetry returns ERROR epochs belonging to one observer queue.
-// Freshness-based CLI selection remains separate from the observer retry policy.
+// The observer selects new work with GetEpochsNeedingCheck, whose freshness
+// rule is separate from this retry policy.
 func (c *Cache) GetEpochsNeedingRetry(network string, accounts bool) ([]uint64, error) {
 	column := "aggregate_status"
 	if accounts {
