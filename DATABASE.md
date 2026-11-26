@@ -144,7 +144,11 @@ plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead of
 a seek on `idx_utxo_tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs a
 bounded `ANALYZE` (`analysis_limit` of 1000 rows per index, the connection's own
 limit restored afterwards) on the write connection, outside any transaction, at startup,
-after each epoch rollover commits, and once a minute in between. `PRAGMA
+after each epoch rollover commits, and once a minute in between, though a
+periodic pass starts no sooner than nine times the last pass's duration after
+it ended, so a pass that outlasts the minute is not followed by another at
+once. A pass excludes bulk-mode transitions but not WAL checkpoints, which keep
+the WAL bounded while it runs. `PRAGMA
 optimize` is not used because it re-analyzes a table only after a large change
 in its row count, leaving a steadily growing table with stale statistics. The
 pass holds one write connection throughout, because `analysis_limit` is per
