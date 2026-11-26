@@ -11020,7 +11020,8 @@ full sweep. Ordinary same-tip rollback remains a no-op.
 
 # Koios parity cache significant counts
 
-The observer and standalone parity tool share a separate SQLite reference cache.
+The Koios parity observer keeps its own SQLite reference cache, separate from
+Dingo's databases.
 Its `check_epoch_status` table stores `significant_mismatch_count` alongside
 `mismatch_count`, plus `aggregate_significant_mismatch_count` and
 `account_significant_mismatch_count`. Significant counts exclude informational
