@@ -40,6 +40,8 @@ type fakeUpdater struct {
 	active  atomic.Int64
 	maxSeen atomic.Int64
 	err     error
+	// duration is the run time every call reports.
+	duration time.Duration
 }
 
 func newFakeUpdater() *fakeUpdater {
@@ -68,7 +70,9 @@ func (f *fakeUpdater) OptimizePlannerStatsContext(
 	case <-ctx.Done():
 		return types.PlannerStatsResult{Supported: true}, ctx.Err()
 	}
-	return types.PlannerStatsResult{Supported: true, Changed: true}, f.err
+	return types.PlannerStatsResult{
+		Supported: true, Changed: true, Duration: f.duration,
+	}, f.err
 }
 
 func receive[T any](t *testing.T, ch <-chan T, msg string) T {

@@ -156,7 +156,9 @@ measure is per table and not the file size: a large database whose
 `transaction` and `certs` tables were recorded at almost no rows still passes as
 they fill, and a vacuum that shrinks the file does not suppress later passes.
 Startup and anchor passes always run. The table sizes of the last pass
-are held in memory, since a restart runs a startup pass. `PRAGMA
+are held in memory, since a restart runs a startup pass. A pass excludes
+bulk-mode transitions but not WAL checkpoints, which keep the WAL bounded while
+it runs. `PRAGMA
 optimize` is not used because it re-analyzes a table only after a large change
 in its row count, leaving a steadily growing table with stale statistics. The
 pass holds one write connection throughout, because `analysis_limit` is per
