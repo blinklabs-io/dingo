@@ -42,7 +42,7 @@ func TestOrderedSchemaVersionsFollowsPredecessorsNotIDs(t *testing.T) {
 	lower := schemaVersion{Version: versionA, Name: nameA, Dir: "lower", After: versionB}
 	ordered, err := orderedSchemaVersions([]schemaVersion{lower, first, higher})
 	require.NoError(t, err)
-	require.Equal(t, []int{1, versionB, versionA}, []int{
+	require.Equal(t, []int64{1, versionB, versionA}, []int64{
 		ordered[0].Version,
 		ordered[1].Version,
 		ordered[2].Version,
@@ -60,7 +60,7 @@ func TestOrderedSchemaVersionsFollowsPredecessorsNotIDs(t *testing.T) {
 		{Version: versionC, Name: nameC, Dir: "a", After: 1},
 	})
 	require.NoError(t, err)
-	require.Equal(t, []int{1, versionC, versionD}, []int{
+	require.Equal(t, []int64{1, versionC, versionD}, []int64{
 		ordered[0].Version,
 		ordered[1].Version,
 		ordered[2].Version,
@@ -99,7 +99,7 @@ func TestSchemaVersionsDiscoverIndependentManifests(t *testing.T) {
 	require.NoError(t, err)
 	ordered, err := orderedSchemaVersions(versions)
 	require.NoError(t, err)
-	require.Equal(t, []int{1, min(versionA, versionB), max(versionA, versionB)}, []int{
+	require.Equal(t, []int64{1, min(versionA, versionB), max(versionA, versionB)}, []int64{
 		ordered[0].Version,
 		ordered[1].Version,
 		ordered[2].Version,

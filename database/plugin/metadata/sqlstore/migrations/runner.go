@@ -44,7 +44,7 @@ type Runner struct {
 }
 
 type state struct {
-	version     int
+	version     int64
 	name        string
 	checksum    string
 	phase       Phase
@@ -98,7 +98,7 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 			ErrLegacySchema,
 		)
 	}
-	states := make(map[int]state)
+	states := make(map[int64]state)
 	if stateTableExists {
 		states, err = r.readStates(ctx, conn)
 		if err != nil {
@@ -353,9 +353,9 @@ func (r *Runner) runBackfill(
 	}
 }
 
-func (r *Runner) validateDatabase(states map[int]state) error {
+func (r *Runner) validateDatabase(states map[int64]state) error {
 	target := r.Registry[len(r.Registry)-1].Version
-	registered := make(map[int]Migration, len(r.Registry))
+	registered := make(map[int64]Migration, len(r.Registry))
 	for _, migration := range r.Registry {
 		registered[migration.Version] = migration
 	}
@@ -518,7 +518,7 @@ func (r *Runner) stateTableExists(
 func (r *Runner) readStates(
 	ctx context.Context,
 	conn *sql.Conn,
-) (map[int]state, error) {
+) (map[int64]state, error) {
 	rows, err := conn.QueryContext(
 		ctx,
 		strings.ReplaceAll(
@@ -532,7 +532,7 @@ func (r *Runner) readStates(
 		return nil, fmt.Errorf("read schema_migrations: %w", err)
 	}
 	defer rows.Close()
-	states := make(map[int]state)
+	states := make(map[int64]state)
 	for rows.Next() {
 		var migrationState state
 		if err := rows.Scan(
@@ -580,7 +580,7 @@ func (r *Runner) insertState(
 func (r *Runner) setDirty(
 	ctx context.Context,
 	conn *sql.Conn,
-	version int,
+	version int64,
 	phase Phase,
 ) error {
 	_, err := conn.ExecContext(
@@ -609,7 +609,7 @@ type ddlExecer interface {
 func (r *Runner) setPhase(
 	ctx context.Context,
 	exec stateExecer,
-	version int,
+	version int64,
 	phase Phase,
 	cursor string,
 	dirty bool,
@@ -632,7 +632,7 @@ func (r *Runner) setPhase(
 func (r *Runner) complete(
 	ctx context.Context,
 	conn *sql.Conn,
-	version int,
+	version int64,
 	cursor string,
 ) error {
 	now := r.Now().UnixMilli()

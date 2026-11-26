@@ -53,7 +53,7 @@ func TestChecksumIncludesPhaseBoundaries(t *testing.T) {
 // version instead. The checksum covers the dialect-translated statements, and
 // translation reads the schema as a whole, so an unrelated later migration that
 // perturbs an earlier version's rendering shows up here too.
-var releasedMigrationChecksums = map[string]map[int]string{
+var releasedMigrationChecksums = map[string]map[int64]string{
 	"sqlite": {
 		1:  "05bf00417fe33753f0fae9400ee2f203e4df53f29e630a8c51eed2e0857a6d85",
 		2:  "5412f9074b168bb800a9991c101cebd11741ffe50743736c173adcdca4bfb6ad",
@@ -335,9 +335,9 @@ func TestReleasedMigrationChecksumsAreStable(t *testing.T) {
 				require.LessOrEqual(
 					t,
 					version,
-					len(registry),
+					int64(len(registry)),
 					"pinned %s checksum for unknown version "+
-						strconv.Itoa(version),
+						strconv.FormatInt(version, 10),
 					dialect,
 				)
 			}

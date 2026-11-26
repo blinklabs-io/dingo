@@ -71,11 +71,11 @@ type Backfill func(context.Context, Batch) (BatchResult, error)
 // Migration is immutable after release. BackfillRevision must change whenever
 // the Go backfill behavior changes.
 type Migration struct {
-	Version int
+	Version int64
 	// After identifies the migration that must finish before this one starts.
 	// Independent migrations may share a predecessor; the registry orders those
 	// siblings by stable version.
-	After            int
+	After            int64
 	Name             string
 	BackfillRevision string
 	SQL              map[string]SQL
@@ -90,9 +90,9 @@ func (m Migration) checksum() string {
 		_, _ = hash.Write([]byte{':'})
 		_, _ = hash.Write([]byte(value))
 	}
-	write(strconv.Itoa(m.Version))
+	write(strconv.FormatInt(m.Version, 10))
 	if m.Version > lastSequentialVersion {
-		write(strconv.Itoa(m.After))
+		write(strconv.FormatInt(m.After, 10))
 	}
 	write(m.Name)
 	write(m.BackfillRevision)
@@ -123,15 +123,14 @@ func (m Migration) checksum() string {
 }
 
 // StableVersion gives new migrations an immutable, deterministic identifier
-// derived from their release name. The high bit range keeps these identifiers
-// after the historical sequential versions while allowing independent
-// branches to register migrations without choosing the same next integer.
-// Registry validation detects the (extremely unlikely) hash collision.
-func StableVersion(name string) int {
+// derived from their release name. Its range fits positive int values on both
+// 32-bit and 64-bit targets while leaving the released sequential versions
+// untouched. Registry validation detects hash collisions.
+func StableVersion(name string) int64 {
 	digest := sha256.Sum256([]byte(name))
 	const stableVersionPrefix int64 = 1 << 62
 	const stableVersionMask uint64 = (1 << 62) - 1
-	return int(stableVersionPrefix | int64(binary.BigEndian.Uint64(digest[:8])&stableVersionMask))
+	return stableVersionPrefix | int64(binary.BigEndian.Uint64(digest[:8])&stableVersionMask)
 }
 
 func validateRegistry(registry []Migration, dialect string) error {
@@ -139,7 +138,7 @@ func validateRegistry(registry []Migration, dialect string) error {
 		return ErrEmptyRegistry
 	}
 	seenNames := make(map[string]struct{}, len(registry))
-	seenVersions := make(map[int]struct{}, len(registry))
+	seenVersions := make(map[int64]struct{}, len(registry))
 	versions := make([]schemaVersion, 0, len(registry))
 	for _, migration := range registry {
 		if migration.Version < 1 {

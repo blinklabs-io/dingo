@@ -729,8 +729,9 @@ Migration versions 1 through 75 are the released sequential history and remain
 unchanged. Each later migration has its own JSON manifest under
 `database/plugin/metadata/sqlstore/migrations/migration-manifests/`, with SQL
 under the matching `v<version>/<dialect>/` directory. Its stable version comes
-from `migrations.StableVersion`; the manifest records its version, immutable
-name, and predecessor. This lets independent branches add migrations without
+from `migrations.StableVersion` as an `int64`; the manifest records its version,
+immutable name, and predecessor. The int64 identifier remains intact on 32-bit
+builds. This lets independent branches add migrations without
 editing a shared registry list.
 Migrations with the same predecessor are ordered by stable version, and each
 predecessor is applied before its descendants. A database may already have one

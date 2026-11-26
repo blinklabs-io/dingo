@@ -132,10 +132,10 @@ const alonzoEraID = 4
 // predecessor in its own manifest, so parallel additions do not edit a shared
 // registry list.
 type schemaVersion struct {
-	Version int
+	Version int64
 	Name    string
 	Dir     string
-	After   int
+	After   int64
 }
 
 var schemaVersions = []schemaVersion{
@@ -321,8 +321,8 @@ var schemaVersions = []schemaVersion{
 }
 
 func orderedSchemaVersions(versions []schemaVersion) ([]schemaVersion, error) {
-	byVersion := make(map[int]schemaVersion, len(versions))
-	seenVersions := make(map[int]struct{}, len(versions))
+	byVersion := make(map[int64]schemaVersion, len(versions))
+	seenVersions := make(map[int64]struct{}, len(versions))
 	for _, version := range versions {
 		if version.Version <= 0 {
 			return nil, fmt.Errorf(
@@ -347,7 +347,7 @@ func orderedSchemaVersions(versions []schemaVersion) ([]schemaVersion, error) {
 		byVersion[version.Version] = version
 	}
 
-	children := make(map[int][]schemaVersion, len(versions))
+	children := make(map[int64][]schemaVersion, len(versions))
 	for _, version := range byVersion {
 		if version.After != 0 {
 			if _, exists := byVersion[version.After]; !exists {
@@ -403,9 +403,9 @@ func orderedSchemaVersions(versions []schemaVersion) ([]schemaVersion, error) {
 }
 
 type schemaManifest struct {
-	Version int    `json:"version"`
+	Version int64  `json:"version"`
 	Name    string `json:"name"`
-	After   int    `json:"after"`
+	After   int64  `json:"after"`
 }
 
 func allSchemaVersions() ([]schemaVersion, error) {

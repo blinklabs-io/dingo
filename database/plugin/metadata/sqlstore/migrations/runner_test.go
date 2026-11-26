@@ -380,6 +380,7 @@ func TestValidateRegistryAllowsStableSparseVersions(t *testing.T) {
 			"sqlite": {Expand: []string{"CREATE TABLE independent_migration (id INTEGER)"}},
 		},
 	}
+	require.Greater(t, second.Version, int64(1<<31-1))
 	registry := []Migration{first, second}
 	require.NoError(t, validateRegistry(registry, "sqlite"))
 
@@ -389,7 +390,7 @@ func TestValidateRegistryAllowsStableSparseVersions(t *testing.T) {
 	registry[1] = second
 	registry[1].Version = lastSequentialVersion + 1
 	require.ErrorIs(t, validateRegistry(registry, "sqlite"), ErrInvalidRegistry)
-	require.Greater(t, StableVersion(second.Name), lastSequentialVersion)
+	require.Greater(t, StableVersion(second.Name), int64(lastSequentialVersion))
 }
 
 func TestRunnerAppliesStableSparseVersions(t *testing.T) {
@@ -405,6 +406,7 @@ func TestRunnerAppliesStableSparseVersions(t *testing.T) {
 			"sqlite": {Expand: []string{"CREATE TABLE independent_migration (id INTEGER)"}},
 		},
 	}
+	require.Greater(t, second.Version, int64(1<<31-1))
 	runner := testRunner(db, first)
 	runner.Registry = []Migration{first, second}
 	require.NoError(t, runner.Run(context.Background()))
@@ -466,7 +468,7 @@ func TestRunnerAppliesMergedSiblingAfterPreviouslyAppliedSibling(t *testing.T) {
 		nameA, nameB = nameB, nameA
 		versionA, versionB = versionB, versionA
 	}
-	makeSibling := func(version int, name, table string) Migration {
+	makeSibling := func(version int64, name, table string) Migration {
 		return Migration{
 			Version:          version,
 			After:            parent.Version,
@@ -512,7 +514,7 @@ func TestValidateDatabaseRejectsCompletedMigrationWithIncompletePredecessor(t *t
 	}
 	runner := testRunner(nil, parent)
 	runner.Registry = []Migration{parent, child}
-	states := map[int]state{
+	states := map[int64]state{
 		parent.Version: {
 			version:  parent.Version,
 			name:     parent.Name,
@@ -1166,7 +1168,7 @@ FROM (SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name)`).Scan(
 			beforeSchema := schema()
 			conn, err := db.Conn(t.Context())
 			require.NoError(t, err)
-			var beforeStates map[int]state
+			var beforeStates map[int64]state
 			if existing {
 				beforeStates, err = runner.readStates(t.Context(), conn)
 				require.NoError(t, err)
