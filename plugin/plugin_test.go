@@ -79,9 +79,18 @@ func registerTestProvider(
 	startErr error,
 ) {
 	t.Helper()
+	descriptor := Descriptor{Capability: cap, Name: name, Description: name}
+	if strings.HasPrefix(cap.Name(), "api.") {
+		descriptor.Storage = StorageRequirements{
+			Tier: StorageTierCore,
+			Features: []StorageFeature{
+				StorageFeature("test-" + cap.Name()),
+			},
+		}
+	}
 	err := Register(
 		host,
-		Descriptor{Capability: cap, Name: name, Description: name},
+		descriptor,
 		func() testConfig { return testConfig{Value: "default"} },
 		func(_ context.Context, cfg testConfig, deps testDeps) (string, Instance, error) {
 			return cfg.Value + deps.Suffix, &testInstance{
@@ -125,6 +134,83 @@ func TestRegisterResolveAndStop(t *testing.T) {
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
+}
+
+func TestRegisterAPIProviderRequiresStorageDeclaration(t *testing.T) {
+	t.Parallel()
+
+	err := Register(
+		NewHost(),
+		Descriptor{Capability: CapabilityAPIBlockfrost, Name: "custom"},
+		func() testConfig { return testConfig{} },
+		func(
+			context.Context, testConfig, testDeps,
+		) (string, Instance, error) {
+			return "", &testInstance{}, nil
+		},
+	)
+	require.ErrorContains(t, err, "must declare storage requirements")
+}
+
+func TestRegisterStorageTierRequiresNamedFeature(t *testing.T) {
+	t.Parallel()
+
+	err := Register(
+		NewHost(),
+		Descriptor{
+			Capability: CapabilityAPIBlockfrost,
+			Name:       "custom",
+			Storage: StorageRequirements{
+				Tier: StorageTierCore,
+			},
+		},
+		func() testConfig { return testConfig{} },
+		func(
+			context.Context, testConfig, testDeps,
+		) (string, Instance, error) {
+			return "", &testInstance{}, nil
+		},
+	)
+	require.ErrorContains(t, err, "requires at least one feature")
+}
+
+func TestProviderStorageRequirementsAreDefensivelyCopied(t *testing.T) {
+	t.Parallel()
+
+	host := NewHost()
+	features := []StorageFeature{"custom-index"}
+	descriptor := Descriptor{
+		Capability: CapabilityAPIBlockfrost,
+		Name:       "custom",
+		Storage: StorageRequirements{
+			Tier: StorageTierAPI, Features: features,
+		},
+	}
+	require.NoError(t, Register(
+		host, descriptor,
+		func() testConfig { return testConfig{} },
+		func(
+			context.Context, testConfig, testDeps,
+		) (string, Instance, error) {
+			return "", &testInstance{}, nil
+		},
+	))
+	features[0] = "mutated"
+
+	registered, ok := host.ProviderDescriptor(
+		CapabilityAPIBlockfrost, "custom",
+	)
+	require.True(t, ok)
+	require.Equal(
+		t,
+		[]StorageFeature{"custom-index"},
+		registered.Storage.Features,
+	)
+	registered.Storage.Features[0] = "mutated-again"
+	require.Equal(t,
+		[]StorageFeature{"custom-index"},
+		host.Providers()[0].Storage.Features,
+	)
 }
 
 func TestResolveProviderDoesNotConstrainServiceType(t *testing.T) {

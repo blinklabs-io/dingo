@@ -148,6 +148,9 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 				"total", len(utxos),
 			)
 		}
+	} else if store, h, release, ok := indexerEntryWriter(txn); ok {
+		deleteBatch(store, h, utxos)
+		release()
 	} else {
 		for start := 0; start < len(utxos); start += batchSize {
 			end := min(start+batchSize, len(utxos))
@@ -606,6 +609,11 @@ func repairUtxoBlob(
 	offset *CborOffset,
 ) error {
 	offsetData := EncodeUtxoOffset(offset)
+
+	if store, h, release, ok := indexerEntryWriter(txn); ok {
+		defer release()
+		return store.SetUtxo(h, txId, outputIdx, offsetData)
+	}
 
 	// Use the caller's blob txn when it is write-capable
 	if txn != nil && txn.Blob() != nil && txn.IsReadWrite() {
@@ -2038,9 +2046,9 @@ func (d *Database) RemoveGenesisUtxos(
 	return removed, applied, nil
 }
 
-// UtxoSetOnlySyncKey marks, in sync_state, a database whose metadata store
+// UtxoSetMigratedSyncKey marks, in sync_state, a database whose metadata store
 // holds no UTxO set because the ledger's live UTxO set is its only copy.
-const UtxoSetOnlySyncKey = "ledger.utxo_set_only"
+const UtxoSetMigratedSyncKey = "ledger.utxo_set_only"
 
 // liveUtxoSourceSetter is the metadata store hook SetLiveUtxoSource drives.
 type liveUtxoSourceSetter interface {

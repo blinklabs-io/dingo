@@ -859,7 +859,6 @@ func (b *Backfill) processBlockGovernanceLevel(
 	epochId uint64,
 	pp lcommon.ProtocolParameters,
 	txn *database.Txn,
-	validated *bool,
 ) error {
 	if !tx.IsValid() {
 		return nil
@@ -887,8 +886,6 @@ func (b *Backfill) processBlockGovernanceLevel(
 		proposalLifetime,
 		dbadapter.New(b.db),
 		dbadapter.Txn(txn),
-		pp,
-		validated,
 	); err != nil {
 		return fmt.Errorf("governance transaction effects: %w", err)
 	}
@@ -1622,7 +1619,6 @@ func (b *Backfill) processBlockTxsBatched(
 	}
 	var storageIndexOffset uint64
 	for txIndex, tx := range txs {
-		var proposalsValidated bool
 		levels := dledger.TransactionLevelsForApply(tx)
 		childCount := uint64(len(levels)) - 1
 		storageBaseIndex := uint64(txIndex) + storageIndexOffset
@@ -1680,7 +1676,6 @@ func (b *Backfill) processBlockTxsBatched(
 				epochId,
 				pp,
 				txn,
-				&proposalsValidated,
 			); err != nil {
 				return fmt.Errorf(
 					"governance at slot %d tx %d body %d: %w",

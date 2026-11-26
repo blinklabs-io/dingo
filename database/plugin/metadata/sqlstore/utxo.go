@@ -2935,33 +2935,6 @@ const fillUtxoAddressOrderByTransactionSQL = `-- name: FillUtxoAddressOrderByTra
 UPDATE utxo_address` + utxoAddressOrderSet + `
 WHERE utxo_id IN (SELECT id FROM utxo WHERE tx_id = ?)`
 
-// fillUtxoAddressOrderByTransactions is fillUtxoAddressOrderByTransaction for
-// many transactions, in statements of a bounded size.
-func fillUtxoAddressOrderByTransactions(
-	ctx context.Context,
-	db Execer,
-	transactionIDs []int64,
-) error {
-	const chunk = 500
-	for start := 0; start < len(transactionIDs); start += chunk {
-		ids := transactionIDs[start:min(start+chunk, len(transactionIDs))]
-		args := make([]any, len(ids))
-		for i, id := range ids {
-			args[i] = id
-		}
-		if _, err := db.ExecContext(ctx,
-			"-- name: FillUtxoAddressOrderByTransactions :exec\n"+
-				"UPDATE utxo_address"+utxoAddressOrderSet+
-				"\nWHERE utxo_id IN (SELECT id FROM utxo WHERE tx_id IN ("+
-				strings.TrimSuffix(strings.Repeat("?, ", len(ids)), ", ")+"))",
-			args...,
-		); err != nil {
-			return fmt.Errorf("fill UTxO address order: %w", err)
-		}
-	}
-	return nil
-}
-
 func persistUtxoAddress(
 	ctx context.Context,
 	db queryer,

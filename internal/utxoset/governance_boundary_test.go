@@ -88,12 +88,12 @@ func requireNoBoundary(
 func TestGovernanceBoundarySurvivesRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	set, err := utxoset.Open(utxoset.Config{Dir: dir, Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: dir})
 	require.NoError(t, err)
 	applyBoundaryChain(t, set, 25)
 	require.NoError(t, set.Close())
 
-	set, err = utxoset.Open(utxoset.Config{Dir: dir, Only: true})
+	set, err = utxoset.Open(utxoset.Config{Dir: dir})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	requireBoundary(t, set, 1, nil)
@@ -105,7 +105,7 @@ func TestGovernanceBoundarySurvivesRestart(t *testing.T) {
 // the boundary slot, and a read as of a slot before the boundary finds none.
 func TestGovernanceBoundaryRollbackBelowTheBoundaryRemovesIt(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	applyBoundaryChain(t, set, 25)
@@ -128,7 +128,7 @@ func TestGovernanceBoundaryRollbackBelowTheBoundaryRemovesIt(t *testing.T) {
 // writes it, is still journaled at the boundary slot.
 func TestGovernanceBoundaryWrittenLateRollsBackWithItsBoundary(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	applyBoundaryChain(t, set, 9)
@@ -155,7 +155,7 @@ func TestGovernanceBoundaryWrittenLateRollsBackWithItsBoundary(t *testing.T) {
 // still inside the rollback window read, and drops the older ones.
 func TestGovernanceBoundaryPruneKeepsTheEpochTheFloorIsIn(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	applyBoundaryChain(t, set, 45)
@@ -173,7 +173,7 @@ func TestGovernanceBoundaryImportLoads(t *testing.T) {
 	t.Parallel()
 	t.Run("full", func(t *testing.T) {
 		t.Parallel()
-		set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+		set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = set.Close() })
 		applyBoundaryChain(t, set, 25)
@@ -187,7 +187,7 @@ func TestGovernanceBoundaryImportLoads(t *testing.T) {
 	})
 	t.Run("catch-up", func(t *testing.T) {
 		t.Parallel()
-		set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+		set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = set.Close() })
 		applyBoundaryChain(t, set, 35)
@@ -216,7 +216,7 @@ func TestGovernanceBoundaryRebuiltAfterTheBoundaryIsJournaledAtIt(
 	t *testing.T,
 ) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	applySlotsWithNonces(t, set, 1, 25)
@@ -244,7 +244,7 @@ func TestGovernanceBoundaryRebuiltAfterTheBoundaryIsJournaledAtIt(
 // instead of failing startup.
 func TestPreviewBeyondTheJournalIsUtxoAsOfUnavailable(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	set.UpdateAnchor(slotPoint(12))

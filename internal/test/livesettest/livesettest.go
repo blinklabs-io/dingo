@@ -98,11 +98,9 @@ func OpenLedgerDBAt(
 	_, statErr := os.Stat(utxoset.DirFor(dataDir))
 	reopened := statErr == nil
 	set, err := utxoset.Open(utxoset.Config{
-		Dir:           utxoset.DirFor(dataDir),
-		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Only:          true,
-		Authoritative: true,
-		MemTableSize:  8 << 20,
+		Dir:          utxoset.DirFor(dataDir),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MemTableSize: 8 << 20,
 	})
 	require.NoError(tb, err)
 	adopt(tb, db, set, dataDir, dataDir, !reopened)

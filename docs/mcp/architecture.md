@@ -20,7 +20,8 @@ documentation preview.
 
 Cardano tools use both injected node services and the read-only SQL pool.
 Exact-address queries also resolve output CBOR through the injected database
-and its configured blob provider. The SQL pool reads the IndexerDB's file; a
+and its configured blob provider, or on a core node through the address lookup
+the node injects over its live UTxO set. The SQL pool reads the IndexerDB's file; a
 core node has no IndexerDB and no SQL store to read.
 
 > **Diagram source:** Edit `architecture.excalidraw` in Excalidraw, then export

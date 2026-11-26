@@ -80,6 +80,9 @@ type Descriptor struct {
 	Capability  Capability
 	Name        string
 	Description string
+	// Storage declares the minimum tier and named features this provider
+	// consumes when its capability is enabled.
+	Storage StorageRequirements
 	// DurableClose marks a provider whose Stop persists state and must run to
 	// completion. Host stops such an instance with a context that ignores
 	// cancellation and deadline, waits for it even after the Stop context
@@ -327,6 +330,20 @@ func Register[S, C, D any](
 			descriptor.Name,
 		)
 	}
+	if err := descriptor.Storage.validate(); err != nil {
+		return fmt.Errorf(
+			"invalid storage requirements for %s/%s: %w",
+			descriptor.Capability.Name(), descriptor.Name, err,
+		)
+	}
+	if strings.HasPrefix(descriptor.Capability.Name(), "api.") &&
+		descriptor.Storage.Tier == StorageTierNone {
+		return fmt.Errorf(
+			"API provider %s/%s must declare storage requirements",
+			descriptor.Capability.Name(), descriptor.Name,
+		)
+	}
+	descriptor.Storage = descriptor.Storage.clone()
 	if factory == nil {
 		return fmt.Errorf(
 			"plugin factory is nil for %s/%s",
@@ -535,7 +552,9 @@ func (h *Host) Providers() []Descriptor {
 	h.mu.Lock()
 	ret := make([]Descriptor, 0, len(h.providers))
 	for _, p := range h.providers {
-		ret = append(ret, p.descriptor)
+		descriptor := p.descriptor
+		descriptor.Storage = descriptor.Storage.clone()
+		ret = append(ret, descriptor)
 	}
 	h.mu.Unlock()
 	sort.Slice(ret, func(i, j int) bool {
@@ -545,6 +564,25 @@ func (h *Host) Providers() []Descriptor {
 		return ret[i].Capability < ret[j].Capability
 	})
 	return ret
+}
+
+// ProviderDescriptor returns the descriptor for one registered provider.
+func (h *Host) ProviderDescriptor(
+	capability Capability,
+	name string,
+) (Descriptor, bool) {
+	if h == nil {
+		return Descriptor{}, false
+	}
+	h.mu.Lock()
+	p, ok := h.providers[providerKey{capability: capability, name: name}]
+	h.mu.Unlock()
+	if !ok {
+		return Descriptor{}, false
+	}
+	descriptor := p.descriptor
+	descriptor.Storage = descriptor.Storage.clone()
+	return descriptor, true
 }
 
 // ValidateSelection verifies that a provider exists and its configuration

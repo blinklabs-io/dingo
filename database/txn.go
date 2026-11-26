@@ -390,6 +390,7 @@ func newDatabaseTxnContext(
 			)
 		}
 	}
+	bindIndexerMetadata(t.blobTxn, t.metadataTxn, readWrite)
 	return t, nil
 }
 
@@ -508,6 +509,7 @@ func NewReadSnapshotWithAnchorContext(
 	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(false)
 	}
+	bindIndexerMetadata(t.blobTxn, t.metadataTxn, false)
 	if !db.isIndexer() && t.blobTxn != nil {
 		var err error
 		tip, err = db.GetTip(t)
@@ -780,6 +782,11 @@ func (t *Txn) withBlobForRecovery() (*Txn, func()) {
 	if aug.blobStore != nil {
 		aug.blobTxn = aug.blobStore.NewTransaction(aug.readWrite)
 	}
+	// An IndexerDB keeps its CBOR entries with t's metadata, so a repair
+	// written through this handle commits with t rather than in a second
+	// write transaction, which a store with one writer would wait on behind
+	// t forever.
+	bindIndexerMetadata(aug.blobTxn, aug.metadataTxn, t.readWrite && !t.staged)
 	return aug, aug.Release
 }
 

@@ -29,6 +29,6 @@ func (n *Node) migrateUtxoRows(ctx context.Context) error {
 	)
 }
 
-func (n *Node) checkUtxoSetOnly() error {
-	return nodestorage.CheckUtxoSetOnly(n.db)
+func (n *Node) checkUtxoSetMigrated() error {
+	return nodestorage.CheckUtxoSetMigrated(n.db)
 }

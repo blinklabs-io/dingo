@@ -176,7 +176,8 @@ type RewardBlockOp struct {
 	// Fee adds to Epoch's fees. It is ignored when they are unknown.
 	Fee uint64
 	// PruneBelow, when non-zero, deletes every row of every epoch below it,
-	// without a journal entry: a rollback does not bring them back.
+	// journaled at Slot: a rollback below Slot brings them back, because the
+	// boundary it re-crosses reads the epoch the prune dropped.
 	PruneBelow uint64
 }
 
@@ -185,7 +186,7 @@ func putRewardBlocks(txn *badger.Txn, ops []RewardBlockOp) error {
 		var err error
 		switch {
 		case op.PruneBelow > 0:
-			err = pruneRewardBlocks(txn, op.PruneBelow)
+			err = pruneRewardBlocks(txn, op.Slot, op.PruneBelow)
 		case op.Open:
 			err = openRewardBlockEpoch(txn, op)
 		case len(op.Pool) > 0:
@@ -296,7 +297,7 @@ func addRewardBlockFees(txn *badger.Txn, op RewardBlockOp) error {
 	return putJournaled(txn, op.Slot, k, EncodeRewardBlockCount(fees+op.Fee))
 }
 
-func pruneRewardBlocks(txn *badger.Txn, below uint64) error {
+func pruneRewardBlocks(txn *badger.Txn, slot, below uint64) error {
 	var keys [][]byte
 	opts := badger.DefaultIteratorOptions
 	opts.Prefix = []byte{RewardBlocksTag}
@@ -310,7 +311,15 @@ func pruneRewardBlocks(txn *badger.Txn, below uint64) error {
 		keys = append(keys, it.Item().KeyCopy(nil))
 	}
 	it.Close()
-	return deleteKeys(txn, keys)
+	for _, k := range keys {
+		if err := journalRow(txn, slot, k); err != nil {
+			return err
+		}
+		if err := txn.Delete(k); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // LoadRewardBlocks replaces the store's reward block rows with the ones feed

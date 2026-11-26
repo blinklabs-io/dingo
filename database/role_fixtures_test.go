@@ -39,8 +39,9 @@ func newReleasedTestDB(t *testing.T) *Database {
 }
 
 // indexerTestDB is an IndexerDB composed as a node composes it: its own
-// API-mode SQLite store over the indexer view of the ledger's block store.
-// Blocks are written through ledger; the IndexerDB cannot write them.
+// API-mode SQLite store, which also keeps its CBOR offsets, reading blocks
+// from the ledger's block store. Blocks are written through ledger; the
+// IndexerDB cannot write them.
 type indexerTestDB struct {
 	ledger  *Database
 	indexer *Database
@@ -52,6 +53,17 @@ type indexerTestDB struct {
 func newIndexerTestDB(
 	t *testing.T,
 	wrap func(metadata.MetadataStore) metadata.MetadataStore,
+) indexerTestDB {
+	t.Helper()
+	return newIndexerTestDBOver(t, wrap, nil)
+}
+
+// newIndexerTestDBOver is newIndexerTestDB with the IndexerDB reading the
+// ledger's block store through wrapBlocks, when it is set.
+func newIndexerTestDBOver(
+	t *testing.T,
+	wrap func(metadata.MetadataStore) metadata.MetadataStore,
+	wrapBlocks func(blob.BlobStore) blob.BlobStore,
 ) indexerTestDB {
 	t.Helper()
 	ledger, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
@@ -73,6 +85,12 @@ func newIndexerTestDB(
 		_ = host.Stop(context.Background())
 		require.NoError(t, err)
 	}
+	ledgerBlocks := ledger.Blob()
+	if wrapBlocks != nil {
+		ledgerBlocks = wrapBlocks(ledgerBlocks)
+	}
+	blocks, err := NewIndexerBlobStore(ledgerBlocks, store)
+	require.NoError(t, err)
 	if wrap != nil {
 		store = wrap(store)
 	}
@@ -84,7 +102,7 @@ func newIndexerTestDB(
 			Role:        RoleIndexer,
 			StorageMode: types.StorageModeAPI,
 		},
-		Stores{Blob: blob.NewIndexerStore(ledger.Blob()), Metadata: store},
+		Stores{Blob: blocks, Metadata: store},
 	)
 	if err != nil {
 		_ = host.Stop(context.Background())

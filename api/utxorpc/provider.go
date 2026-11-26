@@ -49,6 +49,10 @@ func RegisterProvider(host *plugin.Host) error {
 			Capability:  plugin.CapabilityAPIUtxorpc,
 			Name:        "builtin",
 			Description: "built-in UTxO RPC Connect server",
+			Storage: plugin.StorageRequirements{
+				Tier:     plugin.StorageTierCore,
+				Features: []plugin.StorageFeature{plugin.StorageFeatureUtxorpc},
+			},
 		},
 		func() ProviderConfig {
 			return ProviderConfig{Port: 9090, Host: defaultListenHost}

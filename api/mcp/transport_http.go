@@ -138,7 +138,7 @@ func (s *Server) handler() http.Handler {
 	})
 
 	// Every tool and resource can read current state, so all but the
-	// health routes wait for the IndexerDB on a split layout.
+	// health routes wait for the IndexerDB with an IndexerDB.
 	gated := apiready.Middleware(
 		s.ready,
 		func(r *http.Request) (indexerdb.Kind, bool) {

@@ -564,6 +564,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 			uint(dijkstra.EraIdDijkstra),
 			rbBlockNumber,
 		)
+		delta.consensus = ls.forkValidationConsensus(txn)
 		delta.Offsets = offsets
 		delta.expandedIndexOffset = expandedIndexOffset
 		delta.closureContextSlot = contextSlot
@@ -1980,7 +1981,18 @@ func (b *leiosBackfiller) fetchOnce(
 	if endorserBlockAvailableAt(b.provider, r.hash.Bytes(), r.slot) {
 		return nil
 	}
-	return b.fetch(ctx, r.slot, r.hash.Bytes())
+	// Mark the fetch as mandatory so a leios-fetch connection held by a
+	// background prefetch of another endorser block is waited for, within
+	// ctx, instead of failing busy. A busy failure returns in microseconds,
+	// so fetchRequired's few short-spaced attempts would otherwise all land
+	// inside one slow prefetch and fail the chunk while the budget still had
+	// most of its time left. Background spawns stay unmarked: they skip a
+	// busy connection and never queue ahead of this fetch.
+	return b.fetch(
+		WithRequiredEndorserBlockFetch(ctx),
+		r.slot,
+		r.hash.Bytes(),
+	)
 }
 
 // waitForEndorserBlock polls the EndorserBlockProvider until the endorser block
@@ -2217,9 +2229,7 @@ func (ls *LedgerState) applyUntickedBoundaryClosure(
 		return err
 	}
 	if donation > 0 {
-		ls.RLock()
-		epoch := ls.currentEpoch.EpochId
-		ls.RUnlock()
+		epoch := ls.stagingEpoch(txn)
 		if err := ls.ledgerDB().AddNetworkDonation(point.Slot, epoch, donation, txn); err != nil {
 			return err
 		}

@@ -49,9 +49,9 @@ func (n *Node) captureIndexerPayload(
 }
 
 // indexerPayloadSource is the IndexerDB capture the scheduled snapshot
-// manager runs on the split layout.
+// manager runs with an IndexerDB.
 func (n *Node) indexerPayloadSource() *dblifecycle.IndexerPayloadSource {
-	if !n.splitIndexer() {
+	if !n.hasIndexerDB() {
 		return nil
 	}
 	return &dblifecycle.IndexerPayloadSource{

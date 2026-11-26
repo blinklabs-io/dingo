@@ -358,8 +358,8 @@ func IsPreStakingEpoch(network string, epoch uint64) bool {
 // epoch Koios reports the corresponding pool_history/epoch_info row under).
 // reward_pool_output.Epoch is written from that same epochs.snapshot value in
 // the same reward-application call, so it shares this offset with
-// reward_pool_input's stake fields exactly. See ARCHITECTURE.md's Koios
-// Parity Tracker "Epoch alignment" section for the full derivation and
+// reward_pool_input's stake fields exactly. See README.md's "Epoch alignment"
+// section for the full derivation and
 // koiosParamEpoch below for the distinct offset reward_pool_input's
 // BlocksProduced field needs instead. Margin/FixedCost share this stake-epoch
 // offset rather than that one.
@@ -390,7 +390,7 @@ func koiosStakeEpoch(
 // DelegatorCount/Margin/Cost instead. BlocksProduced is the only field read
 // at this offset: a mark snapshot records the pool parameters as of its own
 // boundary, so Margin/FixedCost belong with the stake epoch.
-// See koiosStakeEpoch's doc comment and ARCHITECTURE.md.
+// See koiosStakeEpoch's doc comment and README.md.
 // poolDepartedAtParamEpoch reports whether keyHex provably left the pool set
 // by K+1, from either of two independent routes.
 //
@@ -634,7 +634,7 @@ func checkEpoch(
 	// overlapping field names; see CompareEpochTotals. Unlike total_active_stake
 	// above, reward_ada_pots is a point-in-time ledger pot balance captured at
 	// the boundary into epoch itself (not a delayed reward-calculation input),
-	// so it is read at epoch, not stakeEpoch — see ARCHITECTURE.md. A missing
+	// so it is read at epoch, not stakeEpoch — see README.md. A missing
 	// totals row (e.g. cached before totals fetching existed, or a
 	// --skip-fetch run against a cache that never fetched it) is reported by
 	// CompareEpochTotals as an explicit "koios_totals" / CategoryDBMissing
@@ -1262,7 +1262,7 @@ func accountRewardsPending(dingoPoolMap map[string]*DingoPoolEpochData) bool {
 // reporting epoch `epoch` actually live under — the same koiosStakeEpoch
 // (K-1) offset reward_pool_output already uses, since both are written from
 // app.epochs.snapshot in the same ledger/epochengine/reward_calculation.go call (see
-// koiosStakeEpoch's doc comment and ARCHITECTURE.md's Epoch alignment
+// koiosStakeEpoch's doc comment and README.md's Epoch alignment
 // section).
 func compareEpochAccounts(
 	ctx context.Context,
@@ -1847,7 +1847,7 @@ func historyPending(err error) bool {
 }
 
 // transactionHistoryPoll and transactionHistoryWait bound how long a check
-// waits for the IndexerDB to index the epoch it samples. At an epoch boundary
+// waits for the IndexerDB to index the epoch it reads. At an epoch boundary
 // the IndexerDB usually trails the ledger by seconds to minutes; waiting here
 // keeps the epoch's other checks from being deferred and reported as an error
 // on every boundary. Tests shorten them.
@@ -1858,8 +1858,8 @@ var (
 
 // waitForHistory calls read, retrying while the history it reads has not
 // reached the epoch, up to transactionHistoryWait. It returns
-// ErrTransactionHistoryPending when the history is still behind after that,
-// and ctx's error when ctx ends first.
+// ErrTransactionHistoryPending or ErrRewardHistoryPending when the history is
+// still behind after that, and ctx's error when ctx ends first.
 func waitForHistory[T any](
 	ctx context.Context,
 	read func() (T, error),

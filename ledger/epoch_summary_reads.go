@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -122,15 +121,6 @@ func totalActiveStakeFrom(
 		total += v
 	}
 	return total, nil
-}
-
-func sameSummaryPtr(a, b *models.EpochSummary) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	x, y := *a, *b
-	x.ID, y.ID = 0, 0
-	return fmt.Sprintf("%+v", x) == fmt.Sprintf("%+v", y)
 }
 
 func (s stagingLedgerDB) GetEpochSummary(

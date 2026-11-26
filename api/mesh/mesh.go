@@ -67,7 +67,7 @@ type ServerConfig struct {
 	Database    MeshDatabase
 	Chain       MeshChain
 	Mempool     MeshMempool
-	// Ready gates the IndexerDB-backed routes on a split layout. Nil serves
+	// Ready gates the IndexerDB-backed routes with an IndexerDB. Nil serves
 	// everything.
 	Ready apiready.Check
 	// ListenAddress is the TCP address to listen on (e.g. ":8080").

@@ -58,9 +58,7 @@ func bootSetNode(
 		DataDir: dir, StorageMode: types.StorageModeCore,
 	})
 	require.NoError(t, err)
-	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(dir), Only: true, Authoritative: true,
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: utxoset.DirFor(dir)})
 	require.NoError(t, err)
 	bus := event.NewEventBus(nil, logger)
 	cm, err := chain.NewManager(t.Context(), db, bus)

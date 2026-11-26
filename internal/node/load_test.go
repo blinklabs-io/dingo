@@ -1495,9 +1495,7 @@ func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 		"devnet genesis fixture must declare staking for this test to be meaningful",
 	)
 
-	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(db.DataDir()), Only: true,
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: utxoset.DirFor(db.DataDir())})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, set.Close()) })
 	rewardSnapshot, err := set.RewardSnapshotRow(0, "mark", nil)

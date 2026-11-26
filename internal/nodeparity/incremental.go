@@ -451,7 +451,7 @@ const blockCheckTimeout = 30 * time.Second
 // follow-up cardano-node reference-batch query together, not either phase
 // on its own -- the same combined cost cmd/node-parity/watch.go's full-mode
 // defaultCheckTimeout (20m) bounds. 10 minutes was sized for an earlier
-// measurement of Dingo's own walk alone (~5 minutes, see ARCHITECTURE.md);
+// measurement of Dingo's own walk alone (~5 minutes);
 // live validation later the same day this was raised found Preview's
 // continued growth had pushed that same walk to 9.6-10 minutes by itself,
 // so a periodic full checkpoint's context deadline fired on the

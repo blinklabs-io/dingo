@@ -201,7 +201,7 @@ func saveRewardPrecomputeCursor(
 // StakeRewardPrecomputeRound holds a reward round's inputs and Pass-1 result,
 // gathered once in a read-only transaction and then reused across every
 // chunk step: none of it changes for the life of one precompute attempt
-// (a change is exactly what rewardInputGeneration bumping means, and every
+// (a change is exactly what a RewardInputGeneration bump means, and every
 // chunk step re-checks that before writing).
 type StakeRewardPrecomputeRound struct {
 	NewEpoch     uint64
