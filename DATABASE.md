@@ -4617,9 +4617,9 @@ never by row id, from `metadata.FactTables`:
   the order the ledger applies them in, so a withdrawal of a fresh deposit
   later in the segment finds its balance. The journal key makes the held credit
   a no-op once the blocks have credited it, and a held credit whose account is
-  still missing fails the batch. Block replay credits only when it debits
-  withdrawals, and not for the bodies of a certified closure, whose credits
-  come from the copy alone. The replay up to a Mithril anchor does not debit: no
+  still missing fails the batch. A certified closure's bodies are credited the
+  same way, at the certifying block's slot, where the ledger journals them.
+  Block replay credits only when it debits withdrawals. The replay up to a Mithril anchor does not debit: no
   credit before the anchor is replayed, and the anchor's balances are set
   from the imported state afterwards. The journal is exported from the set's
   reward records, each of which carries

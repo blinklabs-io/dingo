@@ -1719,17 +1719,16 @@ func (b *Backfill) processBlockTxsBatched(
 	return nil
 }
 
-// creditDirectDeposits credits the reward accounts a Dijkstra transaction body
-// deposits to, directly after the body's certificates were stored and before
-// the next body's withdrawals, as the ledger orders them. The credit is then in
-// the IndexerDB for an account the same segment registers, which the writer's
-// replay of the ledger's reward credits cannot reach before the blocks are
-// indexed. The journal key makes a credit the replay already applied a no-op.
+// creditDirectDeposits credits the reward accounts a Dijkstra transaction body,
+// of a ranking block or of a certified closure, deposits to, directly after
+// the body's certificates were stored and before the next body's withdrawals,
+// as the ledger orders them. The credit is then in the IndexerDB for an
+// account the same segment registers, which the writer's replay of the
+// ledger's reward credits cannot reach before the blocks are indexed. The
+// journal key makes a credit the replay already applied a no-op.
 //
 // Nothing is credited unless withdrawals debit: a replay that leaves balances
-// to an imported snapshot leaves its credits to the snapshot too. A certified
-// closure's bodies are not credited here; their credits come from the replay
-// alone.
+// to an imported snapshot leaves its credits to the snapshot too.
 func (b *Backfill) creditDirectDeposits(
 	ctx context.Context,
 	level lcommon.Transaction,
