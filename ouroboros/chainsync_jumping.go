@@ -121,8 +121,8 @@ type ChainsyncJumpingConfig struct {
 	LocalProgress func() uint64
 	// Held reports whether the selector holds the connection's header stream
 	// on purpose (the Limit on Eagerness or the catch-up band). A held dynamo
-	// is not recycled for its silence once it has delivered a header since
-	// its election. Optional.
+	// is not recycled for its silence once it has sent a header since its
+	// election, verified or still parked. Optional.
 	Held func(ouroboros.ConnectionId) bool
 }
 
@@ -188,10 +188,11 @@ type chainsyncJumping struct {
 	progressAt   time.Time
 	progressMark uint64
 	markSeen     bool
-	// dynamoDelivered records that the dynamo has delivered a header since
-	// its election. Only then can a hold of its stream be the node's own
-	// wait on that header rather than the peer's silence.
-	dynamoDelivered bool
+	// dynamoSentHeader records that the dynamo has sent a header since its
+	// election, set on receipt before any wait can park the header unverified.
+	// Only then can a hold of its stream be the node's own wait on that
+	// header rather than the peer's silence.
+	dynamoSentHeader bool
 
 	now func() time.Time
 
@@ -418,7 +419,7 @@ func (j *chainsyncJumping) setDynamoLocked(connId ouroboros.ConnectionId) {
 	j.restartBlock = 0
 	j.streamPoint = ocommon.Point{}
 	j.progressAt = j.now()
-	j.dynamoDelivered = false
+	j.dynamoSentHeader = false
 	delete(j.streamers, connId)
 	delete(j.jumpers, connId)
 }
@@ -800,6 +801,22 @@ func (o *Ouroboros) csjOnAwaitReply(connId ouroboros.ConnectionId) {
 	}
 }
 
+// csjObserveHeaderSent runs, from the ChainSync callback, for every header a
+// connection sends, before the callback can park it unverified (header
+// capacity, the catch-up band, the future-header wait). A parked header is
+// not yet a delivery, but the node, not the peer, is then the one waiting.
+func (o *Ouroboros) csjObserveHeaderSent(connId ouroboros.ConnectionId) {
+	j := o.csj
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	if j.hasDynamo && j.dynamo == connId {
+		j.dynamoSentHeader = true
+	}
+	j.mu.Unlock()
+}
+
 // csjObserveDelivery runs for every header delivered on any connection, from
 // the ChainSync callback, so it only decides and hands work to a goroutine.
 func (o *Ouroboros) csjObserveDelivery(
@@ -815,7 +832,7 @@ func (o *Ouroboros) csjObserveDelivery(
 	isDynamo := j.hasDynamo && j.dynamo == connId
 	if isDynamo {
 		j.progressAt = j.now()
-		j.dynamoDelivered = true
+		j.dynamoSentHeader = true
 		// A different header at or below the last one starts a new
 		// stream; the last header delivered again does not.
 		sameHeader := point.Slot == j.streamPoint.Slot &&
@@ -1354,12 +1371,12 @@ func (o *Ouroboros) csjCheckDynamoStall(now time.Time) {
 		j.mu.Unlock()
 		return
 	}
-	// A hold excuses the dynamo only once it has delivered a header: the
+	// A hold excuses the dynamo only once it has sent a header: the
 	// reference pauses the Limit on Patience only while the node itself is
 	// busy with a header the peer sent, and leaves a peer that has sent
-	// none to the timeouts. A hold before any delivery would otherwise keep
+	// none to the timeouts. A hold before any header would otherwise keep
 	// a silent dynamo, and every jumper waiting on it, in place for good.
-	if (held && j.dynamoDelivered) || (j.markSeen && mark != j.progressMark) {
+	if (held && j.dynamoSentHeader) || (j.markSeen && mark != j.progressMark) {
 		j.progressAt = now
 	}
 	j.markSeen = true
