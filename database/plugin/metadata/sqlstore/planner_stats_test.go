@@ -825,3 +825,39 @@ func TestOptimizePlannerStatsEpochPassRunsForSmallTableInLargeDatabase(
 		"shrinking the file must not suppress a later pass")
 	require.Equal(t, int64(3), passes.Load())
 }
+
+// A table whose highest rowid falls, as after a rollback deletes its newest
+// rows, is measured from the lower value. Measured from the last pass
+// instead, it would wait until it outgrew a size it no longer has.
+func TestOptimizePlannerStatsEpochPassCountsGrowthFromAShrunkTable(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newFilePlannerStatsStore(t, nil)
+	var passes atomic.Int64
+	store.dialect = countingOptimizeDialect(&passes)
+	ctx := t.Context()
+	optimize := func(trigger string) types.PlannerStatsResult {
+		result, err := store.OptimizePlannerStatsContext(ctx, trigger)
+		require.NoError(t, err)
+		return result
+	}
+	insertGrowthRows(t, store.writeDB, "planner_growth_big", 10000)
+	require.False(t, optimize(PlannerStatsTriggerStartup).Skipped)
+	require.Equal(t, int64(1), passes.Load())
+
+	_, err := store.writeDB.Exec(
+		"DELETE FROM planner_growth_big WHERE id > 5000",
+	)
+	require.NoError(t, err)
+	require.True(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"a table that shrank has not grown")
+
+	insertGrowthRows(t, store.writeDB, "planner_growth_big", 1249)
+	require.True(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"growth under a quarter of the lowered size must wait")
+	insertGrowthRows(t, store.writeDB, "planner_growth_big", 1)
+	require.False(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"growth of a quarter from the lowered size must run the epoch pass")
+	require.Equal(t, int64(2), passes.Load())
+}
