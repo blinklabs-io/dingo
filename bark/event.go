@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -45,6 +46,11 @@ const (
 	// eventAckTimeout is how long an acknowledging subscriber may leave a
 	// full send window unacknowledged before its stream is closed.
 	eventAckTimeout = 30 * time.Second
+	// eventStalledConnGrace is how long a send the guard has already ended
+	// may stay blocked before the guard ends its connection's write as well.
+	// It applies only to a stream that has lagged out of the ring or is
+	// being closed for shutdown.
+	eventStalledConnGrace = time.Second
 )
 
 // eventHub turns the node's EventBus traffic into the Event Service's
@@ -618,6 +624,14 @@ func errEventServiceClosing() error {
 
 type responseControllerKey struct{}
 
+type eventConnKey struct{}
+
+// eventConnContext is the http.Server ConnContext that gives each request
+// its connection, which sendGuard needs when the connection itself is stuck.
+func eventConnContext(ctx context.Context, c net.Conn) context.Context {
+	return context.WithValue(ctx, eventConnKey{}, c)
+}
+
 // newEventServiceHTTPHandler mounts the Event Service with each call's
 // http.ResponseController in its context, which sendGuard needs to end a
 // blocked send.
@@ -652,6 +666,9 @@ const (
 type sendGuard struct {
 	hub *eventHub
 	rc  *http.ResponseController
+	// conn is the stream's connection, nil when the server does not record
+	// it.
+	conn net.Conn
 	// mu binds the watcher's lag check and expiry to one batch: the handler
 	// cannot move to the next batch between them.
 	mu sync.Mutex
@@ -670,6 +687,7 @@ type sendGuard struct {
 func (h *eventHub) guardSends(ctx context.Context) *sendGuard {
 	g := &sendGuard{hub: h, done: make(chan struct{})}
 	g.rc, _ = ctx.Value(responseControllerKey{}).(*http.ResponseController)
+	g.conn, _ = ctx.Value(eventConnKey{}).(net.Conn)
 	if g.rc != nil {
 		g.exited = make(chan struct{})
 		go g.watch(ctx)
@@ -712,6 +730,8 @@ func (g *sendGuard) end() {
 
 // sendError maps a failed Send to the reason the guard ended it, if any.
 func (g *sendGuard) sendError(err error, lagErr func() error) error {
+	// Send has returned, so the watcher must not expire the connection.
+	g.end()
 	switch g.expired.Load() {
 	case sendExpiredLagged:
 		return lagErr()
@@ -723,6 +743,32 @@ func (g *sendGuard) sendError(err error, lagErr func() error) error {
 
 func (g *sendGuard) watch(ctx context.Context) {
 	defer close(g.exited)
+	if !g.watchSends(ctx) || g.conn == nil {
+		return
+	}
+	// The stream reset that ends the send is a frame queued behind the
+	// connection's pending write. A client that has stopped reading the
+	// connection itself, such as a stopped process, never lets that write
+	// finish, so the send stays blocked and the connection's write must be
+	// expired too. That closes the connection and any other call on it,
+	// none of which can progress while the connection is stuck.
+	timer := time.NewTimer(eventStalledConnGrace)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		g.mu.Lock()
+		if g.sending != 0 {
+			_ = g.conn.SetWriteDeadline(time.Unix(1, 0))
+		}
+		g.mu.Unlock()
+	case <-g.done:
+	case <-ctx.Done():
+	}
+}
+
+// watchSends expires the write of a batch that lags out of the ring or is in
+// flight when the hub closes, and reports whether it did.
+func (g *sendGuard) watchSends(ctx context.Context) bool {
 	for {
 		g.hub.mu.Lock()
 		wake := g.hub.wake
@@ -730,17 +776,19 @@ func (g *sendGuard) watch(ctx context.Context) {
 		if g.expireIf(sendExpiredLagged, func(s uint64) bool {
 			return g.hub.lagged(s - 1)
 		}) {
-			return
+			return true
 		}
 		select {
 		case <-wake:
 		case <-g.hub.closed:
-			g.expireIf(sendExpiredClosing, func(uint64) bool { return true })
-			return
+			return g.expireIf(
+				sendExpiredClosing,
+				func(uint64) bool { return true },
+			)
 		case <-g.done:
-			return
+			return false
 		case <-ctx.Done():
-			return
+			return false
 		}
 	}
 }

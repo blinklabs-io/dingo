@@ -445,17 +445,19 @@ func (b *Bark) Start(ctx context.Context) error {
 		)
 
 		server = &http.Server{
-			Addr:    listenAddr,
-			Handler: handler,
+			Addr:        listenAddr,
+			Handler:     handler,
+			ConnContext: eventConnContext,
 		}
 	} else {
 		b.config.Logger.Info(
 			"starting bark gRPC listener on " + listenAddr,
 		)
 		server = &http.Server{
-			Addr:      listenAddr,
-			Handler:   handler,
-			Protocols: unencryptedHTTP2Protocols(),
+			Addr:        listenAddr,
+			Handler:     handler,
+			Protocols:   unencryptedHTTP2Protocols(),
+			ConnContext: eventConnContext,
 		}
 	}
 	if err := b.startServer(server); err != nil {
