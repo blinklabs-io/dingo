@@ -403,14 +403,13 @@ func (r *Runner) validateDatabase(states map[int]state) error {
 			)
 		}
 	}
-	for version, migrationState := range states {
+	for version := range states {
 		migration := registered[version]
 		if migration.After == 0 {
 			continue
 		}
 		predecessor, exists := states[migration.After]
-		if !exists || (migrationState.phase != PhaseComplete &&
-			predecessor.phase != PhaseComplete) {
+		if !exists || predecessor.phase != PhaseComplete {
 			return fmt.Errorf(
 				"metadata migration state for version %d has no completed predecessor %d",
 				version,

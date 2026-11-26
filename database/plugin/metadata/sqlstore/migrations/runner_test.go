@@ -500,6 +500,37 @@ func TestRunnerAppliesMergedSiblingAfterPreviouslyAppliedSibling(t *testing.T) {
 	}
 }
 
+func TestValidateDatabaseRejectsCompletedMigrationWithIncompletePredecessor(t *testing.T) {
+	t.Parallel()
+	parent := testMigration(nil)
+	child := Migration{
+		Version:          StableVersion("completed_child"),
+		After:            parent.Version,
+		Name:             "completed_child",
+		BackfillRevision: "1",
+		SQL:              map[string]SQL{"sqlite": {}},
+	}
+	runner := testRunner(nil, parent)
+	runner.Registry = []Migration{parent, child}
+	states := map[int]state{
+		parent.Version: {
+			version:  parent.Version,
+			name:     parent.Name,
+			checksum: parent.checksum(),
+			phase:    PhaseExpand,
+			dirty:    true,
+		},
+		child.Version: {
+			version:     child.Version,
+			name:        child.Name,
+			checksum:    child.checksum(),
+			phase:       PhaseComplete,
+			completedAt: sql.NullInt64{Int64: 1, Valid: true},
+		},
+	}
+	require.ErrorContains(t, runner.validateDatabase(states), "no completed predecessor")
+}
+
 func TestProcessLockerCancellation(t *testing.T) {
 	t.Parallel()
 	locker := NewProcessLocker()
