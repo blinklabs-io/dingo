@@ -2893,12 +2893,19 @@ both errors and the database requires recovery before another load.
 On every on-disk database `<databasePath>/ledger/utxo` holds the live UTxO set
 and the ledger state it computes (`internal/utxoset` over
 `database/ledgerdb/badgerutxo`); the metadata store keeps no `utxo` rows. Each
-ledger commit's UTxO changes are applied to it in one Badger transaction,
-synchronously after the commit and before the next block is validated, so it
-does not depend on the event bus. A commit of several blocks writes a journal
+ledger commit's UTxO changes are applied to it synchronously after the
+commit and before the next block is validated, so it does not depend on the
+event bus. A commit is one Badger transaction when it fits; otherwise it is
+written in several, the first setting a failure mark and the last writing the
+tip and clearing it, so the tip moves only with the whole commit and a stop
+in between is rewound at startup. A commit of several blocks writes a journal
 record for each block, including one that changed no output
 (`Set.withBlockPoints` adds its point from the commit's block nonces), so
-every block of the journal window is a point `Store.Rollback` accepts.
+every block of the journal window is a point `Store.Rollback` accepts. A
+block whose own changes exceed one transaction, such as one carrying a large
+endorser block's transactions, is written in parts with a record each; a
+rollback that undoes such a block records itself pending first, so a stop
+part way is finished at the next start.
 Validation reads the set alone. Every key
 tag and marker is declared once, in `database/ledgerdb/badgerutxo/keys.go`;
 `TestKeyFamiliesDoNotOverlap` fails when two families share a first byte or a

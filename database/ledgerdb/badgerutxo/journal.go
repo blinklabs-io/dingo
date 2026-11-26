@@ -41,7 +41,8 @@ var ErrPointNotInJournal = errors.New(
 
 // journalRecord is one ApplyBatch segment: its exact point, whether it
 // advanced the tip, the tip before it, and the prior state of every output it
-// touched.
+// touched. A point written in parts has a record per part; the tip before a
+// later part is the point itself.
 type journalRecord struct {
 	point       ocommon.Point
 	prevTip     ocommon.Point
@@ -111,41 +112,12 @@ func encodeRecord(rec journalRecord) []byte {
 }
 
 func decodeRecord(b []byte) (journalRecord, error) {
-	var rec journalRecord
+	rec, b, err := decodeRecordHead(b)
+	if err != nil {
+		return rec, err
+	}
 	bad := errors.New("badgerutxo: truncated journal record")
 	need := func(n int) bool { return len(b) >= n }
-	if !need(10) {
-		return rec, bad
-	}
-	rec.point.Slot = binary.BigEndian.Uint64(b)
-	pointHashLen := int(b[8])
-	b = b[9:]
-	if !need(pointHashLen + 1) {
-		return rec, bad
-	}
-	rec.point.Hash = append([]byte(nil), b[:pointHashLen]...)
-	flags := b[pointHashLen]
-	rec.advancesTip = flags&1 != 0
-	rec.baseline = flags&2 != 0
-	b = b[pointHashLen+1:]
-	if !need(1) {
-		return rec, bad
-	}
-	rec.hadTip = b[0] == 1
-	b = b[1:]
-	if rec.hadTip {
-		if !need(1) {
-			return rec, bad
-		}
-		hl := int(b[0])
-		b = b[1:]
-		if !need(8 + hl) {
-			return rec, bad
-		}
-		rec.prevTip.Slot = binary.BigEndian.Uint64(b)
-		rec.prevTip.Hash = append([]byte(nil), b[8:8+hl]...)
-		b = b[8+hl:]
-	}
 	if !need(4) {
 		return rec, bad
 	}
@@ -171,6 +143,86 @@ func decodeRecord(b []byte) (journalRecord, error) {
 		rec.ops = append(rec.ops, op)
 	}
 	return rec, nil
+}
+
+// decodeRecordHead decodes a journal record's point, flags and tip before
+// it, and returns the undecoded ops after them.
+func decodeRecordHead(b []byte) (journalRecord, []byte, error) {
+	var rec journalRecord
+	bad := errors.New("badgerutxo: truncated journal record")
+	need := func(n int) bool { return len(b) >= n }
+	if !need(10) {
+		return rec, nil, bad
+	}
+	rec.point.Slot = binary.BigEndian.Uint64(b)
+	pointHashLen := int(b[8])
+	b = b[9:]
+	if !need(pointHashLen + 1) {
+		return rec, nil, bad
+	}
+	rec.point.Hash = append([]byte(nil), b[:pointHashLen]...)
+	flags := b[pointHashLen]
+	rec.advancesTip = flags&1 != 0
+	rec.baseline = flags&2 != 0
+	b = b[pointHashLen+1:]
+	if !need(1) {
+		return rec, nil, bad
+	}
+	rec.hadTip = b[0] == 1
+	b = b[1:]
+	if rec.hadTip {
+		if !need(1) {
+			return rec, nil, bad
+		}
+		hl := int(b[0])
+		b = b[1:]
+		if !need(8 + hl) {
+			return rec, nil, bad
+		}
+		rec.prevTip.Slot = binary.BigEndian.Uint64(b)
+		rec.prevTip.Hash = append([]byte(nil), b[8:8+hl]...)
+		b = b[8+hl:]
+	}
+	return rec, b, nil
+}
+
+// continues reports whether rec is a later part of a point an earlier record
+// began: its tip before it is its own point.
+func (rec journalRecord) continues() bool {
+	return rec.hadTip && samePoint(rec.prevTip, rec.point)
+}
+
+// splitRecordsAfter reports whether a record after slot continues a point,
+// so undoing that point takes more than one transaction.
+func splitRecordsAfter(txn *badger.Txn, slot uint64) (bool, error) {
+	opts := badger.DefaultIteratorOptions
+	// Prefetching starts a goroutine per item, and the records scanned are
+	// as many as the rollback undoes.
+	opts.PrefetchValues = false
+	opts.Reverse = true
+	opts.Prefix = []byte{JournalTag}
+	it := txn.NewIterator(opts)
+	defer it.Close()
+	it.Seek(append([]byte{JournalTag},
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
+	for ; it.Valid(); it.Next() {
+		var rec journalRecord
+		err := it.Item().Value(func(v []byte) error {
+			var err error
+			rec, _, err = decodeRecordHead(v)
+			return err
+		})
+		if err != nil {
+			return false, err
+		}
+		if rec.point.Slot <= slot {
+			return false, nil
+		}
+		if rec.continues() {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func readTip(txn *badger.Txn) (ocommon.Point, bool, error) {
@@ -573,9 +625,10 @@ func (s *Store) RollbackReaches(point ocommon.Point) (bool, error) {
 //
 // A rollback that cannot stay inside such transactions records point as
 // pending first: when rows under a range tombstone it undoes are deleted
-// ahead of its transactions, or when the state journal entries it undoes are
+// ahead of its transactions, when the state journal entries it undoes are
 // more than one transaction takes, which it then undoes in several, newest
-// first, before any batch. Until the last transaction clears the mark the
+// first, before any batch, or when it undoes a point written in parts, whose
+// tip stays on the point until its first part is undone. Until the last transaction clears the mark the
 // set holds a mix of states, so a store that starts with the mark finishes
 // the rollback (ResumeRollback), and ApplyLedgerBatch refuses until then.
 // Readers wait while the mark is set.
@@ -647,13 +700,19 @@ func (s *Store) rollback(point ocommon.Point, marked bool) (RollbackResult, erro
 	if err != nil {
 		return RollbackResult{}, err
 	}
-	var heavy bool
+	var heavy, split bool
 	if err := s.view(func(txn *badger.Txn) error {
 		var err error
 		heavy, err = rowsAfterExceed(txn, point.Slot, entries, maxBytes)
+		if err != nil {
+			return err
+		}
 		// A credit or withdrawal record per account, as many as the rows.
 		heavy = heavy ||
 			slotKeysAfterExceed(txn, RewardRecordTag, point.Slot, entries)
+		// Undoing a point written in parts leaves its tip on the point
+		// until the last part is undone, a state the set never held.
+		split, err = splitRecordsAfter(txn, point.Slot)
 		return err
 	}); err != nil {
 		return RollbackResult{}, err
@@ -661,7 +720,7 @@ func (s *Store) rollback(point ocommon.Point, marked bool) (RollbackResult, erro
 	hook := s.newStepHook()
 	// cur is where the state journal scan resumes between transactions.
 	var cur rowsCursor
-	if marked || len(prefixes) > 0 || heavy {
+	if marked || len(prefixes) > 0 || heavy || split {
 		if !marked {
 			if err := s.update(func(txn *badger.Txn) error {
 				return txn.Set(rollbackPendingKey, encodePoint(point))

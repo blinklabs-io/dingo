@@ -74,8 +74,8 @@ func (c cost) fits(entries, bytes int64) bool {
 	return c.entries <= entries && c.bytes <= bytes
 }
 
-// pointUnit is the changes of one point, which a journal record covers and
-// so a transaction never splits.
+// pointUnit is the changes of one point, or a part of them, which one
+// journal record covers.
 type pointUnit struct {
 	changes []Change
 	cost    cost
@@ -88,26 +88,94 @@ func pointUnits(changes []Change) []pointUnit {
 		for j < len(changes) && samePoint(changes[j].Point, changes[i].Point) {
 			j++
 		}
-		u := pointUnit{
-			changes: changes[i:j],
-			cost:    cost{entries: perPointEntries},
-		}
-		for _, c := range changes[i:j] {
-			for _, o := range c.Added {
-				u.cost.entries += outputEntries
-				u.cost.bytes += int64(
-					keyBytes + len(o.Cbor) + sumBytes + journalBytes + indexBytes,
-				)
-			}
-			for range c.Removed {
-				u.cost.entries += outputEntries
-				u.cost.bytes += int64(
-					keyBytes + sumBytes + journalBytes + removedBytes + indexBytes,
-				)
-			}
-		}
-		units = append(units, u)
+		units = append(units, newPointUnit(changes[i:j]))
 		i = j
+	}
+	return units
+}
+
+func newPointUnit(changes []Change) pointUnit {
+	u := pointUnit{changes: changes, cost: cost{entries: perPointEntries}}
+	for _, c := range changes {
+		for _, o := range c.Added {
+			u.cost.entries += outputEntries
+			u.cost.bytes += int64(
+				keyBytes + len(o.Cbor) + sumBytes + journalBytes + indexBytes,
+			)
+		}
+		for range c.Removed {
+			u.cost.entries += outputEntries
+			u.cost.bytes += int64(
+				keyBytes + sumBytes + journalBytes + removedBytes + indexBytes,
+			)
+		}
+	}
+	return u
+}
+
+// unitOutputs is how many outputs u's changes remove or add.
+func unitOutputs(u pointUnit) int {
+	n := 0
+	for _, c := range u.changes {
+		n += len(c.Removed) + len(c.Added)
+	}
+	return n
+}
+
+// splitUnit cuts u in two parts of about half its outputs each, keeping their
+// order: a change's removals still go ahead of its additions. ok is false
+// for a unit of fewer than two outputs.
+//
+// A block's changes are bounded by the protocol, not by Badger's transaction
+// limit: a block with an endorser block's transactions can change more
+// outputs than one transaction takes. Its parts go in transactions of their
+// own, each with a journal record whose tip before it is the block itself
+// after the first.
+func splitUnit(u pointUnit) (pointUnit, pointUnit, bool) {
+	total := unitOutputs(u)
+	if total < 2 {
+		return pointUnit{}, pointUnit{}, false
+	}
+	cut := total / 2
+	var first, second []Change
+	seen := 0
+	for _, c := range u.changes {
+		n := len(c.Removed) + len(c.Added)
+		switch {
+		case seen+n <= cut:
+			first = append(first, c)
+		case seen >= cut:
+			second = append(second, c)
+		default:
+			k := cut - seen
+			head := Change{Point: c.Point}
+			tail := Change{Point: c.Point}
+			if k <= len(c.Removed) {
+				head.Removed = c.Removed[:k]
+				tail.Removed = c.Removed[k:]
+				tail.Added = c.Added
+			} else {
+				head.Removed = c.Removed
+				head.Added = c.Added[:k-len(c.Removed)]
+				tail.Added = c.Added[k-len(c.Removed):]
+			}
+			first = append(first, head)
+			second = append(second, tail)
+		}
+		seen += n
+	}
+	return newPointUnit(first), newPointUnit(second), true
+}
+
+// splitFront splits the unit at the front of units until it fits the budget
+// alone or holds one output, and returns the units.
+func splitFront(units []pointUnit, entries, bytes int64) []pointUnit {
+	for len(units) > 0 && !units[0].cost.fits(entries, bytes) {
+		a, b, ok := splitUnit(units[0])
+		if !ok {
+			break
+		}
+		units = append([]pointUnit{a, b}, units[1:]...)
 	}
 	return units
 }
@@ -136,8 +204,8 @@ func familyCost(b LedgerBatch) cost {
 }
 
 // takeUnits returns how many of units, from the front, a transaction takes
-// within the budget. It takes at least one: a point's changes are bounded by
-// the block that made them, so the budget is never smaller than one point.
+// within the budget. It takes at least one; splitFront first cuts a unit that
+// does not fit alone.
 func takeUnits(units []pointUnit, base cost, entries, bytes int64) int {
 	c := base
 	n := 0
@@ -155,7 +223,8 @@ func takeUnits(units []pointUnit, base cost, entries, bytes int64) int {
 // and otherwise in several.
 //
 // A chunked batch writes its UTxO changes, point by point and each point with
-// its own journal record, in transactions that leave the tip alone. The last
+// its own journal record, in transactions that leave the tip alone; a point
+// too big for one transaction is written in parts, a record each. The last
 // transaction writes the remaining changes, every other row of the batch and
 // the tip. So the tip, and the state it stands for, only moves when the whole
 // batch is in, and the journal reaches back through every point written.
@@ -310,6 +379,7 @@ func (s *Store) applyChunked(
 				}
 			}
 		case !last:
+			units = splitFront(units, entries, bytes)
 			n = takeUnits(units, cost{}, entries, bytes)
 		}
 		leading := rowChunk != nil || accountChunk != nil ||
@@ -418,6 +488,12 @@ func (s *Store) applyChunked(
 				continue
 			case last:
 				familyAlone = true
+				continue
+			case unitOutputs(units[0]) > 1:
+				// The unit's estimate fit and the transaction did not, so
+				// the budget is halved until splitFront cuts the unit.
+				entries = max(min(entries, units[0].cost.entries)/2, 1)
+				bytes = max(min(bytes, units[0].cost.bytes)/2, 1)
 				continue
 			}
 		}
