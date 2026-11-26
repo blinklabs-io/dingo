@@ -123,9 +123,9 @@ func (m Migration) checksum() string {
 }
 
 // StableVersion gives new migrations an immutable, deterministic identifier
-// derived from their release name. Its range fits positive int values on both
-// 32-bit and 64-bit targets while leaving the released sequential versions
-// untouched. Registry validation detects hash collisions.
+// derived from their release name. Its range fits positive int64 values while
+// leaving the released sequential versions untouched, and remains intact on
+// 32-bit builds. Registry validation detects hash collisions.
 func StableVersion(name string) int64 {
 	digest := sha256.Sum256([]byte(name))
 	const stableVersionPrefix int64 = 1 << 62
