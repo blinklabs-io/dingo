@@ -31,6 +31,10 @@ func RegisterProvider(host *plugin.Host) error {
 			Capability:  plugin.CapabilityAPIMcp,
 			Name:        "builtin",
 			Description: "built-in Model Context Protocol (MCP) server for SQLite and Cardano introspection",
+			Storage: plugin.StorageRequirements{
+				Tier:     plugin.StorageTierCore,
+				Features: []plugin.StorageFeature{plugin.StorageFeatureMCP},
+			},
 		},
 		func() ProviderConfig {
 			return DefaultProviderConfig()

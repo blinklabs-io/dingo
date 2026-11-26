@@ -314,8 +314,7 @@ func Fetch(
 	// before per-account fetching existed (or before AccountsEnabled was
 	// turned on) would look "already fetched" to GetUncachedEpochs forever and
 	// never get a per-account backfill — see GetEpochsMissingAccountCoverage's
-	// doc comment and ARCHITECTURE.md's Koios Parity Tracker "Per-account
-	// exact parity" subsection.
+	// doc comment and README.md's "Per-account exact parity" section.
 	// ForceRefresh mode: fetch the full range and overwrite cached rows, used
 	// when the user suspects stale or corrupt cached data in [fromEpoch, through].
 	var epochs []uint64

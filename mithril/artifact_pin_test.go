@@ -162,8 +162,7 @@ func syncConfigForFixture(
 func newSyncTestSet(t *testing.T) *utxoset.Set {
 	t.Helper()
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: t.TempDir(), Only: true, Authoritative: true,
-		MemTableSize: 8 << 20,
+		Dir: t.TempDir(), MemTableSize: 8 << 20,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, set.Close()) })

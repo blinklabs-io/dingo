@@ -44,14 +44,16 @@ type FactsSource interface {
 	Boundaries(ctx context.Context, from, through uint64) ([]uint64, error)
 	// CopyFacts stores the rows dated in [from, through] that block replay
 	// depends on or that happen at the segment start, and applies the reward
-	// credits dated in the range, inside dst.
+	// credits dated in the range, inside dst. A credit whose account the
+	// segment's blocks register is held for PatchFacts.
 	CopyFacts(
 		ctx context.Context,
 		dst *database.Txn,
 		from, through uint64,
 	) error
 	// PatchFacts applies, inside dst, the ledger's outcome columns onto the
-	// rows block replay wrote for [from, through].
+	// rows block replay wrote for [from, through], and the reward credits
+	// CopyFacts held.
 	PatchFacts(
 		ctx context.Context,
 		dst *database.Txn,
@@ -92,6 +94,10 @@ type MetadataFacts struct {
 	sampled uint64
 	// through is the last slot the current batch copied facts for.
 	through uint64
+	// held are the credits of the current segment whose account the copy did
+	// not find in dst, which the segment's blocks may register. PatchFacts
+	// applies them once those blocks are indexed.
+	held []models.AccountRewardCredit
 	// pending is the position of the latest committed batch that has not
 	// been acknowledged.
 	pending        bool
@@ -252,6 +258,7 @@ func (f *MetadataFacts) CopyFacts(
 	from, through uint64,
 ) error {
 	f.through = through
+	f.held = nil
 	if f.journal != nil && f.sampled == 0 {
 		high, err := f.journal.RewardJournalHigh()
 		if err != nil {
@@ -296,10 +303,35 @@ func (f *MetadataFacts) PatchFacts(
 			return err
 		}
 	}
+	if err := f.applyHeldCredits(dst); err != nil {
+		return err
+	}
 	if store, ok := f.dst.Metadata().(metadata.DrepExpiryAsOfStore); ok {
 		return store.ApplyDrepExpiryAsOf(through, dst.Metadata())
 	}
 	return nil
+}
+
+// applyHeldCredits applies the credits CopyFacts held, now that the segment's
+// blocks are indexed. A credit the blocks of a direct-deposit transaction
+// already applied is in the journal and moves nothing. A credit whose account
+// is still missing is an error: the ledger credits only registered accounts.
+func (f *MetadataFacts) applyHeldCredits(dst *database.Txn) error {
+	held := f.held
+	f.held = nil
+	if len(held) == 0 {
+		return nil
+	}
+	folds, ok := f.dst.Metadata().(metadata.RewardFoldStore)
+	if !ok {
+		return errors.New("indexer: store cannot fold reward outputs")
+	}
+	if err := f.dst.Metadata().AddAccountRewardsByCredential(
+		held, dst.Metadata(),
+	); err != nil {
+		return err
+	}
+	return folds.FoldRewardOutputsForCredits(held, dst.Metadata())
 }
 
 // RollbackFacts implements FactsSource.
@@ -532,7 +564,8 @@ func (f *MetadataFacts) applyJournalRange(
 				}
 				return bytes.Compare(a.SourceHash, b.SourceHash)
 			})
-			err := store.AddAccountRewardsByCredential(batch, dst.Metadata())
+			credited, err := f.creditBatch(batch, dst)
+			applied = append(applied, credited...)
 			batch = batch[:0]
 			return err
 		}
@@ -560,7 +593,6 @@ func (f *MetadataFacts) applyJournalRange(
 				StakingKey: key, SourceHash: hash, Amount: amount,
 				Slot: slot, CredentialTag: uint8(tag),
 			}
-			applied = append(applied, credit)
 			if asBool(r[postCol]) {
 				if err := flush(); err != nil {
 					return 0, err
@@ -570,6 +602,7 @@ func (f *MetadataFacts) applyJournalRange(
 				); err != nil {
 					return 0, err
 				}
+				applied = append(applied, credit)
 				continue
 			}
 			batch = append(batch, credit)
@@ -589,6 +622,52 @@ func (f *MetadataFacts) applyJournalRange(
 		}
 		cursor = next
 	}
+}
+
+// creditBatch credits batch to the store's accounts and returns the credits
+// it applied. When some account is not in dst, the credits of the accounts
+// that are get applied and the rest are held for PatchFacts: the segment's
+// blocks have not been indexed yet, and a direct deposit may credit an
+// account those blocks register. The journal makes a credit repeated in a
+// retried batch a no-op, so crediting the batch again after a partial failure
+// moves nothing twice.
+func (f *MetadataFacts) creditBatch(
+	batch []models.AccountRewardCredit,
+	dst *database.Txn,
+) ([]models.AccountRewardCredit, error) {
+	store := f.dst.Metadata()
+	err := store.AddAccountRewardsByCredential(batch, dst.Metadata())
+	if !errors.Is(err, models.ErrAccountNotFound) {
+		if err != nil {
+			return nil, err
+		}
+		return slices.Clone(batch), nil
+	}
+	refs := make([]models.StakeCredentialRef, 0, len(batch))
+	for _, c := range batch {
+		refs = append(refs, models.NewStakeCredentialRef(
+			c.CredentialTag, c.StakingKey,
+		))
+	}
+	present, err := store.GetAccountsByCredential(refs, false, dst.Metadata())
+	if err != nil {
+		return nil, err
+	}
+	var credit []models.AccountRewardCredit
+	for _, c := range batch {
+		ref := models.NewStakeCredentialRef(c.CredentialTag, c.StakingKey)
+		if _, ok := present[ref.MapKey()]; ok {
+			credit = append(credit, c)
+		} else {
+			f.held = append(f.held, c)
+		}
+	}
+	if err := store.AddAccountRewardsByCredential(
+		credit, dst.Metadata(),
+	); err != nil {
+		return nil, err
+	}
+	return credit, nil
 }
 
 func asUint64(v any) (uint64, error) {

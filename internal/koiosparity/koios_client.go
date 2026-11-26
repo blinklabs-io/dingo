@@ -491,7 +491,7 @@ func validateKoiosNetwork(network string) error {
 }
 
 // ValidateNetwork reports whether network is one koios-parity can validate
-// against. The node wiring and the CLI use it so the supported set has a single
+// against. The node wiring uses it so the supported set has a single
 // definition.
 func ValidateNetwork(network string) error {
 	return validateKoiosNetwork(network)
@@ -1966,7 +1966,7 @@ type KoiosAccountRewardHistoryItem struct {
 // /account_reward_history. epoch is assumed to filter by the row's
 // earned_epoch — consistent with FetchAccountRewardsForEpoch always storing
 // the response under the koiosStakeEpoch-derived Koios reporting epoch it
-// requested (see check.go's koiosStakeEpoch/ARCHITECTURE.md's Epoch
+// requested (see check.go's koiosStakeEpoch/README.md's Epoch
 // alignment section), the same way /pool_history's _epoch_no filter already
 // behaves for GetPoolEpochHistory. This assumption could not be verified
 // against a live Koios instance in this environment (no network access);

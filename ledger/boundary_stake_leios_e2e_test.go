@@ -22,7 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -249,9 +248,6 @@ func TestLeiosBoundaryStakeRefusesAClosureWithdrawalAcrossTheSnapshot(
 	require.NoError(t, err)
 	require.Equal(t, before, reached(), "a served read reached the store")
 
-	h.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-	)
 	_, err = readLeiosBoundary(t, h.scenario.LedgerDB(), s.Pools, s.Snapshot)
 	require.ErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable)
 	require.Equal(t, before, reached(), "a refused read reached the store")
@@ -293,13 +289,10 @@ func TestLeiosBoundaryStakeRefusesAClosureThatWithdrawsAndDelegates(
 		require.ErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable)
 		require.Zero(t, reached(), "the read reached the metadata store")
 	})
-	t.Run("a drained set refuses what it cannot derive", func(t *testing.T) {
+	t.Run("the set refuses what it cannot derive", func(t *testing.T) {
 		t.Parallel()
 		h := newLeiosBoundaryHarnessWith(t, "set", opts)
 		s := h.slots
-		h.scenario.DrainFamilies(
-			nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-		)
 		reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 		hide(true)
 		_, err := readLeiosBoundary(
@@ -343,9 +336,6 @@ func TestLeiosBoundaryStakeServesASupersededClosureWitnessUnderExpiry(
 		)
 		return stakes, inputs, err
 	}
-	h.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-	)
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
 	_, inputs, err := read(h.scenario.LedgerDB(), s.Snapshot)

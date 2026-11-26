@@ -71,7 +71,7 @@ func runApplyPoolRetirements(
 	t.Helper()
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyPoolRetirements(context.Background(), txn, newEpoch, boundarySlot)
+		return ls.engine().ApplyPoolRetirements(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 }
 
@@ -118,7 +118,7 @@ func fxReapBlock(
 	fxBlock(
 		t, ls, fxPoint(boundarySlot),
 		func(_ ledgerdb.LedgerDB, txn ledgerdb.Txn) error {
-			return ls.applyPoolRetirements(
+			return ls.engine().ApplyPoolRetirements(
 				context.Background(), txn, newEpoch, boundarySlot,
 			)
 		},

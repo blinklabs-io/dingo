@@ -412,6 +412,9 @@ type Ouroboros struct {
 	// waiter has seen the tip behind the block; a tip published earlier is
 	// served directly and never reaches the wait.
 	chainsyncServerAppliedWaitHook func()
+	// chainsyncServerAwaitNextHook runs before the post-AwaitReply iterator
+	// read. Tests use it to synchronize failures with the waiter.
+	chainsyncServerAwaitNextHook func()
 	// chainsyncLocalChainTips returns the hashes of the local block tip and
 	// header-queue tip. Tests override it without a LedgerState.
 	chainsyncLocalChainTips func() (tipHash, headerTipHash []byte)
@@ -595,6 +598,7 @@ type Ouroboros struct {
 	leiosPersistGCStarted  atomic.Bool
 	leiosPersistGCMu       sync.Mutex
 	leiosPersistGCStop     chan struct{}
+	leiosPersistGCCancel   context.CancelFunc
 	leiosPersistGCDone     chan struct{}
 }
 

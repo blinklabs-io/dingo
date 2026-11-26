@@ -144,12 +144,12 @@ func readAllFactRows(
 // The live UTxO set exports each served
 // fact table by its natural keys: every table holds rows over the whole slot
 // range, and a narrower range returns rows of the whole range only.
-func TestDrainedSetExportsTheFactRowsTheStoreHeld(t *testing.T) {
+func TestSetExportsTheFactRows(t *testing.T) {
 	t.Parallel()
 	type window struct{ from, through uint64 }
 	windows := []window{{0, math.MaxInt64}, {0, 0}}
 	out := map[string][]string{}
-	_, h := releasedFactsRun(t, func(h *p5Harness) func() []string {
+	_, h := releasedFactsRun(t, func(h *setHarness) func() []string {
 		// DRep registrations, activity, a dormant expiry bump, a reset
 		// and a clear of dangling delegations write the DRep history.
 		h.scenario.Governance(h.refs[0], 10)
@@ -176,12 +176,11 @@ func TestDrainedSetExportsTheFactRowsTheStoreHeld(t *testing.T) {
 	}
 }
 
-// Every fact table whose family is drained is exported by the set: none is
-// left that the metadata store, which no longer holds its rows, would have to
-// answer.
-func TestDrainedSetServesEveryDrainedFactTable(t *testing.T) {
+// Every ledger-state fact table is exported by the set: no other store holds
+// its rows.
+func TestSetServesEveryLedgerStateFactTable(t *testing.T) {
 	t.Parallel()
-	_, h := releasedFactsRun(t, func(*p5Harness) func() []string {
+	_, h := releasedFactsRun(t, func(*setHarness) func() []string {
 		return func() []string { return nil }
 	})
 	require.Empty(t, h.scenario.UnservedFactTables())
@@ -190,13 +189,13 @@ func TestDrainedSetServesEveryDrainedFactTable(t *testing.T) {
 // A rollback drops the DRep history rows written after its target from the
 // live UTxO set as it drops them from the metadata store, and the rows before
 // it stay.
-func TestDrainedDRepHistoryFollowsARollback(t *testing.T) {
+func TestSetDRepHistoryFollowsARollback(t *testing.T) {
 	t.Parallel()
 	names := []string{
 		"drep_expiry_history", "drep_dormancy_history",
 		"drep_expiry_epoch_event", "account_drep_clear",
 	}
-	drained, _ := releasedFactsRun(t, func(h *p5Harness) func() []string {
+	rows, _ := releasedFactsRun(t, func(h *setHarness) func() []string {
 		h.scenario.Governance(h.refs[0], 10)
 		return func() []string {
 			var lines []string
@@ -221,7 +220,7 @@ func TestDrainedDRepHistoryFollowsARollback(t *testing.T) {
 			}
 			return n
 		}
-		if count(drained["applied"]) > count(drained["rolled back"]) {
+		if count(rows["applied"]) > count(rows["rolled back"]) {
 			grew++
 		}
 	}
@@ -239,7 +238,7 @@ func TestSeekedFactPagesAreTheWholeTable(t *testing.T) {
 	tables := []string{
 		"account", "drep", "drep_expiry_history", "drep_dormancy_history",
 	}
-	releasedFactsRun(t, func(h *p5Harness) func() []string {
+	releasedFactsRun(t, func(h *setHarness) func() []string {
 		for _, name := range tables {
 			idx := slices.IndexFunc(metadata.FactTables, func(ft metadata.FactTable) bool {
 				return ft.Name == name
@@ -293,7 +292,7 @@ func TestAccountAndDrepExportCostFollowsTheRowsChangedInRange(t *testing.T) {
 		require.GreaterOrEqual(t, i, 0, name)
 		return metadata.FactTables[i]
 	}
-	releasedFactsRun(t, func(h *p5Harness) func() []string {
+	releasedFactsRun(t, func(h *setHarness) func() []string {
 		base := h.scenario.CurrentPoint().Slot + 10
 		cred := func(i int) []byte {
 			return []byte{0x90, byte(i >> 16), byte(i >> 8), byte(i), 1, 2, 3, 4}

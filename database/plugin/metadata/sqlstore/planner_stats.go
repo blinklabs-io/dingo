@@ -127,6 +127,18 @@ func (m sqlitePlannerStatsMetrics) observe(
 	}
 }
 
+// lockPlannerStatsPass admits a planner-statistics pass: it holds
+// plannerStatsMu until unlock, so no bulk-mode transition runs meanwhile, and
+// reports whether bulk mode is on. It does not hold scheduledWorkMu, so WAL
+// checkpoints keep running for the length of the pass.
+func (s *Store) lockPlannerStatsPass() (bulk bool, unlock func()) {
+	s.plannerStatsMu.Lock()
+	s.scheduledWorkMu.Lock()
+	bulk = s.bulkMode
+	s.scheduledWorkMu.Unlock()
+	return bulk, s.plannerStatsMu.Unlock
+}
+
 // OptimizePlannerStatsContext runs the backend's incremental planner
 // statistics maintenance (a bounded ANALYZE on SQLite). When the stored
 // statistics changed it then refreshes the read pool and the cached hot
@@ -149,10 +161,10 @@ func (s *Store) OptimizePlannerStatsContext(
 	if !s.dialect.HasIncrementalPlannerStats() {
 		return result, nil
 	}
-	s.scheduledWorkMu.Lock()
-	defer s.scheduledWorkMu.Unlock()
+	bulk, unlock := s.lockPlannerStatsPass()
+	defer unlock()
 	started := time.Now()
-	if s.bulkMode {
+	if bulk {
 		result.Supported = true
 		result.Skipped = true
 		s.plannerStats.observe(trigger, "skipped", time.Since(started))

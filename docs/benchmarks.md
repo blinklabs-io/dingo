@@ -2,7 +2,7 @@
 
 Run benchmark commands from the repository root. The Makefile targets include
 the default `dingo_extra_plugins` build tag. Go test benchmark targets report
-memory allocations; `make bench-leios-db` prints latency percentiles only.
+memory allocations; `make bench-leios-db` also prints latency percentiles.
 
 ## Benchmarks
 
@@ -29,13 +29,16 @@ benchmark](https://github.com/IntersectMBO/ouroboros-consensus/pull/2424). It
 tracks 100 measured EBs, one at a time, over a database of 1000 EBs of 2857
 transactions of 350 bytes each. Each EB is fetched from 20 upstream peers, read
 once for voting, read by 100 downstream peers, and read once more for block
-application. The command prints the p50, p99, maximum, and count for each step.
-`-burst` adds background bursts of 10 EBs every 5 seconds that are fetched,
-voted on, and served alongside the measured EBs, and `-h` lists the flags that
-change the workload. Set `GOMAXPROCS` and `TMPDIR` to compare against the
-reference's `-N` setting and storage device.
+application. It runs `BenchmarkLeiosDBLatency` in `./database` once
+(`-benchtime=1x`) and prints the p50, p99, maximum, and count for each step.
+The workload flags are test binary flags with a `leiosdb.` prefix, passed after
+`-args`. `-leiosdb.burst` adds background bursts of 10 EBs every 5 seconds that
+are fetched, voted on, and served alongside the measured EBs; `go test
+./database -args -h` lists the flags that change the workload. Set `GOMAXPROCS`
+and `TMPDIR` to compare against the reference's `-N` setting and storage
+device.
 
-`make bench-leios-db-cached` (or `-cached-reads` on the command) shares the
+`make bench-leios-db-cached` (or `-leiosdb.cached-reads`) shares the
 first persisted manifest and transaction-closure read for each EB across its
 readers. Transaction requests copy only their selected transactions out of the
 shared closure, using the same packed response-copy routine as the Leios-fetch
@@ -45,13 +48,14 @@ background caches live with their in-flight work. This models good
 read-through-cache conditions without using the generated input as the read
 result. It does not exercise the network protocol's cache admission, TTL,
 eviction or wire encoding. Report it separately from the default cache-bypassing
-database workload, including with `-burst`. Both Make targets forward
-`LEIOS_DB_BENCH_ARGS`, for example `make bench-leios-db-cached
-LEIOS_DB_BENCH_ARGS=-burst`.
+database workload, including with `-leiosdb.burst`. Both Make targets set
+`DINGO_BENCH_LEIOS_DB=1`, without which the benchmark skips so `make bench` stays
+fast, and forward `LEIOS_DB_BENCH_ARGS` after `-args`, for example `make bench-leios-db-cached
+LEIOS_DB_BENCH_ARGS=-leiosdb.burst`.
 
-Use `-cpuprofile=<file>` for a diagnostic run to profile the workload after
-database prepopulation. Keep profile runs separate from comparison timings.
-Use `-heapprofile=<file>` to sample runtime memory through prepopulation and
+Use `-leiosdb.cpuprofile=<file>` for a diagnostic run to profile the workload
+after database prepopulation. Keep profile runs separate from comparison
+timings. Use `-leiosdb.heapprofile=<file>` to sample runtime memory through prepopulation and
 the workload and write a final heap profile without forcing a collection.
 Its runtime memory counters exclude Badger's mmap-backed files and other
 non-Go allocations; compare them with process RSS in a diagnostic run.
@@ -123,8 +127,10 @@ Method:
 The report and both result files are in the job summary and the
 `benchmark-gate` artifact. To reproduce locally, run
 `.github/scripts/bench-gate.sh <base-checkout> <head-checkout> <out-dir> 8`
-and `go run ./internal/benchci/cmd/benchgate <out-dir>/base.txt
-<out-dir>/head.txt report.md`.
+and `BENCHCI_BASE_FILE=<out-dir>/base.txt BENCHCI_HEAD_FILE=<out-dir>/head.txt
+BENCHCI_REPORT=$PWD/report.md go test ./internal/benchci -run '^TestGateFiles$' -count=1`
+with an absolute `<out-dir>`: `go test` runs in the package directory, so the
+test rejects relative paths.
 
 The same job ends with a report-only `external-storage-smoke` step for storage
 plugins that live outside this repository. It never gates and currently prints

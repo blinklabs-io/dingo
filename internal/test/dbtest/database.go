@@ -168,6 +168,8 @@ type Options struct {
 	// through itself before it is injected into the database. Returning nil
 	// injects none.
 	WrapImmutable func(immplugin.ImmutableDB) immplugin.ImmutableDB
+	// ImmutableConfig is the chunk-file provider's raw configuration.
+	ImmutableConfig map[string]any
 }
 
 // NewDatabase composes Badger and SQLite for a test. The database is closed
@@ -338,7 +340,8 @@ func newDatabaseWithOptions(
 	}
 	immutableStore, err := plugin.Resolve[immplugin.ImmutableDB](
 		context.Background(), host,
-		plugin.CapabilityStorageImmutable, chunkfile.ProviderName, nil,
+		plugin.CapabilityStorageImmutable, chunkfile.ProviderName,
+		opts.ImmutableConfig,
 		immplugin.ProviderDependencies{
 			DataDir: config.DataDir, Logger: config.Logger,
 		},

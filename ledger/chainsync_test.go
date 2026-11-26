@@ -1180,13 +1180,10 @@ func TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate(t *testing.T) {
 }
 
 // TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks covers
-// the specific caller observed wedging on DevNet. After a slot battle,
-// tryResolveFork rolls back to the common ancestor, re-queues the winning
-// peer's headers and calls restartQueuedBlockfetchAfterForkLocked; if that
-// returns an error the fork handler only logs
-// "failed to start blockfetch after fork rollback" and reports the fork
-// resolved. Nothing else retries, so the queued header stays latched and
-// block production stops until an unrelated event clears the queue.
+// the specific caller observed wedging on DevNet: tryResolveFork queues a
+// fork's headers and calls restartQueuedBlockfetchAfterForkLocked. If that
+// restart fails and nothing else retries, the queued header stays latched
+// and block production stops until an unrelated event clears the queue.
 func TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks(
 	t *testing.T,
 ) {
@@ -6782,7 +6779,7 @@ func TestNotFitHeaderRetainsVerificationGenerationPin(t *testing.T) {
 		"snapshot publication should resume after fork handling releases the pin")
 }
 
-func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
+func TestPinnedForkCandidateFetchAvoidsGenerationLockDeadlock(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
@@ -6792,23 +6789,28 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	ls.config.EventBus = bus
 	resyncCh := subscribeChainsyncResync(t, bus)
 
-	truncateEntered := make(chan struct{})
-	allowTruncate := make(chan struct{})
-	var truncateOnce sync.Once
-	releaseTruncate := func() { truncateOnce.Do(func() { close(allowTruncate) }) }
+	truncateEntered := make(chan struct{}, 1)
 	ls.rollbackTruncateAfterSlotFunc = func(
 		point ocommon.Point,
 		trustSlot uint64,
 		txn ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
-		close(truncateEntered)
-		<-allowTruncate
+		truncateEntered <- struct{}{}
 		return ls.db.TruncateAfterSlot(
 			ls.lifecycleContext(),
 			point,
 			trustSlot,
 			dbadapter.Unwrap(txn),
 		)
+	}
+	requestStarted := make(chan struct{}, 1)
+	ls.config.BlockfetchRequestRangeFunc = func(
+		_ ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ ocommon.Point,
+	) (uint64, error) {
+		requestStarted <- struct{}{}
+		return 17, nil
 	}
 
 	decisionEntered := make(chan struct{})
@@ -6844,7 +6846,6 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	handlerExited := make(chan struct{})
 	defer func() {
 		releaseForkDecision()
-		releaseTruncate()
 		testutil.RequireReceive(t, handlerExited, 30*time.Second,
 			"fork handler should finish before fixture cleanup")
 	}()
@@ -6883,26 +6884,18 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	// The writer must progress before the real SQL rollback sweep; its cost
 	// under parallel fixtures is independent of the generation lock cycle.
 	testutil.RequireReceive(t, writerDone, testutil.AsyncWait,
-		"rollback must release the pinned generation for the waiting writer")
-	testutil.RequireReceive(t, truncateEntered, 30*time.Second,
-		"fork handling should reach the real rollback sweep")
-	releaseTruncate()
+		"candidate fetch must release the pinned generation for the waiting writer")
+	testutil.RequireReceive(t, requestStarted, testutil.AsyncWait,
+		"fork handling should request candidate bodies")
 	require.NoError(t, testutil.RequireReceive(t, handled, 30*time.Second,
-		"fork handling should finish the real rollback"))
+		"fork handling should finish after starting candidate fetch"))
 	assert.False(t, testutil.RequireReceive(t, admission, time.Second,
-		"a header must not be selector-admitted across a rollback generation"))
-	// The rollback publishes its own "local ledger rollback" resync first.
-	resync := testutil.RequireReceive(t, resyncCh, time.Second,
-		"the peer should re-intersect after the rollback")
-	assert.Equal(
-		t,
-		event.ChainsyncResyncReasonLocalLedgerRollback,
-		resync.Reason,
-	)
-	resync = testutil.RequireReceive(t, resyncCh, time.Second,
-		"the peer should re-intersect before replaying the winning fork")
-	assert.Equal(t, event.ChainsyncResyncReasonPersistentFork, resync.Reason)
-	assert.Equal(t, fixture.ancestorTip, ls.chain.Tip())
+		"a header must not be selector-admitted before candidate validation"))
+	testutil.RequireNoReceive(t, truncateEntered, 200*time.Millisecond,
+		"candidate fetching must not start a rollback sweep")
+	testutil.RequireNoReceive(t, resyncCh, 200*time.Millisecond,
+		"candidate fetching must not force a re-intersection")
+	assert.Equal(t, fixture.currentTip, ls.chain.Tip())
 	assert.Zero(t, ls.chain.HeaderCount())
 }
 
@@ -8468,6 +8461,60 @@ type chainsyncRollbackFixture struct {
 	forkPoint     ocommon.Point
 }
 
+type forkCandidateRequest struct {
+	start ocommon.Point
+	end   ocommon.Point
+	id    uint64
+}
+
+func captureForkCandidateRequest(
+	t *testing.T,
+	fixture *chainsyncRollbackFixture,
+) *forkCandidateRequest {
+	t.Helper()
+	request := &forkCandidateRequest{id: 17}
+	fixture.ls.config.BlockfetchRequestRangeFunc = func(
+		connID ouroboros.ConnectionId,
+		start ocommon.Point,
+		end ocommon.Point,
+	) (uint64, error) {
+		require.Equal(t, fixture.connId, connID)
+		request.start = start
+		request.end = end
+		return request.id, nil
+	}
+	t.Cleanup(func() {
+		fixture.ls.chainsyncBlockfetchMutex.Lock()
+		fixture.ls.discardForkCandidateLocked()
+		fixture.ls.chainsyncBlockfetchMutex.Unlock()
+	})
+	return request
+}
+
+func TestForkCandidateValidationDoesNotConsumeDeferredHeaderMarker(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	point := ocommon.NewPoint(42, testHashBytes("deferred-fork-candidate"))
+	ls := &LedgerState{
+		deferredHeaderValidation: map[string]ouroboros.ConnectionId{
+			headerValidationPointKey(point): {},
+		},
+	}
+	required, _, err := ls.deferredHeaderValidationRequiredWithMode(
+		point, false,
+	)
+	require.NoError(t, err)
+	require.True(t, required)
+	required, _, err = ls.deferredHeaderValidationRequired(point)
+	require.NoError(t, err)
+	require.True(t, required)
+	required, _, err = ls.deferredHeaderValidationRequired(point)
+	require.NoError(t, err)
+	assert.False(t, required)
+}
+
 func recordVerifiedPeerHeader(
 	fixture *chainsyncRollbackFixture,
 	header mockHeader,
@@ -8515,6 +8562,27 @@ func TestHandleEventChainsyncRollbackSynchronizesLedgerTip(t *testing.T) {
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestRollbackChainAndStateDeferredPreflightLeavesStateUntouched(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	preflightErr := errors.New("candidate became stale")
+	err := fixture.ls.rollbackChainAndStateDeferredIf(
+		t.Context(),
+		fixture.ancestorTip.Point,
+		nil,
+		func() error { return preflightErr },
+	)
+	require.ErrorIs(t, err, preflightErr)
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.currentTip, dbTip)
 }
 
 func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
@@ -9156,10 +9224,11 @@ func TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile(
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 }
 
-func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
+func TestTryResolveForkRejectsInvalidCandidateBeforeRollback(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
+	request := captureForkCandidateRequest(t, fixture)
 
 	forkParentHash := testHashBytes("fork-block-parent")
 	forkParent := mockHeader{
@@ -9196,17 +9265,67 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resolved)
 
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 	assert.True(
 		t,
-		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+		bytes.Equal(fixture.currentNonce, fixture.ls.currentTipBlockNonce),
 	)
-	assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, forkParent.SlotNumber(), request.start.Slot)
+	assert.Equal(t, forkParent.Hash().Bytes(), request.start.Hash)
+	assert.Equal(t, header.SlotNumber(), request.end.Slot)
+	assert.Equal(t, header.Hash().Bytes(), request.end.Hash)
 
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
-	assert.Equal(t, fixture.ancestorTip, dbTip)
+	assert.Equal(t, fixture.currentTip, dbTip)
+
+	// The fetched bodies match the requested points but are not valid ledger
+	// blocks. Full speculative validation must reject the suffix without first
+	// rolling back the selected chain or its ledger state.
+	for _, block := range []*nonExtendingRejectionTestBlock{
+		{
+			hash:        forkParent.hash,
+			prevHash:    forkParent.prevHash,
+			slot:        forkParent.slot,
+			blockNumber: forkParent.blockNumber,
+		},
+		{
+			hash:        header.hash,
+			prevHash:    header.prevHash,
+			slot:        header.slot,
+			blockNumber: header.blockNumber,
+		},
+	} {
+		fixture.ls.handleEventBlockfetch(event.NewEvent(
+			BlockfetchEventType,
+			BlockfetchEvent{
+				ConnectionId: fixture.connId,
+				Point: ocommon.NewPoint(
+					block.SlotNumber(), block.Hash().Bytes(),
+				),
+				Block:     block,
+				RequestId: request.id,
+			},
+		))
+	}
+	fixture.ls.handleEventBlockfetch(event.NewEvent(
+		BlockfetchEventType,
+		BlockfetchEvent{
+			ConnectionId: fixture.connId,
+			RequestId:    request.id,
+			BatchDone:    true,
+		},
+	))
+	fixture.ls.blockfetchContinuationMu.Lock()
+	fixture.ls.blockfetchContinuationWG.Wait()
+	fixture.ls.blockfetchContinuationMu.Unlock()
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	dbTip, err = fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.currentTip, dbTip)
 }
 
 func TestHandleEventChainsyncDeferredForkDoesNotRollbackCanonicalChain(
@@ -9303,6 +9422,7 @@ func TestTryResolveForkGenesisRequestsRevalidationForDenserShorterCandidate(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
+	request := captureForkCandidateRequest(t, fixture)
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	fixture.ls.config.EventBus = bus
@@ -9381,30 +9501,24 @@ func TestTryResolveForkGenesisRequestsRevalidationForDenserShorterCandidate(
 	)
 
 	require.NoError(t, err)
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	assert.NotEqual(t, localTip, fixture.ls.chain.Tip())
+	assert.Equal(t, localTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
-	// The rollback publishes its own "local ledger rollback" resync first.
-	resync := testutil.RequireReceive(
+	assert.Equal(t, header1.slot, request.start.Slot)
+	assert.Equal(t, header2.slot, request.end.Slot)
+	testutil.RequireNoReceive(
 		t,
 		resyncCh,
-		time.Second,
-		"the rollback should request a resync",
+		200*time.Millisecond,
+		"candidate validation must not resync before a switch",
 	)
-	assert.Equal(t, event.ChainsyncResyncReasonLocalLedgerRollback, resync.Reason)
-	resync = testutil.RequireReceive(
-		t,
-		resyncCh,
-		time.Second,
-		"the denser Genesis candidate should be replayed after reintersection",
-	)
-	assert.Equal(t, event.ChainsyncResyncReasonPersistentFork, resync.Reason)
 }
 
 func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
+	request := captureForkCandidateRequest(t, fixture)
 	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
 		return false, 15
 	}
@@ -9443,8 +9557,10 @@ func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 
 	require.NoError(t, err)
 	require.True(t, resolved)
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, forkParent.slot, request.start.Slot)
+	assert.Equal(t, header.slot, request.end.Slot)
 }
 
 func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
@@ -9752,6 +9868,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
+	request := captureForkCandidateRequest(t, fixture)
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
@@ -9793,6 +9910,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 		fixture.currentTip.Point.Slot+10,
 		fixture.ls.chain.Tip().Point.Slot,
 	)
+	localRawTip := fixture.ls.chain.Tip()
 
 	// Simulate the raw primary chain being well ahead of the metadata
 	// ledger apply loop during historical catch-up.
@@ -9839,14 +9957,16 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resolved)
 
-	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, localRawTip, fixture.ls.chain.Tip())
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
 	assert.True(
 		t,
 		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
 	)
 	assert.Equal(t, preRollbackSeq, fixture.ls.lastLocalRollbackSeq)
-	assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, forkParent.slot, request.start.Slot)
+	assert.Equal(t, header.slot, request.end.Slot)
 
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
@@ -9864,6 +9984,7 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
+	request := captureForkCandidateRequest(t, fixture)
 
 	forkHash1 := testHashBytes("fork-block-1")
 	forkHash2 := testHashBytes("fork-block-2")
@@ -9923,21 +10044,22 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resolved)
 
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
-	assert.Equal(t, 3, fixture.ls.chain.HeaderCount())
-
-	start, end := fixture.ls.chain.HeaderRange(10)
-	assert.Equal(t, uint64(header1.SlotNumber()), start.Slot)
-	assert.Equal(t, forkHash1, start.Hash)
-	assert.Equal(t, uint64(header3.SlotNumber()), end.Slot)
-	assert.Equal(t, forkHash3, end.Hash)
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, uint64(header1.SlotNumber()), request.start.Slot)
+	assert.Equal(t, forkHash1, request.start.Hash)
+	assert.Equal(t, uint64(header3.SlotNumber()), request.end.Slot)
+	assert.Equal(t, forkHash3, request.end.Hash)
+	require.NotNil(t, fixture.ls.forkCandidate)
+	assert.Len(t, fixture.ls.forkCandidate.path, 3)
 }
 
 func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
+	request := captureForkCandidateRequest(t, fixture)
 
 	forkHash1 := testHashBytes("observed-fork-block-1")
 	forkHash2 := testHashBytes("observed-fork-block-2")
@@ -10015,15 +10137,15 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resolved)
 
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
-	assert.Equal(t, 3, fixture.ls.chain.HeaderCount())
-
-	start, end := fixture.ls.chain.HeaderRange(10)
-	assert.Equal(t, uint64(header1.SlotNumber()), start.Slot)
-	assert.Equal(t, forkHash1, start.Hash)
-	assert.Equal(t, uint64(header3.SlotNumber()), end.Slot)
-	assert.Equal(t, forkHash3, end.Hash)
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, uint64(header1.SlotNumber()), request.start.Slot)
+	assert.Equal(t, forkHash1, request.start.Hash)
+	assert.Equal(t, uint64(header3.SlotNumber()), request.end.Slot)
+	assert.Equal(t, forkHash3, request.end.Hash)
+	require.NotNil(t, fixture.ls.forkCandidate)
+	assert.Len(t, fixture.ls.forkCandidate.path, 3)
 }
 
 func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
@@ -11889,30 +12011,45 @@ func newChainsyncRollbackFixtureAt(
 	seed func(),
 ) *chainsyncRollbackFixture {
 	t.Helper()
+	ancestorHash := testHashBytes("ancestor-block")
+	currentHash := testHashBytes("current-block")
+	return newChainsyncRollbackFixtureWithBlocks(
+		t, db,
+		chain.RawBlock{
+			Slot:        10,
+			Hash:        ancestorHash,
+			BlockNumber: 1,
+			Type:        1,
+			Cbor:        chainsyncFixtureBlockCbor,
+		},
+		chain.RawBlock{
+			Slot:        currentSlot,
+			Hash:        currentHash,
+			BlockNumber: 2,
+			Type:        1,
+			PrevHash:    ancestorHash,
+			Cbor:        chainsyncFixtureBlockCbor,
+		},
+		seed,
+	)
+}
+
+// newChainsyncRollbackFixtureWithBlocks is newChainsyncRollbackFixtureAt over
+// the given ancestor and current blocks, for a test whose fork validation
+// decodes them.
+func newChainsyncRollbackFixtureWithBlocks(
+	t *testing.T,
+	db *database.Database,
+	ancestorBlock, currentBlock chain.RawBlock,
+	seed func(),
+) *chainsyncRollbackFixture {
+	t.Helper()
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
 		cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
 	)
-
-	ancestorHash := testHashBytes("ancestor-block")
-	currentHash := testHashBytes("current-block")
-	ancestorBlock := chain.RawBlock{
-		Slot:        10,
-		Hash:        ancestorHash,
-		BlockNumber: 1,
-		Type:        1,
-		Cbor:        chainsyncFixtureBlockCbor,
-	}
-	currentBlock := chain.RawBlock{
-		Slot:        currentSlot,
-		Hash:        currentHash,
-		BlockNumber: 2,
-		Type:        1,
-		PrevHash:    ancestorHash,
-		Cbor:        chainsyncFixtureBlockCbor,
-	}
 	require.NoError(
 		t,
 		cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
@@ -11929,8 +12066,8 @@ func newChainsyncRollbackFixtureAt(
 		Point:       ocommon.NewPoint(currentBlock.Slot, currentBlock.Hash),
 		BlockNumber: currentBlock.BlockNumber,
 	}
-	ancestorNonce := []byte("nonce-ancestor")
-	currentNonce := []byte("nonce-current")
+	ancestorNonce := testHashBytes("nonce-ancestor")
+	currentNonce := testHashBytes("nonce-current")
 
 	require.NoError(
 		t,
@@ -16698,7 +16835,7 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 	}
 
 	// Initial epoch should return genesis hash
-	nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+	nonce, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 		nil,
 		0,
 		ls.currentEra,
@@ -16768,7 +16905,7 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 		},
 	}
 
-	_, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+	_, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 		nil,
 		0,
 		ls.currentEra,
@@ -16799,7 +16936,7 @@ func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 		},
 	}
 
-	_, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+	_, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 		nil,
 		86400,
 		ls.currentEra,
@@ -16989,7 +17126,7 @@ func TestCalculateEpochNonce_AllEras(t *testing.T) {
 				},
 			}
 
-			nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+			nonce, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 				nil,
 				0,
 				ls.currentEra,
@@ -17048,7 +17185,7 @@ func TestCalculateEpochNonce_MissingByronGenesisInByronEra(t *testing.T) {
 	}
 
 	// Byron era returns nil nonce immediately without genesis validation
-	nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+	nonce, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 		nil,
 		86400,
 		ls.currentEra,
@@ -17933,7 +18070,7 @@ func loadByronGenesisForTest(
 //     = 0x99*32. The block at slot 245 is past the cutoff and does not
 //     contribute, so the latest pre-cutoff block is slot 230.
 //
-// The test asserts the correct value. Today, calculateEpochNonce passes
+// The test asserts the correct value. Today, CalculateEpochNonce passes
 // `currentEra.Id` (Babbage) into computeCandidateNonce — i.e. the
 // post-transition era — which selects the Praos window and produces the
 // buggy value. The fix is to pass `currentEpoch.EraId` (the source
@@ -17999,7 +18136,7 @@ func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(
 
 	// currentTipBlockNonce is intentionally left empty so the
 	// resume-from-tip optimisation in computeEpochNonceForSlot
-	// /calculateEpochNonce does not short-circuit and the candidate
+	// /CalculateEpochNonce does not short-circuit and the candidate
 	// is recomputed across the full epoch range from prevEvolvingNonce.
 	ls := &LedgerState{
 		db:         db,
@@ -18031,7 +18168,7 @@ func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(
 	// entered.
 	var candidate []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, _, c, _, err := ls.calculateEpochNonce(context.Background(),
+		_, _, c, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn,
 			ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots),
 			eras.BabbageEraDesc,
@@ -18184,7 +18321,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 			return err
 		}
 		// importTip checkpoint at the snapshot tip — Branch B in
-		// calculateEpochNonce relies on this row to find the seam
+		// CalculateEpochNonce relies on this row to find the seam
 		// between imported state and post-import accumulation.
 		if err := seedBlockNonce(t, db,
 			hashAtSnap, snapTipSlot, importedNonce, true, txn,
@@ -18205,7 +18342,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 	// generateAndSaveEpochs at import time: EvolvingNonce and
 	// CandidateNonce both seeded from the snapshot's mid-epoch value.
 	// currentTipBlockNonce intentionally left empty so the
-	// resume-from-tip optimisation in calculateEpochNonce takes the
+	// resume-from-tip optimisation in CalculateEpochNonce takes the
 	// Branch B path (block_nonce row search).
 	ls := &LedgerState{
 		db:         db,
@@ -18230,7 +18367,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 
 	var candidate, evolving []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, ev, c, _, err := ls.calculateEpochNonce(context.Background(),
+		_, ev, c, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn,
 			epochEnd,
 			eras.ConwayEraDesc,
@@ -18364,7 +18501,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
 
 	var candidate, evolving []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, ev, c, _, err := ls.calculateEpochNonce(context.Background(),
+		_, ev, c, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn,
 			epochEnd,
 			eras.ConwayEraDesc,
@@ -18400,7 +18537,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
 // the operational hazard where a deployment was bootstrapped with an
 // importer that did not write the block_nonce checkpoint at the
 // snapshot tip slot. Branch B
-// in calculateEpochNonce searches for a block_nonce row matching
+// in CalculateEpochNonce searches for a block_nonce row matching
 // prevEpoch.EvolvingNonce; with no checkpoint that row does not
 // exist, and the resume seam is not found.
 //
@@ -18510,7 +18647,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint(
 
 	var candidate, evolving []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, ev, c, _, err := ls.calculateEpochNonce(context.Background(),
+		_, ev, c, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn,
 			epochEnd,
 			eras.ConwayEraDesc,
@@ -18844,7 +18981,7 @@ func TestCalculateEpochNonceFoldsExtraEntropy(t *testing.T) {
 
 	var withEntropy, withoutParam []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		n, _, candidate, _, err := ls.calculateEpochNonce(context.Background(),
+		n, _, candidate, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.MaryEraDesc, prevEpoch, enacted,
 		)
 		if err != nil {
@@ -18857,7 +18994,7 @@ func TestCalculateEpochNonceFoldsExtraEntropy(t *testing.T) {
 			"candidate nonce must freeze at the pre-cutoff block nonce",
 		)
 		withEntropy = n
-		n, _, _, _, err = ls.calculateEpochNonce(context.Background(),
+		n, _, _, _, err = ls.engine().CalculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.MaryEraDesc, prevEpoch, neutral,
 		)
 		withoutParam = n
@@ -18968,7 +19105,7 @@ func TestCalculateEpochNonceNeutralLabMixesExtraEntropy(t *testing.T) {
 
 	var nonce []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		n, _, _, _, err := ls.calculateEpochNonce(context.Background(),
+		n, _, _, _, err := ls.engine().CalculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.MaryEraDesc, prevEpoch, enacted,
 		)
 		nonce = n
@@ -20495,16 +20632,16 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 	})
 }
 
-// TestForkResolutionInvalidatesTheIncomingHeaderVerdict covers the second way
-// an announcing header reaches the header queue. A header that does not fit
-// the current tip is queued by tryResolveFork after the rollback publishes a
-// new ledger generation, so its pre-rollback verdict must not arm a vote.
+// TestForkResolutionDoesNotPublishCandidateBeforeBodyValidation covers the
+// second way an announcing header can reach fork selection. A header that does
+// not fit the current tip must not reach the selected header queue or arm a vote
+// before its fork bodies pass validation.
 //
 // tryResolveFork re-queues a whole fork path: the header this event delivered,
 // plus earlier headers replayed from recorded peer history. Only the delivered
 // one carries a pre-rollback crypto verdict, which is stale by the time the
 // path is queued. Both a stale and an absent verdict are asserted here.
-func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
+func TestForkResolutionDoesNotPublishCandidateBeforeBodyValidation(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
@@ -20512,11 +20649,11 @@ func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
 		cryptoVerified bool
 	}{
 		{
-			name:           "pre-rollback verdict does not announce",
+			name:           "verified candidate does not announce",
 			cryptoVerified: true,
 		},
 		{
-			name:           "unverified incoming header does not announce",
+			name:           "unverified candidate does not announce",
 			cryptoVerified: false,
 		},
 	} {
@@ -20526,9 +20663,13 @@ func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
 			fixture := newChainsyncRollbackFixtureWithBus(t, bus)
 			subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
 			defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
-			// Keep the test at header admission; no blockfetch worker is
-			// needed.
-			fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+			fixture.ls.config.BlockfetchRequestRangeFunc = func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) (uint64, error) {
+				return 17, nil
+			}
 
 			forkParent := mockHeader{
 				hash: lcommon.NewBlake2b256(
@@ -20593,20 +20734,9 @@ func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.True(t, resolved)
-			// The header was queued through fork resolution, not direct
-			// admission.
-			require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-			require.Equal(t, 2, fixture.ls.chain.HeaderCount())
+			require.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+			require.Zero(t, fixture.ls.chain.HeaderCount())
 			fixture.ls.chain.PublishPendingChainUpdates()
-
-			// The rollback's invalidation precedes anything the fork
-			// resolution queued after it.
-			invalidation := testutil.RequireReceive(
-				t, ch, testutil.AsyncWait, "rollback invalidation",
-			)
-			invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
-			require.True(t, ok, "got %T", invalidation.Data)
-			assert.Equal(t, chain.HeaderInvalidationRollback, invalid.Reason)
 
 			testutil.RequireNoReceive(
 				t,
@@ -20840,7 +20970,7 @@ func TestApplyEpochDonations(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyEpochDonations(txn, 7, 80)
+		return ls.engine().ApplyEpochDonations(txn, 7, 80)
 	}))
 
 	treasury, reserves, slot := networkState(t, db)
@@ -20865,7 +20995,7 @@ func TestApplyEpochDonations_NoDonations(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyEpochDonations(txn, 7, 80)
+		return ls.engine().ApplyEpochDonations(txn, 7, 80)
 	}))
 
 	treasury, reserves, slot := networkState(t, db)
@@ -20915,7 +21045,7 @@ func TestEpochDonationWithdrawalRollback(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if err := ls.applyEpochDonations(txn, 7, 80); err != nil {
+		if err := ls.engine().ApplyEpochDonations(txn, 7, 80); err != nil {
 			return err
 		}
 		ls.stageUtxoSet(txn, &boundary.Point)

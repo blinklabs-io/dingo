@@ -460,8 +460,8 @@ func (s stagingLedgerDB) drepsUnserved() error {
 
 // failDrepStaging stops the set following the ledger and, since the set
 // alone holds the write, returns err so the write is not lost.
-func (s stagingLedgerDB) failDrepStaging(err error) error {
-	s.ls.failAccountStaging(err)
+func (s stagingLedgerDB) failDrepStaging(txn ledgerdb.Txn, err error) error {
+	s.ls.failAccountStaging(txn, err)
 	return err
 }
 
@@ -480,7 +480,7 @@ func (s stagingLedgerDB) UpdateDRepActivity(
 	}
 	d, err := s.ls.drepView(r, txn, credentialTag, drepCredential)
 	if err != nil {
-		return s.failDrepStaging(err)
+		return s.failDrepStaging(txn, err)
 	}
 	if d == nil {
 		// The metadata store's answer for a missing DRep, which vote
@@ -529,7 +529,7 @@ func (s stagingLedgerDB) InsertDrepIfAbsent(
 	}
 	d, err := s.ls.drepView(r, txn, credentialTag, cred)
 	if err != nil {
-		return s.failDrepStaging(err)
+		return s.failDrepStaging(txn, err)
 	}
 	if d != nil {
 		return nil
@@ -556,7 +556,7 @@ func (s stagingLedgerDB) ResetDormantDRepEpochs(
 	}
 	n, err := s.ls.dormancyView(r, txn)
 	if err != nil {
-		return s.failDrepStaging(err)
+		return s.failDrepStaging(txn, err)
 	}
 	if n != 0 {
 		s.ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
@@ -577,7 +577,7 @@ func (s stagingLedgerDB) BumpDormantDRepExpiries(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (int, error) {
-	return s.bumpDrainedDormantDRepExpiries(slot, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	return s.bumpDormantDRepExpiriesInSet(slot, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 }
 
 func (ls *LedgerState) stageDormantBump(r DRepReader, txn ledgerdb.Txn, slot uint64) error {
@@ -651,7 +651,7 @@ func (s stagingLedgerDB) ClearDanglingDRepDelegations(
 	}
 	n, err := s.ls.stageDanglingClear(ar, r, txn, atSlot) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	if err != nil {
-		return 0, s.failDrepStaging(err)
+		return 0, s.failDrepStaging(txn, err)
 	}
 	return n, nil
 }
@@ -830,11 +830,11 @@ func (s stagingLedgerDB) GetDormantDRepEpochs(
 	return s.ls.dormancyView(r, txn)
 }
 
-// bumpDrainedDormantDRepExpiries applies the epoch's dormancy bump to the set
+// bumpDormantDRepExpiriesInSet applies the epoch's dormancy bump to the set
 // alone. The metadata store applies it once per boundary slot, so the bump
 // is skipped when the set already holds a counter change at slot, staged in
 // txn or committed, that no staged rollback undoes.
-func (s stagingLedgerDB) bumpDrainedDormantDRepExpiries(
+func (s stagingLedgerDB) bumpDormantDRepExpiriesInSet(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (int, error) {

@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -34,7 +35,7 @@ import (
 // Epoch labels for the lifecycle. DelegatorInactivity is short (2 epochs) so
 // the whole lifecycle -- register, expire, and reactivate -- fits in a small
 // number of epoch labels. The reward-crediting stage's epoch offsets follow
-// stakeRewardEpochsForNewEpoch (snapshot = newEpoch-3, performance =
+// epochengine.StakeRewardEpochsForNewEpoch (snapshot = newEpoch-3, performance =
 // newEpoch-2, pots = newEpoch-1), chosen so its snapshot epoch lines up with
 // delegatorInactivityE2EExcludeEpoch: the same point in the timeline where
 // the stake-snapshot query (Task 8) excludes this account is also the
@@ -106,7 +107,7 @@ func e2eExpiryArg(gateEnabled bool, epoch uint64) uint64 {
 //  2. Advance with no further witness past expiration: query the same
 //     aggregation at a later epoch to confirm the now-expired credential's
 //     stake is excluded, then run the Task 10 reward-crediting guard
-//     (applyStakeRewards) against a second credential carrying the same
+//     (ApplyStakeRewards) against a second credential carrying the same
 //     expiration to confirm an account in this same expired state is not
 //     credited (see the leaderCred comment below for why it is a separate
 //     credential rather than a literal reuse of cred).
@@ -217,7 +218,7 @@ func runDelegatorInactivityLifecycleScenario(
 	// "Not credited": a second credential (leaderCred), carrying the exact
 	// expiration res.expirationAfterRegister just observed on cred, plays the
 	// pool's own reward (leader) account for the Task 10 reward-crediting
-	// guard via applyStakeRewards, at a snapshot epoch matching excludeEpoch.
+	// guard via ApplyStakeRewards, at a snapshot epoch matching excludeEpoch.
 	// It is a separate credential, and neither it nor the member is
 	// delegated to the pool: the round pays them from the reward inputs
 	// seeded below, and a delegation would add their rewards to the pool
@@ -351,7 +352,7 @@ func runDelegatorInactivityLifecycleScenario(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(),
+		return ls.engine().ApplyStakeRewards(context.Background(),
 			txn,
 			delegatorInactivityE2ERewardNewEpoch,
 			delegatorInactivityE2EBoundarySlot,
@@ -513,9 +514,9 @@ func TestAccountExpiredAtEpoch(t *testing.T) {
 		{10, 11, true}, // exp < cur => expired
 	}
 	for _, c := range cases {
-		if got := accountExpiredAtEpoch(c.exp, c.cur); got != c.expired {
+		if got := epochengine.AccountExpiredAtEpoch(c.exp, c.cur); got != c.expired {
 			t.Fatalf(
-				"accountExpiredAtEpoch(%d,%d)=%v want %v",
+				"epochengine.AccountExpiredAtEpoch(%d,%d)=%v want %v",
 				c.exp,
 				c.cur,
 				got,

@@ -341,7 +341,7 @@ func (d *Database) settleLedgerNodeSettings(ctx context.Context) error {
 
 // copyReleasedNodeSettings copies a v0.94.2 database's node settings from
 // its metadata store into the dbinfo file. Other rows of the same table,
-// such as the per-family state mask, stay where they are read. The rows are
+// stay where they are read. The rows are
 // left behind as well: the ledger never reads them again, and adopting an
 // API store as the IndexerDB copies them with the rest of that store.
 func (d *Database) copyReleasedNodeSettings(

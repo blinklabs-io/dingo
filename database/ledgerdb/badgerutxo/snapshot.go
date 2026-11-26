@@ -109,7 +109,7 @@ func (s *Store) snapshotChecked(
 		return nil, err
 	}
 	sn.idle = sync.NewCond(&sn.mu)
-	return &Store{db: s.db, agg: s.agg, snap: sn}, nil
+	return &Store{db: s.db, agg: s.agg, indexer: s.indexer, snap: sn}, nil
 }
 
 // view runs fn on the snapshot's transaction, or on a fresh read

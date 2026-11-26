@@ -15,9 +15,6 @@
 package ledger
 
 import (
-	"fmt"
-	"strconv"
-
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 )
@@ -101,36 +98,6 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
 		)
 	}
 	return nil
-}
-
-// delegatorInactivityActivationEpoch reads the durable CIP-0163 activation
-// marker and reports the activation epoch A, whether activation has occurred,
-// and any read/parse error. An empty marker means activation has not run yet
-// (activated == false, epoch 0). It is the read-back counterpart of the marker
-// write in activateDelegatorInactivityIfNeeded and is consumed by the reward
-// round's activation-floor clamp.
-func (ls *LedgerState) delegatorInactivityActivationEpoch(
-	txn ledgerdb.Txn,
-) (epoch uint64, activated bool, err error) {
-	marker, err := ls.ledgerDB().GetSyncState(
-		database.DelegatorInactivityActivatedSyncKey,
-		txn,
-	)
-	if err != nil {
-		return 0, false, err
-	}
-	if marker == "" {
-		return 0, false, nil
-	}
-	epoch, err = strconv.ParseUint(marker, 10, 64)
-	if err != nil {
-		return 0, false, fmt.Errorf(
-			"parse delegator-inactivity activation marker %q: %w",
-			marker,
-			err,
-		)
-	}
-	return epoch, true, nil
 }
 
 // DelegatorInactivityConfig reports the CIP-0163 delegator-inactivity gate

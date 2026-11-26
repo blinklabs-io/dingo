@@ -421,20 +421,11 @@ type RewardStore interface {
 	// DeleteRewardOutputsForEpoch deletes reward-calculation output rows for an
 	// epoch.
 	DeleteRewardOutputsForEpoch(epoch uint64, txn Txn) error
-	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
-	// older than the retained snapshot window, leaving reward_account_output
-	// intact. This is the Koios-parity pruning path, used so the observer
-	// can read reward_account_output behind the tip. API storage mode prunes
-	// neither table. See rewardstate.DeleteStakeInputBeforeEpoch.
-	DeleteRewardStakeInputBeforeEpoch(
-		ctx context.Context,
-		epoch uint64,
-		txn Txn,
-	) error
 	// DeleteRewardStateBeforeEpoch deletes reward-state rows older than the
 	// retained snapshot window. This is the CORE storage-mode pruning path:
-	// it deletes both reward_stake_input and reward_account_output. See
-	// rewardstate.DeleteStateBeforeEpoch for the full rationale.
+	// it deletes both reward_stake_input and reward_account_output, and the
+	// ledger's staging LedgerDB also prunes the live set's derived reward
+	// rows. See snapshot.Manager's cleanupOldSnapshots for the window.
 	DeleteRewardStateBeforeEpoch(
 		ctx context.Context,
 		epoch uint64,

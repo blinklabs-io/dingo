@@ -34,11 +34,11 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -174,7 +174,7 @@ func runUtxoSetScenario(
 			return res.(*utxoWholeResult).encoded, nil
 		},
 		UtxosByAddress: func(addrs []gledger.Address) ([]models.Utxo, error) {
-			return run.ls.UtxosByAddress(t.Context(), addrs)
+			return run.ls.utxosByAddress(addrs, 0, nil)
 		},
 		UtxosByAddressAt: func(p ocommon.Point, addrs []gledger.Address) ([]models.Utxo, error) {
 			res, err := run.ls.queryShelleyUtxoByAddress(
@@ -209,7 +209,7 @@ func runUtxoSetScenario(
 			return ret, nil
 		},
 		UtxoIncludingSpent: func(txID []byte, index uint32) (*models.Utxo, error) {
-			return run.ls.UtxoByRefIncludingSpent(txID, index)
+			return run.ls.utxoIncludingSpent(t.Context(), nil, txID, index)
 		},
 		ReadsForValidation: func(refs []models.UtxoId) ([]models.Utxo, error) {
 			return run.ls.utxosByRefsForValidation(refs, nil)
@@ -228,9 +228,9 @@ func runUtxoSetScenario(
 	}
 }
 
-// RunUtxoSetOnlyScenarioForTest is RunShadowScenarioForTest in core mode with
+// RunLedgerDBScenarioForTest is RunShadowScenarioForTest in core mode with
 // utxoSet as the only copy of the live UTxO set.
-func RunUtxoSetOnlyScenarioForTest(
+func RunLedgerDBScenarioForTest(
 	t *testing.T,
 	utxoSet UtxoSetWriter,
 	attach func(*database.Database),
@@ -243,26 +243,6 @@ func RunUtxoSetOnlyScenarioForTest(
 		utxoSet,
 		nil,
 		attach,
-	)
-}
-
-// RunUtxoSetOnlyDrainedScenarioForTest is RunUtxoSetOnlyScenarioForTest on a
-// database that has drained the families of mask before its first block.
-func RunUtxoSetOnlyDrainedScenarioForTest(
-	t *testing.T,
-	utxoSet UtxoSetWriter,
-	mask nodesettings.FamilyMask,
-	attach func(*database.Database),
-) ShadowScenario {
-	t.Helper()
-	return runUtxoSetScenario(
-		t,
-		types.StorageModeCore,
-		nil,
-		utxoSet,
-		nil,
-		attach,
-		func(*LedgerState) {},
 	)
 }
 
@@ -317,8 +297,7 @@ type BoundaryEpochStateScenario struct {
 	// LedgerDB is the LedgerDB the ledger reads through.
 	LedgerDB func() ledgerdb.LedgerDB
 	// ReadFactRows reads a fact table through the ledger, from the live UTxO
-	// set when the table's family is drained and from the metadata store
-	// otherwise. UnservedFactTables names the drained tables it cannot read.
+	// set. UnservedFactTables names the tables it cannot read.
 	ReadFactRows func(
 		table metadata.FactTable, from, through uint64, cursor int64,
 		limit int,
@@ -343,18 +322,16 @@ type BoundaryEpochStateScenario struct {
 	// reached it and a switch for the hiding. A read the live UTxO set
 	// serves never reaches the store.
 	HideStoreReads func(names ...string) (reached func() int64, hide func(on bool))
-	// DrainFamilies adds mask to the families the ledger treats as drained.
-	DrainFamilies func(mask nodesettings.FamilyMask)
 	// FailSet makes the ledger treat its set as failed, as an update the
 	// set refused does.
 	FailSet func()
 	// WrapSet replaces the ledger's set with wrap's result, for a test that
 	// overrides what the set answers.
 	WrapSet func(wrap func(UtxoSetWriter) UtxoSetWriter)
-	// InstallDrainedSources gives the database the sources its reads of a
-	// drained family come from, which a ledger built for set reads installs
+	// InstallSetSources gives the database the sources its reads of a
+	// ledger-state family come from, which a ledger built for set reads installs
 	// when it is created.
-	InstallDrainedSources func()
+	InstallSetSources func()
 	// CorruptEpochWrites makes the metadata store keep a different nonce
 	// than each epoch write gives it.
 	CorruptEpochWrites func()
@@ -1521,12 +1498,11 @@ func NewSeededBoundaryEpochStateScenarioForTest(
 			blind.off.Store(false)
 			return blind.hits.Load, func(on bool) { blind.off.Store(!on) }
 		},
-		DrainFamilies: func(nodesettings.FamilyMask) {},
-		FailSet:       func() { h.ls.utxoSetFailed.Store(true) },
+		FailSet: func() { h.ls.utxoSetFailed.Store(true) },
 		WrapSet: func(wrap func(UtxoSetWriter) UtxoSetWriter) {
 			h.ls.config.UtxoSet = wrap(h.ls.config.UtxoSet)
 		},
-		InstallDrainedSources: func() {
+		InstallSetSources: func() {
 			h.ls.installNonceSource()
 			h.ls.installEpochSource()
 			h.ls.installPParamsSource()
@@ -1909,7 +1885,7 @@ func NewSeededBoundaryEpochStateScenarioForTest(
 			require.NoError(t, txn.Commit())
 			txn = ldb.Begin(t.Context(), true)
 			defer txn.Release()
-			require.NoError(t, h.ls.applyPoolReapRefunds(
+			require.NoError(t, h.ls.engine().ApplyPoolReapRefunds(
 				t.Context(), txn, epoch, boundarySlot,
 			))
 			require.NoError(t, txn.Commit())
@@ -2816,10 +2792,10 @@ func NewSeededBoundaryEpochStateScenarioForTest(
 			snapshotEpoch uint64,
 			capturedSlot uint64,
 		) bool {
-			app := &stakeRewardApplication{
-				epochs:               stakeRewardEpochs{snapshot: snapshotEpoch},
-				snapshotCapturedSlot: capturedSlot,
-				accountOutputs: []*models.RewardAccountOutput{{
+			app := &epochengine.StakeRewardApplication{
+				Epochs:               epochengine.StakeRewardEpochs{Snapshot: snapshotEpoch},
+				SnapshotCapturedSlot: capturedSlot,
+				AccountOutputs: []*models.RewardAccountOutput{{
 					CredentialTag: ref.Tag,
 					StakingKey:    ref.Key,
 				}},
@@ -2827,7 +2803,7 @@ func NewSeededBoundaryEpochStateScenarioForTest(
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), false)
 			defer txn.Release()
-			guarded, err := h.ls.guardedExpiredRewardCredentials(
+			guarded, err := h.ls.engine().GuardedExpiredRewardCredentials(
 				t.Context(), txn, app,
 			)
 			require.NoError(t, err)
@@ -3864,8 +3840,6 @@ type MidEpochEraSwitchScenario struct {
 	EraInsideRollback func() uint
 	// LedgerDB is the LedgerDB the ledger reads through.
 	LedgerDB func() ledgerdb.LedgerDB
-	// DrainFamilies adds mask to the families the ledger treats as drained.
-	DrainFamilies func(mask nodesettings.FamilyMask)
 	// FailSet makes the ledger treat its set as failed, as an update the
 	// set refused does.
 	FailSet func()
@@ -3909,12 +3883,11 @@ func NewGuardedMidEpochEraSwitchScenarioForTest(
 	tc.db = db
 	ls, blocks := newBoundaryEraLedgerChain(t, tc)
 	return MidEpochEraSwitchScenario{
-		DB:            ls.db,
-		LedgerDB:      ls.LedgerDB,
-		DrainFamilies: func(nodesettings.FamilyMask) {},
-		FailSet:       func() { ls.utxoSetFailed.Store(true) },
-		ReadPParams:   func() []string { return renderPParamState(t, ls.LedgerDB()) },
-		ReadEpochs:    func() []string { return renderEpochRows(t, ls.LedgerDB()) },
+		DB:          ls.db,
+		LedgerDB:    ls.LedgerDB,
+		FailSet:     func() { ls.utxoSetFailed.Store(true) },
+		ReadPParams: func() []string { return renderPParamState(t, ls.LedgerDB()) },
+		ReadEpochs:  func() []string { return renderEpochRows(t, ls.LedgerDB()) },
 
 		ApplySwitch: func() {
 			require.NoError(t, processMidEpochEraBlocks(t, ls, blocks))
@@ -4009,8 +3982,6 @@ type ClassicUpdateBoundaryScenario struct {
 	// reached it.
 	HideStoreReads func(names ...string) (reached func() int64)
 
-	// DrainFamilies adds mask to the families the ledger treats as drained.
-	DrainFamilies func(mask nodesettings.FamilyMask)
 	// FailSet makes the ledger treat its set as failed, as an update the
 	// set refused does.
 	FailSet func()
@@ -4143,10 +4114,9 @@ func NewGuardedClassicUpdateBoundaryScenarioForTest(
 		))
 	}
 	return ClassicUpdateBoundaryScenario{
-		DB:            ls.db,
-		LedgerDB:      ls.LedgerDB,
-		DrainFamilies: func(nodesettings.FamilyMask) {},
-		FailSet:       func() { ls.utxoSetFailed.Store(true) },
+		DB:       ls.db,
+		LedgerDB: ls.LedgerDB,
+		FailSet:  func() { ls.utxoSetFailed.Store(true) },
 		ReplaceSet: func(set UtxoSetWriter) {
 			ls.config.UtxoSet = set
 			ls.pparamsSetLoaded.Store(false)

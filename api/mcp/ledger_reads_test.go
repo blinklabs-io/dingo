@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -172,13 +173,24 @@ func ledgerToolSession(
 	ldb ledgerdb.LedgerDB,
 ) *mcp.ClientSession {
 	t.Helper()
+	return ledgerToolSessionWithIndexer(t, ldb, indexerReads{})
+}
+
+// ledgerToolSessionWithIndexer is ledgerToolSession on a node whose IndexerDB
+// answers reads.
+func ledgerToolSessionWithIndexer(
+	t *testing.T,
+	ldb ledgerdb.LedgerDB,
+	reads indexerReads,
+) *mcp.ClientSession {
+	t.Helper()
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "test", Version: "1"},
 		nil,
 	)
 	registerCardanoTools(
 		server, nil, recordedLedgerState{ldb: ldb}, nil, "preview",
-		5*time.Second, newReadLimits(),
+		5*time.Second, newReadLimits(), reads,
 	)
 	ct, st := mcp.NewInMemoryTransports()
 	ss, err := server.Connect(t.Context(), st, nil)
@@ -404,6 +416,9 @@ func TestLedgerStateToolsReadThroughLedgerDB(t *testing.T) {
 		)
 		got := res.Content[0].(*mcp.TextContent).Text
 		require.Equal(t, tc.want, rec.taken(), tc.name)
+		// Only the ledger's count is limited to its retained window, so only
+		// it carries the caveat; the counts themselves must agree.
+		got = strings.Replace(got, retainedWindowNote, "", 1)
 		require.Equal(
 			t, callTool(t, viaSQL, tc.tool, tc.args, false), got, tc.name,
 		)
@@ -443,4 +458,37 @@ func TestLedgerStateToolsReportAbsentRows(t *testing.T) {
 			callTool(t, viaLedger, "get_epoch_summary", args, true),
 		)
 	}
+}
+
+// TestEpochSummaryCountsIndexerBlocksOnAnAPINode gives the ledger one retained
+// block nonce of epoch 5, as pruning leaves an older epoch, and the IndexerDB
+// all four of its blocks. An API node reports the IndexerDB's count; a core
+// node reports the ledger's and says it covers the retained window only.
+func TestEpochSummaryCountsIndexerBlocksOnAnAPINode(t *testing.T) {
+	t.Parallel()
+	nodeDB, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	raw, err := dbtest.RawSQLiteMetadata(t, nodeDB)
+	require.NoError(t, err)
+	seedLedgerStateRows(t, raw)
+	idx, err := dbtest.NewIndexerDatabase(t, nodeDB, dbtest.IndexerOptions{})
+	require.NoError(t, err)
+	// The ledger's epoch 6 runs from slot 1100, so a block at 1100 is not
+	// epoch 5's.
+	for i, slot := range []uint64{1000, 1010, 1050, 1099, 1100} {
+		h := bytes.Repeat([]byte{byte(0x70 + i)}, 32)
+		require.NoError(t, idx.SetBlockNonce(h, slot, h, false, nil))
+	}
+	ldb := dbadapter.New(nodeDB)
+	args := map[string]any{"epoch": 5}
+
+	api := callTool(t, ledgerToolSessionWithIndexer(t, ldb, indexerReads{
+		epochBlocks: indexerEpochBlocks(idx),
+	}), "get_epoch_summary", args, false)
+	require.Contains(t, api, "- **Recorded Blocks**: 4\n")
+
+	core := callTool(
+		t, ledgerToolSession(t, ldb), "get_epoch_summary", args, false,
+	)
+	require.Contains(t, core, "- **Recorded Blocks**: 1"+retainedWindowNote+"\n")
 }

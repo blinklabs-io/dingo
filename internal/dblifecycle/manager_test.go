@@ -2071,10 +2071,10 @@ func fakeIndexerSource(
 	}
 }
 
-// TestManagerSnapshotsCarryTheIndexerDBOnSplit verifies that an automatic
-// snapshot of a split node holds the IndexerDB payload beside the ledger's,
+// TestManagerSnapshotsCarryTheIndexerDB verifies that an automatic
+// snapshot of an API node holds the IndexerDB payload beside the ledger's,
 // with the IndexerDB tip the capture reported.
-func TestManagerSnapshotsCarryTheIndexerDBOnSplit(t *testing.T) {
+func TestManagerSnapshotsCarryTheIndexerDB(t *testing.T) {
 	t.Parallel()
 
 	db := newManagerTestDB(t)
@@ -2147,7 +2147,7 @@ func TestManagerRefusesAnIndexerDBAheadOfTheLedger(t *testing.T) {
 }
 
 // TestManagerRefusesToScheduleWhatTheIndexerPayloadCannotCover verifies the
-// startup refusals on the split layout.
+// startup refusals with an IndexerDB.
 func TestManagerRefusesToScheduleWhatTheIndexerPayloadCannotCover(
 	t *testing.T,
 ) {

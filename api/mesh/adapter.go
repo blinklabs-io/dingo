@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
@@ -79,7 +80,34 @@ func (a *meshDatabaseAdapter) GetTransactionsByBlockHash(ctx context.Context,
 	return a.db.GetTransactionsByBlockHash(ctx, hash, nil)
 }
 
-// boundedDatabase hides the blocks above a tip: on the split layout the
+func (a *meshDatabaseAdapter) UtxosByAddress(
+	ctx context.Context,
+	addrs []lcommon.Address,
+) ([]models.Utxo, error) {
+	return a.db.UtxosByAddress(ctx, addrs, 0, nil)
+}
+
+func (a *meshDatabaseAdapter) ScanUtxosByAddress(
+	ctx context.Context,
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+	visit func([]models.UtxoWithOrdering) error,
+) (ochainsync.Tip, error) {
+	return a.db.ScanUtxosByAddress(ctx, q, maxCandidates, maxBytes, visit)
+}
+
+func (a *meshDatabaseAdapter) UtxoBalanceByAddressAtSlot(
+	ctx context.Context,
+	addr lcommon.Address,
+	slot uint64,
+) (models.AddressBalance, error) {
+	txn := database.NewTxnContext(ctx, a.db, false)
+	defer txn.Release()
+	return a.db.UtxoBalanceByAddressAtSlot(ctx, addr, slot, txn)
+}
+
+// boundedDatabase hides the blocks above a tip: with an IndexerDB the
 // ledger's block store is ahead of the IndexerDB that holds their
 // transactions, and a block answered from the store alone would be empty.
 type boundedDatabase struct {

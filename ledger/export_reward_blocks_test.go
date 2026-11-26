@@ -22,10 +22,10 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -104,14 +104,12 @@ type RewardBlocksScenario struct {
 	RollbackBeforeBoundary func()
 	// HideStoreReads is BoundaryEpochStateScenario.HideStoreReads.
 	HideStoreReads func(names ...string) (func() int64, func(bool))
-	// DrainFamilies publishes the drained mask to the ledger.
-	DrainFamilies func(mask nodesettings.FamilyMask)
 	// FailSet makes the ledger treat its set as failed, as an update the
 	// set refused does.
 	FailSet func()
-	// InstallDrainedSources is BoundaryEpochStateScenario.InstallDrainedSources.
-	InstallDrainedSources func()
-	LedgerDB              func() ledgerdb.LedgerDB
+	// InstallSetSources is BoundaryEpochStateScenario.InstallSetSources.
+	InstallSetSources func()
+	LedgerDB          func() ledgerdb.LedgerDB
 }
 
 // RewardInputsAnswer is what a read of an epoch's reward snapshot inputs
@@ -377,7 +375,7 @@ func NewRewardBlocksScenarioForTest(
 				{PoolKeyHash: poolA}, {PoolKeyHash: poolB},
 				{PoolKeyHash: poolIdle},
 			}
-			return h.ls.rewardBlockCounts(
+			return h.ls.engine().RewardBlockCounts(
 				h.ls.LedgerDB(), nil, epoch, inputs,
 			)
 		},
@@ -555,9 +553,8 @@ func NewRewardBlocksScenarioForTest(
 			blind.off.Store(false)
 			return blind.hits.Load, func(on bool) { blind.off.Store(!on) }
 		},
-		DrainFamilies: func(nodesettings.FamilyMask) {},
-		FailSet:       func() { h.ls.utxoSetFailed.Store(true) },
-		InstallDrainedSources: func() {
+		FailSet: func() { h.ls.utxoSetFailed.Store(true) },
+		InstallSetSources: func() {
 			h.ls.installNonceSource()
 			h.ls.installEpochSource()
 			h.ls.installPParamsSource()
@@ -574,7 +571,7 @@ func readOutputs(ldb ledgerdb.LedgerDB, epoch uint64) RewardOutputsAnswer {
 	if a.Accounts, a.Err = ldb.GetRewardAccountOutputs(epoch, nil); a.Err != nil {
 		return a
 	}
-	if a.Cursor, a.Err = ldb.GetSyncState(rewardPrecomputeCursorKey(epoch), nil); a.Err != nil {
+	if a.Cursor, a.Err = ldb.GetSyncState(epochengine.RewardPrecomputeCursorKey(epoch), nil); a.Err != nil {
 		return a
 	}
 	a.Rounds, a.Err = ldb.GetPendingRewardCreditRounds(nil)

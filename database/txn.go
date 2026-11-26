@@ -57,6 +57,11 @@ type Txn struct {
 	// transaction began under; it is never used for cancellation. Nil on
 	// transactions built without a context, which record no commit region.
 	traceCtx context.Context
+	// cancelCtx is the caller's context on a transaction opened where no
+	// metadata store exists. A metadata transaction observes cancellation
+	// through its SQL connection; a blob-only transaction has nothing to
+	// observe it, so Do checks cancelCtx before running its function.
+	cancelCtx context.Context
 	// staged marks a NewStagedTxn transaction: what it commits is staged by
 	// its callers for another store, so having no store of its own to commit
 	// is not a failure.
@@ -366,6 +371,9 @@ func newDatabaseTxnContext(
 	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
+	if db.Metadata() == nil {
+		t.cancelCtx = ctx
+	}
 	if ms := db.Metadata(); ms != nil {
 		// Use the read connection pool for read-only transactions to
 		// avoid contending with the SQLite write connection. This
@@ -382,6 +390,7 @@ func newDatabaseTxnContext(
 			)
 		}
 	}
+	bindIndexerMetadata(t.blobTxn, t.metadataTxn, readWrite)
 	return t, nil
 }
 
@@ -500,6 +509,7 @@ func NewReadSnapshotWithAnchorContext(
 	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(false)
 	}
+	bindIndexerMetadata(t.blobTxn, t.metadataTxn, false)
 	if !db.isIndexer() && t.blobTxn != nil {
 		var err error
 		tip, err = db.GetTip(t)
@@ -772,6 +782,11 @@ func (t *Txn) withBlobForRecovery() (*Txn, func()) {
 	if aug.blobStore != nil {
 		aug.blobTxn = aug.blobStore.NewTransaction(aug.readWrite)
 	}
+	// An IndexerDB keeps its CBOR entries with t's metadata, so a repair
+	// written through this handle commits with t rather than in a second
+	// write transaction, which a store with one writer would wait on behind
+	// t forever.
+	bindIndexerMetadata(aug.blobTxn, aug.metadataTxn, t.readWrite && !t.staged)
 	return aug, aug.Release
 }
 
@@ -1169,6 +1184,21 @@ func (t *Txn) Do(fn func(*Txn) error) (err error) {
 		}
 	}()
 
+	if t.cancelCtx != nil {
+		select {
+		case <-t.cancelCtx.Done():
+			ctxErr := t.cancelCtx.Err()
+			if rbErr := t.Rollback(); rbErr != nil {
+				return fmt.Errorf(
+					"rollback failed: %w: original error: %w",
+					rbErr,
+					ctxErr,
+				)
+			}
+			return ctxErr
+		default:
+		}
+	}
 	if fnErr := fn(t); fnErr != nil {
 		if rbErr := t.Rollback(); rbErr != nil {
 			return fmt.Errorf(

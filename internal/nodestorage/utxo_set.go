@@ -44,7 +44,7 @@ type UtxoSetConfig struct {
 	Logger            *slog.Logger
 	Registerer        prometheus.Registerer
 	CardanoNodeConfig *cardano.CardanoNodeConfig
-	// RetainRewardRecords is set on the split layout; see
+	// RetainRewardRecords is set with an IndexerDB; see
 	// utxoset.Config.RetainRewardRecords.
 	RetainRewardRecords bool
 	// CheckpointKeep is how many checkpoints the set retains.
@@ -89,9 +89,7 @@ func OpenUtxoSet(cfg UtxoSetConfig) (*utxoset.Set, string, error) {
 		Logger:              logger,
 		Registerer:          cfg.Registerer,
 		HistorySlots:        history,
-		Only:                true,
 		RetainRewardRecords: cfg.RetainRewardRecords,
-		Authoritative:       true,
 		// The set is the only copy of the ledger state, so it needs a
 		// checkpoint to recover from.
 		CheckpointDir:  utxoset.CheckpointDirFor(dataDir),
@@ -141,7 +139,6 @@ func (r Reconcile) Run(ctx context.Context) error {
 		}
 	}
 	if r.Set != nil {
-		r.Set.ServeLedgerOnly()
 		if err := r.Set.Reconcile(
 			ctx, dbadapter.New(r.DB), r.Resume,
 		); err != nil {
@@ -225,7 +222,7 @@ func (m ReleasedMigration) rewindMetadataLedger(
 	db *database.Database,
 	logger *slog.Logger,
 ) error {
-	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	marked, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read UTxO set mode: %w", err)
 	}
@@ -296,7 +293,7 @@ func (m ReleasedMigration) resolveRewardInputs(
 	db *database.Database,
 	logger *slog.Logger,
 ) error {
-	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	marked, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read UTxO set mode: %w", err)
 	}
@@ -322,7 +319,7 @@ func MigrateUtxoRows(
 	dataDir string,
 	logger *slog.Logger,
 ) error {
-	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	marked, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read UTxO set mode: %w", err)
 	}
@@ -360,10 +357,10 @@ func MigrateUtxoRows(
 		utxoset.MigrationEnv{
 			Store: releasedStore{db},
 			Mark: func(context.Context) error {
-				return db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil)
+				return db.SetSyncState(database.UtxoSetMigratedSyncKey, "1", nil)
 			},
 			Marked: func(context.Context) (bool, error) {
-				v, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+				v, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
 				return v != "", err
 			},
 			FreeBytes: func() (uint64, error) {
@@ -374,12 +371,12 @@ func MigrateUtxoRows(
 	)
 }
 
-// CheckUtxoSetOnly marks a database at origin as holding its UTxO set only in
-// the live UTxO set. A database with a metadata UTxO set is marked by
+// CheckUtxoSetMigrated marks a database at origin as holding its UTxO set only
+// in the live UTxO set. A database with a metadata UTxO set is marked by
 // MigrateUtxoRows, which runs first, so one still unmarked past origin has a
 // metadata UTxO set that was not moved.
-func CheckUtxoSetOnly(db *database.Database) error {
-	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+func CheckUtxoSetMigrated(db *database.Database) error {
+	marked, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read UTxO set mode: %w", err)
 	}
@@ -395,7 +392,7 @@ func CheckUtxoSetOnly(db *database.Database) error {
 			"found a metadata UTxO set that was not moved into the live UTxO set",
 		)
 	}
-	if err := db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil); err != nil {
+	if err := db.SetSyncState(database.UtxoSetMigratedSyncKey, "1", nil); err != nil {
 		return fmt.Errorf("record UTxO set mode: %w", err)
 	}
 	return nil

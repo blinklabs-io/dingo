@@ -81,9 +81,6 @@ func TestMissingDeferredIndexesNamesDroppedEntries(t *testing.T) {
 	missing, err = store.MissingDeferredIndexes()
 	require.NoError(t, err)
 	require.NotEmpty(t, missing)
-	critical, err := store.MissingCriticalDeferredIndexes()
-	require.NoError(t, err)
-	require.Subset(t, missing, critical)
 }
 
 func TestBuildDeferredIndexesContextWithProgressReportsOnlyMissingIndexes(
@@ -263,10 +260,7 @@ func TestBulkLoadDefersAddressAndScriptIndexes(t *testing.T) {
 	require.NoError(t, err)
 	require.Subset(t, missing, names)
 
-	require.NoError(t, store.BuildCriticalDeferredIndexesContext(t.Context()))
-	critical, err := store.MissingCriticalDeferredIndexes()
-	require.NoError(t, err)
-	require.Empty(t, critical)
+	require.NoError(t, store.BuildDeferredIndexesContext(t.Context()))
 	missing, err = store.MissingDeferredIndexes()
 	require.NoError(t, err)
 	for _, name := range names {

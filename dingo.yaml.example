@@ -65,6 +65,16 @@
         # VACUUM, which pauses SQLite writers for the whole rewrite; later
         # runs release free pages in short steps.
         # vacuumIntervalSeconds: 86400
+    # immutable:
+      # provider: "chunkfile"
+      # config:
+        # How chunks the ImmutableDB completes are kept: "none" (default) as
+        # plain chunk files, or "mithril" as one zstd-compressed tar per chunk
+        # in the Mithril immutable archive layout. Existing chunks keep their
+        # form; both are read. Not supported by the s3 and gcs providers.
+        # compression: "none"
+        # MiB of decompressed archived chunks kept in memory for block reads.
+        # archiveCacheMb: 256
     # PostgreSQL metadata alternative (replace the metadata block above):
     # metadata:
     #   provider: "postgres"
@@ -350,7 +360,8 @@
 
 # Storage mode controls how much data is persisted.
 # - "core": Only consensus data (UTxOs, certs, pools, pparams). Suitable for
-#   block producers and relay nodes. Only MCP can serve API requests in core mode.
+#   block producers and relay nodes. In core mode MCP and UTxO RPC serve API
+#   requests; UTxO RPC reads the live UTxO set and refuses transaction reads.
 # - "api": Core data plus full transaction metadata (witnesses, scripts, datums,
 #   redeemers). APIs with nonzero configured ports start; MCP is opt-in.
 #
@@ -368,7 +379,9 @@
 # storageMode: "core"
 
 # API ports are configured under plugins.api above. Set a port to 0 to
-# disable that API. Other APIs remain inactive outside API storage mode; MCP supports both modes.
+# disable that API. MCP and UTxO RPC support both modes. Blockfrost, Kupo and
+# Mesh need API storage mode: in core mode a built-in one left at its default
+# port stays inactive, and any other nonzero port or provider refuses startup.
 
 # Base URL of a remote Bark archive server. When set, this node keeps using
 # its configured local blob plugin but wraps it with Bark archive fallback for
@@ -616,7 +629,7 @@
 # process or second synced copy of the database required.
 # This is a one-off validation aid, not a permanent
 # subsystem; leave disabled for normal node operation. See
-# internal/koiosparity and ARCHITECTURE.md's "Koios Parity Tracker" section.
+# internal/koiosparity/README.md.
 # koiosParity:
   # Can be overridden with DINGO_KOIOS_PARITY_ENABLED
   # CLI: --koios-parity-enabled
@@ -928,8 +941,7 @@
 # Decode blocks in the chainsync replay loop with a small parallel worker
 # pool instead of one at a time (default: true in core mode, false in API mode
 # and on Musashi). Not consensus-affecting -- only changes how CBOR decode work
-# is scheduled, not validation or apply behavior. See ARCHITECTURE.md ("Block
-# Processing Pipeline").
+# is scheduled, not validation or apply behavior. See ledger/state.go.
 #
 # Can be overridden with the DINGO_BLOCK_PIPELINE_ENABLED environment variable
 # CLI: --block-pipeline-enabled
@@ -940,7 +952,7 @@
 # Admission-time crypto remains authoritative because persisted chain blocks
 # are available to downstream readers before replay reaches this stage. The
 # replay check follows the serial path's historical, Mithril, and epoch-nonce
-# availability gates. See ARCHITECTURE.md ("Block Processing Pipeline").
+# availability gates. See ledger/state.go.
 #
 # Can be overridden with the DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED
 # environment variable
@@ -1032,22 +1044,9 @@
 # CLI: --strict-utxo-validation
 # strictUtxoValidation: true
 
-# Skip the startup consistency check between reward_live_stake and the live
-# UTxO/account set (default: false, i.e. the check runs).
-#
-# The check scans the entire live UTxO table on every startup, whether or not
-# anything actually needs repairing, so on a mainnet-scale database it costs
-# as much as a full rebuild each time the node starts. Advanced/diagnostic use
-# only: skipping is safe when the database is already known to be consistent,
-# such as repeated restarts while investigating an unrelated issue. It is
-# unsafe to leave enabled permanently, because this check is what catches a
-# stale or pre-migration reward_live_stake table.
-#
-# This does not disable the stake-snapshot provenance check that runs in the
-# same startup step. That one is a pair of indexed existence probes whose cost
-# does not scale with the UTxO set, and it fails closed on a database whose
-# consensus stake snapshots came from an older accounting version, so it
-# always runs.
+# Accepted so released configurations keep loading; it has no effect. The
+# ledger's database keeps no reward_live_stake table, so there is no startup
+# scan to skip, and the stake-snapshot provenance check always runs.
 #
 # Can be overridden with the CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK
 # environment variable

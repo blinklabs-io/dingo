@@ -31,8 +31,7 @@ import (
 func openFixtureSetAt(t *testing.T, dir string) *utxoset.Set {
 	t.Helper()
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: dir, Only: true, Authoritative: true,
-	})
+		Dir: dir})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	return set

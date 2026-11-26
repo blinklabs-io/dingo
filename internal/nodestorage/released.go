@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -62,6 +63,9 @@ type ReleasedMigration struct {
 	// Blob is the data directory's block store, already open. The migration
 	// does not close it.
 	Blob blob.BlobStore
+	// Immutable resolves block bodies already promoted out of the block store.
+	// Its lifecycle remains owned by the storage provider host.
+	Immutable immplugin.ImmutableDB
 	// OpenMetadata opens the v0.94.2 metadata store and returns the function
 	// that closes it. It is called only for a block store that v0.94.2 opened.
 	OpenMetadata func(context.Context) (metadata.MetadataStore, func() error, error)
@@ -185,11 +189,12 @@ func (m ReleasedMigration) migrate(
 	// The ledger's database registers the collectors once it opens.
 	cfg.PromRegistry = nil
 	cfg.Immutable = database.ImmutableConfig{}
-	// v0.94.2 keeps every block in the block store, so the source needs no
-	// ImmutableDB, and the ledger's database keeps the one it opens.
+	// Do not create an ImmutableDB for the source, but preserve access to
+	// any existing promoted blocks through the provider already open.
 	db, err := database.New(ctx, &cfg, database.Stores{
-		Blob:     m.Blob,
-		Metadata: store,
+		Blob:      m.Blob,
+		Immutable: m.Immutable,
+		Metadata:  store,
 	})
 	if db != nil {
 		defer func() { err = errors.Join(err, db.Close()) }()
@@ -242,7 +247,7 @@ func (m ReleasedMigration) Move(
 	); err != nil {
 		return err
 	}
-	if err := CheckUtxoSetOnly(db); err != nil {
+	if err := CheckUtxoSetMigrated(db); err != nil {
 		return err
 	}
 	if err := m.step(ReleasedStepOutputs); err != nil {

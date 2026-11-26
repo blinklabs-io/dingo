@@ -225,8 +225,6 @@ func parityModels(
 
 type parityPath struct {
 	name string
-	// coreOnly paths need the core storage mode's overlay.
-	coreOnly bool
 	// ledgerBacked paths write transaction rows too.
 	ledgerBacked bool
 	apply        func(t *testing.T, store *Store, api bool)
@@ -237,32 +235,10 @@ func applyParityStage(
 	store *Store,
 	stage []parityTx,
 	apply func(txn types.Txn, acc types.MetadataBatchAccumulator, tx parityTx),
-	enableOverlay bool,
 ) {
 	t.Helper()
 	txn := store.Transaction(context.Background())
 	acc := store.NewBatchAccumulator()
-	if enableOverlay {
-		var inputs []models.UtxoId
-		created := map[parityInput]struct{}{}
-		for _, tx := range stage {
-			for i := range tx.outs {
-				created[parityInput{seed: tx.seed, idx: uint32(i)}] = struct{}{} //nolint:gosec
-			}
-		}
-		for _, tx := range stage {
-			for _, spend := range tx.spends {
-				if _, ok := created[spend]; !ok {
-					inputs = append(inputs, models.UtxoId{
-						Hash: parityTxID(spend.seed), Idx: spend.idx,
-					})
-				}
-			}
-		}
-		enabled, err := store.EnableBatchUtxoOverlay(acc, txn, inputs, nil, nil)
-		require.NoError(t, err)
-		require.True(t, enabled)
-	}
 	for _, tx := range stage {
 		apply(txn, acc, tx)
 	}
@@ -275,10 +251,9 @@ func parityPaths() []parityPath {
 		t *testing.T,
 		store *Store,
 		apply func(types.Txn, types.MetadataBatchAccumulator, parityTx),
-		overlay bool,
 	) {
 		for _, stage := range parityStages() {
-			applyParityStage(t, store, stage, apply, overlay)
+			applyParityStage(t, store, stage, apply)
 		}
 	}
 	return []parityPath{
@@ -313,7 +288,7 @@ func parityPaths() []parityPath {
 							tx.ledger(t, addrs), tx.point(), 0, nil, true,
 							acc, txn, 0,
 						))
-					}, false)
+					})
 			},
 		},
 		{
@@ -488,9 +463,6 @@ func TestAssetReadsAgreeAcrossWritePaths(t *testing.T) {
 			t.Parallel()
 			snapshots := map[string]string{}
 			for _, path := range parityPaths() {
-				if path.coreOnly && api {
-					continue
-				}
 				store := parityStore(t, api)
 				path.apply(t, store, api)
 				snapshots[path.name] = paritySnapshot(

@@ -25,16 +25,17 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 )
 
 // RewardPrecomputeCursorKey is the sync_state key of the precompute cursor of
 // a snapshot epoch.
 func RewardPrecomputeCursorKey(snapshotEpoch uint64) string {
-	return rewardPrecomputeCursorKey(snapshotEpoch)
+	return epochengine.RewardPrecomputeCursorKey(snapshotEpoch)
 }
 
 func isRewardCursorKey(key string) bool {
-	return strings.HasPrefix(key, rewardPrecomputeCursorPrefix)
+	return strings.HasPrefix(key, models.RewardPrecomputeCursorPrefix)
 }
 
 // rewardOutputsServed returns the configured set reader or an error when the
@@ -117,20 +118,6 @@ func (s stagingLedgerDB) derivedServed(
 		return &v, nil
 	}
 	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyRewardOutputs)
-}
-
-func samePoolOutput(a, b *models.RewardPoolOutput) bool {
-	return a.Epoch == b.Epoch && bytes.Equal(a.PoolKeyHash, b.PoolKeyHash) &&
-		a.OptimalReward == b.OptimalReward && a.TotalReward == b.TotalReward &&
-		a.LeaderReward == b.LeaderReward &&
-		a.LeaderRewardDeficit == b.LeaderRewardDeficit &&
-		a.MemberRewardTotal == b.MemberRewardTotal &&
-		a.OwnerStake == b.OwnerStake && a.Undistributed == b.Undistributed &&
-		a.Unspendable == b.Unspendable && a.CapturedSlot == b.CapturedSlot &&
-		a.BoundarySlot == b.BoundarySlot &&
-		(a.ApparentPerformance == nil) == (b.ApparentPerformance == nil) &&
-		(a.ApparentPerformance == nil ||
-			a.ApparentPerformance.Cmp(b.ApparentPerformance.Rat) == 0)
 }
 
 func (s stagingLedgerDB) GetRewardPoolOutputs(
@@ -218,7 +205,7 @@ func (s stagingLedgerDB) cursorRead(
 	key string,
 	txn ledgerdb.Txn,
 ) (string, bool, error) {
-	epoch, ok := cursorEpochOfKey(key)
+	epoch, ok := epochengine.CursorEpochOfKey(key)
 	if !ok {
 		return "", false, nil
 	}
@@ -234,7 +221,7 @@ func (s stagingLedgerDB) cursorWrite(
 	key, value string,
 	txn ledgerdb.Txn,
 ) {
-	epoch, ok := cursorEpochOfKey(key)
+	epoch, ok := epochengine.CursorEpochOfKey(key)
 	if !ok {
 		return
 	}
@@ -246,8 +233,8 @@ func (s stagingLedgerDB) cursorWrite(
 	})
 }
 
-// claimPendingFromSet is ClaimPendingRewardCreditsForCredential for a drained
-// family: the credential's unfolded credits in credited rounds come from the
+// claimPendingFromSet is ClaimPendingRewardCreditsForCredential on the set:
+// the credential's unfolded credits in credited rounds come from the
 // set and are staged as folded.
 func (s stagingLedgerDB) claimPendingFromSet(
 	txn ledgerdb.Txn,

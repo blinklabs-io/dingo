@@ -26,8 +26,9 @@ import (
 	"github.com/blinklabs-io/dingo/internal/node"
 )
 
-// healthProbeServer is the liveness/readiness listener an operation outside
-// `serve` keeps up.
+// healthProbeServer is the liveness/readiness listener an operation that does
+// not follow the chain keeps up: `dingo mithril sync`, and the `serve`
+// preflight before node.Run starts its own.
 //
 // The bootstrap case is why it exists. `dingo mithril sync` runs as its own
 // process, ahead of serve, and on mainnet it runs for hours; the shipped
@@ -37,9 +38,10 @@ import (
 // its retries -- long before the snapshot has finished downloading, and again
 // on every replacement.
 type healthProbeServer struct {
-	server *http.Server
-	errCh  <-chan error
-	addr   string
+	server   *http.Server
+	listener net.Listener
+	errCh    <-chan error
+	addr     string
 }
 
 // boundHealthProbe is a health probe whose socket is already bound: the
@@ -59,9 +61,9 @@ type boundHealthProbe struct {
 // bindHealthProbe binds cfg's health address, returning a nil probe when
 // healthPort is 0 and the operator has disabled it.
 //
-// The tip gap is deliberately nil: nothing outside `serve` follows the chain,
-// so the probe reports live and not ready, which is exactly the state an
-// operator and an orchestrator should see during a bootstrap. Liveness is
+// The tip gap is deliberately nil: neither a bootstrap nor the `serve`
+// preflight follows the chain, so the probe reports live and not ready, which
+// is exactly the state an operator and an orchestrator should see then. Liveness is
 // what keeps the container alive; readiness is what keeps it out of a load
 // balancer.
 func bindHealthProbe(cfg *config.Config) (*boundHealthProbe, error) {
@@ -109,17 +111,36 @@ func serveHealthProbe(
 		}
 	}()
 	return &healthProbeServer{
-		server: server,
-		errCh:  errCh,
-		addr:   actualAddr,
+		server:   server,
+		listener: probe.listener,
+		errCh:    errCh,
+		addr:     actualAddr,
 	}
 }
 
+// Shutdown stops the server and closes its listener. http.Server.Shutdown
+// only closes listeners that Serve has already registered, so a Shutdown that
+// beats the Serve goroutine would otherwise leave the port bound until that
+// goroutine ran.
 func (s *healthProbeServer) Shutdown(ctx context.Context) error {
 	if s == nil || s.server == nil {
 		return nil
 	}
-	return s.server.Shutdown(ctx)
+	return errors.Join(
+		s.server.Shutdown(ctx),
+		closeListener(s.listener),
+	)
+}
+
+// closeListener closes l, treating an already-closed listener as success.
+func closeListener(l net.Listener) error {
+	if l == nil {
+		return nil
+	}
+	if err := l.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 func (s *healthProbeServer) Err() <-chan error {

@@ -58,7 +58,7 @@ func openRaw(t *testing.T, path string) *sql.DB {
 	return raw
 }
 
-func TestSplitIndexerFollowsLedgerAndRollsBack(t *testing.T) {
+func TestIndexerDBFollowsLedgerAndRollsBack(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -94,7 +94,7 @@ func TestSplitIndexerFollowsLedgerAndRollsBack(t *testing.T) {
 	}
 	t.Cleanup(func() { closeRuntime() })
 
-	// The ledger replays real blocks in core mode: the split layout's
+	// The ledger replays real blocks in core mode: the IndexerDB's
 	// consensus store.
 	dir := copyImmutableChunkPrefix(t, 30)
 	require.NoError(t, LoadWithDB(

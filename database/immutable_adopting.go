@@ -39,13 +39,13 @@ var ErrImmutableAdoptionPending = errors.New(
 	"a chunk adoption is pending in the immutable directory",
 )
 
-// BeginImmutableAdopt durably records that the import is about to move chunk
-// into the ImmutableDB directory, before the first file moves. From then
-// until ClearImmutableAdopt, reconciliation leaves the directory alone: a stop
-// after the files moved but before AdoptImmutableTip covers them would
-// otherwise read them as bytes beyond the recorded tip and cut them, after
-// the source copy is already gone. Repeating the call is safe. The caller
-// holds LockImmutable.
+// BeginImmutableAdopt durably records that the import is about to move a
+// group of chunks starting at chunk into the ImmutableDB directory, before
+// the first file moves. From then until ClearImmutableAdopt, reconciliation
+// leaves the directory alone: a stop after the files moved but before
+// AdoptImmutableTip covers them would otherwise read them as bytes beyond the
+// recorded tip and cut them, after the source copy is already gone.
+// Repeating the call is safe. The caller holds LockImmutable.
 func (d *Database) BeginImmutableAdopt(chunk uint64) error {
 	rt := d.immutable
 	if rt == nil {
@@ -82,8 +82,9 @@ func (d *Database) BeginImmutableAdopt(chunk uint64) error {
 	return nil
 }
 
-// ClearImmutableAdopt removes the record BeginImmutableAdopt wrote, once the
-// recorded tip covers the chunk's files or the files are gone. It is a no-op
+// ClearImmutableAdopt removes the record BeginImmutableAdopt wrote, once a
+// durable recorded tip covers every moved file of the group (the blob store
+// has synced after AdoptImmutableTip) or the files are gone. It is a no-op
 // when none exists. The caller holds LockImmutable.
 func (d *Database) ClearImmutableAdopt() error {
 	rt := d.immutable
@@ -94,14 +95,15 @@ func (d *Database) ClearImmutableAdopt() error {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("clear immutable adopt: %w", err)
 	}
-	if err := fsyncdir.Sync(rt.dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := fsyncdir.Sync(rt.dir); err != nil &&
+		!errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("clear immutable adopt: %w", err)
 	}
 	return nil
 }
 
-// ImmutableAdoptPending returns the chunk a bulk import recorded as being
-// moved in, when the import has not cleared it.
+// ImmutableAdoptPending returns the first chunk of the group a bulk import
+// recorded as being moved in, when the import has not cleared it.
 func (d *Database) ImmutableAdoptPending() (uint64, bool, error) {
 	rt := d.immutable
 	if rt == nil {

@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -179,14 +178,11 @@ func TestRewardOutputsRecheckIsSkippedWithoutARollback(t *testing.T) {
 	}
 }
 
-// With the family drained and the set serving nothing, the reward reads fail
-// rather than answer from the emptied tables.
-func TestRewardOutputsFailWhenTheDrainedSetServesNothing(t *testing.T) {
+// With the set serving nothing, the reward reads fail
+// rather than answer nothing.
+func TestRewardOutputsFailWhenTheSetServesNothing(t *testing.T) {
 	t.Parallel()
 	r := newRewardBlocksRun(t, "set", nil, false)
-	r.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyRewardOutputs),
-	)
 	reached, hide := r.scenario.HideStoreReads(rewardDerivedReadNames...)
 	a := r.scenario.Outputs(3)
 	hide(false)

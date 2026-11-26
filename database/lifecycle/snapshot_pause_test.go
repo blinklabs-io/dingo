@@ -320,38 +320,49 @@ func TestSnapshotBackupFailureCancelsPeerAndReleasesBarrier(t *testing.T) {
 	t.Parallel()
 
 	peerCancelled := make(chan struct{})
+	releasePeer := make(chan struct{})
+	setFailed := make(chan struct{})
 	hooks := &backupHooks{
 		blob: func(ctx context.Context, _ io.Writer) error {
 			<-ctx.Done()
 			close(peerCancelled)
+			<-releasePeer
 			return ctx.Err()
 		},
 		set: func(context.Context, io.Writer) error {
+			close(setFailed)
 			return errInjectedBackup
 		},
 	}
 	db := newHookedDB(t, nil, hooks)
 	dir := snapshotTestDir(t, "snap")
-	// The pause limit is far beyond the wait below, so only the failed
-	// backup can cancel its peer in time.
 	result := make(chan error, 1)
 	go func() {
 		_, err := snapshotAt(
 			t.Context(), db, dir,
-			lifecycle.WithMaxCommitPause(time.Minute),
+			lifecycle.WithMaxCommitPause(10*time.Minute),
 		)
 		result <- err
 	}()
-	err := testutil.RequireReceive(
-		t, result, 5*time.Second,
+	// The bound covers only the cancellation, measured from the failure: the
+	// pause limit is far beyond it, so only the failed backup can cancel its
+	// peer in time. Setup before the backups start is not timed.
+	testutil.RequireReceive(
+		t, setFailed, testutil.AsyncWait, "the set backup must run",
+	)
+	testutil.RequireReceive(
+		t, peerCancelled, 5*time.Second,
 		"a failed set backup must cancel the blob backup",
 	)
+	testutil.RequireNoReceive(
+		t, result, 100*time.Millisecond,
+		"the snapshot must not return while its cancelled peer still runs",
+	)
+	close(releasePeer)
+	err := testutil.RequireReceive(
+		t, result, testutil.AsyncWait, "the snapshot must return",
+	)
 	require.ErrorIs(t, err, errInjectedBackup)
-	select {
-	case <-peerCancelled:
-	default:
-		t.Fatal("failed set backup did not cancel the blob backup")
-	}
 	require.NoDirExists(t, dir)
 	requireBarrierReleased(t, db)
 }

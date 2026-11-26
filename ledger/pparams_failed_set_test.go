@@ -54,7 +54,7 @@ func TestPParamsReadsRefuseAFailedSet(t *testing.T) {
 		_, err := cbor.Decode(data, &p)
 		return &p, err
 	}
-	src := drainedPParamsSource{ls}
+	src := setPParamsSource{ls}
 	noUpdate := func(models.PParamUpdate) error { return nil }
 
 	// While the set follows the ledger, every reader answers.
@@ -81,11 +81,11 @@ func TestPParamsReadsRefuseAFailedSet(t *testing.T) {
 	_, err = ldb.GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
 	require.ErrorIs(t, err, ErrLedgerStateUnserved, "syncMarkerView")
 	_, err = src.PParamsForEra(era)
-	require.ErrorIs(t, err, ErrLedgerStateUnserved, "drainedPParamsSource")
+	require.ErrorIs(t, err, ErrLedgerStateUnserved, "setPParamsSource")
 	require.ErrorIs(
 		t, src.PParamUpdates(noUpdate), ErrLedgerStateUnserved,
-		"drainedPParamsSource",
+		"setPParamsSource",
 	)
 	_, _, err = src.SyncMarker(database.SyntheticV2CostModelSyncKey)
-	require.ErrorIs(t, err, ErrLedgerStateUnserved, "drainedPParamsSource")
+	require.ErrorIs(t, err, ErrLedgerStateUnserved, "setPParamsSource")
 }

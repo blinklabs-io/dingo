@@ -29,9 +29,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -468,4 +470,48 @@ func TestParseSigningKey(t *testing.T) {
 		_, err := ParseSigningKey(encoded)
 		assert.Error(t, err, name)
 	}
+}
+
+// TestCreateSnapshotPublishesStoredArchives creates a snapshot from a
+// database whose ImmutableDB keeps chunk 0 as an archive. The snapshot is
+// the one the plain database yields, and chunk 0's published archive is the
+// stored archive, byte for byte.
+func TestCreateSnapshotPublishesStoredArchives(t *testing.T) {
+	t.Parallel()
+	_, key := newSigningKey(t)
+	plainDir := newCardanoDB(t, 3)
+	archivedDir := newCardanoDB(t, 3)
+	immDir := filepath.Join(archivedDir, "immutable")
+	var stored bytes.Buffer
+	require.NoError(t, immutable.WriteChunkArchive(&stored, immDir, 0))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(immDir, immutable.ArchiveName(0)), stored.Bytes(), 0o640,
+	))
+	for _, ext := range immutableFileExtensions {
+		require.NoError(t, os.Remove(
+			filepath.Join(immDir, fmt.Sprintf("%05d.%s", 0, ext)),
+		))
+	}
+
+	plainStore, _ := newLocalStore(t)
+	want, err := CreateSnapshot(
+		context.Background(), newSnapshotConfig(t, plainDir, plainStore, key),
+	)
+	require.NoError(t, err)
+	archivedStore, archivedStoreDir := newLocalStore(t)
+	got, err := CreateSnapshot(
+		context.Background(),
+		newSnapshotConfig(t, archivedDir, archivedStore, key),
+	)
+	require.NoError(t, err)
+	require.Equal(t, want.Hash, got.Hash)
+	require.Equal(t, want.Digests, got.Digests)
+
+	var published []byte
+	for name, data := range readTree(t, archivedStoreDir) {
+		if strings.HasSuffix(name, "/"+immutableArchiveName(0)) {
+			published = data
+		}
+	}
+	require.Equal(t, stored.Bytes(), published)
 }
