@@ -4044,7 +4044,7 @@ whose estimated entries or bytes exceed half of `db.MaxBatchCount` or
 `db.MaxBatchSize` is split at point boundaries, never inside a point. Every
 transaction but the last leaves the tip and the nonces alone: the leading ones
 write the rows, accounts, reward records and snapshot and reward block ops too
-many for the last, and the rest write UTxO changes with one journal record per
+many for the last (every row of a batch with a reward epoch wipe), and the rest write UTxO changes with one journal record per
 point; the last writes the remaining changes, the other state rows and the
 tip. The first transaction also writes the `mfailed` marker at the batch's
 first slot and the last removes it (or restores a lower mark already there),
