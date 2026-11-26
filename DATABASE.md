@@ -3945,7 +3945,10 @@ to run.
 `Store.Rollback(point)` undoes the journal records after `point` newest
 first, one Badger transaction per record, each also moving `mtip` back to the
 tip before that record, so a crash part way leaves the set at a point it
-held. It returns the net change.
+held. It returns the net change. A block written in parts is the exception:
+until its first-written part is undone `mtip` names the block while part of
+it is undone, so a rollback that undoes any record continuing a block writes
+the `mrbpend` mark described below before its first transaction.
 A rollback whose state journal entries, or reward records, after `point` exceed
 one transaction's plan (the forward plan's budget, `txnBudget`) undoes them first, newest first,
 in transactions of their own, and only then the records. A boundary
@@ -4074,19 +4077,26 @@ A ledger commit larger than one Badger transaction is applied in several by
 `Store.ApplyLedgerBatch`, through `applyChunked`
 (`database/ledgerdb/badgerutxo/chunk.go`). A batch
 whose estimated entries or bytes exceed half of `db.MaxBatchCount` or
-`db.MaxBatchSize` is split at point boundaries, never inside a point. Every
+`db.MaxBatchSize` is split at point boundaries. A point whose own changes
+exceed the budget, such as a block carrying a large endorser block's
+transactions, is cut into parts by output count, keeping the changes' order
+and each change's removals ahead of its additions; each part gets its own
+journal record, and every part after the first records the point itself as
+its tip before, which `JournalPoints` and `HasJournalPoint` do not report as a
+rollback target. Every
 transaction but the last leaves the tip and the nonces alone: the leading ones
 write the rows, accounts, reward records and snapshot and reward block ops too
 many for the last, and the rest write UTxO changes with one journal record per
-point; the last writes the remaining changes, the other state rows and the
-tip. The first transaction also writes the `mfailed` marker at the batch's
+point or part; the last writes the remaining changes, the other state rows
+and the tip. The first transaction also writes the `mfailed` marker at the batch's
 first slot and the last removes it (or restores a lower mark already there),
 so a batch that stopped between transactions, by error or by crash, starts
 with the marker and `Reconcile` rewinds the journal records past the tip, which
 `Rollback` undoes whether or not they are above the tip. A read transaction
 begins only when no chunked batch is part written (`Store.gate`), so a reader
 sees the set before the batch or after it. If Badger still refuses a
-transaction, the budget is halved and the plan redone.
+transaction, the budget is halved and the plan redone; a single point it
+refuses is cut into smaller parts.
 
 At startup `Reconcile` first rewinds a set that carries the marker, from its
 journal, to the tip before its oldest journaled commit at or after the marked
