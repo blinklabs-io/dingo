@@ -34,8 +34,8 @@ import (
 // that the parity checker needs, independent of how that view is obtained.
 //
 // DingoDB (dingo_db.go) implements this by opening its own read-only SQL
-// connection to a separate metadata.sqlite/postgres/mysql instance — the
-// shipped, standalone-CLI design. DatabaseSource (this file)
+// connection to a separate metadata.sqlite/postgres/mysql instance.
+// DatabaseSource (this file)
 // implements it by reading directly from a live, in-process
 // *database.Database via its existing typed MetadataStore accessors — the
 // in-process observer's narrow "reward-parity source" adapter,
@@ -598,9 +598,9 @@ func (s *DatabaseSource) GetPoolStakeSnapshotMembers(
 }
 
 // GetPoolsRetiredByEpoch implements RewardParitySource through the metadata
-// store's own GetPoolKeyHashesRetiredByEpoch, so the in-process observer and
-// the standalone CLI resolve departure from one shared query rather than two
-// copies of the certificate-ordering rules.
+// store's own GetPoolKeyHashesRetiredByEpoch, so the in-process observer
+// resolves departure from the same query as the metadata store rather than a
+// second copy of the certificate-ordering rules.
 func (s *DatabaseSource) GetPoolsRetiredByEpoch(
 	ctx context.Context,
 	epoch uint64,

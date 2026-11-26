@@ -198,8 +198,8 @@ func TestCheckReselectsPoolOnlyEpochMissingAccountCoverage(t *testing.T) {
 		Status: StatusPass,
 	}))
 
-	// Sanity check: pool-only mode (AccountsEnabled=false, the standalone
-	// CLI's default) must NOT change behavior — this is the existing,
+	// Sanity check: pool-only mode (AccountsEnabled=false, the library
+	// default) must NOT change behavior — this is the existing,
 	// already-correct case the fix must not regress.
 	needingPoolOnly, err := cache.GetEpochsNeedingCheck(network, false)
 	require.NoError(t, err)

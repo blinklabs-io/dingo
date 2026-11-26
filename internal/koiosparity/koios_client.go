@@ -184,7 +184,7 @@ const (
 	//
 	// Applies to every KoiosClient, not only node-parity's live
 	// per-epoch checking that this investigation was run against:
-	// observer.go's in-process Observer and fetch.go's koios-parity fetch
+	// observer.go's in-process Observer and fetch.go's Fetch
 	// both construct their client through this same NewKoiosClient, and
 	// each one makes is still a single bounded, page-sized Koios API call
 	// (koiosPageSize) -- a long-running bulk fetch is many such calls over
@@ -491,7 +491,7 @@ func validateKoiosNetwork(network string) error {
 }
 
 // ValidateNetwork reports whether network is one koios-parity can validate
-// against. The node wiring and the CLI use it so the supported set has a single
+// against. The node wiring uses it so the supported set has a single
 // definition.
 func ValidateNetwork(network string) error {
 	return validateKoiosNetwork(network)
@@ -1142,7 +1142,7 @@ func (k *KoiosClient) getAttempts(
 			bodyStr := strings.TrimSpace(string(body))
 			// Daily quota: retrying with the burst cooldown cannot help.
 			if isDailyQuotaExceeded(bodyStr) {
-				hint := "Public tier caps at 5,000 requests/day with no API key; set --api-key/KOIOS_API_KEY for the Free tier's 50,000/day or higher"
+				hint := "Public tier caps at 5,000 requests/day with no API key; configure a Koios API key for the Free tier's 50,000/day or higher"
 				if k.apiKey != "" {
 					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
 				}
@@ -1196,8 +1196,7 @@ func (k *KoiosClient) getAttempts(
 				// an injected logger: one KoiosClient serves the
 				// concurrent chunk fetchers, so it deliberately holds no
 				// logger field. cmd/dingo calls slog.SetDefault before
-				// building one, and cmd/koios-parity logs through slog.Default()
-				// itself, so this lands wherever the binary's own output
+				// building one, so this lands wherever the binary's own output
 				// goes.
 				slog.Warn(
 					"koiosparity: koios request timed out (408), retrying",
@@ -1360,7 +1359,7 @@ func (k *KoiosClient) postAttempts(
 		if resp.StatusCode == http.StatusTooManyRequests {
 			bodyStr := strings.TrimSpace(string(body))
 			if isDailyQuotaExceeded(bodyStr) {
-				hint := "Public tier caps at 5,000 requests/day with no API key; set --api-key/KOIOS_API_KEY for the Free tier's 50,000/day or higher"
+				hint := "Public tier caps at 5,000 requests/day with no API key; configure a Koios API key for the Free tier's 50,000/day or higher"
 				if k.apiKey != "" {
 					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
 				}

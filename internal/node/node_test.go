@@ -1010,6 +1010,38 @@ func TestBuildDingoConfigWiresBarkEventNodeID(t *testing.T) {
 	}
 }
 
+// TestBuildDingoConfigWiresBarkEventSources pins that sources loaded from
+// YAML reach the node; without them the node silently follows nothing.
+func TestBuildDingoConfigWiresBarkEventSources(t *testing.T) {
+	t.Parallel()
+
+	want := []config.BarkEventSource{{
+		Name:       "upstream",
+		URL:        "http://upstream:9090",
+		EventTypes: []string{"chain.update"},
+	}}
+	cfg := &config.Config{BarkEventSources: want}
+
+	built := buildDingoConfig(
+		cfg,
+		slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	got := built.BarkEventSources()
+	if len(got) != 1 || got[0].Name != want[0].Name ||
+		got[0].URL != want[0].URL ||
+		!slices.Equal(got[0].EventTypes, want[0].EventTypes) {
+		t.Fatalf("expected Bark event sources to flow through, got %+v", got)
+	}
+}
+
 // TestBuildDingoConfigWiresMidnightServerPolicy pins the composition boundary
 // between YAML/env/CLI configuration and the root node configuration used by
 // both initial startup and live API reinitialization.

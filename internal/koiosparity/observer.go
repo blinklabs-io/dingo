@@ -103,7 +103,7 @@ type ObserverConfig struct {
 	// AccountsEnabled runs the per-account exact-parity fetch+check
 	// phase (FetchAccountRewardsForEpoch / CompareAccountEpoch) alongside
 	// the existing epoch-aggregate/pool phases, for every epoch this
-	// observer processes. Unlike the standalone CLI's opt-in-only default
+	// observer processes. Unlike the opt-in-only library default
 	// (see FetchConfig.AccountsEnabled/CheckConfig.AccountsEnabled), the
 	// in-process observer is the operationally-real, continuously-driven
 	// path the observer exists to make possible, so this defaults to true at
