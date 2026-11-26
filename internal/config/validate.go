@@ -1401,6 +1401,15 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// one-shot `dingo mithril sync` and `dingo sync --mithril` paths are
 	// not gated by these settings.
 	if c.Mithril.Enabled && effectiveMode.RequiresListeners() {
+		if c.HistoryExpiry.Enabled && c.HasIndexerDB() {
+			errs = append(errs, errors.New(
+				"mithril.enabled with historyExpiry.enabled restores a "+
+					"snapshot that keeps only recent blocks, and the "+
+					"IndexerDB of storageMode api is derived by replaying "+
+					"every block from genesis: disable historyExpiry, or "+
+					"use storageMode core",
+			))
+		}
 		if c.Mithril.BatchChunks < 1 {
 			errs = append(errs, fmt.Errorf(
 				"invalid mithril.batchChunks %d: must be at least 1",

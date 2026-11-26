@@ -4725,7 +4725,9 @@ genesis out of the shared blob store through the same loop that follows the tip:
 no imported ledger rows, no anchor and no comparison with the ledger's state.
 A database whose block history does not start at genesis, as after a restore
 that kept only recent blocks, cannot build it, and the node stops with
-`indexer.ErrChainNotFromGenesis`. Current-state endpoints report not ready
+`indexer.ErrChainNotFromGenesis`. Configuration validation refuses the
+combination that produces such a restore, `mithril.enabled` with
+`historyExpiry.enabled` in API storage mode, before the restore starts. Current-state endpoints report not ready
 until the replay is within `indexer.maxReadyLagBlocks` of the ledger tip. A database that is already complete is not advanced by a later
 `mithril sync`.
 
