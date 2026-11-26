@@ -3071,6 +3071,15 @@ starts with the mark, and a batch that writes the epoch again wipes the
 epoch's prefix first, so rows the stopped attempt wrote and the new one does
 not are gone.
 
+A `RowPut.WipeRewardEpoch` row deletes an epoch's reward output rows and
+their `F` index rows, as many as the epoch holds, so a batch with one always
+writes its rows in transactions of their own, whatever their estimate. The wipe
+runs after the batch's rollback, which is alone in the first transaction when
+the wipe leads, and deletes a bounded number of whole outputs per transaction.
+It is not journaled, so a stopped attempt leaves part of the epoch's outputs
+and the batch applied again deletes the rest, then writes the puts after the
+wipe.
+
 Snapshot and reward block ops that do not fit beside the batch's other rows
 follow, in order, in transactions of their own before the last. The batch's
 accounts, rows and reward records then go ahead of them in transactions of
