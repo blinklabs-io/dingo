@@ -842,6 +842,13 @@ func (o *Ouroboros) txsubmissionServerInit(
 	return nil
 }
 
+// txsubmissionClientRequestTxIds answers a peer's RequestTxIds from the
+// connection's mempool consumer. A blocking request waits for a transaction.
+// When that wait is released without one (shutdown stopping the mempool, or
+// connection cleanup cancelling the consumer), or the consumer is already
+// gone, it returns ErrStopServerProcess so the client answers with MsgDone:
+// the protocol forbids an empty reply to a blocking request. The metric for
+// this callback records that stop as a success, not an error.
 func (o *Ouroboros) txsubmissionClientRequestTxIds(
 	ctx txsubmission.CallbackContext,
 	blocking bool,
