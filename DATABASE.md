@@ -4018,7 +4018,7 @@ Readers outside the ledger's LedgerDB:
 |---|---|
 | MCP tools | With a ledger state the tools read through its LedgerDB. On a node with an IndexerDB, `get_utxos` pages exact addresses from it; on a core node it pages them from the live UTxO set (`LedgerState.UtxosByAddressBoundedPage`). On a node with an IndexerDB, `get_epoch_summary` counts an epoch's blocks from the IndexerDB's `block_nonce` rows, which it keeps for every block it indexes; without one the count covers the ledger's retained window and says so. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
 | `internal/node` backfill | Runs on the IndexerDB. |
-| `internal/koiosparity` | `DatabaseSource` reads current ledger state through the ledger's LedgerDB, and the reward tables and transaction sample from the IndexerDB when the node has one. `DingoDB` queries the IndexerDB's SQL tables directly (the `koios-parity` commands open `<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
+| `internal/koiosparity` | `DatabaseSource` reads current ledger state through the ledger's LedgerDB, and the reward tables and transaction sample from the IndexerDB when the node has one. `DingoDB` queries the IndexerDB's SQL tables directly (`<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
 | `api/blockfrost` | Reads the IndexerDB, and protocol parameters through `Database.GetPParamRows`. |
 | `api/mesh` | Reads blocks, address UTxOs and transaction history from the IndexerDB through `mesh.MeshDatabase`, which the node builds over it. |
 | `api/utxorpc` | Reads through `utxorpc.QueryDatabase`. On an API node that is the IndexerDB. On a core node, `utxorpc.NewLedgerQueryDatabase` reads UTxOs by reference and address and inline datums from the live UTxO set, and refuses a transaction lookup with `ErrQueryNeedsAPIStorage`. |
@@ -10596,8 +10596,8 @@ WHERE lrt.epoch <= $epoch
 ```
 
 The Koios parity checker reaches this through `RewardParitySource`, which has
-two implementations: `DatabaseSource` calls this store method directly, and the
-standalone-CLI `DingoDB` runs the same SQL against a separately synced metadata
+two implementations: `DatabaseSource` calls this store method directly, and
+`DingoDB` runs the same SQL against a separately synced metadata
 database. Both feed `poolDepartedAtParamEpoch`, which treats membership in this
 result as proof of departure and so downgrades a missing K+1 `reward_pool_input`
 row from `dingo_db_missing` to the informational `pool_departed`.
@@ -11020,7 +11020,8 @@ full sweep. Ordinary same-tip rollback remains a no-op.
 
 # Koios parity cache significant counts
 
-The observer and standalone parity tool share a separate SQLite reference cache.
+The Koios parity observer keeps its own SQLite reference cache, separate from
+Dingo's databases.
 Its `check_epoch_status` table stores `significant_mismatch_count` alongside
 `mismatch_count`, plus `aggregate_significant_mismatch_count` and
 `account_significant_mismatch_count`. Significant counts exclude informational
@@ -11032,7 +11033,8 @@ stored `check_mismatches` categories and scopes. Total counts and mismatch rows
 are preserved. Reopening an upgraded cache does not rerun the backfill. Observer
 retry selection uses the ERROR status of its own phase even when Koios reference
 timestamps have not changed, allowing a later check to observe newly committed
-Dingo state. CLI freshness selection is unchanged. Fetch/check errors update
+Dingo state. New work is still selected by Koios reference freshness
+(`GetEpochsNeedingCheck`). Fetch/check errors update
 only the failed queue's persisted status. The other queue's verdict, check
 timestamp, comparison counts, pool metadata, mismatch evidence, and Koios
 reference rows remain intact. This makes retries survive reopening the cache

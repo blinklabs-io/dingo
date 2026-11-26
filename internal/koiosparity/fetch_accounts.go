@@ -296,8 +296,7 @@ func accountUniverseFresh(fetchedAt, notBefore time.Time) bool {
 // rather than trusting either side alone.
 //
 // source may be nil — used when the caller has no Dingo database access
-// configured for accounts at all (e.g. the standalone CLI's `fetch` command
-// invoked without --metadata-*); the resulting universe is then Koios's list
+// configured for accounts at all; the resulting universe is then Koios's list
 // alone, which still lets every Koios-known account be checked, just unable
 // to also surface a Dingo-only account Koios has never indexed.
 //

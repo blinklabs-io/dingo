@@ -464,10 +464,10 @@ func DefaultIndexerConfig() IndexerConfig {
 // When enabled, Dingo subscribes an epoch-boundary observer to
 // its own EventBus (event.EpochTransitionEventType) and validates each newly
 // closed epoch's committed reward state directly against Koios reference
-// data as the node advances, instead of requiring a separate koios-parity
-// CLI process polling a second, independently synced copy of the metadata
-// database. See internal/koiosparity/README.md. This is a one-off validation
-// aid, not a permanent subsystem — leave it disabled for normal node operation.
+// data as the node advances, with no separate process or second,
+// independently synced copy of the metadata database. See
+// internal/koiosparity/README.md. This is a one-off validation aid, not a
+// permanent subsystem — leave it disabled for normal node operation.
 type KoiosParityConfig struct {
 	// Enabled subscribes the observer to epoch.transition when true.
 	Enabled bool `yaml:"enabled"               envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
@@ -476,8 +476,7 @@ type KoiosParityConfig struct {
 	// Network.
 	Network string `yaml:"network"               envconfig:"DINGO_KOIOS_PARITY_NETWORK"`
 	// CachePath is the Koios reference cache.db path. Empty defaults to
-	// {DatabasePath}/.koios/cache.db, matching cmd/koios-parity's own
-	// default cache location.
+	// {DatabasePath}/.koios/cache.db.
 	CachePath string `yaml:"cachePath"             envconfig:"DINGO_KOIOS_PARITY_CACHE_PATH"`
 	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
 	// uses Koios's unauthenticated rate limit.
@@ -529,11 +528,7 @@ type KoiosParityConfig struct {
 	// Accounts additionally runs the per-account exact-parity fetch+check
 	// phase for every epoch the observer processes, alongside the existing
 	// epoch-aggregate/pool phases. Defaults to true (see
-	// DefaultKoiosParityConfig): the in-process observer is the
-	// operationally-real, continuously-driven path the observer exists to make
-	// possible, unlike the standalone koios-parity CLI's `--accounts` flag,
-	// which stays opt-in-only for cost/compatibility reasons (see
-	// cmd/koios-parity's addAccountsFlag). Set false explicitly to keep the
+	// DefaultKoiosParityConfig). Set false explicitly to keep the
 	// observer pool-level-only, e.g. to bound Koios request volume on a
 	// resource-constrained deployment.
 	Accounts bool `yaml:"accounts"              envconfig:"DINGO_KOIOS_PARITY_ACCOUNTS"`

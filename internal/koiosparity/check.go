@@ -46,9 +46,9 @@ type CheckConfig struct {
 	// phases, consulting koios_account_rewards/koios_account_coverage —
 	// which only ever get populated when the corresponding fetch phase was
 	// also run with accounts enabled (see FetchConfig.AccountsEnabled). False
-	// by default for the standalone CLI (opt-in: per-account checking issues
-	// far more Koios requests than pool-level checking); see
-	// ObserverConfig.AccountsEnabled for the in-process default.
+	// by default (opt-in: per-account checking issues far more Koios requests
+	// than pool-level checking); see ObserverConfig.AccountsEnabled for the
+	// in-process default.
 	AccountsEnabled bool
 }
 
@@ -250,10 +250,10 @@ func Check(
 }
 
 // CheckEpoch compares the Koios reference cache against source (either a
-// standalone DingoDB connection or the in-process
+// DingoDB connection or the in-process
 // DatabaseSource) for exactly one epoch, persisting the result the same way
 // checkEpoch's callers inside Check do. This is the primitive both Check's
-// batch CLI/watch-loop mode and the in-process epoch observer (observer.go)
+// batch mode and the in-process epoch observer (observer.go)
 // share — the observer needs a "validate exactly this epoch now, regardless
 // of whether it was already checked" call unconditioned by
 // GetEpochsNeedingCheck's Koios-reference-freshness gate, so a
