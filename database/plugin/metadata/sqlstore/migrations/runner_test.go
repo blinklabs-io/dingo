@@ -373,6 +373,7 @@ func TestValidateRegistryAllowsStableSparseVersions(t *testing.T) {
 	first := testMigration(nil)
 	second := Migration{
 		Version:          StableVersion("independent_branch_migration"),
+		After:            first.Version,
 		Name:             "independent_branch_migration",
 		BackfillRevision: "1",
 		SQL: map[string]SQL{
@@ -397,6 +398,7 @@ func TestRunnerAppliesStableSparseVersions(t *testing.T) {
 	first := testMigration(nil)
 	second := Migration{
 		Version:          StableVersion("independent_branch_migration"),
+		After:            first.Version,
 		Name:             "independent_branch_migration",
 		BackfillRevision: "1",
 		SQL: map[string]SQL{
@@ -410,6 +412,47 @@ func TestRunnerAppliesStableSparseVersions(t *testing.T) {
 	var count int
 	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count))
 	require.Equal(t, 2, count)
+}
+
+func TestRunnerAppendsLowerStableVersionAfterAppliedMigration(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	first := testMigration(nil)
+	nameA, nameB := "independent_branch_a", "independent_branch_b"
+	versionA, versionB := StableVersion(nameA), StableVersion(nameB)
+	require.NotEqual(t, versionA, versionB)
+	if versionA > versionB {
+		nameA, nameB = nameB, nameA
+		versionA, versionB = versionB, versionA
+	}
+	higher := Migration{
+		Version:          versionB,
+		After:            first.Version,
+		Name:             nameB,
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {Expand: []string{"CREATE TABLE higher_version_first (id INTEGER)"}},
+		},
+	}
+	runner := testRunner(db, first)
+	runner.Registry = []Migration{first, higher}
+	require.NoError(t, runner.Run(context.Background()))
+
+	lower := Migration{
+		Version:          versionA,
+		After:            higher.Version,
+		Name:             nameA,
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {Expand: []string{"CREATE TABLE lower_version_appended (id INTEGER)"}},
+		},
+	}
+	runner.Registry = append(runner.Registry, lower)
+	require.NoError(t, runner.Run(context.Background()))
+	require.NoError(t, runner.Run(context.Background()))
+	var count int
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count))
+	require.Equal(t, 3, count)
 }
 
 func TestProcessLockerCancellation(t *testing.T) {
@@ -1056,6 +1099,7 @@ FROM (SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name)`).Scan(
 			backfillCalled := false
 			runner.Registry = append(runner.Registry, Migration{
 				Version:          2,
+				After:            1,
 				Name:             "new_column",
 				BackfillRevision: "1",
 				SQL: map[string]SQL{"sqlite": {

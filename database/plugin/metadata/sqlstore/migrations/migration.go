@@ -71,7 +71,11 @@ type Backfill func(context.Context, Batch) (BatchResult, error)
 // Migration is immutable after release. BackfillRevision must change whenever
 // the Go backfill behavior changes.
 type Migration struct {
-	Version          int
+	Version int
+	// After identifies the migration that must finish before this one starts.
+	// New migrations form one stable, append-only chain even when independent
+	// branches allocate their version identifiers at the same time.
+	After            int
 	Name             string
 	BackfillRevision string
 	SQL              map[string]SQL
@@ -87,6 +91,9 @@ func (m Migration) checksum() string {
 		_, _ = hash.Write([]byte(value))
 	}
 	write(strconv.Itoa(m.Version))
+	if m.Version > lastSequentialVersion {
+		write(strconv.Itoa(m.After))
+	}
 	write(m.Name)
 	write(m.BackfillRevision)
 	dialects := make([]string, 0, len(m.SQL))
@@ -149,11 +156,16 @@ func validateRegistry(registry []Migration, dialect string) error {
 				migration.Version,
 			)
 		}
-		if idx > 0 && migration.Version <= registry[idx-1].Version {
+		expectedAfter := 0
+		if idx > 0 {
+			expectedAfter = registry[idx-1].Version
+		}
+		if migration.After != expectedAfter {
 			return fmt.Errorf(
-				"%w: versions are not strictly increasing at %d",
+				"%w: version %d must follow version %d",
 				ErrInvalidRegistry,
 				migration.Version,
+				expectedAfter,
 			)
 		}
 		if _, exists := seenVersions[migration.Version]; exists {

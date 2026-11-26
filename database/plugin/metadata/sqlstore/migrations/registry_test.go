@@ -26,6 +26,34 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestOrderedSchemaVersionsFollowsPredecessorsNotIDs(t *testing.T) {
+	t.Parallel()
+	first := schemaVersion{Version: 1, Name: "initial", Dir: "v1"}
+	nameA, nameB := "branch_a", "branch_b"
+	versionA, versionB := StableVersion(nameA), StableVersion(nameB)
+	require.NotEqual(t, versionA, versionB)
+	if versionA > versionB {
+		nameA, nameB = nameB, nameA
+		versionA, versionB = versionB, versionA
+	}
+	higher := schemaVersion{Version: versionB, Name: nameB, Dir: "higher", After: 1}
+	lower := schemaVersion{Version: versionA, Name: nameA, Dir: "lower", After: versionB}
+	ordered, err := orderedSchemaVersions([]schemaVersion{lower, first, higher})
+	require.NoError(t, err)
+	require.Equal(t, []int{1, versionB, versionA}, []int{
+		ordered[0].Version,
+		ordered[1].Version,
+		ordered[2].Version,
+	})
+
+	_, err = orderedSchemaVersions([]schemaVersion{
+		first,
+		{Version: versionA, Name: nameA, Dir: "a", After: 1},
+		{Version: versionB, Name: nameB, Dir: "b", After: 1},
+	})
+	require.ErrorIs(t, err, ErrInvalidRegistry)
+}
+
 func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
 	t.Parallel()
 
@@ -43,7 +71,7 @@ func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
 			t.Parallel()
 			registry, err := cachedRegistryForDialect(testCase.dialect)
 			require.NoError(t, err)
-					migration := registry[51]
+			migration := registry[51]
 			require.Equal(t, backfillCheckpointIdentitySchemaRelease, migration.Name)
 			require.Contains(t, migration.SQL[testCase.dialect].Expand,
 				"ALTER TABLE backfill_checkpoint ADD COLUMN last_index_id "+
@@ -72,7 +100,7 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-					migration := registry[39]
+			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
 			require.Contains(t, seed, "WHERE NOT EXISTS")

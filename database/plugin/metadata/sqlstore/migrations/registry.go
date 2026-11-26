@@ -25,7 +25,6 @@ import (
 	"io/fs"
 	"net"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -131,12 +130,16 @@ const alonzoEraID = 4
 // schemaVersions keeps the released sequential identifiers 1 through 75
 // unchanged. New entries use StableVersion(name) and a directory derived from
 // that identifier, so parallel branches do not compete for a next version.
-// registryForDialect sorts entries by identifier before applying them.
-var schemaVersions = []struct {
+// New entries also name their predecessor in After. Parallel additions that
+// share a predecessor must be linked in order before they can enter a release.
+type schemaVersion struct {
 	Version int
 	Name    string
 	Dir     string
-}{
+	After   int
+}
+
+var schemaVersions = []schemaVersion{
 	{Version: 1, Name: initialSchemaRelease, Dir: "v1"},
 	{Version: 2, Name: leiosKeySchemaRelease, Dir: "v2"},
 	{Version: 3, Name: tokenRegistrySchemaRelease, Dir: "v3"},
@@ -318,6 +321,57 @@ var schemaVersions = []struct {
 	{Version: 75, Name: indexerOffsetsSchemaRelease, Dir: "v75"},
 }
 
+func orderedSchemaVersions(versions []schemaVersion) ([]schemaVersion, error) {
+	children := make(map[int]schemaVersion, len(versions))
+	seenVersions := make(map[int]struct{}, len(versions))
+	for _, version := range versions {
+		if version.Version <= 0 {
+			return nil, fmt.Errorf(
+				"%w: invalid migration version %d",
+				ErrInvalidRegistry,
+				version.Version,
+			)
+		}
+		if _, exists := seenVersions[version.Version]; exists {
+			return nil, fmt.Errorf(
+				"%w: duplicate version %d",
+				ErrInvalidRegistry,
+				version.Version,
+			)
+		}
+		seenVersions[version.Version] = struct{}{}
+		after := version.After
+		if version.Version <= lastSequentialVersion {
+			after = version.Version - 1
+		}
+		version.After = after
+		if _, exists := children[after]; exists {
+			return nil, fmt.Errorf(
+				"%w: multiple migrations follow version %d",
+				ErrInvalidRegistry,
+				after,
+			)
+		}
+		children[after] = version
+	}
+
+	ordered := make([]schemaVersion, 0, len(versions))
+	previous := 0
+	for len(ordered) < len(versions) {
+		version, exists := children[previous]
+		if !exists {
+			return nil, fmt.Errorf(
+				"%w: migration chain has no successor after version %d",
+				ErrInvalidRegistry,
+				previous,
+			)
+		}
+		ordered = append(ordered, version)
+		previous = version.Version
+	}
+	return ordered, nil
+}
+
 // SQLiteRegistry returns the checked-in SQLite migration registry.
 func SQLiteRegistry() ([]Migration, error) {
 	return registryForDialect("sqlite")
@@ -336,14 +390,10 @@ func MySQLRegistry() ([]Migration, error) {
 }
 
 func registryForDialect(dialect string) ([]Migration, error) {
-	versions := append([]struct {
-		Version int
-		Name    string
-		Dir     string
-	}(nil), schemaVersions...)
-	sort.Slice(versions, func(i, j int) bool {
-		return versions[i].Version < versions[j].Version
-	})
+	versions, err := orderedSchemaVersions(schemaVersions)
+	if err != nil {
+		return nil, err
+	}
 	loaded := make([]SQL, 0, len(versions))
 	// Every CREATE TABLE lives in the initial version, and MySQL's translation
 	// reads them to learn which columns are blobs. A later version indexing an
@@ -389,6 +439,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 				}
 				ret = append(ret, Migration{
 					Version:          version.Version,
+					After:            version.After,
 					Name:             version.Name,
 					BackfillRevision: "none",
 					SQL: map[string]SQL{
@@ -410,6 +461,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		}
 		migration := Migration{
 			Version:          version.Version,
+			After:            version.After,
 			Name:             version.Name,
 			BackfillRevision: "none",
 			SQL: map[string]SQL{

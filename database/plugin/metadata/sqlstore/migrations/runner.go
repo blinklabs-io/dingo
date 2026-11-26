@@ -124,11 +124,12 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 
 	target := r.Registry[len(r.Registry)-1].Version
 	current := 0
-	for _, migrationState := range states {
-		if migrationState.phase == PhaseComplete &&
-			migrationState.version > current {
-			current = migrationState.version
+	for _, migration := range r.Registry {
+		migrationState, exists := states[migration.Version]
+		if !exists || migrationState.phase != PhaseComplete {
+			break
 		}
+		current = migration.Version
 	}
 	r.Logger.Info(
 		"metadata schema upgrade check",
@@ -356,15 +357,23 @@ func (r *Runner) runBackfill(
 
 func (r *Runner) validateDatabase(states map[int]state) error {
 	target := r.Registry[len(r.Registry)-1].Version
-	registered := make(map[int]Migration, len(r.Registry))
-	for _, migration := range r.Registry {
-		registered[migration.Version] = migration
+	type registeredMigration struct {
+		migration Migration
+		position  int
 	}
+	registered := make(map[int]registeredMigration, len(r.Registry))
+	for position, migration := range r.Registry {
+		registered[migration.Version] = registeredMigration{
+			migration: migration,
+			position:  position,
+		}
+	}
+	seen := make([]bool, len(r.Registry)+1)
 	for version, migrationState := range states {
-		migration, exists := registered[version]
+		registeredItem, exists := registered[version]
 		if !exists {
 			return fmt.Errorf(
-				"%w: database migration version %d is not registered (highest binary version %d)",
+				"%w: database migration version %d is not registered (latest binary version %d)",
 				ErrNewerSchema,
 				version,
 				target,
@@ -376,6 +385,8 @@ func (r *Runner) validateDatabase(states map[int]state) error {
 				version,
 			)
 		}
+		seen[registeredItem.position+1] = true
+		migration := registeredItem.migration
 		checksum := migration.checksum()
 		if migrationState.name != migration.Name ||
 			migrationState.checksum != checksum {
@@ -401,6 +412,19 @@ func (r *Runner) validateDatabase(states map[int]state) error {
 				"metadata migration version %d has inconsistent "+
 					"completed state",
 				version,
+			)
+		}
+	}
+	seenGap := false
+	for position := 1; position < len(seen); position++ {
+		if !seen[position] {
+			seenGap = true
+			continue
+		}
+		if seenGap {
+			return fmt.Errorf(
+				"metadata migration state is noncontiguous at position %d",
+				position,
 			)
 		}
 	}
