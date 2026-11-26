@@ -40,6 +40,14 @@ import (
 // next epoch to have useful planner statistics.
 const DefaultRefreshInterval = time.Minute
 
+// periodicBackoff scales how long periodic runs wait after a pass: none
+// starts until periodicBackoff times the last pass's duration has passed. A
+// pass holds the write connection, and on a large store it can outlast
+// DefaultRefreshInterval many times over; without the wait the ticker's
+// buffered tick starts the next pass the moment one ends, pausing writes
+// for good. Epoch runs do not wait.
+const periodicBackoff = 9
+
 // shelleyProtocolMajor is the first protocol major version with an epoch
 // nonce; Byron used 0 and 1.
 const shelleyProtocolMajor = 2
@@ -62,6 +70,12 @@ type Manager struct {
 	// newTick returns the periodic trigger channel and its stop function.
 	// Tests replace it to fire the trigger without waiting on a clock.
 	newTick func() (<-chan time.Time, func())
+
+	// now is the clock periodic backoff reads; tests replace it.
+	now func() time.Time
+	// periodicAfter is when the next periodic run may start. Only the worker
+	// reads or writes it.
+	periodicAfter time.Time
 
 	// deferMu guards deferrals, the outstanding Defer calls, and skipped,
 	// whether a trigger arrived while any was outstanding.
@@ -93,6 +107,7 @@ func NewManager(
 			ticker := time.NewTicker(DefaultRefreshInterval)
 			return ticker.C, ticker.Stop
 		},
+		now: time.Now,
 	}
 }
 
@@ -258,14 +273,25 @@ func (m *Manager) worker(ctx context.Context, tick <-chan time.Time) {
 		case <-ctx.Done():
 			return
 		case <-tick:
-			if !m.deferred() {
-				_, _ = m.run(ctx, types.PlannerStatsTriggerPeriodic)
+			if m.now().Before(m.periodicAfter) || m.deferred() {
+				continue
 			}
+			result, _ := m.run(ctx, types.PlannerStatsTriggerPeriodic)
+			m.backOff(result)
 		case <-m.pending:
 			if !m.deferred() {
-				_, _ = m.run(ctx, types.PlannerStatsTriggerEpoch)
+				result, _ := m.run(ctx, types.PlannerStatsTriggerEpoch)
+				m.backOff(result)
 			}
 		}
+	}
+}
+
+// backOff holds periodic runs back for periodicBackoff times the duration
+// of the pass that just ran.
+func (m *Manager) backOff(result types.PlannerStatsResult) {
+	if result.Duration > 0 {
+		m.periodicAfter = m.now().Add(periodicBackoff * result.Duration)
 	}
 }
 

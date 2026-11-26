@@ -39,6 +39,8 @@ type fakeUpdater struct {
 	active  atomic.Int64
 	maxSeen atomic.Int64
 	err     error
+	// duration is the run time every call reports.
+	duration time.Duration
 }
 
 func newFakeUpdater() *fakeUpdater {
@@ -67,7 +69,9 @@ func (f *fakeUpdater) OptimizePlannerStatsContext(
 	case <-ctx.Done():
 		return types.PlannerStatsResult{Supported: true}, ctx.Err()
 	}
-	return types.PlannerStatsResult{Supported: true, Changed: true}, f.err
+	return types.PlannerStatsResult{
+		Supported: true, Changed: true, Duration: f.duration,
+	}, f.err
 }
 
 func receive[T any](t *testing.T, ch <-chan T, msg string) T {
@@ -431,4 +435,38 @@ func TestDeferWithoutTriggerQueuesNothing(t *testing.T) {
 		200*time.Millisecond, 10*time.Millisecond)
 	var nilManager *Manager
 	nilManager.Defer()()
+}
+
+// TestPeriodicRunsBackOffAfterALongPass reports a 10s pass. Periodic ticks
+// inside the next 90s start nothing, so a pass that outlasts the refresh
+// interval cannot be followed at once by another; a tick after that runs.
+func TestPeriodicRunsBackOffAfterALongPass(t *testing.T) {
+	t.Parallel()
+	u := newFakeUpdater()
+	close(u.release)
+	u.duration = 10 * time.Second
+	m := newTestManager(u, event.NewEventBus(nil, nil))
+	var clock atomic.Int64
+	m.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	tick := make(chan time.Time)
+	m.newTick = func() (<-chan time.Time, func()) { return tick, func() {} }
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	require.NoError(t, m.Start(ctx))
+	defer func() { require.NoError(t, m.Stop()) }()
+
+	tick <- time.Time{}
+	require.Equal(t, "periodic", receive(t, u.entered, "first periodic run"))
+	// An unbuffered send returns only once the worker is back in its select,
+	// so this one proves the first pass and its backoff are recorded.
+	tick <- time.Time{}
+	clock.Add(int64(89 * time.Second))
+	tick <- time.Time{}
+	tick <- time.Time{}
+	require.Equal(t, int64(1), u.calls.Load(),
+		"a periodic tick inside the backoff must not start a pass")
+
+	clock.Add(int64(2 * time.Second))
+	tick <- time.Time{}
+	require.Equal(t, "periodic", receive(t, u.entered, "periodic run after backoff"))
 }
