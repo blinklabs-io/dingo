@@ -1125,6 +1125,7 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 	db := newTestDB(t)
 	rejected := errors.New("reject trusted replay batch")
 	noBatch := errors.New("trusted replay ended without a batch")
+	replayStarted := make(chan struct{})
 	firstBatchReceived := make(chan struct{})
 	rejectReplay := make(chan struct{})
 
@@ -1138,6 +1139,7 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 		ctx context.Context,
 		batches <-chan []gledger.Block,
 	) error {
+		close(replayStarted)
 		select {
 		case _, ok := <-batches:
 			if !ok {
@@ -1173,8 +1175,14 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 			db,
 		)
 	}()
+	// Wait for LoadWithDB to reach replay before timing the first batch:
+	// the setup before it is not the step under test, and is what stalls
+	// on a loaded host.
 	testutil.RequireReceive(
-		t, firstBatchReceived, 5*time.Second, "first replay batch",
+		t, replayStarted, testutil.AsyncWait, "trusted replay started",
+	)
+	testutil.RequireReceive(
+		t, firstBatchReceived, testutil.AsyncWait, "first replay batch",
 	)
 	testutil.WaitForCondition(
 		t,
@@ -1182,12 +1190,12 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 			return replayState.PrimaryChainTip().BlockNumber >
 				firstCopiedTip.BlockNumber
 		},
-		5*time.Second,
+		testutil.AsyncWait,
 		"the copier must persist a later batch before replay rejects the first",
 	)
 	close(rejectReplay)
 	err := testutil.RequireReceive(
-		t, loadErr, 5*time.Second, "load failure after replay rejection",
+		t, loadErr, testutil.AsyncWait, "load failure after replay rejection",
 	)
 	require.ErrorIs(t, err, rejected)
 	require.Greater(
