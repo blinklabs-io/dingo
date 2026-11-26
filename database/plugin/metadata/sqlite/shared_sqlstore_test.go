@@ -861,7 +861,7 @@ func TestCascadeChildColumnsIndexedByCriticalEntries(t *testing.T) {
 // checking one parent row never scans a child table: the foreign keys the
 // schema declares to "transaction"(id), and the columns that name one without
 // declaring it. The check holds again after the deferred-index drop and the
-// critical rebuild a bulk load performs.
+// rebuild a bulk load performs.
 func TestTransactionForeignKeyChildColumnsAreIndexed(t *testing.T) {
 	t.Parallel()
 	store, db := newCoreModeSQLStore(t)
