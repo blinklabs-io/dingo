@@ -17,6 +17,7 @@ package immutable
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -297,4 +298,95 @@ func TestSetArchiveCacheBytesBoundsReads(t *testing.T) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	require.LessOrEqual(t, c.used, int64(1))
+}
+
+// TestPackLeavesOversizedChunkPlain lowers the largest file an archive may
+// hold below a chunk's index size: the store keeps that chunk in plain files
+// rather than publish an archive no reader accepts, and it still reads.
+//
+// Not t.Parallel: it changes the package-level maxArchiveEntry.
+func TestPackLeavesOversizedChunkPlain(t *testing.T) {
+	prior := maxArchiveEntry
+	t.Cleanup(func() { maxArchiveEntry = prior })
+	maxArchiveEntry = 8
+	blocks := archivedStoreBlocks(t)
+	dir := t.TempDir()
+	s, _ := openFilledStore(t, dir, true, blocks)
+	t.Cleanup(func() { _ = s.Close() })
+
+	requireExists(t, filepath.Join(dir, ArchiveName(0)), false)
+	requireExists(t, filepath.Join(dir, ChunkName(0)+".chunk"), true)
+	got, _, err := s.GetBlock(blocks[0].Slot, blocks[0].Hash)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+}
+
+// TestTruncateBesideInterruptedPack truncates into a chunk that holds both
+// an archive and its plain files, as a pack whose directory sync failed
+// leaves them. The truncate holds: reopening does not bring back the blocks
+// after the point from the archive.
+func TestTruncateBesideInterruptedPack(t *testing.T) {
+	t.Parallel()
+	blocks := archivedStoreBlocks(t)
+	dir := t.TempDir()
+	s, _ := openFilledStore(t, dir, true, blocks)
+	plainDir := t.TempDir()
+	plain, _ := openFilledStore(t, plainDir, false, blocks[:2])
+	require.NoError(t, plain.Close())
+	for _, ext := range archiveFileExtensions {
+		data, err := os.ReadFile(filepath.Join(plainDir, ChunkName(1)+ext))
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(dir, ChunkName(1)+ext), data, 0o644,
+		))
+	}
+
+	require.NoError(t, s.TruncateAfter(blocks[0].Slot, blocks[0].Hash))
+	require.NoError(t, s.Close())
+	s, err := OpenStoreWithOptions(
+		dir, Geometry{ChunkSlots: 10}, StoreOptions{Compress: true},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	tip, ok := s.Tip()
+	require.True(t, ok)
+	require.Equal(t, blocks[0].Slot, tip.Slot)
+	got, _, err := s.GetBlock(blocks[1].Slot, blocks[1].Hash)
+	require.NoError(t, err)
+	require.Nil(t, got)
+}
+
+// TestPlainLookupReadsOnlyTheIndexEntries reads a block from a completed
+// plain chunk whose primary index is large: the lookup reads the offsets it
+// needs, not the whole index.
+//
+// Not t.Parallel: it measures process-wide allocation.
+func TestPlainLookupReadsOnlyTheIndexEntries(t *testing.T) {
+	geom := Geometry{ChunkSlots: 200000}
+	dir := t.TempDir()
+	s, err := OpenStore(dir, geom)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	first := syntheticBlock(t, 1, 5, 1)
+	_, err = s.Append(first)
+	require.NoError(t, err)
+	_, err = s.Append(syntheticBlock(t, 1, 200005, 2))
+	require.NoError(t, err)
+	require.NoError(t, s.Sync())
+	st, err := os.Stat(filepath.Join(dir, ChunkName(0)+".primary"))
+	require.NoError(t, err)
+	require.Greater(t, st.Size(), int64(512<<10))
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for range 10 {
+		got, _, err := s.GetBlock(first.Slot, first.Hash)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+	}
+	runtime.ReadMemStats(&after)
+	perRead := (after.TotalAlloc - before.TotalAlloc) / 10
+	require.Less(t, perRead, uint64(64<<10),
+		"a lookup must not read the whole primary index")
 }

@@ -279,6 +279,32 @@ func (s *Store) settleArchives() error {
 	return fsyncdir.Sync(s.dir)
 }
 
+// plainForTruncate leaves chunk num in plain files only, ready to be cut. An
+// archive beside plain files is what an interrupted pack leaves, holding the
+// same bytes; it is removed, since recovery would otherwise prefer it to the
+// cut plain files and restore what the truncate removed. An archive alone is
+// unpacked.
+func (s *Store) plainForTruncate(num uint64) error {
+	archive := filepath.Join(s.dir, ArchiveName(num))
+	if _, err := os.Stat(archive); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if _, err := os.Stat(s.path(num, ".chunk")); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return unpackChunk(s.dir, num)
+	}
+	sharedArchiveCache.forget(archive)
+	if err := os.Remove(archive); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return fsyncdir.Sync(s.dir)
+}
+
 // packCompleted archives chunks from..to-1, which the store has completed.
 func (s *Store) packCompleted(from, to uint64) error {
 	if !s.compress {
@@ -1073,14 +1099,14 @@ func (s *Store) GetBlock(slot uint64, hash []byte) (*Block, *Location, error) {
 // lookup finds the secondary entry for a relative slot, or nil when the slot
 // or chunk is empty or absent.
 func (s *Store) lookup(chunkNo, rel uint64) (*secEntry, *Location, error) {
-	priBytes, err := readChunkFile(s.dir, chunkNo, ".primary")
+	pri, closePri, err := openChunkFileReader(s.dir, chunkNo, ".primary")
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil, nil
 		}
 		return nil, nil, err
 	}
-	pri := bytes.NewReader(priBytes)
+	defer closePri()
 	var offs [8]byte
 	n, err := pri.ReadAt(offs[:], int64(1+4*rel)) // #nosec G115
 	if n < 8 {
@@ -1094,11 +1120,11 @@ func (s *Store) lookup(chunkNo, rel uint64) (*secEntry, *Location, error) {
 	if end <= start {
 		return nil, nil, nil
 	}
-	secBytes, err := readChunkFile(s.dir, chunkNo, ".secondary")
+	sec, closeSec, err := openChunkFileReader(s.dir, chunkNo, ".secondary")
 	if err != nil {
 		return nil, nil, err
 	}
-	sec := bytes.NewReader(secBytes)
+	defer closeSec()
 	// This entry and, when present, the next one, whose offset bounds it.
 	var buf [2 * secondaryIndexEntrySize]byte
 	n, err = sec.ReadAt(buf[:], int64(start))
@@ -1156,14 +1182,8 @@ func (s *Store) TruncateAfter(slot uint64, hash []byte) error {
 			return err
 		}
 	}
-	archived, err := s.isArchived(loc.Chunk)
-	if err != nil {
+	if err := s.plainForTruncate(loc.Chunk); err != nil {
 		return err
-	}
-	if archived {
-		if err := unpackChunk(s.dir, loc.Chunk); err != nil {
-			return err
-		}
 	}
 	// Cut the point's chunk right after the point: chunk and secondary first
 	// so the primary, rewritten last, never claims more than they hold.

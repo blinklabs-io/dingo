@@ -8119,7 +8119,8 @@ written.
   it, and a chunk taken in from Mithril once its markers commit: the archive is
   written under a temporary name, fsynced and renamed into place before the plain
   files are removed, and startup removes a leftover temporary file and the plain
-  files of a chunk whose archive is in place. Truncating into an archived chunk,
+  files of a chunk whose archive is in place. A chunk with a file over 1 GiB,
+  the largest entry the reader accepts, stays plain. Truncating into an archived chunk,
   or reopening with an archived chunk highest, returns it to plain files first.
   Existing chunks keep their form, and every reader takes either, so a store can
   hold both. Block reads decompress an archived chunk into a cache of

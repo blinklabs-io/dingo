@@ -50,6 +50,11 @@ const (
 	maxArchiveMemory = 1 << 30
 )
 
+// maxArchiveEntry is the largest file an archive holds. The reader refuses a
+// larger entry, so packChunk leaves a chunk with a larger file in plain files
+// rather than publish an archive no reader accepts. Tests lower it.
+var maxArchiveEntry int64 = maxArchiveMemory
+
 // DefaultArchiveCacheBytes is the default bound on decompressed archived
 // chunks held in memory for block reads.
 const DefaultArchiveCacheBytes = 256 << 20
@@ -186,7 +191,7 @@ func ReadChunkArchive(
 				"%w: unexpected archive entry %q", ErrStoreCorrupt, hdr.Name,
 			)
 		}
-		if hdr.Size < 0 || hdr.Size > maxArchiveMemory {
+		if hdr.Size < 0 || hdr.Size > maxArchiveEntry {
 			return nil, nil, nil, fmt.Errorf(
 				"%w: archive entry %q has size %d",
 				ErrStoreCorrupt, hdr.Name, hdr.Size,
@@ -307,29 +312,21 @@ func (c *archiveCache) remove(el *list.Element) {
 	c.used -= entry.files.size()
 }
 
-// readChunkFile returns the whole ext file of chunk num in dir, from the plain
-// file when the chunk has one and from its archive otherwise.
-func readChunkFile(dir string, num uint64, ext string) ([]byte, error) {
-	data, err := os.ReadFile(filepath.Join(dir, ChunkName(num)+ext))
-	if err == nil || !errors.Is(err, os.ErrNotExist) {
-		return data, err
-	}
-	files, aerr := sharedArchiveCache.get(
-		filepath.Join(dir, ArchiveName(num)), num,
-	)
-	if aerr != nil {
-		if errors.Is(aerr, os.ErrNotExist) {
-			return nil, err
-		}
-		return nil, aerr
-	}
-	return files.file(ext)
-}
-
 // openChunkReader returns a reader over chunk num's .chunk file in dir, the
 // plain file when the chunk has one and its archived bytes otherwise.
 func openChunkReader(dir string, num uint64) (io.ReaderAt, func(), error) {
-	f, err := os.Open(filepath.Join(dir, ChunkName(num)+chunkFileExtension))
+	return openChunkFileReader(dir, num, chunkFileExtension)
+}
+
+// openChunkFileReader returns a reader over chunk num's ext file in dir. A
+// plain file is read in place, so a caller reading a few bytes of an index
+// reads only those; an archived file is served from its decompressed bytes.
+func openChunkFileReader(
+	dir string,
+	num uint64,
+	ext string,
+) (io.ReaderAt, func(), error) {
+	f, err := os.Open(filepath.Join(dir, ChunkName(num)+ext))
 	if err == nil {
 		return f, func() { _ = f.Close() }, nil
 	}
@@ -345,13 +342,26 @@ func openChunkReader(dir string, num uint64) (io.ReaderAt, func(), error) {
 		}
 		return nil, nil, aerr
 	}
-	return bytes.NewReader(files.chunk), func() {}, nil
+	data, ferr := files.file(ext)
+	if ferr != nil {
+		return nil, nil, ferr
+	}
+	return bytes.NewReader(data), func() {}, nil
 }
 
 // packChunk replaces chunk num's plain files in dir with its archive. The
 // archive is written under a temporary name and renamed into place before the
 // plain files are removed, so a crash leaves one complete form or the other.
 func packChunk(dir string, num uint64, sync func(*os.File) error) error {
+	for _, ext := range archiveFileExtensions {
+		st, err := os.Stat(filepath.Join(dir, ChunkName(num)+ext))
+		if err != nil {
+			return err
+		}
+		if st.Size() > maxArchiveEntry {
+			return nil
+		}
+	}
 	final := filepath.Join(dir, ArchiveName(num))
 	tmp := final + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
