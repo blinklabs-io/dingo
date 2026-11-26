@@ -549,10 +549,13 @@ type LedgerBatch struct {
 // written with the UTxO changes. The nonce prune is not: after any
 // RowPut.WipePrefix delete, the non-checkpoint nonces before
 // PruneNoncesBefore are deleted in transactions of their own, ahead of the
-// UTxO changes and the tip. An error after that leaves the prune committed
-// and the tip and UTxOs unchanged; the next prune deletes any nonces it
-// left. A rollback deletes the nonces above the point it restores, so nonces
-// need no journal.
+// UTxO changes and the tip. An error before the first UTxO transaction
+// leaves the prune committed and the tip and UTxOs unchanged; the next prune
+// deletes any nonces it left. An error after a UTxO transaction has
+// committed leaves the tip unchanged and, for a batch with a tip, changes or
+// slotted rows, a failure mark from which startup rewinds the partial
+// changes. A rollback deletes the nonces above the point
+// it restores, so nonces need no journal.
 func (s *Store) ApplyLedgerBatch(
 	tip *ocommon.Point,
 	batch LedgerBatch,
