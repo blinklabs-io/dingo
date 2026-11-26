@@ -46,9 +46,9 @@ type CheckConfig struct {
 	// phases, consulting koios_account_rewards/koios_account_coverage —
 	// which only ever get populated when the corresponding fetch phase was
 	// also run with accounts enabled (see FetchConfig.AccountsEnabled). False
-	// by default for the standalone CLI (opt-in: per-account checking issues
-	// far more Koios requests than pool-level checking); see
-	// ObserverConfig.AccountsEnabled for the in-process default.
+	// by default (opt-in: per-account checking issues far more Koios requests
+	// than pool-level checking); see ObserverConfig.AccountsEnabled for the
+	// in-process default.
 	AccountsEnabled bool
 }
 
@@ -1592,8 +1592,8 @@ func accountLifecycleMismatches(
 		// accounts" from "its rows have since been pruned" — an empty,
 		// error-free result either way. Treating a pruned-empty result as a
 		// complete previous-epoch universe would make every account in the
-		// current epoch look newly registered. Only *DingoDB (the
-		// standalone CLI's full, unpruned copy) can be trusted for this
+		// current epoch look newly registered. Only *DingoDB (a full,
+		// unpruned copy) can be trusted for this
 		// diff; skip it entirely for a prunable source rather than report a
 		// false lifecycle signal. Zero-reward reporting above is unaffected
 		// — it doesn't depend on any historical epoch's data.

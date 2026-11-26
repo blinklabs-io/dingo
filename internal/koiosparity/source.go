@@ -509,9 +509,9 @@ func (s *DatabaseSource) GetPoolStakeSnapshotMembers(
 }
 
 // GetPoolsRetiredByEpoch implements RewardParitySource through the metadata
-// store's own GetPoolKeyHashesRetiredByEpoch, so the in-process observer and
-// the standalone CLI resolve departure from one shared query rather than two
-// copies of the certificate-ordering rules.
+// store's own GetPoolKeyHashesRetiredByEpoch, so the in-process observer
+// resolves departure from the same query as the metadata store rather than a
+// second copy of the certificate-ordering rules.
 func (s *DatabaseSource) GetPoolsRetiredByEpoch(
 	ctx context.Context,
 	epoch uint64,

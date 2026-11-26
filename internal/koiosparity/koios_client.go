@@ -184,7 +184,7 @@ const (
 	//
 	// Applies to every KoiosClient, not only node-parity's live
 	// per-epoch checking that this investigation was run against:
-	// observer.go's in-process Observer and fetch.go's koios-parity fetch
+	// observer.go's in-process Observer and fetch.go's Fetch
 	// both construct their client through this same NewKoiosClient, and
 	// each one makes is still a single bounded, page-sized Koios API call
 	// (koiosPageSize) -- a long-running bulk fetch is many such calls over
@@ -1142,7 +1142,7 @@ func (k *KoiosClient) getAttempts(
 			bodyStr := strings.TrimSpace(string(body))
 			// Daily quota: retrying with the burst cooldown cannot help.
 			if isDailyQuotaExceeded(bodyStr) {
-				hint := "Public tier caps at 5,000 requests/day with no API key; set --api-key/KOIOS_API_KEY for the Free tier's 50,000/day or higher"
+				hint := "Public tier caps at 5,000 requests/day with no API key; configure a Koios API key for the Free tier's 50,000/day or higher"
 				if k.apiKey != "" {
 					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
 				}
@@ -1360,7 +1360,7 @@ func (k *KoiosClient) postAttempts(
 		if resp.StatusCode == http.StatusTooManyRequests {
 			bodyStr := strings.TrimSpace(string(body))
 			if isDailyQuotaExceeded(bodyStr) {
-				hint := "Public tier caps at 5,000 requests/day with no API key; set --api-key/KOIOS_API_KEY for the Free tier's 50,000/day or higher"
+				hint := "Public tier caps at 5,000 requests/day with no API key; configure a Koios API key for the Free tier's 50,000/day or higher"
 				if k.apiKey != "" {
 					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
 				}

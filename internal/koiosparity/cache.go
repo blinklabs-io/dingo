@@ -2777,9 +2777,9 @@ func (c *Cache) RecordKoiosSource(
 // assertClaimedSource fails a write whose cache has since been re-pointed at
 // a different oracle by another process.
 //
-// The cache path is shared by default across the standalone commands and the
-// in-process observer, so an observer on one host and a `fetch --koios-url`
-// on another are a reachable pair. RecordKoiosSource only invalidates the rows
+// The cache path can be shared between the in-process observer and the
+// from-genesis run in internal/nodeparity, so two clients pointed at different
+// Koios hosts are a reachable pair. RecordKoiosSource only invalidates the rows
 // present when it runs; without this the older client would go on appending
 // its host's answers under the newer host's marker, which is the mixed-oracle
 // state the marker exists to make impossible.
