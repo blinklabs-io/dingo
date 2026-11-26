@@ -42,6 +42,41 @@ func TestChecksumIncludesPhaseBoundaries(t *testing.T) {
 	}
 }
 
+func requirePinnedMigrationVersions(
+	t *testing.T,
+	dialect string,
+	registered map[int64]struct{},
+	pinned map[int64]string,
+	registryLength int,
+) {
+	t.Helper()
+	require.Len(
+		t,
+		pinned,
+		registryLength,
+		"pinned %s checksums cover versions not in the registry",
+		dialect,
+	)
+	for version := range pinned {
+		_, ok := registered[version]
+		require.True(
+			t,
+			ok,
+			"pinned %s checksum for unknown version "+strconv.FormatInt(version, 10),
+			dialect,
+		)
+	}
+}
+
+func TestPinnedMigrationVersionsAcceptStableIDs(t *testing.T) {
+	t.Parallel()
+	version := StableVersion("pinned_stable_migration")
+	registered := map[int64]struct{}{version: {}}
+	pinned := map[int64]string{version: "checksum"}
+	require.Greater(t, version, int64(len(registered)))
+	requirePinnedMigrationVersions(t, "test", registered, pinned, len(registered))
+}
+
 // releasedMigrationChecksums pins the checksum every shipped migration version
 // produces on each dialect. The runner compares a database's recorded checksum
 // against the registry's and refuses to start on a mismatch (ErrChecksumDrift),
@@ -301,8 +336,10 @@ func TestReleasedMigrationChecksumsAreStable(t *testing.T) {
 			require.NoError(t, err)
 			pinned := releasedMigrationChecksums[dialect]
 			require.NotEmpty(t, pinned, "no pinned checksums for %s", dialect)
+			registeredVersions := make(map[int64]struct{}, len(registry))
 
 			for _, migration := range registry {
+				registeredVersions[migration.Version] = struct{}{}
 				want, ok := pinned[migration.Version]
 				require.True(
 					t,
@@ -324,23 +361,7 @@ func TestReleasedMigrationChecksumsAreStable(t *testing.T) {
 					migration.Name,
 				)
 			}
-			require.Len(
-				t,
-				pinned,
-				len(registry),
-				"pinned %s checksums cover versions not in the registry",
-				dialect,
-			)
-			for version := range pinned {
-				require.LessOrEqual(
-					t,
-					version,
-					int64(len(registry)),
-					"pinned %s checksum for unknown version "+
-						strconv.FormatInt(version, 10),
-					dialect,
-				)
-			}
+			requirePinnedMigrationVersions(t, dialect, registeredVersions, pinned, len(registry))
 		})
 	}
 }
