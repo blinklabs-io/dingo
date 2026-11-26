@@ -8126,6 +8126,23 @@ written.
   chunks exist as empty trios. A Byron epoch boundary block takes relative slot
   0 with `BlockOrEbb` set to the epoch. Writing a block appends the chunk bytes,
   then the secondary entry, then the primary offsets.
+- **Compressed chunks.** The local `chunkfile` provider's `compression: mithril`
+  keeps each chunk it completes as `NNNNN.tar.zst`: the chunk's `.chunk`,
+  `.primary` and `.secondary` files, named `immutable/NNNNN.*`, in one
+  zstd-compressed USTAR archive, the layout of a Mithril immutable archive. The
+  open chunk stays in plain files. A chunk is archived when the store moves past
+  it, and a chunk taken in from Mithril once its markers commit: the archive is
+  written under a temporary name, fsynced and renamed into place before the plain
+  files are removed, and startup removes a leftover temporary file and the plain
+  files of a chunk whose archive is in place. A chunk with a file over 1 GiB,
+  the largest entry the reader accepts, stays plain. Truncating into an archived chunk,
+  or reopening with an archived chunk highest, returns it to plain files first.
+  Existing chunks keep their form, and every reader takes either, so a store can
+  hold both. Block reads decompress an archived chunk into a cache of
+  decompressed chunks bounded by `archiveCacheMb` (256 MiB unless set). Database
+  snapshots copy archives as they are, and a Mithril snapshot made from one
+  publishes each stored archive unchanged, with digests taken from its
+  decompressed files. The S3 and GCS providers do not compress.
 - **Durability order.** A promotion step appends and fsyncs the three files and
   the directory, and only then commits one blob transaction that swaps the
   markers in and advances `im_state`. Advancing into a new chunk fsyncs the

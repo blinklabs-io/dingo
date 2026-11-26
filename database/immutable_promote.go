@@ -278,6 +278,20 @@ func (d *Database) ReleaseImmutableChunk(num uint64) error {
 	return releaser.ReleaseChunk(num)
 }
 
+// ArchiveImmutableChunk lets a provider that compresses completed chunks
+// archive chunk num, which the caller has made durable and committed. It is a
+// no-op for a provider that does not compress.
+func (d *Database) ArchiveImmutableChunk(num uint64) error {
+	if d.immutable == nil {
+		return ErrImmutableNotEnabled
+	}
+	archiver, ok := d.immutable.svc.(immplugin.ChunkArchiver)
+	if !ok {
+		return nil
+	}
+	return archiver.ArchiveChunk(num)
+}
+
 // ImmutableState returns the persisted state, and false when the database
 // has no ImmutableDB.
 func (d *Database) ImmutableState() (ImmutableState, bool) {
