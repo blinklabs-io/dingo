@@ -564,7 +564,7 @@ func TestEventAckResumesFromOldestEventAfterServerRestart(t *testing.T) {
 	}
 	require.Eventually(t, func() bool {
 		return eventPosition(current.hub) == 3
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -619,7 +619,7 @@ func TestEventAckKeepsInitialPositionAcrossReconnect(t *testing.T) {
 	f.publishChurn("b:1")
 	require.Eventually(t, func() bool {
 		return eventPosition(f.hub) == 2
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 
 	second := f.client.SubscribeWithAck(ctx)
 	require.NoError(t, second.Send(&eventv1alpha1.SubscribeWithAckRequest{
@@ -651,7 +651,7 @@ func TestEventAckKeepsInitialPositionAcrossReconnect(t *testing.T) {
 func TestEventAckKeepsInitialPositionWhenReadyIsLost(t *testing.T) {
 	t.Parallel()
 	f := newEventFixture(t, nil, false)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), eventTestWait)
 	t.Cleanup(cancel)
 	start := &eventv1alpha1.SubscribeWithAckRequest{
 		Message: &eventv1alpha1.SubscribeWithAckRequest_Start{
@@ -673,7 +673,7 @@ func TestEventAckKeepsInitialPositionWhenReadyIsLost(t *testing.T) {
 	f.publishChurn("b:1")
 	require.Eventually(t, func() bool {
 		return eventPosition(f.hub) == 2
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 
 	second := f.client.SubscribeWithAck(ctx)
 	require.NoError(t, second.Send(start))
