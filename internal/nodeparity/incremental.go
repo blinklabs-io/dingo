@@ -425,15 +425,13 @@ type IncrementalConfig struct {
 	// matched or diverged, so a caller can log and record metrics per block.
 	OnBlockCheck func(tip Tip, diff Diff)
 	// OnBlockCheckError is called whenever incrementalSession ends with an
-	// error -- a per-block LocalStateQuery failure (the failure class this
-	// exists for: previously such errors reached only a log line, never any
-	// metric, so the NodeParityCheckErrors alert could not see them at all;
-	// incremental-mode audit finding), a dial
-	// failure, or any other reason the session dropped -- right before
-	// RunIncremental logs it and reconnects with backoff. Unlike OnBlockCheck
-	// (one call per successfully-validated block), this is one call per
-	// ended session, so a caller can count it like any other Check
-	// failure. Never called for a clean shutdown (ctx cancelled).
+	// error -- a per-block LocalStateQuery failure, a dial failure, or any
+	// other reason the session dropped -- right before RunIncremental logs it
+	// and reconnects with backoff. Without it such a failure reaches only a
+	// log line. Unlike OnBlockCheck (one call per successfully-validated
+	// block), this is one call per ended session, so a caller can count it
+	// like any other Check failure. Never called for a clean shutdown (ctx
+	// cancelled).
 	OnBlockCheckError func(err error)
 }
 
