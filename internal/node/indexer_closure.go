@@ -176,6 +176,15 @@ func (b *Backfill) indexClosure(
 					idx, levelIndex, err,
 				)
 			}
+			// The ledger dates a closure's credits at the certifying block.
+			if err := b.creditDirectDeposits(
+				ctx, level, point.Slot, txn,
+			); err != nil {
+				return fmt.Errorf(
+					"direct deposits of endorser transaction %d body %d: %w",
+					idx, levelIndex, err,
+				)
+			}
 			if err := b.processBlockGovernanceLevel(
 				ctx, level, point, storageIndex, epochId, pp, txn,
 			); err != nil {
