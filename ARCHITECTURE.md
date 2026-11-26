@@ -12565,7 +12565,11 @@ per-connection id tracking. A non-blocking `NextTx` returns nil once that
 count is reached; a blocking one parks until an id is acknowledged rather than
 answering empty, since the peer's pull loop has no backoff for an empty reply
 and would spin request/reply without pacing. Shutdown or connection cleanup
-releases a parked waiter. A peer acknowledgement frees only the acknowledged
+releases a parked waiter, and the released blocking `RequestTxIds` (or one
+that arrives after the connection's consumer is gone) is answered with
+`MsgDone` by returning `ErrStopServerProcess`: the protocol forbids an empty
+reply to a blocking request. Like chainsync's `ErrStopSyncProcess`, that stop
+is recorded as a successful message, not an error. A peer acknowledgement frees only the acknowledged
 prefix: TxSubmission ids are offered and acknowledged in FIFO order, so the
 consumer tracks that offer order and, on ack, forgets exactly the oldest
 acknowledged count of bodies — never the whole cache — preserving bodies for

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	"github.com/blinklabs-io/gouroboros/protocol/txsubmission"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -118,8 +119,12 @@ func (o *Ouroboros) recordProtocolMessage(
 		return
 	}
 	outcome := "success"
-	// A held chainsync message stops the sync loop by design.
-	if err != nil && !errors.Is(err, ochainsync.ErrStopSyncProcess) {
+	// A stop sentinel ends the protocol by design, not by failure: a held
+	// chainsync message stops the sync loop, and a stopped blocking txid
+	// wait answers with MsgDone.
+	if err != nil &&
+		!errors.Is(err, ochainsync.ErrStopSyncProcess) &&
+		!errors.Is(err, txsubmission.ErrStopServerProcess) {
 		outcome = "error"
 	}
 	o.protocolMetrics.messagesReceived.
