@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/indexer"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -56,6 +57,14 @@ type governanceChain struct {
 	// hardFork is a proposal for protocol version 10 ratified in the first
 	// epoch, which the first boundary enacts.
 	hardFork *models.GovernanceProposal
+	// hardForkMajor is the protocol version the hard-fork proposal initiates.
+	hardForkMajor uint
+	// retirements are pools retiring at the first boundary, one refunding a
+	// registered reward account and one an unregistered one.
+	retirements bool
+	// mir moves lovelace between the pots and distributes from the reserves
+	// to a registered account within the first epoch.
+	mir bool
 }
 
 func newGovernanceChain(epoch models.Epoch, major uint) *governanceChain {
@@ -107,13 +116,19 @@ func newGovernanceChain(epoch models.Epoch, major uint) *governanceChain {
 // account delegating to a DRep that is not registered, which the Plomin rule
 // clears when the version is enacted.
 func (c *governanceChain) withHardFork() *governanceChain {
+	return c.withHardForkTo(10)
+}
+
+// withHardForkTo is withHardFork for the protocol version major.
+func (c *governanceChain) withHardForkTo(major uint) *governanceChain {
+	c.hardForkMajor = major
 	raw, err := cbor.Encode(&lcommon.HardForkInitiationGovAction{
 		Type: uint(lcommon.GovActionTypeHardForkInitiation),
 		ProtocolVersion: struct {
 			cbor.StructAsArray
 			Major uint
 			Minor uint
-		}{Major: 10},
+		}{Major: major},
 	})
 	if err != nil {
 		panic(err)
@@ -310,9 +325,9 @@ func ledgerStateFacts(
 	require.NoError(t, accounts(func(a *models.Account) error {
 		facts["account"] = append(facts["account"], fmt.Sprintf(
 			"staking_key=%x credential_tag=%d pool=%x drep=%x drep_type=%d "+
-				"active=%t expiration_epoch=%d added_slot=%d",
+				"active=%t expiration_epoch=%d added_slot=%d reward=%d",
 			a.StakingKey, a.CredentialTag, a.Pool, a.Drep, a.DrepType,
-			a.Active, a.ExpirationEpoch, a.AddedSlot,
+			a.Active, a.ExpirationEpoch, a.AddedSlot, a.Reward,
 		))
 		return nil
 	}))
@@ -392,13 +407,13 @@ func readFactTable(
 func requireGovernanceEquality(
 	t *testing.T,
 	major uint,
-	withHardFork bool,
+	configure func(*governanceChain),
 ) map[string][]string {
 	t.Helper()
 	f := newTreasuryRolloverFixture(t, 100*governanceAda)
 	chain := newGovernanceChain(f.currentEpoch, major)
-	if withHardFork {
-		chain.withHardFork()
+	if configure != nil {
+		configure(chain)
 	}
 	f.currentPParams = chain.pparams()
 	f.ls.currentPParams = f.currentPParams
@@ -463,7 +478,7 @@ func requireGovernanceEquality(
 
 func TestDerivedGovernanceEqualsTheLedgers(t *testing.T) {
 	t.Parallel()
-	facts := requireGovernanceEquality(t, 10, false)
+	facts := requireGovernanceEquality(t, 10, nil)
 	// The scenario reaches each outcome it compares, so equality is not
 	// two empty tables.
 	require.Len(t, facts["governance_proposal"], 2)
@@ -481,7 +496,7 @@ func TestDerivedGovernanceEqualsTheLedgers(t *testing.T) {
 // ledger does; the enacted parameters carry the new version.
 func TestDerivedHardForkRuleEqualsTheLedgers(t *testing.T) {
 	t.Parallel()
-	facts := requireGovernanceEquality(t, 9, true)
+	facts := requireGovernanceEquality(t, 9, func(c *governanceChain) { c.withHardFork() })
 	require.Len(t, facts["account_drep_clear"], 1)
 	require.Contains(t, strings.Join(facts["governance_proposal"], " "), "enacted_epoch=6")
 }
@@ -498,6 +513,92 @@ func (f *treasuryRolloverFixture) seedGovernance(
 	}
 	for _, a := range c.accts {
 		require.NoError(t, seedCreateAccount(t, f.db, context.Background(), nil, a))
+	}
+	if c.retirements {
+		for _, r := range c.retiringPools() {
+			fxRetiringPool(
+				t, f.db, r.keyHash, r.rewardAccount, r.deposit, 1,
+				c.epoch.EpochId+1, c.epoch.StartSlot+5,
+			)
+		}
+	}
+	if c.mir {
+		seedMIRPotTransfer(t, f.db, epochengine.MIRPotTreasury, mirTransfer, c.mirSlot())
+		seedMIRDistribution(
+			t, f.db, epochengine.MIRPotReserves, c.mirSlot(),
+			c.mirRewards(),
+		)
+	}
+}
+
+const (
+	mirTransfer     = 5 * governanceAda
+	mirDistribution = 600
+)
+
+type retiringPool struct {
+	keyHash, rewardAccount []byte
+	deposit                uint64
+}
+
+// retiringPools are the pools that retire at the first boundary: the deposit
+// of the first is refunded to the registered account of the first DRep
+// delegator and the second's goes to the treasury, its account being
+// unregistered.
+func (c *governanceChain) retiringPools() []retiringPool {
+	return []retiringPool{
+		{repeatByte(28, 0xa1), c.accts[0].StakingKey, 7 * governanceAda},
+		{repeatByte(28, 0xa2), repeatByte(28, 0xa3), 11 * governanceAda},
+	}
+}
+
+func (c *governanceChain) mirSlot() uint64 { return c.epoch.StartSlot + 6 }
+
+func (c *governanceChain) mirRewards() []models.MoveInstantaneousRewardsReward {
+	return []models.MoveInstantaneousRewardsReward{{
+		Credential: c.accts[1].StakingKey, Amount: big.NewInt(mirDistribution),
+	}}
+}
+
+// seedIndexerExtras writes the pool and MIR rows the IndexerDB's block indexer
+// would have written.
+func (c *governanceChain) seedIndexerExtras(t *testing.T, idx *database.Database) {
+	t.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(t, idx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = raw.Close() })
+	exec := func(query string, args ...any) int64 {
+		res, err := raw.Exec(query, args...)
+		require.NoError(t, err)
+		id, err := res.LastInsertId()
+		require.NoError(t, err)
+		return id
+	}
+	if c.retirements {
+		for _, r := range c.retiringPools() {
+			poolID := exec(`INSERT INTO pool (pool_key_hash) VALUES (?)`, r.keyHash)
+			exec(`INSERT INTO pool_registration (pool_id, pool_key_hash, `+
+				`added_slot, reward_account, reward_account_credential_tag, `+
+				`deposit_amount, deposit_held) VALUES (?, ?, 1, ?, 0, ?, ?)`,
+				poolID, r.keyHash, r.rewardAccount,
+				fmt.Sprint(r.deposit), fmt.Sprint(r.deposit))
+			exec(`INSERT INTO pool_retirement (pool_id, pool_key_hash, `+
+				`certificate_id, epoch, added_slot) VALUES (?, ?, 0, ?, ?)`,
+				poolID, r.keyHash, c.epoch.EpochId+1, c.epoch.StartSlot+5)
+		}
+	}
+	if c.mir {
+		exec(`INSERT INTO move_instantaneous_rewards (pot, certificate_id, `+
+			`added_slot, other_pot) VALUES (?, 0, ?, ?)`,
+			epochengine.MIRPotTreasury, c.mirSlot(), fmt.Sprint(mirTransfer))
+		mirID := exec(`INSERT INTO move_instantaneous_rewards (pot, `+
+			`certificate_id, added_slot) VALUES (?, 0, ?)`,
+			epochengine.MIRPotReserves, c.mirSlot())
+		for _, r := range c.mirRewards() {
+			exec(`INSERT INTO move_instantaneous_rewards_reward (credential, `+
+				`credential_tag, amount, mir_id) VALUES (?, 0, ?, ?)`,
+				r.Credential, r.Amount.String(), mirID)
+		}
 	}
 }
 
@@ -531,4 +632,41 @@ func (c *governanceChain) seedIndexer(
 	for _, a := range c.accts {
 		require.NoError(t, idx.CreateAccount(ctx, nil, a))
 	}
+	c.seedIndexerExtras(t, idx)
+}
+
+// A pool retiring at the boundary refunds its deposit to a registered reward
+// account or, when the account is unregistered, to the treasury, in the
+// IndexerDB as in the ledger.
+func TestDerivedPoolRetirementRefundsEqualTheLedgers(t *testing.T) {
+	t.Parallel()
+	facts := requireGovernanceEquality(t, 10, func(c *governanceChain) {
+		c.retirements = true
+	})
+	require.Contains(t, strings.Join(facts["account"], "\n"),
+		fmt.Sprintf("reward=%d", (30+7)*governanceAda))
+}
+
+// Instantaneous rewards in the ended epoch move lovelace between the pots and
+// credit a registered account at the boundary, in the IndexerDB as in the
+// ledger.
+func TestDerivedMIREqualsTheLedgers(t *testing.T) {
+	t.Parallel()
+	facts := requireGovernanceEquality(t, 10, func(c *governanceChain) {
+		c.mir = true
+	})
+	require.Contains(t, strings.Join(facts["account"], "\n"),
+		fmt.Sprintf("reward=%d", 20*governanceAda+mirDistribution))
+}
+
+// Enacting protocol version 12 makes the same boundary ratify after the
+// enactment, so the motion of no confidence ratifies there as it does in the
+// ledger.
+func TestDerivedPostEnactmentRatificationEqualsTheLedgers(t *testing.T) {
+	t.Parallel()
+	facts := requireGovernanceEquality(t, 11, func(c *governanceChain) {
+		c.withHardForkTo(12)
+	})
+	require.Contains(t, strings.Join(facts["governance_proposal"], "\n"),
+		"ratified_epoch=6")
 }
