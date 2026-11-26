@@ -58,7 +58,7 @@ func TestDatumHashIndexDropAppliesOnPostgres(t *testing.T) {
 	registry, err := migrations.PostgresRegistry()
 	require.NoError(t, err)
 	runner := migrations.Runner{
-		DB: db, Dialect: "postgres", Registry: registry,
+		DB: db, Dialect: "postgres", Registry: registryThrough(t, registry, 63),
 		Locker: migrations.NewProcessLocker(),
 	}
 	check := func() {
@@ -119,7 +119,7 @@ func TestDatumHashIndexDropAppliesOnMySQL(t *testing.T) {
 	registry, err := migrations.MySQLRegistry()
 	require.NoError(t, err)
 	runner := migrations.Runner{
-		DB: db, Dialect: "mysql", Registry: registry,
+		DB: db, Dialect: "mysql", Registry: registryThrough(t, registry, 63),
 		Locker: migrations.NewProcessLocker(),
 	}
 	count := func(name string) int {
