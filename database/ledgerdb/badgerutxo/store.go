@@ -553,6 +553,15 @@ func (s *Store) ApplyLedgerBatch(
 	tip *ocommon.Point,
 	batch LedgerBatch,
 ) (ApplyResult, error) {
+	// A wipe runs after the batch's first transaction has committed, so its
+	// key is checked before anything is written.
+	for _, r := range batch.Rows {
+		if r.WipeRewardEpoch && len(r.Key) != 8 {
+			return ApplyResult{}, errors.New(
+				"badgerutxo: a reward epoch wipe needs an 8-byte epoch",
+			)
+		}
+	}
 	changes := batch.Changes
 	var res ApplyResult
 	var pending bool

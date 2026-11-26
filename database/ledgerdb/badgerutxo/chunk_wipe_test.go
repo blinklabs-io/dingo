@@ -170,3 +170,25 @@ func TestRewardEpochWipeFollowsTheBatchsRollback(t *testing.T) {
 	require.Zero(t, primary, "the row the rollback restored is wiped")
 	require.Zero(t, index)
 }
+
+// A wipe's key is the epoch as 8 bytes; any other key is rejected before the
+// batch writes anything.
+func TestRewardEpochWipeWithoutAnEightByteEpochIsRejected(t *testing.T) {
+	t.Parallel()
+	s := smallTxnStore(t)
+	bootstrap(t, s, point(1, 0x01))
+	slot := seedRewardEpoch(t, s, 5, 10, 2)
+	tip := point(slot, byte(slot))
+	_, err := s.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{
+		Rows: []badgerutxo.RowPut{
+			{WipeRewardEpoch: true, Key: []byte{0, 0, 0, 5}},
+		},
+	})
+	require.Error(t, err)
+	primary, index := countRewardRows(t, s, 5)
+	require.Equal(t, 10, primary)
+	require.Equal(t, 10, index)
+	_, failed, err := s.Failed()
+	require.NoError(t, err)
+	require.False(t, failed)
+}
