@@ -5565,9 +5565,9 @@ handoff buffer. In-memory SQLite and other metadata providers keep the ordered
 path without this prefetch.
 
 Indexes used by per-transaction cleanup remain resident during import.
-Critical API-query and rollback indexes are rebuilt before the node serves
-traffic. The unused mint/burn fingerprint, datum-slot, certificate-query, and
-script-type indexes remain lazy. The separate
+The IndexerDB writer rebuilds the whole manifest before the IndexerDB serves
+traffic, including the mint/burn fingerprint, datum-slot, certificate-query,
+and script-type indexes no API query uses. The separate
 `idx_utxo_staking_deleted_amount` remains in `deferred.Retained`, and every
 drop and rebuild path creates it if absent before touching the manifest.
 
