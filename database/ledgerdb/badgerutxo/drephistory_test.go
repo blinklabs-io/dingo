@@ -85,7 +85,7 @@ func TestCatchUpImportRestatesImportedBlocksPerEpoch(t *testing.T) {
 	bootstrap(t, s, point(10, 0x01), out(0x11, 0))
 	pool := bytes.Repeat([]byte{0x61}, 28)
 	other := bytes.Repeat([]byte{0x62}, 28)
-	require.NoError(t, s.LoadImportedBlocks(false, func(
+	require.NoError(t, s.LoadImportedBlocks(func(
 		func(k, v []byte) error, func(uint64, []byte) error,
 	) error {
 		return nil

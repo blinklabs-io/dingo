@@ -274,8 +274,7 @@ var ErrUtxoConflict = errors.New("UTxO already spent")
 
 // ErrBatchUtxoOverlayConflict reports a UNIQUE constraint failure while a
 // batch UTxO overlay wrote its rows. The overlay writes without conflict
-// clauses, so the caller applies the batch again on the per-row path, which
-// repairs rows a snapshot import created ahead of their producer.
+// clauses, so a row it did not expect fails the batch.
 var ErrBatchUtxoOverlayConflict = errors.New(
 	"batch UTxO overlay write conflict",
 )

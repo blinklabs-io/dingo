@@ -31,21 +31,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBackfillJudgesPreviousEraBlockByItsEraParameters persists a Conway
-// ParameterChange from a Conway block that falls in the epoch recorded as
-// Dijkstra's first. A zero coinsPerUTxOByte is accepted at protocol version 9
-// and refused at the successor's version, so the proposal persists only when
-// the block is judged under the last Conway epoch's parameters, as transaction
-// validation judged it. A Dijkstra block in the same epoch keeps that epoch's
-// parameters.
-func TestBackfillJudgesPreviousEraBlockByItsEraParameters(t *testing.T) {
+// TestBackfillUsesPreviousEraParametersForItsBlocks indexes a Conway
+// ParameterChange from a block in the epoch recorded as Dijkstra's first. A
+// Conway block there takes the last Conway epoch's parameters, as transaction
+// validation did, and a Dijkstra block keeps that epoch's. Either way the
+// proposal is stored as the chain holds it.
+func TestBackfillUsesPreviousEraParametersForItsBlocks(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
 		name     string
 		blockEra uint
 		wantEra  uint
-		wantErr  string
+		wantNext bool
 	}{
 		{
 			name:     "previous-era block",
@@ -56,7 +54,7 @@ func TestBackfillJudgesPreviousEraBlockByItsEraParameters(t *testing.T) {
 			name:     "boundary-era block",
 			blockEra: dijkstra.EraIdDijkstra,
 			wantEra:  dijkstra.EraIdDijkstra,
-			wantErr:  "coinsPerUTxOByte",
+			wantNext: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -86,6 +84,11 @@ func TestBackfillJudgesPreviousEraBlockByItsEraParameters(t *testing.T) {
 				test.blockEra,
 			)
 			require.Equal(t, test.wantEra, eraID)
+			if test.wantNext {
+				require.Same(t, next, pparams)
+			} else {
+				require.Same(t, &prev, pparams)
+			}
 
 			tx, err := conway.NewConwayTransactionFromCbor(
 				testutil.ParameterChangeTxCbor(
@@ -104,17 +107,11 @@ func TestBackfillJudgesPreviousEraBlockByItsEraParameters(t *testing.T) {
 					11,
 					pparams,
 					txn,
-					nil,
 				)
 			})
 			stored, getErr := db.GetGovernanceProposal(
 				context.Background(), tx.Id().Bytes(), 0, nil,
 			)
-			if test.wantErr != "" {
-				require.ErrorContains(t, err, test.wantErr)
-				require.ErrorIs(t, getErr, models.ErrGovernanceProposalNotFound)
-				return
-			}
 			require.NoError(t, err)
 			require.NoError(t, getErr)
 			require.NotNil(t, stored)

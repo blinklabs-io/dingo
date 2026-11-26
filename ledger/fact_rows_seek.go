@@ -326,8 +326,7 @@ func (ls *LedgerState) historySeeker() DRepHistorySeeker {
 		return nil
 	}
 	loaded, err := h.DRepHistoryLoaded()
-	lost, lerr := h.DRepHistoryLost()
-	if err != nil || lerr != nil || !loaded || lost {
+	if err != nil || !loaded {
 		// The unseekable path reports why the history is unserved.
 		return nil
 	}

@@ -418,12 +418,13 @@ func DefaultImmutableDBConfig() ImmutableDBConfig {
 }
 
 // Values of the indexer_layout node setting a database records. A database
-// recorded as split is refused by a release that predates the layout.
+// recorded with an IndexerDB (persisted as "split") is refused by a release
+// that predates the layout.
 const (
 	// IndexerLayoutShared records a database with no IndexerDB: a core node's.
 	IndexerLayoutShared = "shared"
-	// IndexerLayoutSplit records API rows in a separate IndexerDB.
-	IndexerLayoutSplit = "split"
+	// IndexerLayoutIndexerDB records API rows in a separate IndexerDB.
+	IndexerLayoutIndexerDB = "split"
 )
 
 // IndexerConfig tunes the IndexerDB, which holds the API and history rows in
@@ -434,8 +435,8 @@ type IndexerConfig struct {
 	MaxReadyLagBlocks uint64 `yaml:"maxReadyLagBlocks" envconfig:"DINGO_INDEXER_MAX_READY_LAG_BLOCKS"`
 }
 
-// SplitIndexer reports whether API rows live in a separate IndexerDB.
-func (c *Config) SplitIndexer() bool {
+// HasIndexerDB reports whether API rows live in a separate IndexerDB.
+func (c *Config) HasIndexerDB() bool {
 	return c.StorageMode == storageModeAPI
 }
 
@@ -443,7 +444,7 @@ func (c *Config) SplitIndexer() bool {
 // when the IndexerDB is the store opened in API mode, and the configured mode
 // otherwise.
 func (c *Config) ConsensusStorageMode() string {
-	if c.SplitIndexer() {
+	if c.HasIndexerDB() {
 		return storageModeCore
 	}
 	return c.StorageMode
@@ -1334,8 +1335,8 @@ type Config struct {
 	// (UTxOs, certs, pools, pparams).
 	// "api" additionally stores witnesses, scripts,
 	// datums, redeemers, and tx metadata.
-	// APIs (blockfrost, kupo, utxorpc, mesh) require
-	// "api" mode.
+	// Blockfrost, Kupo and Mesh require "api" mode;
+	// UTxO RPC and MCP serve either mode.
 	StorageMode string `yaml:"storageMode" envconfig:"DINGO_STORAGE_MODE"`
 
 	// Mithril snapshot bootstrap configuration

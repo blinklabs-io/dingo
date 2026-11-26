@@ -416,7 +416,7 @@ func newBoundaryEraLedgerChain(
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	// The snapshot manager reads through the ledger's LedgerDB, as a node's
-	// does, so a drained family is served from the set it reads.
+	// does, so each family is served from the set it reads.
 	if tc.utxoSet != nil {
 		ls.config.UtxoSet = tc.utxoSet
 		ls.installEpochSource()

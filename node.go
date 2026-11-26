@@ -450,6 +450,11 @@ func New(cfg Config) (*Node, error) {
 	if err := n.configValidate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
+	storageFeatures, err := n.storagePlan()
+	if err != nil {
+		return nil, fmt.Errorf("invalid storage configuration: %w", err)
+	}
+	n.config.storageFeatures = storageFeatures
 	// Wrap the prometheus registry with a "network" label so all metrics
 	// registered by subsystems carry the network name automatically.
 	// This must happen before any component registers metrics.
@@ -620,14 +625,7 @@ func (n *Node) apiPluginSelection(
 	}
 	portValue, ok := selection.Config["port"]
 	if !ok {
-		defaultPorts := map[plugin.Capability]uint{
-			plugin.CapabilityAPIBlockfrost: 3000,
-			plugin.CapabilityAPIKupo:       0,
-			plugin.CapabilityAPIMesh:       8080,
-			plugin.CapabilityAPIUtxorpc:    9090,
-			plugin.CapabilityAPIMcp:        0,
-		}
-		return selection, defaultPorts[capability], nil
+		return selection, defaultAPIPort(capability), nil
 	}
 	var port uint64
 	switch value := portValue.(type) {
@@ -661,6 +659,16 @@ func (n *Node) apiPluginSelection(
 		)
 	}
 	return selection, uint(port), nil
+}
+
+var defaultAPIPorts = map[plugin.Capability]uint{
+	plugin.CapabilityAPIBlockfrost: 3000,
+	plugin.CapabilityAPIMesh:       8080,
+	plugin.CapabilityAPIUtxorpc:    9090,
+}
+
+func defaultAPIPort(capability plugin.Capability) uint {
+	return defaultAPIPorts[capability]
 }
 
 // effectiveBarkHost decides the interface Bark actually binds to.
@@ -998,7 +1006,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return err
 	}
-	if n.storageSelections().SplitIndexer {
+	if n.storageSelections().IndexerDB {
 		if err := n.checkServerAdopted(n.ctx, deps); err != nil {
 			return err
 		}
@@ -1259,7 +1267,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// storage mode are required: the indexer depends on the api-mode indexes to
 	// function, and storage mode alone is no longer sufficient to start it (an
 	// api-mode deployment may not want Midnight indexing at all).
-	if midnightIndexerActive(n.apiStorageMode(), n.config.midnight) {
+	if midnightIndexerActive(n.config.storageFeatures, n.config.midnight) {
 		if err := n.prepareEpochCache(ctx); err != nil {
 			return fmt.Errorf(
 				"load epoch cache before Midnight indexer start: %w",
@@ -1707,14 +1715,17 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// On startup failure or panic, stop the recycler and wait for it before
 	// unwinding later components that the recycler can still touch.
 	started = append(started, n.waitChainsyncStallRecycler)
-	// Resolve UTxO RPC only in API mode with a non-zero configured port.
+	// Resolve UTxO RPC when the selected provider is enabled by the storage
+	// plan and its configured port is non-zero.
 	utxorpcSelection, utxorpcPort, err := n.apiPluginSelection(
 		plugin.CapabilityAPIUtxorpc,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to select UTxO RPC API plugin: %w", err)
 	}
-	if n.apiStorageMode().IsAPI() && utxorpcPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIUtxorpc, utxorpcSelection, utxorpcPort,
+	) {
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
 			utxorpcSelection.Provider, utxorpcSelection.Config,
@@ -1806,7 +1817,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 	// Configure the Midnight gRPC server only after the operator explicitly
 	// enables it in API mode. The indexer has an independent opt-in.
-	if midnightServerActive(n.apiStorageMode(), n.config.midnight) {
+	if midnightServerActive(n.config.storageFeatures, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			n.midnightServerConfig(),
@@ -1850,7 +1861,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to select Blockfrost API plugin: %w", err)
 	}
-	if n.apiStorageMode().IsAPI() && blockfrostPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIBlockfrost, blockfrostSelection, blockfrostPort,
+	) {
 		adapter, err := blockfrost.NewNodeAdapter(
 			n.ledgerState,
 			n.mempool,
@@ -1889,7 +1902,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// apiPluginSelection names the capability in its errors.
 		return err
 	}
-	if n.apiStorageMode().IsAPI() && kupoPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIKupo, kupoSelection, kupoPort,
+	) {
 		adapter, err := kupo.NewNodeAdapter(
 			n.ledgerState, n.indexerStore,
 		)
@@ -1921,7 +1936,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to select Mesh API plugin: %w", err)
 	}
-	if n.apiStorageMode().IsAPI() && meshPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIMesh, meshSelection, meshPort,
+	) {
 		var genesisHash string
 		if nc := n.config.cardanoNodeConfig; nc != nil {
 			genesisHash = nc.ByronGenesisHash
@@ -1969,7 +1986,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// apiPluginSelection names the capability in its errors.
 		return err
 	}
-	if mcpPort > 0 {
+	if n.apiProviderEnabled(
+		plugin.CapabilityAPIMcp, mcpSelection, mcpPort,
+	) {
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIMcp,
 			mcpSelection.Provider, mcpSelection.Config,
@@ -1978,6 +1997,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				Database:           n.apiDatabase(),
 				LedgerState:        n.ledgerState,
 				Ready:              n.apiReadiness(),
+				AddressLookup:      n.mcpAddressLookup(),
 				Mempool:            n.mempool,
 				Host:               n.config.bindAddr,
 				Network:            n.config.network,
@@ -1993,7 +2013,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		)
 	}
 
-	if n.apiStorageMode().IsAPI() {
+	if n.storageFeatureEnabled(plugin.StorageFeatureOffchainMetadata) {
 		fetcher, err := offchainmetadata.New(
 			n.offchainMetadataConfig(),
 		)
@@ -2013,7 +2033,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				)
 			}
 		})
-		if n.config.tokenRegistry.Enabled {
+		if n.storageFeatureEnabled(plugin.StorageFeatureCIP26) &&
+			n.config.tokenRegistry.Enabled {
 			sync, err := n.newTokenRegistrySync()
 			if err != nil {
 				return fmt.Errorf("creating token registry sync: %w", err)
@@ -2178,8 +2199,12 @@ func applyPeerTargets(cfg Config, peerGovConfig *peergov.PeerGovernorConfig) {
 }
 
 // midnightServerActive centralizes the startup and live-reinitialization gate.
-func midnightServerActive(storageMode StorageMode, cfg MidnightConfig) bool {
-	return storageMode.IsAPI() && cfg.ServerEnabled && cfg.Port > 0
+func midnightServerActive(
+	features []plugin.StorageFeature,
+	cfg MidnightConfig,
+) bool {
+	return slices.Contains(features, plugin.StorageFeatureMidnight) &&
+		cfg.ServerEnabled && cfg.Port > 0
 }
 
 // logErrIfNotNil logs err at Error level if non-nil, so a cleanup step run

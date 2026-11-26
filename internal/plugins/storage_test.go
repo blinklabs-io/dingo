@@ -66,7 +66,7 @@ func TestOpenDatabaseErrorDoesNotReturnLiveRuntime(t *testing.T) {
 	)
 }
 
-func openSplitPair(
+func openIndexerPair(
 	t *testing.T,
 	reg prometheus.Registerer,
 ) (*DatabaseRuntime, *database.Database, StorageDependencies, string) {
@@ -94,7 +94,7 @@ func openSplitPair(
 
 func TestOpenIndexerDatabaseIsASeparateAPIStoreOverTheSharedBlobs(t *testing.T) {
 	t.Parallel()
-	runtime, indexer, _, dataDir := openSplitPair(t, nil)
+	runtime, indexer, _, dataDir := openIndexerPair(t, nil)
 
 	require.Equal(t, "core", runtime.Database.StorageMode())
 	require.Equal(t, "api", indexer.StorageMode())
@@ -114,7 +114,7 @@ func TestOpenIndexerDatabaseIsASeparateAPIStoreOverTheSharedBlobs(t *testing.T) 
 func TestOpenIndexerDatabaseRegistersMetricsUnderTheIndexerRole(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
-	openSplitPair(t, reg)
+	openIndexerPair(t, reg)
 	families, err := reg.Gather()
 	require.NoError(t, err)
 	var indexerSeries, ledgerSeries int
@@ -162,7 +162,7 @@ func TestIndexerMetadataSelection(t *testing.T) {
 	_, _, err = IndexerMetadataSelection(pg, "/data")
 	require.ErrorContains(t, err, "its own namespace",
 		"a server store without the consensus namespace would share its tables")
-	pg.SplitIndexer = true
+	pg.IndexerDB = true
 	sel, _, err = IndexerMetadataSelection(pg, "/data")
 	require.NoError(t, err)
 	require.Equal(t, "postgres://a/ledger", sel.Config["dsn"],
@@ -173,11 +173,11 @@ func TestConfiguredStorageSelectionsSelectsTheConsensusNamespace(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{StorageMode: "api"}
 	cfg.Plugins.Storage.Metadata = plugin.Selection{Provider: "postgres"}
-	require.True(t, ConfiguredStorageSelections(cfg).SplitIndexer)
+	require.True(t, ConfiguredStorageSelections(cfg).IndexerDB)
 	cfg.StorageMode = "core"
-	require.False(t, ConfiguredStorageSelections(cfg).SplitIndexer)
+	require.False(t, ConfiguredStorageSelections(cfg).IndexerDB)
 	cfg.ServerCoreNamespace = true
-	require.True(t, ConfiguredStorageSelections(cfg).SplitIndexer)
+	require.True(t, ConfiguredStorageSelections(cfg).IndexerDB)
 }
 
 // Opening an API IndexerDB over a pending address-history rebuild reads a

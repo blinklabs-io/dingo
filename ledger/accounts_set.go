@@ -76,9 +76,9 @@ func (ls *LedgerState) failAccountStaging(txn ledgerdb.Txn, err error) {
 	)
 }
 
-// failDrainedAccountStaging stops the set when an account change cannot be
+// failUnservedAccountStaging stops the set when an account change cannot be
 // staged: the set is the only copy, so the change would be lost.
-func (ls *LedgerState) failDrainedAccountStaging(txn ledgerdb.Txn) {
+func (ls *LedgerState) failUnservedAccountStaging(txn ledgerdb.Txn) {
 	if !ls.utxoSetFailed.Load() {
 		ls.failAccountStaging(txn, ledgerStateUnserved(nodesettings.FamilyAccounts))
 	}
@@ -189,7 +189,7 @@ func (ls *LedgerState) stageRewardCreditsAs(
 ) {
 	r := ls.accountReader(txn)
 	if r == nil || ls.utxoSetFailed.Load() {
-		ls.failDrainedAccountStaging(txn)
+		ls.failUnservedAccountStaging(txn)
 		return
 	}
 	for _, c := range credits {
@@ -321,7 +321,7 @@ func (ls *LedgerState) stageAccountTransaction(
 		return nil
 	}
 	if r == nil || ls.utxoSetFailed.Load() {
-		ls.failDrainedAccountStaging(txn)
+		ls.failUnservedAccountStaging(txn)
 		return nil
 	}
 	err := ls.stageAccountTransactionErr(
@@ -676,7 +676,7 @@ func (ls *LedgerState) stagePoolReap(
 		return
 	}
 	if r == nil || ls.utxoSetFailed.Load() {
-		ls.failDrainedAccountStaging(txn)
+		ls.failUnservedAccountStaging(txn)
 		return
 	}
 	refs, err := r.AccountsByPool(pool)

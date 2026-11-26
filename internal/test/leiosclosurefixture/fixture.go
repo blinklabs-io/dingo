@@ -130,12 +130,30 @@ func build(payloads bool) (*Scenario, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.Raw = []cbor.RawMessage{first, second}
+	if err := s.endorse([]cbor.RawMessage{first, second}); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// NewWithTransactions builds the scenario with the given transactions in the
+// endorser block, in order, and no seeded UTxO.
+func NewWithTransactions(raw []cbor.RawMessage) (*Scenario, error) {
+	s := &Scenario{}
+	if err := s.endorse(raw); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// endorse puts raw in the endorser block and builds the two ranking blocks.
+func (s *Scenario) endorse(raw []cbor.RawMessage) error {
+	s.Raw = raw
 	manifest := &lcommon.LeiosEndorserBlock{}
 	for _, raw := range s.Raw {
 		tx, err := safedecode.DijkstraBlockTransaction(raw)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		s.Txs = append(s.Txs, tx)
 		manifest.TransactionReferences = append(
@@ -147,16 +165,17 @@ func build(payloads bool) (*Scenario, error) {
 		)
 	}
 	s.EBHash = manifest.Hash()
+	var err error
 	if s.ManifestCbor, err = manifest.MarshalCBOR(); err != nil {
-		return nil, err
+		return err
 	}
 	if s.Announcing, err = s.block(1, AnnouncingSlot, nil, false, true); err != nil {
-		return nil, err
+		return err
 	}
 	s.Certifying, err = s.block(
 		2, CertifyingSlot, s.Announcing.Hash().Bytes(), true, false,
 	)
-	return s, err
+	return err
 }
 
 func (s *Scenario) block(

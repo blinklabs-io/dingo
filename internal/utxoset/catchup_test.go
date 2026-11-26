@@ -82,7 +82,7 @@ func nonceSlots(t *testing.T, set *utxoset.Set) []uint64 {
 // below it, in place of replacing the whole set.
 func TestCatchUpOfASetPastTheSnapshotRollsItBackAndKeepsItsHistory(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	applySlotsWithNonces(t, set, 1, 10)
@@ -105,7 +105,7 @@ func TestCatchUpOfASetPastTheSnapshotRollsItBackAndKeepsItsHistory(t *testing.T)
 // fail with the set untouched, since replacing it loses the history it keeps.
 func TestCatchUpOfASetThatCannotReachTheSnapshotIsRefused(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	set.UpdateAnchor(slotPoint(12))
@@ -129,7 +129,7 @@ func TestCatchUpOfASetThatCannotReachTheSnapshotIsRefused(t *testing.T) {
 // tip, and no point the load refuses.
 func TestCatchUpReachesOnlyWhatTheCatchUpLoadAccepts(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	set.UpdateAnchor(slotPoint(12))

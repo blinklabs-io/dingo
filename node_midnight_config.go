@@ -16,18 +16,24 @@ package dingo
 
 import (
 	"context"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
+	"github.com/blinklabs-io/dingo/plugin"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // midnightIndexerActive is shared by initial startup and live reconstruction.
 // Indexer enablement is independent of the Midnight server's listener settings.
-func midnightIndexerActive(storageMode StorageMode, cfg MidnightConfig) bool {
-	return cfg.Enabled && storageMode.IsAPI()
+func midnightIndexerActive(
+	features []plugin.StorageFeature,
+	cfg MidnightConfig,
+) bool {
+	return cfg.Enabled &&
+		slices.Contains(features, plugin.StorageFeatureMidnight)
 }
 
 // midnightIndexerConfig preserves startup configuration during reconstruction.

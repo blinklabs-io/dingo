@@ -28,8 +28,8 @@ import (
 
 // SetClosureSource sets where IndexBlocks reads the certified endorser blocks
 // of certifying ranking blocks from. The default is the backfill's own
-// database, which reads through to the ledger's blob store on the split
-// layout.
+// database, which reads through to the ledger's block store when the node
+// has an IndexerDB.
 func (b *Backfill) SetClosureSource(src dledger.CertifiedClosureSource) {
 	b.closures = src
 }
@@ -159,7 +159,6 @@ func (b *Backfill) indexClosure(
 			)
 		}
 		expanded += childCount
-		var proposalsValidated bool
 		for levelIndex, level := range txLevels {
 			b.indexedTxs++
 			storageIndex := uint32(base) + uint32(levelIndex) //nolint:gosec
@@ -183,9 +182,17 @@ func (b *Backfill) indexClosure(
 					idx, levelIndex, err,
 				)
 			}
+			// The ledger dates a closure's credits at the certifying block.
+			if err := b.creditDirectDeposits(
+				ctx, level, point.Slot, txn,
+			); err != nil {
+				return fmt.Errorf(
+					"direct deposits of endorser transaction %d body %d: %w",
+					idx, levelIndex, err,
+				)
+			}
 			if err := b.processBlockGovernanceLevel(
 				ctx, level, point, storageIndex, epochId, pp, txn,
-				&proposalsValidated,
 			); err != nil {
 				return fmt.Errorf(
 					"governance of endorser transaction %d body %d: %w",

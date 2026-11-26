@@ -42,40 +42,35 @@ func chainUpTo(
 // A set the metadata store cannot rebuild is rolled back through its journal
 // to the nearest point the ledger can resume from, instead of stopping the
 // node.
-func TestReconcileRecoversADrainedSetFromItsJournal(t *testing.T) {
+func TestReconcileRecoversASetFromItsJournal(t *testing.T) {
 	t.Parallel()
 	const applied = 8
 	forkTip := ocommon.NewPoint(5, bytes.Repeat([]byte{0xee}, 32))
 	for _, tc := range []struct {
-		name       string
-		cfg        utxoset.Config
-		ledgerOnly bool
-		ledgerTip  ocommon.Point
-		chainTo    uint64
-		wantAsked  []uint64
-		wantSlot   uint64
+		name      string
+		ledgerTip ocommon.Point
+		chainTo   uint64
+		wantAsked []uint64
+		wantSlot  uint64
 	}{
 		{
-			name:       "behind on a fork the chain left, drained",
-			ledgerOnly: true,
-			ledgerTip:  slotPoint(10),
-			chainTo:    5,
+			name:      "behind on a fork the chain left, resumes at 5",
+			ledgerTip: slotPoint(10),
+			chainTo:   5,
 			// The set's own tip is asked first by Reconcile, then the
 			// journal points newest first.
 			wantAsked: []uint64{applied, 7, 6, 5},
 			wantSlot:  5,
 		},
 		{
-			name:      "behind on a fork the chain left, only",
-			cfg:       utxoset.Config{Only: true},
+			name:      "behind on a fork the chain left, resumes at 3",
 			ledgerTip: slotPoint(10),
 			chainTo:   3,
 			wantAsked: []uint64{applied, 7, 6, 5, 4, 3},
 			wantSlot:  3,
 		},
 		{
-			name:      "ahead, ledger tip on another fork, only",
-			cfg:       utxoset.Config{Only: true},
+			name:      "ahead, ledger tip on another fork",
 			ledgerTip: forkTip,
 			chainTo:   3,
 			wantAsked: []uint64{applied, 4, 3},
@@ -84,12 +79,9 @@ func TestReconcileRecoversADrainedSetFromItsJournal(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			set := openRecoverySet(t, tc.cfg)
+			set := openRecoverySet(t, utxoset.Config{})
 			require.NoError(t, set.StartEmptyForTest())
 			applySlots(t, set, applied)
-			if tc.ledgerOnly {
-				set.ServeLedgerOnly()
-			}
 			db := ledgerAt(t, tc.ledgerTip)
 			var asked []uint64
 			err := set.Reconcile(
@@ -113,9 +105,8 @@ func TestReconcileRecoversADrainedSetFromItsJournal(t *testing.T) {
 // the operator to resync.
 func TestReconcileNamesWhatIsMissingWhenTheJournalHoldsNoBase(t *testing.T) {
 	t.Parallel()
-	set := openRecoverySet(t, utxoset.Config{Only: true})
+	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 6)
-	set.ServeLedgerOnly()
 	db := ledgerAt(t, slotPoint(9))
 	var asked []uint64
 	err := set.Reconcile(
@@ -129,7 +120,7 @@ func TestReconcileNamesWhatIsMissingWhenTheJournalHoldsNoBase(t *testing.T) {
 // rolled further back for a failure that may be transient.
 func TestReconcileJournalWalkStopsOnAResumeError(t *testing.T) {
 	t.Parallel()
-	set := openRecoverySet(t, utxoset.Config{Only: true})
+	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 6)
 	db := ledgerAt(t, slotPoint(9))
 	calls := 0
@@ -165,20 +156,16 @@ func setFormatMark(t *testing.T, dir string, version byte) {
 func TestReconcileNamesTheMissingLayoutMigration(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name       string
-		cfg        utxoset.Config
-		ledgerOnly bool
-		wantErr    bool
+		name    string
+		wantErr bool
 	}{
-		{"drained", utxoset.Config{}, true, true},
-		{"only", utxoset.Config{Only: true}, false, true},
-		{"released source", utxoset.Config{}, false, false},
+		{"ledger", true},
+		{"released source", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			cfg := tc.cfg
-			cfg.Dir = dir
+			cfg := utxoset.Config{Dir: dir}
 			set, err := utxoset.Open(cfg)
 			require.NoError(t, err)
 			require.NoError(t, set.StartEmptyForTest())
@@ -189,9 +176,6 @@ func TestReconcileNamesTheMissingLayoutMigration(t *testing.T) {
 			set, err = utxoset.Open(cfg)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
-			if tc.ledgerOnly {
-				set.ServeLedgerOnly()
-			}
 			if tc.wantErr {
 				db := ledgerAt(t, slotPoint(3))
 				err = set.Reconcile(t.Context(), dbadapter.New(db), neverResume)

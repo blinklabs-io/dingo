@@ -23,7 +23,7 @@ import (
 )
 
 // ArchiveStore wraps upstream with the archive fallback cfg configures: the
-// wrapper the node reads through. The split-layout migration fetches blocks
+// wrapper the node reads through. The IndexerDB migration fetches blocks
 // that expired locally through it.
 func ArchiveStore(
 	cfg *config.Config,

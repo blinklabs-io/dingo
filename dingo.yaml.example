@@ -65,6 +65,16 @@
         # VACUUM, which pauses SQLite writers for the whole rewrite; later
         # runs release free pages in short steps.
         # vacuumIntervalSeconds: 86400
+    # immutable:
+      # provider: "chunkfile"
+      # config:
+        # How chunks the ImmutableDB completes are kept: "none" (default) as
+        # plain chunk files, or "mithril" as one zstd-compressed tar per chunk
+        # in the Mithril immutable archive layout. Existing chunks keep their
+        # form; both are read. Not supported by the s3 and gcs providers.
+        # compression: "none"
+        # MiB of decompressed archived chunks kept in memory for block reads.
+        # archiveCacheMb: 256
     # PostgreSQL metadata alternative (replace the metadata block above):
     # metadata:
     #   provider: "postgres"
@@ -350,7 +360,8 @@
 
 # Storage mode controls how much data is persisted.
 # - "core": Only consensus data (UTxOs, certs, pools, pparams). Suitable for
-#   block producers and relay nodes. Only MCP can serve API requests in core mode.
+#   block producers and relay nodes. In core mode MCP and UTxO RPC serve API
+#   requests; UTxO RPC reads the live UTxO set and refuses transaction reads.
 # - "api": Core data plus full transaction metadata (witnesses, scripts, datums,
 #   redeemers). APIs with nonzero configured ports start; MCP is opt-in.
 #
@@ -368,7 +379,9 @@
 # storageMode: "core"
 
 # API ports are configured under plugins.api above. Set a port to 0 to
-# disable that API. Other APIs remain inactive outside API storage mode; MCP supports both modes.
+# disable that API. MCP and UTxO RPC support both modes. Blockfrost, Kupo and
+# Mesh need API storage mode: in core mode a built-in one left at its default
+# port stays inactive, and any other nonzero port or provider refuses startup.
 
 # Base URL of a remote Bark archive server. When set, this node keeps using
 # its configured local blob plugin but wraps it with Bark archive fallback for

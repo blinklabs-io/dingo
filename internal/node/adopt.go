@@ -756,9 +756,18 @@ func finishAdoptedGroup(
 			return err
 		}
 	}
+	// The previous group left its last chunk plain: it was the highest then.
+	if group[0] > 0 {
+		if err := db.ArchiveImmutableChunk(group[0] - 1); err != nil {
+			return fmt.Errorf("archiving adopted chunk %d: %w", group[0]-1, err)
+		}
+	}
 	for _, num := range group {
 		if err := db.ReleaseImmutableChunk(num); err != nil {
 			return fmt.Errorf("releasing local chunk %d: %w", num, err)
+		}
+		if err := db.ArchiveImmutableChunk(num); err != nil {
+			return fmt.Errorf("archiving adopted chunk %d: %w", num, err)
 		}
 		removeChunkFiles(cfg.SourceDir, num)
 	}

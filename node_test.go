@@ -1241,27 +1241,27 @@ func TestMidnightServerActiveRequiresExplicitEnablement(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		storageMode StorageMode
-		config      MidnightConfig
-		want        bool
+		name     string
+		features []plugin.StorageFeature
+		config   MidnightConfig
+		want     bool
 	}{
 		{
-			name:        "disabled despite configured default port",
-			storageMode: StorageModeAPI,
-			config:      MidnightConfig{Port: 50051},
+			name:     "disabled despite configured default port",
+			features: []plugin.StorageFeature{plugin.StorageFeatureMidnight},
+			config:   MidnightConfig{Port: 50051},
 		},
 		{
-			name:        "indexer enabled without server",
-			storageMode: StorageModeAPI,
+			name:     "indexer enabled without server",
+			features: []plugin.StorageFeature{plugin.StorageFeatureMidnight},
 			config: MidnightConfig{
 				Enabled: true,
 				Port:    50051,
 			},
 		},
 		{
-			name:        "enabled in api mode",
-			storageMode: StorageModeAPI,
+			name:     "enabled in api mode",
+			features: []plugin.StorageFeature{plugin.StorageFeatureMidnight},
 			config: MidnightConfig{
 				ServerEnabled: true,
 				Port:          50051,
@@ -1269,23 +1269,22 @@ func TestMidnightServerActiveRequiresExplicitEnablement(t *testing.T) {
 			want: true,
 		},
 		{
-			name:        "enabled in core mode",
-			storageMode: StorageModeCore,
+			name: "enabled in core mode",
 			config: MidnightConfig{
 				ServerEnabled: true,
 				Port:          50051,
 			},
 		},
 		{
-			name:        "enabled with zero port",
-			storageMode: StorageModeAPI,
-			config:      MidnightConfig{ServerEnabled: true},
+			name:     "enabled with zero port",
+			features: []plugin.StorageFeature{plugin.StorageFeatureMidnight},
+			config:   MidnightConfig{ServerEnabled: true},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := midnightServerActive(tt.storageMode, tt.config); got != tt.want {
+			if got := midnightServerActive(tt.features, tt.config); got != tt.want {
 				t.Fatalf("midnightServerActive() = %v, want %v", got, tt.want)
 			}
 		})
@@ -1709,7 +1708,16 @@ func registerAPIProbe(
 	probe *apiLifecycleProbe,
 ) {
 	t.Helper()
-	descriptor := plugin.Descriptor{Capability: capability, Name: name}
+	descriptor := plugin.Descriptor{
+		Capability: capability,
+		Name:       name,
+		Storage: plugin.StorageRequirements{
+			Tier: plugin.StorageTierCore,
+			Features: []plugin.StorageFeature{
+				plugin.StorageFeature("test-" + capability.Name()),
+			},
+		},
+	}
 	var err error
 	switch capability {
 	case plugin.CapabilityAPIUtxorpc:
@@ -3238,7 +3246,7 @@ func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
 	)}
 
 	assert.True(t, node.config.blockProducer)
-	assert.True(t, node.config.splitIndexer)
+	assert.True(t, node.config.hasIndexerDB)
 	assert.Equal(t, StorageModeCore, node.config.storageMode)
 	assert.False(t, node.ledgerStateConfig().ForgeBlocks)
 }

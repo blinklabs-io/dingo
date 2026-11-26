@@ -40,8 +40,7 @@ const loadNodeChunks = 4
 
 // requireLoadedStorage opens the stores of the stopped data directory dir and
 // requires the layout a node leaves: the ledger and the live UTxO set at tip,
-// the database marked as holding its UTxO set only in the set, and every
-// graduated ledger-state family drained from the metadata store.
+// and the database marked as holding its UTxO set only in the set.
 func requireLoadedStorage(t *testing.T, dir string, tip ocommon.Point) {
 	t.Helper()
 	cfg := parityConfig(dir)
@@ -82,8 +81,7 @@ func requireLoadedStorage(t *testing.T, dir string, tip ocommon.Point) {
 	require.Equal(t, tip.Hash, ledgerTip.Point.Hash)
 
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(dir), Logger: logger, Only: true,
-		RetainRewardRecords: cfg.SplitIndexer(),
+		Dir: utxoset.DirFor(dir), Logger: logger, RetainRewardRecords: cfg.HasIndexerDB(),
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, set.Close()) }()
@@ -134,10 +132,9 @@ func TestNodeServesTheTipDingoLoadWrote(t *testing.T) {
 }
 
 // TestLoadExtendsADatabaseItLoaded loads a chain prefix into a new data
-// directory and then a longer one into the same directory. Every database is
-// drained into the live UTxO set by its first start, so the second load runs
-// on a drained database: it must find the ledger state in the set the first
-// one wrote and extend it.
+// directory and then a longer one into the same directory. The first load
+// leaves the ledger state in the live UTxO set, so the second load must find
+// the ledger state the first one wrote and extend it.
 func TestLoadExtendsADatabaseItLoaded(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -184,9 +181,7 @@ func TestLoadRefusesALedgerWithoutItsUtxoSet(t *testing.T) {
 func TestLoadWithDBRefusesAnUnfinishedImport(t *testing.T) {
 	t.Parallel()
 	db := newFileTestDB(t)
-	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(db.DataDir()), Only: true,
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: utxoset.DirFor(db.DataDir())})
 	require.NoError(t, err)
 	require.NoError(t, set.LoadUtxoSet(
 		ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{1}, 32)},

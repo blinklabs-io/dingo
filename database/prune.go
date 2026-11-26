@@ -337,6 +337,24 @@ func (d *Database) materializeUtxosTxn(
 			err,
 		)
 	}
+	return d.materializeUtxosTxnBlock(ctx, txn, slot, hash, blockCbor, refs)
+}
+
+func (d *Database) materializeUtxosTxnBlock(
+	ctx context.Context,
+	txn *Txn,
+	slot uint64,
+	hash []byte,
+	blockCbor []byte,
+	refs []models.UtxoId,
+) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	blobStore := txn.BlobStore()
+	if blobStore == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
 	materialized := 0
 	for _, ref := range refs {
 		if err := ctx.Err(); err != nil {

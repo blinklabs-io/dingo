@@ -30,25 +30,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMigrateToSplitRecoversInterruptedRestoreBeforeOpeningStores(t *testing.T) {
+func TestMigrateToIndexerDBRecoversInterruptedRestoreBeforeOpeningStores(t *testing.T) {
 	t.Parallel()
 	cfg, tip := storageadopt.SeedAPIStore(t, "api", 5)
 	backupDir := cfg.DatabasePath + ".pre-restore"
 	require.NoError(t, os.Rename(cfg.DatabasePath, backupDir))
-	require.NoError(t, node.MigrateToSplit(t.Context(), cfg, storageadopt.MigrateTestLogger()))
+	require.NoError(t, node.MigrateToIndexerDB(t.Context(), cfg, storageadopt.MigrateTestLogger()))
 	require.FileExists(t, filepath.Join(filepath.Join(cfg.DatabasePath, "indexer"), "metadata.sqlite"))
-	storageadopt.RequireSplitStores(t, cfg, tip, 5)
+	storageadopt.RequireIndexerDBStores(t, cfg, tip, 5)
 	require.NoDirExists(t, backupDir)
 }
 
 // The node supplies the archive store constructor, so a configuration that
 // names an archive migrates. Nothing in the store expired, so the archive is
 // never contacted.
-func TestNodeMigrateToSplitBuildsTheConfiguredArchiveStore(t *testing.T) {
+func TestNodeMigrateToIndexerDBBuildsTheConfiguredArchiveStore(t *testing.T) {
 	t.Parallel()
 	cfg, tip := storageadopt.SeedAPIStore(t, "api", 5)
 	cfg.BarkBaseUrl = "http://127.0.0.1:1"
-	require.NoError(t, node.MigrateToSplit(
+	require.NoError(t, node.MigrateToIndexerDB(
 		t.Context(), cfg, storageadopt.MigrateTestLogger(),
 	))
 	storageadopt.RequireSplitStores(t, cfg, tip, 5)
@@ -87,5 +87,5 @@ func TestRestoreAdoptsLegacySQLiteAPIStore(t *testing.T) {
 	cfg.DatabasePath = filepath.Join(testutil.OwnerOnlyTempDir(t), "target")
 	_, err = dblifecycle.NewService(cfg, nil, logger).Restore(ctx, snap)
 	require.NoError(t, err)
-	storageadopt.RequireSplitStores(t, cfg, tip, 5)
+	storageadopt.RequireIndexerDBStores(t, cfg, tip, 5)
 }

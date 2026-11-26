@@ -639,7 +639,7 @@ func (m Manifest) CheckCompatibility(
 	gates nodesettings.Values,
 ) error {
 	if gates["indexer_layout"] == "split" && m.StorageMode == "core" && m.IndexerSHA256 == "" {
-		return errors.New("snapshot has no IndexerDB payload for the split layout")
+		return errors.New("snapshot has no IndexerDB payload for the IndexerDB layout")
 	}
 	if err := m.CheckPluginMatch(blobPlugin, metadataPlugin); err != nil {
 		return err

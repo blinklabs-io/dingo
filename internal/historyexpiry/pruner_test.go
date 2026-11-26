@@ -428,7 +428,7 @@ func TestPruneBlockOfTheLedgerReadsNoSQL(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	require.NoError(t, db.SetLiveUtxoSource(set))

@@ -17,12 +17,11 @@ package ledger_test
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/stretchr/testify/require"
 )
 
-// A loaded set keeps reward block rows available after their metadata family drains.
-func TestRewardBlockReadsStayOnTheSetAfterDrain(t *testing.T) {
+// A loaded set serves the reward block rows.
+func TestRewardBlockReadsServeFromTheSet(t *testing.T) {
 	t.Parallel()
 	r := newRewardBlocksRun(t, "set", nil, true)
 	r.write()
@@ -32,9 +31,6 @@ func TestRewardBlockReadsStayOnTheSetAfterDrain(t *testing.T) {
 	require.NoError(t, err)
 	wantEpochCounts, wantEpochTotal, wantEpochKnown, err := r.scenario.EpochCounts(4)
 	require.NoError(t, err)
-	r.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyRewardBlocksFees),
-	)
 	reached, hide := r.scenario.HideStoreReads(rewardBlockReadNames...)
 	counts, total, known, err := r.scenario.Counts(4)
 	require.NoError(t, err)

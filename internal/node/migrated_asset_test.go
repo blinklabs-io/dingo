@@ -74,7 +74,7 @@ VALUES (?, ?, ?, ?, ?)`,
 	}
 	require.NoError(t, legacy.Close())
 
-	require.NoError(t, MigrateToSplit(
+	require.NoError(t, MigrateToIndexerDB(
 		t.Context(), parityConfig(dir),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))

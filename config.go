@@ -54,10 +54,11 @@ type StorageMode string
 const (
 	// StorageModeCore stores only consensus and chain state data.
 	// Witnesses, scripts, datums, redeemers, and tx metadata CBOR
-	// are skipped. Suitable for block producers with no APIs.
+	// are skipped. Current-chain consumers such as UTxO RPC may use it.
 	StorageModeCore StorageMode = "core"
 	// StorageModeAPI stores everything needed for API queries
-	// (blockfrost, utxorpc, mesh, kupo) in addition to core data.
+	// (blockfrost, mesh, kupo, and historical UTxO RPC queries) in
+	// addition to core data.
 	StorageModeAPI StorageMode = "api"
 )
 
@@ -272,10 +273,11 @@ type Config struct {
 	// malformedPluginSelections are capabilities WithPluginSelection could
 	// not store. The option cannot return an error, so New reports them.
 	malformedPluginSelections []hostplugin.Capability
-	// splitIndexer is set when the IndexerDB holds the API rows.
-	splitIndexer                    bool
+	// hasIndexerDB is set when the IndexerDB holds the API rows.
+	hasIndexerDB                    bool
 	bindAddr                        string
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
+	storageFeatures                 []hostplugin.StorageFeature
 	network                         string
 	tlsCertFilePath, tlsKeyFilePath string
 	// apiConfig mirrors cfg.API -- the shared api.tls policy
@@ -1025,7 +1027,7 @@ func (c *Config) syncCompatFields() {
 	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
 	// storageMode is the ledger's own store's mode, which is core when the
 	// IndexerDB holds the API rows.
-	c.splitIndexer = c.cfg.SplitIndexer()
+	c.hasIndexerDB = c.cfg.HasIndexerDB()
 	c.runMode, c.startEra, c.storageMode = string(
 		c.cfg.RunMode,
 	), c.cfg.StartEra, StorageMode(
@@ -1540,7 +1542,7 @@ func WithUtxorpcTlsKeyFilePath(path string) ConfigOptionFunc {
 	}
 }
 
-// WithUtxorpcPort specifies the port to use for the gRPC API listener. 0 disables the server (default)
+// WithUtxorpcPort specifies the port to use for the gRPC API listener. 0 disables the server.
 func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.API.Utxorpc.Config["port"] = port
@@ -2760,12 +2762,12 @@ type IndexerWriterDeps struct {
 	Moved func()
 }
 
-// IndexerWriterFactory builds the writer of a split layout. It is a seam
+// IndexerWriterFactory builds the writer of an IndexerDB layout. It is a seam
 // because the writer's block indexing lives in a package that imports this
 // one.
 type IndexerWriterFactory func(IndexerWriterDeps) (IndexerWriter, error)
 
-// WithIndexerWriterFactory sets the writer a split layout runs.
+// WithIndexerWriterFactory sets the writer an IndexerDB layout runs.
 func WithIndexerWriterFactory(f IndexerWriterFactory) ConfigOptionFunc {
 	return func(c *Config) {
 		if c.cfg == nil {
@@ -2776,7 +2778,7 @@ func WithIndexerWriterFactory(f IndexerWriterFactory) ConfigOptionFunc {
 }
 
 // WithIndexerMaxReadyLagBlocks sets how far behind the ledger tip the
-// IndexerDB may be while current-state endpoints are ready (split layout).
+// IndexerDB may be while current-state endpoints are ready (IndexerDB layout).
 func WithIndexerMaxReadyLagBlocks(blocks uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		if c.cfg == nil {
