@@ -40,77 +40,59 @@ WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`,
 }
 
 // TestSpendStoresSpenderTransactionID applies a transaction that spends an
-// existing output through the per-row path and through the trusted batch
-// overlay, then reads the spend back every way a reader can: the raw column,
-// the model's spender hash, the spending transaction's inputs, and the
+// existing output, then reads the spend back every way a reader can: the raw
+// column, the model's spender hash, the spending transaction's inputs, and the
 // rollback that restores the output.
 func TestSpendStoresSpenderTransactionID(t *testing.T) {
 	t.Parallel()
-	for _, overlay := range []bool{false, true} {
-		name := "per_row"
-		if overlay {
-			name = "overlay"
-		}
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			store := newMigratedSQLiteStore(t)
-			fx := buildSharedCredentialTx(t, 0x31)
-			seedConsumedUtxo(t, store, fx)
-			ctx := context.Background()
+	store := newMigratedSQLiteStore(t)
+	fx := buildSharedCredentialTx(t, 0x31)
+	seedConsumedUtxo(t, store, fx)
+	ctx := context.Background()
 
-			txn := store.Transaction(ctx)
-			acc := store.NewBatchAccumulator()
-			if overlay {
-				enabled, err := store.EnableBatchUtxoOverlay(
-					acc, txn,
-					[]models.UtxoId{{Hash: fx.consumedTxID, Idx: 0}}, nil, nil,
-				)
-				require.NoError(t, err)
-				require.True(t, enabled)
-			}
-			require.NoError(t, store.SetTransactionBatched(
-				fx.tx, fx.point, 0, fx.certDeposits, false, acc, txn, 0,
-			))
-			require.NoError(t, store.FlushBatch(acc, txn))
-			require.NoError(t, txn.Commit())
+	txn := store.Transaction(ctx)
+	acc := store.NewBatchAccumulator()
+	require.NoError(t, store.SetTransactionBatched(
+		fx.tx, fx.point, 0, fx.certDeposits, false, acc, txn, 0,
+	))
+	require.NoError(t, store.FlushBatch(acc, txn))
+	require.NoError(t, txn.Commit())
 
-			var spenderID int64
-			require.NoError(t, store.writeDB.QueryRow(
-				`SELECT id FROM "transaction" WHERE hash = ?`,
-				fx.tx.Hash().Bytes(),
-			).Scan(&spenderID))
+	var spenderID int64
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT id FROM "transaction" WHERE hash = ?`,
+		fx.tx.Hash().Bytes(),
+	).Scan(&spenderID))
 
-			row := readSpenderRow(t, store, fx.consumedTxID)
-			require.Equal(t, int64(fx.point.Slot), row.deletedSlot)
-			require.Equal(
-				t, sql.NullInt64{Int64: spenderID, Valid: true}, row.spentBy,
-				"spent_at_tx_id must be the spender's transaction id",
-			)
+	row := readSpenderRow(t, store, fx.consumedTxID)
+	require.Equal(t, int64(fx.point.Slot), row.deletedSlot)
+	require.Equal(
+		t, sql.NullInt64{Int64: spenderID, Valid: true}, row.spentBy,
+		"spent_at_tx_id must be the spender's transaction id",
+	)
 
-			spent, err := store.GetUtxoIncludingSpent(fx.consumedTxID, 0, nil)
-			require.NoError(t, err)
-			require.NotNil(t, spent)
-			require.Equal(
-				t, fx.tx.Hash().Bytes(), []byte(spent.SpentAtTxHash),
-				"the model must still carry the spender's hash",
-			)
+	spent, err := store.GetUtxoIncludingSpent(fx.consumedTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, spent)
+	require.Equal(
+		t, fx.tx.Hash().Bytes(), []byte(spent.SpentAtTxHash),
+		"the model must still carry the spender's hash",
+	)
 
-			stored, err := store.GetTransactionByHash(
-				fx.tx.Hash().Bytes(), nil,
-			)
-			require.NoError(t, err)
-			require.NotNil(t, stored)
-			require.Len(t, stored.Inputs, 1)
-			require.Equal(t, fx.consumedTxID, stored.Inputs[0].TxId)
+	stored, err := store.GetTransactionByHash(
+		fx.tx.Hash().Bytes(), nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Len(t, stored.Inputs, 1)
+	require.Equal(t, fx.consumedTxID, stored.Inputs[0].TxId)
 
-			require.NoError(t, store.DeleteTransactionsAfterSlot(
-				fx.point.Slot-1, nil,
-			))
-			row = readSpenderRow(t, store, fx.consumedTxID)
-			require.Zero(t, row.deletedSlot)
-			require.False(t, row.spentBy.Valid, "rollback must clear the spender")
-		})
-	}
+	require.NoError(t, store.DeleteTransactionsAfterSlot(
+		fx.point.Slot-1, nil,
+	))
+	row = readSpenderRow(t, store, fx.consumedTxID)
+	require.Zero(t, row.deletedSlot)
+	require.False(t, row.spentBy.Valid, "rollback must clear the spender")
 }
 
 // TestSpenderQueriesSearchTheSpenderIndex pins the plans of the statements

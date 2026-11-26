@@ -18,9 +18,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -48,26 +46,6 @@ func (d *Database) checkMetadataStore(f nodesettings.Family) error {
 // family.
 func (d *Database) checkCommitteeLive() error {
 	return d.checkMetadataStore(nodesettings.FamilyCommitteeConstitution)
-}
-
-// EachRewardLiveStake calls fn with every reward_live_stake row.
-func (d *Database) EachRewardLiveStake(
-	txn *Txn,
-	fn func(*models.RewardLiveStake) error,
-) error {
-	if err := d.requireStore("EachRewardLiveStake"); err != nil {
-		return err
-	}
-	each, ok := d.Metadata().(interface {
-		EachRewardLiveStake(types.Txn, func(*models.RewardLiveStake) error) error
-	})
-	if !ok {
-		return errors.New("the metadata store cannot list live stake rows")
-	}
-	if txn == nil {
-		return each.EachRewardLiveStake(nil, fn)
-	}
-	return each.EachRewardLiveStake(txn.Metadata(), fn)
 }
 
 // NonceSource answers the block nonce reads a rollback of a database with no

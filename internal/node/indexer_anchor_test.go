@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -240,7 +241,7 @@ func (f *anchorFixture) requireTablesAt(
 	requireSameTables(t, want, got)
 }
 
-func TestSplitMithrilBootstrapMatchesAGenesisIndexAtAnchor(t *testing.T) {
+func TestIndexerMithrilBootstrapMatchesAGenesisIndexAtAnchor(t *testing.T) {
 	t.Parallel()
 	f := newAnchorFixture(t)
 	ctx := context.Background()
@@ -307,7 +308,7 @@ func (f *anchorFixture) lazyIndexExists(t *testing.T) bool {
 	)
 }
 
-func TestSplitMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
+func TestIndexerMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -364,9 +365,9 @@ func TestSplitMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 			return nil
 		},
 		func(ctx context.Context) error {
-			if err := NewDeferredIndexRebuilder(
-				ctx, f.indexerDB, f.deps.Logger,
-			).BuildCritical(); err != nil {
+			builder, ok := f.indexerDB.Metadata().(metadata.ContextCriticalDeferredIndexBuilder)
+			require.True(t, ok)
+			if err := builder.BuildCriticalDeferredIndexesContext(ctx); err != nil {
 				return err
 			}
 			return errStopped
@@ -406,7 +407,7 @@ func TestSplitMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 	requireSameTables(t, atAnchor, got)
 }
 
-func TestSplitMithrilBootstrapRefusesRowsThatDisagreeWithTheImportedState(
+func TestIndexerMithrilBootstrapRefusesRowsThatDisagreeWithTheImportedState(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -481,7 +482,7 @@ func TestSplitMithrilBootstrapRefusesRowsThatDisagreeWithTheImportedState(
 // given the ledger to read them through finds neither the imported balances
 // nor the journal the anchor state is rebuilt from, and an empty IndexerDB
 // refuses the bootstrap rather than take over an empty state.
-func TestSplitMithrilBootstrapRefusesAWriterWithoutTheLedgerState(
+func TestIndexerMithrilBootstrapRefusesAWriterWithoutTheLedgerState(
 	t *testing.T,
 ) {
 	t.Parallel()

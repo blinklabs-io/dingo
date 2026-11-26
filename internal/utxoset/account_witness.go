@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
 
@@ -222,10 +221,8 @@ func accountWitnessRows(lc ledger.LedgerChanges) ([]badgerutxo.RowPut, error) {
 }
 
 // ensureImportBaselines loads every account import baseline, with the
-// delegations the import recorded, from the metadata store into a set from
-// before it kept them. A set that holds the baselines without their
-// delegations has them reloaded while the metadata store still holds the
-// rows, and is marked as having lost them once it does not.
+// delegations the import recorded, from the v0.94.2 metadata store into a set
+// that does not hold them.
 func (s *Set) ensureImportBaselines(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
@@ -271,19 +268,6 @@ func (s *Set) ensureImportBaselines(
 				return put(importBaselineKey(ref), v)
 			})
 	})
-	if loaded && errors.Is(err, badgerutxo.ErrLoadsRefused) {
-		// The rows to take the delegations from are drained, and the
-		// baselines the set holds are all there is.
-		if err := s.store.MarkImportBaselineDelegationsLost(); err != nil {
-			return err
-		}
-		s.logger.Warn(
-			"the live UTxO set holds import baselines without the " +
-				"delegations the import recorded, and the metadata store " +
-				"has drained them",
-		)
-		return nil
-	}
 	if err != nil {
 		return fmt.Errorf("utxoset: load import baselines: %w", err)
 	}
@@ -293,12 +277,6 @@ func (s *Set) ensureImportBaselines(
 		n,
 	)
 	return nil
-}
-
-// ImportBaselineDelegationsLost reports whether the set holds import
-// baselines that lack the delegations the import recorded.
-func (s *Set) ImportBaselineDelegationsLost() (bool, error) {
-	return s.store.ImportBaselineDelegationsLost()
 }
 
 // ImportBaselinesAfter returns at most limit import baselines whose

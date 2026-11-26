@@ -418,12 +418,13 @@ func DefaultImmutableDBConfig() ImmutableDBConfig {
 }
 
 // Values of the indexer_layout node setting a database records. A database
-// recorded as split is refused by a release that predates the layout.
+// recorded with an IndexerDB (persisted as "split") is refused by a release
+// that predates the layout.
 const (
 	// IndexerLayoutShared records a database with no IndexerDB: a core node's.
 	IndexerLayoutShared = "shared"
-	// IndexerLayoutSplit records API rows in a separate IndexerDB.
-	IndexerLayoutSplit = "split"
+	// IndexerLayoutIndexerDB records API rows in a separate IndexerDB.
+	IndexerLayoutIndexerDB = "split"
 )
 
 // IndexerConfig tunes the IndexerDB, which holds the API and history rows in
@@ -434,8 +435,8 @@ type IndexerConfig struct {
 	MaxReadyLagBlocks uint64 `yaml:"maxReadyLagBlocks" envconfig:"DINGO_INDEXER_MAX_READY_LAG_BLOCKS"`
 }
 
-// SplitIndexer reports whether API rows live in a separate IndexerDB.
-func (c *Config) SplitIndexer() bool {
+// HasIndexerDB reports whether API rows live in a separate IndexerDB.
+func (c *Config) HasIndexerDB() bool {
 	return c.StorageMode == storageModeAPI
 }
 
@@ -443,7 +444,7 @@ func (c *Config) SplitIndexer() bool {
 // when the IndexerDB is the store opened in API mode, and the configured mode
 // otherwise.
 func (c *Config) ConsensusStorageMode() string {
-	if c.SplitIndexer() {
+	if c.HasIndexerDB() {
 		return storageModeCore
 	}
 	return c.StorageMode
@@ -465,9 +466,8 @@ func DefaultIndexerConfig() IndexerConfig {
 // closed epoch's committed reward state directly against Koios reference
 // data as the node advances, instead of requiring a separate koios-parity
 // CLI process polling a second, independently synced copy of the metadata
-// database. See internal/koiosparity and ARCHITECTURE.md's "Koios Parity
-// Tracker" section. This is a one-off validation aid, not a permanent
-// subsystem — leave it disabled for normal node operation.
+// database. See internal/koiosparity/README.md. This is a one-off validation
+// aid, not a permanent subsystem — leave it disabled for normal node operation.
 type KoiosParityConfig struct {
 	// Enabled subscribes the observer to epoch.transition when true.
 	Enabled bool `yaml:"enabled"               envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
@@ -1016,14 +1016,13 @@ type Config struct {
 	// CBOR decode work is scheduled, not validation or apply behavior. It is
 	// enabled by default in core mode except on Musashi, whose extended Conway
 	// headers require a decoder the pipeline does not provide. See
-	// ARCHITECTURE.md ("Block Processing Pipeline").
+	// ledger/state.go.
 	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"          envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
 	// BlockPipelineValidateEnabled checks VRF/KES and OpCert header
 	// cryptography serially during block-pipeline replay. It requires
 	// BlockPipelineEnabled. Admission-time header validation remains the
 	// authoritative gate because ls.chain is visible to downstream readers
-	// before replay reaches this stage. See ARCHITECTURE.md ("Block Processing
-	// Pipeline").
+	// before replay reaches this stage. See ledger/state.go.
 	BlockPipelineValidateEnabled bool `yaml:"blockPipelineValidateEnabled"  envconfig:"DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED"`
 	// LedgerPrefetchAheadEnabled resolves the next block's input UTxOs on a
 	// separate goroutine while the current block applies, for blocks under
@@ -1274,7 +1273,7 @@ type Config struct {
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
 	// and off by default; effective only in Dijkstra and later. Enable a nonzero
 	// value only where every node also enables the same value. See
-	// ARCHITECTURE.md ("Reward Calculation And Precomputation").
+	// ledger/epochengine/reward_calculation.go.
 	MinPoolMargin uint `yaml:"minPoolMargin"                          envconfig:"DINGO_MIN_POOL_MARGIN"`
 	// Experimental pre-Dijkstra CIP-50 override. Dijkstra rewards use the
 	// enacted MaxPledgeLeverage protocol parameter instead. This setting is
@@ -1285,15 +1284,14 @@ type Config struct {
 	// off. When enabled the entire epoch reward pot is distributed to eligible
 	// pools and delegators instead of returning the residual to reserves.
 	// Enable only on a network where every node also enables it. See
-	// ARCHITECTURE.md ("Reward Calculation And Precomputation").
+	// ledger/epochengine/reward_calculation.go.
 	FullPotRewardsEnabled bool `yaml:"fullPotRewardsEnabled"                  envconfig:"DINGO_FULL_POT_REWARDS_ENABLED"`
 	// UnsafeFullPotRewardsOnStandardNetworks is an explicit unsafe override
 	// for running CIP-0163 full-pot rewards on predefined public networks.
 	// Leave false except for controlled off-consensus experiments.
 	UnsafeFullPotRewardsOnStandardNetworks bool `yaml:"unsafeFullPotRewardsOnStandardNetworks" envconfig:"DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS"`
 	// CIP-0163 reward-account inactivity expiry. Consensus-affecting; defaults
-	// off. See ARCHITECTURE.md ("Stake Snapshots", CIP-0163 reward-account
-	// inactivity).
+	// off. See ledger/epochengine/account_expiry.go.
 	DelegatorInactivityEnabled bool   `yaml:"delegatorInactivityEnabled"             envconfig:"DINGO_DELEGATOR_INACTIVITY_ENABLED"`
 	DelegatorInactivity        uint64 `yaml:"delegatorInactivity"                    envconfig:"DINGO_DELEGATOR_INACTIVITY"`
 
@@ -1337,8 +1335,8 @@ type Config struct {
 	// (UTxOs, certs, pools, pparams).
 	// "api" additionally stores witnesses, scripts,
 	// datums, redeemers, and tx metadata.
-	// APIs (blockfrost, kupo, utxorpc, mesh) require
-	// "api" mode.
+	// Blockfrost, Kupo and Mesh require "api" mode;
+	// UTxO RPC and MCP serve either mode.
 	StorageMode string `yaml:"storageMode" envconfig:"DINGO_STORAGE_MODE"`
 
 	// Mithril snapshot bootstrap configuration

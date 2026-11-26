@@ -323,7 +323,7 @@ func openCheckpointedSet(
 	applyBlocks(t, store, 1, checkpointAt)
 	require.NoError(t, store.Close())
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: dir, Only: true, Authoritative: true, CheckpointDir: ckptDir,
+		Dir: dir, CheckpointDir: ckptDir,
 	})
 	require.NoError(t, err)
 	_, err = set.WriteCheckpoint(t.Context())

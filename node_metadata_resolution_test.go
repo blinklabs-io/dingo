@@ -180,11 +180,11 @@ func TestAPINodeResolvesOnlyTheIndexerDBMetadataStore(t *testing.T) {
 	require.NoError(t, n.db.SetNodeSettingsGates(
 		t.Context(),
 		nodesettings.Values{
-			"indexer_layout": internalconfig.IndexerLayoutSplit,
+			"indexer_layout": internalconfig.IndexerLayoutIndexerDB,
 		},
 	))
 	writers := &lifecycleIndexerWriters{}
-	n.config.splitIndexer = true
+	n.config.hasIndexerDB = true
 	n.config.indexerWriterFactory = writers.build
 	require.NoError(t, n.openIndexerWriter(t.Context()))
 	t.Cleanup(func() {

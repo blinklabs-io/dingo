@@ -698,19 +698,6 @@ func (s stagingLedgerDB) ClaimUnfoldedRewardCredits(
 	return s.claimUnfoldedFromSet(txn, snapshotEpoch, limit)
 }
 
-func sameRewardRound(a, b models.RewardCreditRound) bool {
-	return a.SnapshotEpoch == b.SnapshotEpoch && a.BoundarySlot == b.BoundarySlot
-}
-
-func sameRewardOutput(a, b *models.RewardAccountOutput) bool {
-	return a.Epoch == b.Epoch && a.CredentialTag == b.CredentialTag &&
-		bytes.Equal(a.StakingKey, b.StakingKey) &&
-		bytes.Equal(a.PoolKeyHash, b.PoolKeyHash) &&
-		a.RewardType == b.RewardType && a.Amount == b.Amount &&
-		a.Spendable == b.Spendable && a.Guarded == b.Guarded &&
-		a.CapturedSlot == b.CapturedSlot && a.BoundarySlot == b.BoundarySlot
-}
-
 func (s stagingLedgerDB) HasAppliedRewardCreditRound(
 	epoch uint64,
 	txn ledgerdb.Txn,

@@ -77,7 +77,6 @@ func (s *Set) newScratch(ctx context.Context) (*Set, error) {
 	}
 	sc, err := Open(Config{
 		Dir: dir, Logger: s.logger, HistorySlots: s.history,
-		Only: s.only, Authoritative: s.rollBackAhead,
 		CheckpointDir: ckptDir, CheckpointKeep: keep,
 	})
 	if err != nil {

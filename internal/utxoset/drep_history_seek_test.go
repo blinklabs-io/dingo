@@ -38,7 +38,7 @@ func TestDRepHistoryPagesSeekWithinTheirSlotRange(t *testing.T) {
 		func(func(badgerutxo.Output) error) error { return nil },
 	))
 	const slots = 2000
-	require.NoError(t, set.store.LoadDRepHistory(false, func(
+	require.NoError(t, set.store.LoadDRepHistory(func(
 		put func(k, v []byte) error,
 	) error {
 		for slot := uint64(1); slot <= slots; slot++ {

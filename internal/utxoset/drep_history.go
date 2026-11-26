@@ -18,19 +18,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 )
 
-// ensureDRepHistory loads the DRep history the metadata store holds into a
-// set from before it kept it. A drained metadata store holds none, and the
-// load then marks the set as having lost it, so the set refuses to export
-// the history rather than export none.
+// ensureDRepHistory loads the DRep history the v0.94.2 metadata store holds
+// into a set that has not held it.
 func (s *Set) ensureDRepHistory(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
@@ -43,19 +39,15 @@ func (s *Set) ensureDRepHistory(
 		return nil
 	}
 	var rows ledgerdb.DRepHistoryRows
-	lost := false
 	if r, ok := ldb.(ledgerdb.DRepHistoryRowsReader); ok {
 		txn := ldb.Begin(ctx, false)
 		rows, err = r.DRepHistoryRows(txn)
 		txn.Release()
-		if errors.Is(err, database.ErrNoMetadataStore) {
-			lost, err = true, nil
-		}
 		if err != nil {
 			return fmt.Errorf("utxoset: read DRep history: %w", err)
 		}
 	}
-	err = s.store.LoadDRepHistory(lost, func(put func(k, v []byte) error) error {
+	err = s.store.LoadDRepHistory(func(put func(k, v []byte) error) error {
 		for _, r := range rows.Expiry {
 			err := put(
 				badgerutxo.DRepExpiryHistoryKey(r.Slot, r.Tag, r.Credential),
@@ -101,12 +93,6 @@ func (s *Set) ensureDRepHistory(
 // tip.
 func (s *Set) DRepHistoryLoaded() (bool, error) {
 	return s.store.DRepHistoryLoaded()
-}
-
-// DRepHistoryLost reports whether the metadata store had drained the DRep
-// history before the set could load it.
-func (s *Set) DRepHistoryLost() (bool, error) {
-	return s.store.DRepHistoryLost()
 }
 
 // DRepHistory lists the DRep history rows the set holds.

@@ -107,7 +107,7 @@ func (a *meshDatabaseAdapter) UtxoBalanceByAddressAtSlot(
 	return a.db.UtxoBalanceByAddressAtSlot(ctx, addr, slot, txn)
 }
 
-// boundedDatabase hides the blocks above a tip: on the split layout the
+// boundedDatabase hides the blocks above a tip: with an IndexerDB the
 // ledger's block store is ahead of the IndexerDB that holds their
 // transactions, and a block answered from the store alone would be empty.
 type boundedDatabase struct {

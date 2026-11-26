@@ -330,11 +330,11 @@ func (emptyLiveSource) EachLiveUtxoStake(
 	return nil
 }
 
-// TestReconcileRemovesGenesisFromLiveSetOnlyStore repairs a store that keeps
-// its UTxO set only in the live set: the metadata store has the genesis
+// TestReconcileRemovesGenesisFromAStoreWithoutUtxoRows repairs a store that
+// keeps its UTxO set only in the live set: the metadata store has the genesis
 // transaction rows but no utxo rows, so the transactions go on the genesis
 // configuration alone.
-func TestReconcileRemovesGenesisFromLiveSetOnlyStore(t *testing.T) {
+func TestReconcileRemovesGenesisFromAStoreWithoutUtxoRows(t *testing.T) {
 	t.Parallel()
 	g := newLegacyGenesis(t)
 	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})

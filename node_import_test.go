@@ -37,7 +37,7 @@ func pendingImportNode(t *testing.T) *Node {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	tip := ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{1}, 32)}

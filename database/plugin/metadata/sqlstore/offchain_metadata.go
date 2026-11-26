@@ -107,9 +107,6 @@ func (s *Store) EnsureOffchainMetadataPointers(
 	}
 	q := s.operationalQueries(db)
 	created := 0
-	// A drained source table is skipped, not read as empty: no anchor is
-	// discovered from it, which the returned error reports.
-	var drainedSources error
 	for _, source := range offchainPointerSources {
 		// Two cursors per source. The high-water cursor never wraps, so an
 		// appended row waits only for rows appended before it. The rescan
@@ -164,7 +161,7 @@ func (s *Store) EnsureOffchainMetadataPointers(
 			return created, err
 		}
 	}
-	return created, drainedSources
+	return created, nil
 }
 
 func readOffchainDiscoveryCursor(

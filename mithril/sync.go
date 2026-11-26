@@ -538,10 +538,10 @@ func pctOf(cur, total int64) float64 {
 	return float64(cur) / float64(total) * 100
 }
 
-// errSplitCatchUp refuses to advance a complete API node's database to a newer
-// snapshot: the IndexerDB's rows belong to the anchor it was built at, and a
-// catch-up import rewrites the ledger state under it.
-var errSplitCatchUp = errors.New(
+// errIndexerDBCatchUp refuses to advance a complete API node's database to a
+// newer snapshot: the IndexerDB's rows belong to the anchor it was built at,
+// and a catch-up import rewrites the ledger state under it.
+var errIndexerDBCatchUp = errors.New(
 	"mithril sync cannot advance a complete database that has an " +
 		"IndexerDB: the IndexerDB follows the ledger from the anchor it " +
 		"was built at; sync a new data directory instead",
@@ -676,7 +676,7 @@ func Sync(
 		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
 	}
 	if cfg.IndexerLayout == "split" && mode == syncModeCatchUp {
-		return SyncResult{}, errSplitCatchUp
+		return SyncResult{}, errIndexerDBCatchUp
 	}
 	pinnedDigest := cfg.PinnedDigest
 	if cfg.RepairLegacyRewardState {
@@ -1653,9 +1653,9 @@ func openDatabase(
 			Immutable: immutableCfg,
 		},
 		internalplugins.StorageSelections{
-			Blob:         storagePlugins.Blob,
-			Metadata:     storagePlugins.Metadata,
-			SplitIndexer: cfg.IndexerLayout == "split" || cfg.ServerCoreNamespace,
+			Blob:      storagePlugins.Blob,
+			Metadata:  storagePlugins.Metadata,
+			IndexerDB: cfg.IndexerLayout == "split" || cfg.ServerCoreNamespace,
 		},
 		internalplugins.StorageDependencies{
 			GenesisStakingEmpty: genesisStakingEmpty,

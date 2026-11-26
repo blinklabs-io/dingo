@@ -78,20 +78,20 @@ func (n *Node) apiReadiness() apiready.Check {
 // The consensus store always runs in core mode; an API node serves the APIs
 // from its IndexerDB.
 func (n *Node) apiStorageMode() StorageMode {
-	if n.splitIndexer() {
+	if n.hasIndexerDB() {
 		return StorageModeAPI
 	}
 	return StorageModeCore
 }
 
-func (n *Node) splitIndexer() bool {
-	return n.config.splitIndexer
+func (n *Node) hasIndexerDB() bool {
+	return n.config.hasIndexerDB
 }
 
 // indexerLayout is the layout recorded in the database's node settings.
 func (n *Node) indexerLayout() string {
-	if n.storageSelections().SplitIndexer {
-		return internalconfig.IndexerLayoutSplit
+	if n.storageSelections().IndexerDB {
+		return internalconfig.IndexerLayoutIndexerDB
 	}
 	return internalconfig.IndexerLayoutShared
 }
@@ -99,7 +99,7 @@ func (n *Node) indexerLayout() string {
 // openIndexerWriter opens the IndexerDB beside the consensus database and
 // builds the writer that fills it. It does nothing on a core node.
 func (n *Node) openIndexerWriter(ctx context.Context) error {
-	if !n.splitIndexer() {
+	if !n.hasIndexerDB() {
 		return nil
 	}
 	// A quiesce that failed without closing storage resumes through here
@@ -186,7 +186,7 @@ func (n *Node) rollbackIndexerForTruncate(
 	target models.Block,
 	opts ...lifecycle.TruncateOption,
 ) error {
-	if !n.splitIndexer() {
+	if !n.hasIndexerDB() {
 		return nil
 	}
 	// The ledger's refusals, including the live UTxO set's, run first: a
@@ -318,15 +318,39 @@ func (c *indexerMeshChain) Tip() ochainsync.Tip {
 	return tip
 }
 
-// utxorpcQueryDatabase is the store UTxO RPC queries read: the IndexerDB.
+// utxorpcQueryDatabase is the store UTxO RPC queries read: the IndexerDB when
+// present, otherwise the ledger's live UTxO set. The ledger's database holds
+// no UTxO, datum or transaction rows to read.
 func (n *Node) utxorpcQueryDatabase() utxorpc.QueryDatabase {
+	if n.indexerDB == nil {
+		return utxorpc.NewLedgerQueryDatabase(n.ledgerState)
+	}
 	return utxorpc.NewIndexerQueryDatabase(
 		n.indexerDB, n.indexerStore, n.apiReadiness(),
 	)
 }
 
+// mcpAddressLookup is the address lookup the MCP server reads UTxOs with: the
+// live UTxO set on a core node, whose consensus database holds no UTxO rows,
+// and nil, the IndexerDB's own lookup, on an API node.
+func (n *Node) mcpAddressLookup() func(
+	context.Context, *models.UtxoWithOrderingQuery, int,
+) (models.UtxoAddressPage, error) {
+	if n.indexerDB != nil || n.ledgerState == nil {
+		return nil
+	}
+	ls := n.ledgerState
+	return func(
+		ctx context.Context,
+		q *models.UtxoWithOrderingQuery,
+		maxCandidates int,
+	) (models.UtxoAddressPage, error) {
+		return ls.UtxosByAddressBoundedPage(ctx, q, maxCandidates, 0)
+	}
+}
+
 // checkServerAdopted refuses a PostgreSQL or MySQL API store a release
-// without the split layout wrote and startup has not adopted. The dingo
+// without the IndexerDB layout wrote and startup has not adopted. The dingo
 // command adopts it before any store opens; Run alone does not.
 func (n *Node) checkServerAdopted(
 	ctx context.Context,

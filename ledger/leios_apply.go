@@ -564,6 +564,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 			uint(dijkstra.EraIdDijkstra),
 			rbBlockNumber,
 		)
+		delta.consensus = ls.forkValidationConsensus(txn)
 		delta.Offsets = offsets
 		delta.expandedIndexOffset = expandedIndexOffset
 		delta.closureContextSlot = contextSlot
@@ -2228,9 +2229,7 @@ func (ls *LedgerState) applyUntickedBoundaryClosure(
 		return err
 	}
 	if donation > 0 {
-		ls.RLock()
-		epoch := ls.currentEpoch.EpochId
-		ls.RUnlock()
+		epoch := ls.stagingEpoch(txn)
 		if err := ls.ledgerDB().AddNetworkDonation(point.Slot, epoch, donation, txn); err != nil {
 			return err
 		}

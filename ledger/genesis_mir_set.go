@@ -187,23 +187,6 @@ func sortMIRRewards(rewards []models.MIRReward) {
 	})
 }
 
-func sameGenesisDelegation(a, b *models.GenesisDelegation) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return bytes.Equal(a.GenesisHash, b.GenesisHash) &&
-		bytes.Equal(a.GenesisDelegateHash, b.GenesisDelegateHash) &&
-		bytes.Equal(a.VrfKeyHash, b.VrfKeyHash) &&
-		a.AddedSlot == b.AddedSlot &&
-		a.BlockIndex == b.BlockIndex && a.CertIndex == b.CertIndex
-}
-
-func sameGenesisDelegations(a, b []models.GenesisDelegation) bool {
-	return slices.EqualFunc(a, b, func(x, y models.GenesisDelegation) bool {
-		return sameGenesisDelegation(&x, &y)
-	})
-}
-
 // GetGenesisDelegationForSlot answers from the set's delegations when it
 // holds them: the latest delegation of the genesis key certified at least the
 // stability window before blockSlot.
