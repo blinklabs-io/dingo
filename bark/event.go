@@ -74,6 +74,12 @@ type eventHub struct {
 	active  int
 	perHost map[string]int
 	ackIDs  map[string]struct{}
+	// joinedAt holds the head position handed to each acknowledging
+	// subscriber that joined without a cursor, until it acknowledges an
+	// event. Its client learns that position only from the ready response;
+	// if the stream drops before the client reads it, the reconnect again
+	// carries no cursor and must resume here rather than at the new head.
+	joinedAt map[string]uint64
 }
 
 type busSubscription struct {
@@ -104,11 +110,12 @@ func newEventHub(cfg BarkConfig) *eventHub {
 		maxPerHost: maxPerHost,
 		// A send window of half the ring leaves the other half for
 		// events arriving while the client catches up on acks.
-		window:  max(uint64(size/2), 1),
-		ring:    make([]*eventv1alpha1.Event, size),
-		wake:    make(chan struct{}),
-		perHost: make(map[string]int),
-		ackIDs:  make(map[string]struct{}),
+		window:   max(uint64(size/2), 1),
+		ring:     make([]*eventv1alpha1.Event, size),
+		wake:     make(chan struct{}),
+		perHost:  make(map[string]int),
+		ackIDs:   make(map[string]struct{}),
+		joinedAt: make(map[string]uint64),
 	}
 }
 
@@ -173,6 +180,7 @@ func (h *eventHub) append(ev *eventv1alpha1.Event) {
 func (h *eventHub) appendLocked(ev *eventv1alpha1.Event) {
 	h.last++
 	ev.Sequence = h.last
+	ev.RunId = h.idPrefix
 	if ev.GetId() == "" {
 		ev.Id = h.idPrefix + "-" + strconv.FormatUint(h.last, 10)
 	}
@@ -185,13 +193,6 @@ func (h *eventHub) appendLocked(ev *eventv1alpha1.Event) {
 	h.ring[(h.last-1)%uint64(len(h.ring))] = ev
 	close(h.wake)
 	h.wake = make(chan struct{})
-}
-
-// position returns the sequence of the newest event.
-func (h *eventHub) position() uint64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.last
 }
 
 // oldestLocked returns the lowest sequence still in the ring.
@@ -297,6 +298,33 @@ func (h *eventHub) claimSubscriberID(id string) (release func(), ok bool) {
 		delete(h.ackIDs, id)
 		h.mu.Unlock()
 	}, true
+}
+
+// joinPositionLocked returns where a subscriber joining without a cursor
+// starts: the position recorded when this id last joined, while that position
+// is still buffered, otherwise the current head. Recorded positions that have
+// left the ring are dropped, which keeps the map to ids whose start is still
+// servable. Callers hold h.mu.
+func (h *eventHub) joinPositionLocked(id string, head, oldest uint64) uint64 {
+	for other, pos := range h.joinedAt {
+		if pos < head && pos+1 < oldest {
+			delete(h.joinedAt, other)
+		}
+	}
+	pos, ok := h.joinedAt[id]
+	if !ok {
+		pos = head
+		h.joinedAt[id] = pos
+	}
+	return pos
+}
+
+// forgetJoinPosition drops the recorded join position once the subscriber has
+// acknowledged an event: from then on its client resumes with its own cursor.
+func (h *eventHub) forgetJoinPosition(id string) {
+	h.mu.Lock()
+	delete(h.joinedAt, id)
+	h.mu.Unlock()
 }
 
 // eventServiceHandler implements the EventService on top of eventHub.
@@ -433,14 +461,21 @@ func (s *eventServiceHandler) SubscribeWithAck(
 	defer releaseID()
 
 	cursor := start.GetLastAckedSequence()
-	head := s.hub.position()
-	if cursor == 0 {
-		cursor = head
-	}
+	previousRun := start.GetLastAckedRunId()
 	s.hub.mu.Lock()
+	head := s.hub.last
 	oldest := s.hub.oldestLocked()
+	runID := s.hub.idPrefix
+	restarted := previousRun != "" && previousRun != runID
+	joined := !restarted && previousRun == "" && cursor == 0
+	if restarted {
+		cursor = oldest - 1
+	} else if joined {
+		cursor = s.hub.joinPositionLocked(id, head, oldest)
+	}
 	s.hub.mu.Unlock()
-	if cursor > head || (cursor < head && cursor+1 < oldest) {
+	if !restarted &&
+		(cursor > head || (cursor < head && cursor+1 < oldest)) {
 		return connect.NewError(
 			connect.CodeOutOfRange,
 			fmt.Errorf(
@@ -454,6 +489,16 @@ func (s *eventServiceHandler) SubscribeWithAck(
 	)
 	log.Info("event subscription opened", "resume_from", cursor)
 	defer log.Info("event subscription closed")
+	if start.GetAcceptReady() {
+		if err := stream.Send(&eventv1alpha1.SubscribeWithAckResponse{
+			Ready: &eventv1alpha1.SubscribeWithAckReady{
+				RunId:              runID,
+				ResumeFromSequence: cursor,
+			},
+		}); err != nil {
+			return err
+		}
+	}
 
 	var win ackWindow
 	ackCh := make(chan struct{}, 1)
@@ -484,6 +529,10 @@ func (s *eventServiceHandler) SubscribeWithAck(
 				return
 			}
 			win.ack(seq)
+			if joined {
+				joined = false
+				s.hub.forgetJoinPosition(id)
+			}
 			select {
 			case ackCh <- struct{}{}:
 			default:
@@ -778,8 +827,11 @@ func (s *eventServiceHandler) validatePublished(
 	info, ok := eventtype.Lookup(ev.GetEventType())
 	if !ok {
 		return &eventv1alpha1.PublishFailure{
-			Code:    eventv1alpha1.PublishFailureCode_PUBLISH_FAILURE_CODE_UNKNOWN_EVENT_TYPE,
-			Message: fmt.Sprintf("event type %q is not registered", ev.GetEventType()),
+			Code: eventv1alpha1.PublishFailureCode_PUBLISH_FAILURE_CODE_UNKNOWN_EVENT_TYPE,
+			Message: fmt.Sprintf(
+				"event type %q is not registered",
+				ev.GetEventType(),
+			),
 		}
 	}
 	if ev.GetOriginNodeId() == "" || ev.GetOriginNodeId() == s.hub.nodeID {
@@ -789,7 +841,8 @@ func (s *eventServiceHandler) validatePublished(
 		}
 	}
 	if td := ev.GetTypedData(); td != nil {
-		if !info.HasTypedPayload || td.MessageName() != protoreflect.FullName(info.PayloadMessage) {
+		if !info.HasTypedPayload ||
+			td.MessageName() != protoreflect.FullName(info.PayloadMessage) {
 			return &eventv1alpha1.PublishFailure{
 				Code:    eventv1alpha1.PublishFailureCode_PUBLISH_FAILURE_CODE_INVALID_EVENT,
 				Message: "typed_data does not match the event type's payload",
@@ -881,7 +934,10 @@ func (s *eventServiceHandler) GetEventSchema(
 	if !ok {
 		return nil, connect.NewError(
 			connect.CodeNotFound,
-			fmt.Errorf("event type %q is not registered", req.Msg.GetEventType()),
+			fmt.Errorf(
+				"event type %q is not registered",
+				req.Msg.GetEventType(),
+			),
 		)
 	}
 	resp := &eventv1alpha1.GetEventSchemaResponse{Info: infoToProto(info)}

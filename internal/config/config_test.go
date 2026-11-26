@@ -1254,6 +1254,73 @@ func TestCloneConfigDoesNotShareBlockProducerPools(t *testing.T) {
 	assert.Equal(t, "a.vrf.skey", cfg.BlockProducerPools[0].ShelleyVRFKey)
 }
 
+func TestLoad_BarkEventSourcesFromYAML(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+barkEventSources:
+  - name: relay-a
+    url: http://relay-a.example:9090
+    eventTypes: ["peergov.*", "epoch.transition"]
+    originNodeIds: ["relay-a"]
+  - name: relay-b
+    url: https://relay-b.example
+`
+	tmpFile := filepath.Join(t.TempDir(), "event-sources.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(yamlContent), 0o644))
+
+	cfg, err := LoadConfig(tmpFile)
+	require.NoError(t, err)
+	require.Equal(t, []BarkEventSource{
+		{
+			Name:          "relay-a",
+			URL:           "http://relay-a.example:9090",
+			EventTypes:    []string{"peergov.*", "epoch.transition"},
+			OriginNodeIDs: []string{"relay-a"},
+		},
+		{Name: "relay-b", URL: "https://relay-b.example"},
+	}, cfg.BarkEventSources)
+}
+
+func TestCloneConfigDoesNotShareBarkEventSources(t *testing.T) {
+	cfg := &Config{BarkEventSources: []BarkEventSource{{
+		Name:          "a",
+		URL:           "http://a",
+		EventTypes:    []string{"peergov.*"},
+		OriginNodeIDs: []string{"n1"},
+	}}}
+	clone := cloneConfig(cfg)
+	clone.BarkEventSources[0].Name = "mutated"
+	clone.BarkEventSources[0].EventTypes[0] = "mutated"
+	clone.BarkEventSources[0].OriginNodeIDs[0] = "mutated"
+	assert.Equal(t, "a", cfg.BarkEventSources[0].Name)
+	assert.Equal(t, "peergov.*", cfg.BarkEventSources[0].EventTypes[0])
+	assert.Equal(t, "n1", cfg.BarkEventSources[0].OriginNodeIDs[0])
+}
+
+func TestValidateBarkEventSources(t *testing.T) {
+	ok := BarkEventSource{Name: "a", URL: "http://a.example:9090"}
+	require.Empty(t, ValidateBarkEventSources(nil))
+	require.Empty(t, ValidateBarkEventSources([]BarkEventSource{
+		ok, {Name: "b", URL: "https://b.example"},
+	}))
+	for name, tc := range map[string]struct {
+		sources []BarkEventSource
+		want    string
+	}{
+		"no name":    {[]BarkEventSource{{URL: ok.URL}}, "barkEventSources[0]: name"},
+		"no url":     {[]BarkEventSource{{Name: "a"}}, "barkEventSources[0]: url"},
+		"bad scheme": {[]BarkEventSource{{Name: "a", URL: "ftp://x"}}, "url"},
+		"no host":    {[]BarkEventSource{{Name: "a", URL: "http://"}}, "url"},
+		"duplicate":  {[]BarkEventSource{ok, ok}, "barkEventSources[1]: duplicate"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			errs := ValidateBarkEventSources(tc.sources)
+			require.NotEmpty(t, errs)
+			require.ErrorContains(t, errs[len(errs)-1], tc.want)
+		})
+	}
+}
+
 // exampleConfigPath returns the path to the repo's bundled
 // dingo.yaml.example, independent of the working directory the test binary
 // runs from.

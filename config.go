@@ -718,6 +718,11 @@ func (n *Node) configValidate() error {
 			return fmt.Errorf("invalid %s %d: must not be negative", name, v)
 		}
 	}
+	if errs := internalconfig.ValidateBarkEventSources(
+		n.config.cfg.BarkEventSources,
+	); len(errs) > 0 {
+		return errors.Join(errs...)
+	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
 		return fmt.Errorf(
 			"min pool margin (%d) must be in [0, 10000] basis points",
@@ -2049,6 +2054,19 @@ func WithShelleyKESAgentRemote(
 	}
 }
 
+// BarkEventSource names one node whose Bark EventService this node follows.
+type BarkEventSource = internalconfig.BarkEventSource
+
+// WithBarkEventSources makes the node follow the EventService of other nodes
+// and republish what it receives on its own EventBus as bark.remote_event.
+// It is off unless sources are given, and independent of whether this node
+// serves its own EventService.
+func WithBarkEventSources(sources ...BarkEventSource) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkEventSources = cloneBarkEventSources(sources)
+	}
+}
+
 // BlockProducerPool is one pool a block producer forges for: its VRF key and
 // operational certificate files and one KES source.
 type BlockProducerPool = internalconfig.BlockProducerPool
@@ -2955,6 +2973,26 @@ func (c *Config) BarkLifecycleEnabled() bool {
 // empty when a random one is drawn for each run.
 func (c *Config) BarkEventNodeID() string {
 	return c.cfg.BarkEventNodeID
+}
+
+// BarkEventSources returns the nodes whose EventService this node follows.
+func (c *Config) BarkEventSources() []BarkEventSource {
+	return cloneBarkEventSources(c.cfg.BarkEventSources)
+}
+
+// cloneBarkEventSources copies the filter slices as well as the sources, so
+// a caller's slice cannot change this node's filters after the fact.
+func cloneBarkEventSources(sources []BarkEventSource) []BarkEventSource {
+	if sources == nil {
+		return nil
+	}
+	out := make([]BarkEventSource, len(sources))
+	for i, src := range sources {
+		src.EventTypes = slices.Clone(src.EventTypes)
+		src.OriginNodeIDs = slices.Clone(src.OriginNodeIDs)
+		out[i] = src
+	}
+	return out
 }
 
 // BarkLifecycleOperatorCertificateFingerprints retains the legacy input.
