@@ -60,11 +60,12 @@ func TestWrappedInMemoryStoreMigratesItself(t *testing.T) {
 			}
 			require.NotEmpty(t, check, "migration runner never reported")
 			require.Contains(
-				t, check, "current_version=0 ",
+				t, check, "completed_migrations=0 ",
 				"wrapped store was restored from the template",
 			)
 
-			var complete, highest int
+			var complete int
+			var highest int64
 			require.NoError(t, writeDB.QueryRowContext(
 				t.Context(),
 				"SELECT COUNT(*), COALESCE(MAX(version), 0) "+
@@ -73,7 +74,7 @@ func TestWrappedInMemoryStoreMigratesItself(t *testing.T) {
 			).Scan(&complete, &highest))
 			require.Equal(t, len(registry), complete)
 			require.Equal(t, target, highest,
-				"schema not migrated to version "+strconv.Itoa(target))
+				"schema not migrated to version "+strconv.FormatInt(target, 10))
 		})
 	}
 }

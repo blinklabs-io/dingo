@@ -729,6 +729,23 @@ single-column marker is not used by the new store. `v1alpha1` also creates the
 `node_settings_gate` table described below: the schema is unreleased, so a new
 table belongs in the initial version rather than in a version of its own.
 
+Migration versions 1 through 75 are the released sequential history and remain
+unchanged. Each later migration has its own JSON manifest under
+`database/plugin/metadata/sqlstore/migrations/migration-manifests/`, with SQL
+under the matching `v<version>/<dialect>/` directory. Its stable version comes
+from `migrations.StableVersion` as an `int64`; the manifest records its version,
+immutable name, and predecessor. The int64 identifier remains intact on 32-bit
+builds. This lets independent branches add migrations without
+editing a shared registry list.
+Migrations with the same predecessor are ordered by stable version, and each
+predecessor is applied before its descendants. A database may already have one
+such sibling applied when another is added; the runner retains the completed
+migration and applies the missing sibling without replaying or reordering it.
+Stored versions are validated by identifier, checksum, and predecessor state;
+an incomplete migration requires its predecessor to be complete. Keep migration
+names unique and never change a released migration's name, version, predecessor,
+SQL, or backfill revision.
+
 Collateral inputs are stored in the `utxo_collateral_edge` association table,
 keyed by `(utxo_id, tx_id)` (`utxo_collateral_input` keyed by hash until
 schema version 61). This is the authoritative many-to-many
@@ -1122,7 +1139,7 @@ counter's sign bit at its SQL boundary, so signed `INTEGER`/`BIGINT` ordering
 matches the ledger's complete `uint64` domain while public values remain
 unchanged.
 
-The upgrade runner owns a `schema_migrations` row per contiguous integer version
+The upgrade runner owns a `schema_migrations` row per migration
 with `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`,
 `dirty`, Unix-millisecond `started_at`/`updated_at`, and nullable
 `completed_at`. Phases are `expand`, `backfill`, `contract`, and `complete`. The
@@ -1130,9 +1147,9 @@ runner marks a phase dirty before work, executes idempotent DDL, and commits
 each data batch and cursor checkpoint in the same transaction. SQLite also
 commits each expand DDL set and its phase advance in one transaction. The runner
 only marks a version complete after contract/index DDL succeeds. Completed
-checksum drift, registry gaps, unknown phases, inconsistent completion state,
-and a database newer than the binary are hard startup errors. File-backed SQLite
-uses a cross-process lock file and in-memory SQLite uses a process lock. Store
+checksum drift, missing predecessors, unknown phases, inconsistent completion
+state, and a database newer than the binary are hard startup errors. File-backed
+SQLite uses a cross-process lock file and in-memory SQLite uses a process lock. Store
 readiness remains false until the locked, offline run succeeds. PostgreSQL/MySQL
 advisory locks are connection-owned for the complete migration run. Bulk-load
 session settings are held on a dedicated connection for the duration of a bulk
@@ -4672,7 +4689,7 @@ such carrier; any other row is deleted, so the same transaction applied in a
 replacement block writes it afresh rather than leaving it naming an abandoned
 body that is released later. A script carried only in auxiliary data or a
 sub-transaction output has no indexed carrier, so neither step finds it.
-Migration v76 adds the indexes these lookups use, each a point
+Migration `active-payload-indexes` adds the indexes these lookups use, each a point
 read at 1,000,000 `utxo` rows: `idx_utxo_live_datum_hash` (partial on live rows
 with a datum hash; MySQL keeps a `(datum_hash(32), deleted_slot)` index),
 `idx_script_created_slot` and `idx_midnight_registrations_block_hash`. Not
@@ -6624,7 +6641,8 @@ Migration `v74` (`utxo-address-prefix-index-drop`, integer version 74) drops
 `idx_utxo_address_order`, which serves every exact-address lookup.
 `TestUtxoAddressPrefixIndexDropMigration` pins the drop.
 
-Migration `v76` (`active-payload-indexes`, integer version 76) adds
+Migration `active-payload-indexes` (identifier derived from its name,
+after `indexer-cbor-offsets`) adds
 `idx_utxo_live_datum_hash` (`utxo(datum_hash)` over live rows with a datum hash;
 MySQL, with no partial indexes, indexes `(datum_hash(32), deleted_slot)`),
 `idx_script_created_slot` and `idx_midnight_registrations_block_hash`, the
