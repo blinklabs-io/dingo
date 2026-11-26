@@ -45,11 +45,6 @@ import (
 //     decide whether to refuse startup or auto-repair.
 type DeferredIndexManager interface {
 	DropDeferredIndexes() error
-	// BuildCriticalDeferredIndexes rebuilds only the manifest
-	// entries marked Critical=true. Call this before marking the
-	// API ready so queries and rollbacks work immediately; follow
-	// up with BuildDeferredIndexes to finish the lazy remainder.
-	BuildCriticalDeferredIndexes() error
 	BuildDeferredIndexes() error
 	HasDeferredIndexesPending() (bool, error)
 }
@@ -58,30 +53,6 @@ type DeferredIndexManager interface {
 // drop used by bulk-load operations.
 type ContextDeferredIndexDropper interface {
 	DropDeferredIndexesContext(ctx context.Context) error
-}
-
-// MissingCriticalDeferredIndexLister is an optional companion to
-// DeferredIndexManager: it answers which critical manifest entries are absent
-// without building anything.
-//
-// BuildCriticalDeferredIndexes is silent while it runs, and building one index
-// on a multi-million-row table takes long enough that an operator watching
-// startup sees nothing at all until it finishes. A caller that can name the
-// missing entries first can attribute that wait while it is happening.
-// Stores that do not implement this report nothing and fall back to logging
-// after the fact.
-type MissingCriticalDeferredIndexLister interface {
-	// MissingCriticalDeferredIndexes returns the names of missing
-	// Critical=true manifest entries, in manifest order. It performs no DDL.
-	MissingCriticalDeferredIndexes() ([]string, error)
-}
-
-// ContextMissingCriticalDeferredIndexLister is the cancellable form of
-// MissingCriticalDeferredIndexLister for startup and restore operations.
-type ContextMissingCriticalDeferredIndexLister interface {
-	MissingCriticalDeferredIndexesContext(
-		ctx context.Context,
-	) ([]string, error)
 }
 
 // MissingDeferredIndexLister lists missing entries in the complete deferred
@@ -109,27 +80,6 @@ type ContextMissingDeferredIndexLister interface {
 type ContextDeferredIndexBuilder interface {
 	// BuildDeferredIndexesContext is BuildDeferredIndexes bound to ctx.
 	BuildDeferredIndexesContext(ctx context.Context) error
-}
-
-// ContextCriticalDeferredIndexBuilder rebuilds the startup-critical subset
-// using the caller's cancellation context.
-type ContextCriticalDeferredIndexBuilder interface {
-	BuildCriticalDeferredIndexesContext(ctx context.Context) error
-}
-
-// CriticalDeferredIndexProgressBuilder is the critical-subset counterpart of
-// DeferredIndexProgressBuilder, for startup and reinitialization repairs that
-// block chain ingest while they run and so must say what they are doing.
-type CriticalDeferredIndexProgressBuilder interface {
-	// BuildCriticalDeferredIndexesContextWithProgress rebuilds missing
-	// critical entries with ctx and leaves the recovery marker alone. before
-	// runs immediately before each DDL statement; after runs after a
-	// successful build with its elapsed duration.
-	BuildCriticalDeferredIndexesContextWithProgress(
-		ctx context.Context,
-		before func(string),
-		after func(string, time.Duration),
-	) error
 }
 
 // DeferredIndexProgressBuilder is an optional companion used by restore
