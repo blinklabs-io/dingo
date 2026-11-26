@@ -595,6 +595,7 @@ type Ouroboros struct {
 	leiosPersistGCStarted  atomic.Bool
 	leiosPersistGCMu       sync.Mutex
 	leiosPersistGCStop     chan struct{}
+	leiosPersistGCCancel   context.CancelFunc
 	leiosPersistGCDone     chan struct{}
 }
 
