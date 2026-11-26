@@ -201,7 +201,7 @@ jobs:
     timeout-minutes: 90
     env:
       CBOR_DATASET_REVISION: 'bfb004144bfdfab2ddf0cf48fd7d5731f072da52'
-      NDC_LEDGER_REVISION: '01d11b7c1e63dfa1d4b0b39182a9f8ceaf28f3d1'
+      AMARU_LEDGER_REVISION: '53467f05047cd6f5c05a81adb56058826d2e05a2'
       UPLC_CORPUS_SHA256: '8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f'
       TURBO_CORPUS_SHA256: '821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576'
     permissions:
@@ -251,10 +251,10 @@ jobs:
         if: github.ref_type == 'tag'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          repository: pragma-org/node-diversity-conformance
-          ref: ${{ env.NDC_LEDGER_REVISION }}
-          path: .conformance/node-diversity-conformance
-          sparse-checkout: scenarios/ledger-rules/fixtures
+          repository: pragma-org/amaru
+          ref: ${{ env.AMARU_LEDGER_REVISION }}
+          path: .conformance/amaru
+          sparse-checkout: crates/amaru-ledger/tests/data/transaction
           persist-credentials: false
       - name: Generate conformance reports
         if: github.ref_type == 'tag'

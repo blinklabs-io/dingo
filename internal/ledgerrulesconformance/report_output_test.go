@@ -16,13 +16,17 @@ package ledgerrulesconformance
 
 import (
 	"os"
+	"regexp"
 	"testing"
 	"time"
 )
 
+var datasetCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
 // TestWriteConformanceReport writes the ledger-rules report the release
 // workflow publishes. It does nothing unless DINGO_CONFORMANCE_OUTPUT is set,
-// and the report is kept even when it records failures.
+// and the report is kept even when it records failures. The report names the
+// Amaru commit of the corpus it ran against in DINGO_CONFORMANCE_REVISION.
 func TestWriteConformanceReport(t *testing.T) {
 	t.Parallel()
 	output := os.Getenv("DINGO_CONFORMANCE_OUTPUT")
@@ -33,10 +37,19 @@ func TestWriteConformanceReport(t *testing.T) {
 	if fixtures == "" {
 		t.Fatal("DINGO_CONFORMANCE_INPUT is required")
 	}
+	revision := os.Getenv("DINGO_CONFORMANCE_REVISION")
+	if !datasetCommitPattern.MatchString(revision) {
+		t.Fatalf(
+			"DINGO_CONFORMANCE_REVISION must be the 40-character Amaru commit "+
+				"that last changed the scenario corpus, got %q",
+			revision,
+		)
+	}
 	report, failures, err := GenerateReport(fixtures, time.Now())
 	if err != nil {
 		t.Fatalf("generate report: %v", err)
 	}
+	report.DatasetCommit = revision
 	if err := WriteReport(output, report); err != nil {
 		t.Fatalf("write report: %v", err)
 	}
