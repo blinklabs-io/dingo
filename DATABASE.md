@@ -3081,8 +3081,8 @@ and the batch applied again deletes the rest, then writes the puts after the
 wipe.
 
 A batch's `PruneNoncesBefore` first deletes the non-checkpoint nonces before
-its slot in as many transactions as they need, ahead of everything else the
-batch writes, because nothing bounds how many nonces a prune finds and the
+its slot in as many transactions as they need, after any `RowPut.WipePrefix`
+delete and ahead of the batch's other writes, because nothing bounds how many nonces a prune finds and the
 estimate does not count them. The batch's own prune then finds only the nonces
 the batch wrote. The delete is not journaled and does not move the tip, so a
 stopped attempt leaves part of them and the next prune finishes it.
@@ -4051,8 +4051,8 @@ whose estimated entries or bytes exceed half of `db.MaxBatchCount` or
 `db.MaxBatchSize` is split at point boundaries, never inside a point. Every
 transaction but the last leaves the tip and the nonces alone: the leading ones
 write the rows, accounts, reward records and snapshot and reward block ops too
-many for the last (every row of a batch with a reward epoch wipe), and the rest write UTxO changes with one journal record per
-point; the last writes the remaining changes, the other state rows and the
+many for the last (every row of a batch with a reward epoch wipe), and the
+rest write UTxO changes with one journal record per point; the last writes the remaining changes, the other state rows and the
 tip. The first transaction also writes the `mfailed` marker at the batch's
 first slot and the last removes it (or restores a lower mark already there),
 so a batch that stopped between transactions, by error or by crash, starts
