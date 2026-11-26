@@ -120,30 +120,3 @@ func TestPoolRetirementReadSeesItsTransactionsStagedRetirement(t *testing.T) {
 	require.Len(t, got, 1)
 	require.Equal(t, h.pool, got[0].PoolKeyHash)
 }
-
-// TestPoolReadUsesSetStateAfterUntrackedRetirements pins the set result when
-// metadata-only retirement rows do not appear in its pool history.
-func TestPoolReadUsesSetStateAfterUntrackedRetirements(t *testing.T) {
-	t.Parallel()
-	h := newPoolReadsHarness(t)
-	require.NoError(t, h.scenario.DB.Metadata().RetirePools(
-		nil, [][]byte{h.pool}, h.cur.EpochId+1, h.cur.StartSlot+5,
-	))
-	require.NoError(t, h.scenario.DB.Metadata().RetirePools(
-		nil, [][]byte{h.pool}, h.cur.EpochId, h.cur.StartSlot+6,
-	))
-	reached, _ := h.scenario.HideStoreReads(
-		"GetPoolsRetiringAtEpoch", "GetActivePoolKeyHashesAtSlot",
-		"GetActivePoolKeyHashes",
-	)
-	ldb := h.scenario.LedgerDB()
-	retiring, err := ldb.GetPoolsRetiringAtEpoch(
-		t.Context(), h.cur.EpochId+1, h.nextStart(), nil,
-	)
-	require.NoError(t, err)
-	require.Empty(t, retiring)
-	active, err := ldb.GetActivePoolKeyHashesAtSlot(h.cur.StartSlot+1000, nil)
-	require.NoError(t, err)
-	require.Equal(t, [][]byte{h.pool}, active)
-	require.Zero(t, reached(), "pool reads reached the metadata store")
-}

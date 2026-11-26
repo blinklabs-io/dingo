@@ -30,14 +30,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMigrateToSplitRecoversInterruptedRestoreBeforeOpeningStores(t *testing.T) {
+func TestMigrateToIndexerDBRecoversInterruptedRestoreBeforeOpeningStores(t *testing.T) {
 	t.Parallel()
 	cfg, tip := storageadopt.SeedAPIStore(t, "api", 5)
 	backupDir := cfg.DatabasePath + ".pre-restore"
 	require.NoError(t, os.Rename(cfg.DatabasePath, backupDir))
-	require.NoError(t, node.MigrateToSplit(t.Context(), cfg, storageadopt.MigrateTestLogger()))
+	require.NoError(t, node.MigrateToIndexerDB(t.Context(), cfg, storageadopt.MigrateTestLogger()))
 	require.FileExists(t, filepath.Join(filepath.Join(cfg.DatabasePath, "indexer"), "metadata.sqlite"))
-	storageadopt.RequireSplitStores(t, cfg, tip, 5)
+	storageadopt.RequireIndexerDBStores(t, cfg, tip, 5)
 	require.NoDirExists(t, backupDir)
 }
 
@@ -49,6 +49,7 @@ func TestRestoreAdoptsLegacySQLiteAPIStore(t *testing.T) {
 	rt, err := internalplugins.OpenDatabase(
 		ctx,
 		&database.Config{
+			Role:    database.RoleReleased,
 			DataDir: cfg.DatabasePath, Logger: logger, StorageMode: "api",
 			Network: cfg.Network,
 		},
@@ -73,5 +74,5 @@ func TestRestoreAdoptsLegacySQLiteAPIStore(t *testing.T) {
 	cfg.DatabasePath = filepath.Join(testutil.OwnerOnlyTempDir(t), "target")
 	_, err = dblifecycle.NewService(cfg, nil, logger).Restore(ctx, snap)
 	require.NoError(t, err)
-	storageadopt.RequireSplitStores(t, cfg, tip, 5)
+	storageadopt.RequireIndexerDBStores(t, cfg, tip, 5)
 }

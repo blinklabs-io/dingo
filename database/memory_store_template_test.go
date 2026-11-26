@@ -53,6 +53,7 @@ func TestInMemoryTestDatabaseStartsFromMigratedSchema(t *testing.T) {
 			db, err := newTestDatabase(t, &Config{
 				DataDir:     "",
 				StorageMode: mode,
+				Role:        RoleIndexer,
 				Logger:      slog.New(slog.NewTextHandler(&logs, nil)),
 			})
 			require.NoError(t, err)

@@ -84,6 +84,8 @@ type Querier interface {
 	DeleteRewardStakeInputsForEpoch(ctx context.Context, epoch int64) error
 	DeleteSyncState(ctx context.Context, syncKey string) error
 	DeleteTransactionMetadataLabelsAfterSlot(ctx context.Context, slot sql.NullInt64) error
+	DeleteTransactionOffset(ctx context.Context, hash []byte) error
+	DeleteUtxoOffset(ctx context.Context, arg DeleteUtxoOffsetParams) error
 	FindMidnightAriadneRollbacksByBlock(ctx context.Context, blockNumber int64) ([]MidnightAriadneRollback, error)
 	FindMidnightCandidateRemovalsByBlock(ctx context.Context, blockNumber int64) ([]MidnightCandidateRemoval, error)
 	FindUnspentMidnightAssetCreates(ctx context.Context) ([]MidnightAssetCreate, error)
@@ -98,7 +100,6 @@ type Querier interface {
 	GetBlockNonce(ctx context.Context, arg GetBlockNonceParams) ([]byte, error)
 	GetBlockNoncesInSlotRange(ctx context.Context, arg GetBlockNoncesInSlotRangeParams) ([]BlockNonce, error)
 	GetBlockSlotRangeStats(ctx context.Context, arg GetBlockSlotRangeStatsParams) (GetBlockSlotRangeStatsRow, error)
-	GetCommitTimestamp(ctx context.Context) (sql.NullInt64, error)
 	GetCommitteeMembers(ctx context.Context) ([]CommitteeMember, error)
 	GetCommitteeMembersIncludeDeleted(ctx context.Context) ([]CommitteeMember, error)
 	GetCommitteeQuorum(ctx context.Context) (sql.NullString, error)
@@ -133,7 +134,6 @@ type Querier interface {
 	GetEpochs(ctx context.Context) ([]GetEpochsRow, error)
 	GetEpochsByEra(ctx context.Context, eraID sql.NullInt64) ([]GetEpochsByEraRow, error)
 	GetExpiredDReps(ctx context.Context, expiryEpoch sql.NullInt64) ([]Drep, error)
-	GetImportCheckpoint(ctx context.Context, importKey string) (ImportCheckpoint, error)
 	GetImportedEpochBlockTotal(ctx context.Context, epoch int64) (int64, error)
 	GetImportedPoolBlockCounts(ctx context.Context, epoch int64) ([]GetImportedPoolBlockCountsRow, error)
 	GetLastBlockNonceInRange(ctx context.Context, arg GetLastBlockNonceInRangeParams) ([]byte, error)
@@ -176,8 +176,10 @@ type Querier interface {
 	GetTransactionHashesAfterSlot(ctx context.Context, slot sql.NullInt64) ([][]byte, error)
 	GetTransactionIDByHash(ctx context.Context, hash []byte) (int64, error)
 	GetTransactionMetadataByHash(ctx context.Context, hash []byte) ([]byte, error)
+	GetTransactionOffset(ctx context.Context, hash []byte) ([]byte, error)
 	GetTransactionSlotByHash(ctx context.Context, hash []byte) (sql.NullInt64, error)
 	GetTransactionsByBlockHash(ctx context.Context, blockHash []byte) ([]GetTransactionsByBlockHashRow, error)
+	GetUtxoOffset(ctx context.Context, arg GetUtxoOffsetParams) ([]byte, error)
 	GetUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetUtxoRefsBySlotRow, error)
 	ImportAccount(ctx context.Context, arg ImportAccountParams) (int64, error)
 	ImportDrep(ctx context.Context, arg ImportDrepParams) (int64, error)
@@ -208,20 +210,20 @@ type Querier interface {
 	SaveRewardStakeInput(ctx context.Context, arg SaveRewardStakeInputParams) (int64, error)
 	SetBackfillCheckpoint(ctx context.Context, arg SetBackfillCheckpointParams) (int64, error)
 	SetBlockNonce(ctx context.Context, arg SetBlockNonceParams) error
-	SetCommitTimestamp(ctx context.Context, timestamp sql.NullInt64) error
 	SetCommitteeMember(ctx context.Context, arg SetCommitteeMemberParams) (int64, error)
 	SetCommitteeQuorum(ctx context.Context, arg SetCommitteeQuorumParams) error
 	SetConstitution(ctx context.Context, arg SetConstitutionParams) (int64, error)
 	SetDatum(ctx context.Context, arg SetDatumParams) error
 	SetDrep(ctx context.Context, arg SetDrepParams) error
 	SetEpoch(ctx context.Context, arg SetEpochParams) error
-	SetImportCheckpoint(ctx context.Context, arg SetImportCheckpointParams) error
 	SetNetworkState(ctx context.Context, arg SetNetworkStateParams) error
 	SetOffchainMetadataFetchResult(ctx context.Context, arg SetOffchainMetadataFetchResultParams) error
 	SetPParamUpdate(ctx context.Context, arg SetPParamUpdateParams) error
 	SetPParams(ctx context.Context, arg SetPParamsParams) error
 	SetSyncState(ctx context.Context, arg SetSyncStateParams) error
 	SetTip(ctx context.Context, arg SetTipParams) error
+	SetTransactionOffset(ctx context.Context, arg SetTransactionOffsetParams) error
+	SetUtxoOffset(ctx context.Context, arg SetUtxoOffsetParams) error
 	SoftDeleteAllCommitteeMembers(ctx context.Context, deletedSlot sql.NullInt64) error
 	SoftDeleteCommitteeMember(ctx context.Context, arg SoftDeleteCommitteeMemberParams) error
 	SumPoolStakeSnapshots(ctx context.Context, arg SumPoolStakeSnapshotsParams) ([]string, error)

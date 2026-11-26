@@ -33,7 +33,7 @@ func TestLoadedImportedBlocksAreDroppedByARollbackBelowTheirCapture(
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
+	db := releasedAt(t, slotPoint(8))
 	pool := bytes.Repeat([]byte{0x31}, 28)
 	meta := db.Metadata()
 	for _, c := range []struct{ epoch, slot, blocks uint64 }{

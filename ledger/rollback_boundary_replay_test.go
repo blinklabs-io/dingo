@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -309,18 +310,7 @@ func seedReplayOutput(
 	t.Helper()
 	txID := bytes.Repeat([]byte{id}, 32)
 	encoded := replayStakedOutputCbor(t, stakingKey, amount)
-	require.NoError(t, db.Transaction(context.Background(), true).Do(
-		func(txn *database.Txn) error {
-			if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
-				TxId:       txID,
-				StakingKey: stakingKey,
-				Amount:     types.Uint64(amount),
-			}); err != nil {
-				return err
-			}
-			return db.Blob().SetUtxo(txn.Blob(), txID, 0, encoded)
-		},
-	))
+	fxSeedOutput(t, db, txID, 0, 0, encoded)
 }
 
 // addUtxo puts a live output of amount, staked to stakingKey and created at
@@ -711,7 +701,7 @@ func TestRollbackDiscardsPendingRewardStakeInputsOfRewoundBoundary(
 
 	h.rollbackBeforeBoundary()
 
-	pending, err := loadRewardStakeInputsPending(h.ls.ledgerDB(), nil)
+	pending, err := epochengine.LoadRewardStakeInputsPending(h.ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.Empty(t, pending.Entries,
 		"the rollback deleted the snapshot the entry describes")

@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -35,7 +34,6 @@ import (
 	rtrace "runtime/trace"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,17 +43,16 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -77,11 +74,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/attribute"
 )
-
-// cleanupConsumedUtxosInterval is the period between consumed-UTxO cleanup
-// runs. A var, like the Close* drain timeouts below, so lifecycle tests can
-// shrink it instead of waiting on a real multi-minute timer.
-var cleanupConsumedUtxosInterval = 5 * time.Minute
 
 // snapshotGenerationCounter gives every publication in this process a unique
 // generation. A live Restore or Truncate replaces LedgerState while consumers
@@ -128,16 +120,12 @@ var (
 )
 
 const (
-	// Keep each cleanup transaction short enough that it cannot monopolize
-	// SQLite while blockfetch handlers persist sync state during shutdown or
-	// catch-up. Later timer or epoch-boundary runs continue the cleanup.
-	cleanupConsumedUtxoBatchSize = 1_000
-	batchSize                    = 50 // Number of blocks to process in a single DB transaction
-	ledgerIntersectDenseCount    = 32
-	ledgerAncestorSearchWindow   = 10_000
-	firstBlockIndex              = 1
-	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
-	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
+	batchSize                  = 50 // Number of blocks to process in a single DB transaction
+	ledgerIntersectDenseCount  = 32
+	ledgerAncestorSearchWindow = 10_000
+	firstBlockIndex            = 1
+	mithrilLedgerSlotSyncKey   = "mithril_ledger_slot"
+	mithrilLedgerHashSyncKey   = "mithril_ledger_hash"
 	// blockPipelineMinWorkers is the decode/validate worker count
 	// blockPipelineWorkerCount falls back to on a host that reports fewer
 	// CPUs than this (including GOMAXPROCS(1)). It is the prior hardcoded
@@ -372,15 +360,12 @@ func (ls *LedgerState) SubmitAsyncDBOperation(
 
 // SubmitAsyncDBTxn submits a database transaction operation for execution on the worker pool.
 // This method blocks waiting for the result and must be called after Start() and before Close().
-// If a partial commit occurs (blob committed but metadata failed), this method will attempt
-// to trigger database recovery to restore consistency.
 func (ls *LedgerState) SubmitAsyncDBTxn(
 	ctx context.Context,
 	opFunc func(txn ledgerdb.Txn) error,
 	readWrite bool,
 ) error {
-	err := ls.submitDBTxnOperation(ctx, opFunc, readWrite, "")
-	return ls.handleDBTxnResult(ctx, err)
+	return ls.submitDBTxnOperation(ctx, opFunc, readWrite, "")
 }
 
 // submitDBTxnOperation runs opFunc in a transaction on the database worker.
@@ -408,56 +393,6 @@ func (ls *LedgerState) submitDBTxnOperation(
 		}
 		return nil
 	})
-}
-
-func (ls *LedgerState) handleDBTxnResult(ctx context.Context, err error) error {
-	// Check for partial commit and trigger recovery if needed.
-	// Guard against recursive recovery: if we're already in recovery and another
-	// PartialCommitError occurs, don't attempt recovery again to prevent unbounded recursion.
-	var partialCommitErr database.PartialCommitError
-	if err != nil && errors.As(err, &partialCommitErr) {
-		ls.Lock()
-		alreadyInRecovery := ls.inRecovery
-		if !alreadyInRecovery {
-			ls.inRecovery = true
-		}
-		ls.Unlock()
-
-		if alreadyInRecovery {
-			ls.config.Logger.Error(
-				"partial commit detected during recovery, skipping nested recovery: " + err.Error(),
-			)
-			return err
-		}
-
-		defer func() {
-			ls.Lock()
-			ls.inRecovery = false
-			ls.Unlock()
-		}()
-
-		ls.config.Logger.Error(
-			"partial commit detected, attempting recovery: " + err.Error(),
-		)
-		// Attempt to recover from the partial commit state
-		if recoveryErr := ls.RecoverCommitTimestampConflict(context.WithoutCancel(ctx)); recoveryErr != nil {
-			ls.config.Logger.Error(
-				"failed to recover from partial commit: " + recoveryErr.Error(),
-			)
-			// Return both errors joined to preserve error chain for errors.Is checks
-			return errors.Join(err, recoveryErr)
-		}
-		ls.config.Logger.Info("successfully recovered from partial commit")
-		// Return an error so callers know the operation failed and should retry.
-		// Recovery restored consistency but did NOT complete the original transaction.
-		// Wrap the underlying metadata error (not PartialCommitError) so callers
-		// won't match errors.Is(err, types.ErrPartialCommit) and attempt recovery again.
-		return fmt.Errorf(
-			"transaction failed, recovered from partial commit: %w",
-			partialCommitErr.MetadataErr,
-		)
-	}
-	return err
 }
 
 // blockApplyCandidatePoint returns the last block that the block-apply
@@ -798,7 +733,7 @@ func (ls *LedgerState) submitBlockApplyDBTxn(
 	region string,
 	opFunc func(txn ledgerdb.Txn) error,
 ) error {
-	err := func() error {
+	return func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
 
@@ -827,10 +762,6 @@ func (ls *LedgerState) submitBlockApplyDBTxn(
 			return opFunc(txn)
 		}, true, region)
 	}()
-	// Partial-commit recovery can itself rewind the primary chain, so it must
-	// run after releasing transactionEventMutex rather than recursively trying
-	// to acquire it from rollbackPrimaryChainInSecurityParamWindows.
-	return ls.handleDBTxnResult(ctx, err)
 }
 
 func (ls *LedgerState) lifecycleContext() context.Context {
@@ -1267,15 +1198,13 @@ type LedgerStateConfig struct {
 	// before being handed to ledgerProcessBlocksFromSource exactly as
 	// today. Validation and apply are untouched -- this only changes how
 	// CBOR decode work is scheduled. Off by default: throughput and
-	// stability are still being proven. See
-	// ARCHITECTURE.md ("Block Processing Pipeline").
+	// stability are still being proven. See ledgerReadChainIterator.
 	//
 	// A rollback drains blockPipeline's in-flight decode/validate backlog
 	// (drainBlockPipelineBeforeRollback) before it
 	// proceeds, to shrink -- not eliminate -- the window in which an
 	// already-in-flight batch from an abandoned fork could otherwise be
-	// applied after the rollback. See ARCHITECTURE.md ("Phase 5: rollback
-	// coordination").
+	// applied after the rollback. See drainBlockPipelineBeforeRollback.
 	BlockPipelineEnabled bool
 	// BlockPipelineValidateEnabled checks header cryptography serially in
 	// decodeReadChainBatch for blocks read back during replay; the pipeline
@@ -1288,8 +1217,7 @@ type LedgerStateConfig struct {
 	// VerifyBlock checks the OpCert cold signature ungated by any
 	// VerifyConfig Skip field, so the default serial path pays it too, where
 	// verifyBlockHeaderCrypto calls verifyBlockHeaderHex and
-	// verifyOpCertHeaderCrypto back to back. See ARCHITECTURE.md
-	// ("Operational Certificate Validation").
+	// verifyOpCertHeaderCrypto back to back.
 	// It enforces results only where the serial path has validation state:
 	// not trusted historical/Mithril replay and only with a cached epoch
 	// nonce. A rejection is returned as headerValidationError so the already-
@@ -1298,7 +1226,7 @@ type LedgerStateConfig struct {
 	// This is defense in depth, not a replacement for admission validation.
 	// Headers and blocks remain fully checked before entering ls.chain because
 	// that chain is served to downstream clients before ledger apply. See
-	// ARCHITECTURE.md ("Block Processing Pipeline").
+	// ledgerReadChainIterator.
 	//
 	// This flag's extra CPU cost (two dedicated VRF/KES workers) can make
 	// block-apply throughput fall behind header arrival during bursty
@@ -1313,9 +1241,7 @@ type LedgerStateConfig struct {
 	// tryResolveFork, not specific to this flag (reproduced live under
 	// this flag, under decode-only, and under the pre-pipeline baseline
 	// alike); the flag's throughput cost just makes it easier to reach.
-	// See ensureBlockfetchDrainingAfterForkQueueFailure and
-	// ARCHITECTURE.md ("Fork-resolution header-queue overflow must still
-	// restart blockfetch") for the fix and the full explanation.
+	// See ensureBlockfetchDrainingAfterForkQueueFailure for the drain invariant.
 	BlockPipelineValidateEnabled bool
 	// LedgerPrefetchAheadEnabled resolves the input UTxOs of block k+1 on a
 	// separate goroutine, from a read-only transaction, while block k applies
@@ -1326,14 +1252,6 @@ type LedgerStateConfig struct {
 	// Mithril-covered blocks read no inputs. Not consensus-affecting. The
 	// zero value is off; node configuration turns it on by default.
 	LedgerPrefetchAheadEnabled bool
-	// ApplyRowBatchingEnabled writes the accumulated deltas of blocks that
-	// are not validated through the metadata store's batched path in core
-	// storage mode, as API storage mode already does. Validated blocks, Leios
-	// endorser-block applies, and batches applied with closure context keep
-	// the per-transaction path in every storage mode. Off by default; the stored
-	// state is identical either way. See ARCHITECTURE.md ("Block Processing
-	// Pipeline").
-	ApplyRowBatchingEnabled bool
 	// LedgerValidateAheadEnabled runs the validation work that reads no ledger
 	// state ahead of the serial apply loop: the vkey and bootstrap witness
 	// signatures of every validated block of a block-apply chunk are verified
@@ -1414,6 +1332,12 @@ type EndorserBlockValidationFunc func(
 // ctx bounds the whole fetch, including its per-connection failover. The caller
 // owns the budget: block application waits for this fetch, so an implementation
 // must not outlive the context it was handed.
+//
+// A connection already serving another fetch is skipped rather than waited
+// for, so a background prefetch fails over or gives up promptly. When ctx is
+// marked with WithRequiredEndorserBlockFetch and every usable connection is
+// busy, the implementation instead waits for one to become free, bounded by
+// ctx, because the caller cannot make progress without the endorser block.
 type EndorserBlockFetcherFunc func(
 	ctx context.Context,
 	ebSlot uint64,
@@ -1427,6 +1351,23 @@ type EndorserBlockFetcherFunc func(
 var ErrEndorserBlockFetchNoPeer = errors.New(
 	"no leios-fetch connection available",
 )
+
+type requiredEndorserBlockFetchKey struct{}
+
+// WithRequiredEndorserBlockFetch marks ctx as carrying a mandatory fetch: the
+// certified closure of a ranking block that block application is waiting for.
+// An EndorserBlockFetcherFunc handed such a context waits, within ctx, for a
+// busy leios-fetch connection instead of returning at once with a busy error.
+func WithRequiredEndorserBlockFetch(ctx context.Context) context.Context {
+	return context.WithValue(ctx, requiredEndorserBlockFetchKey{}, true)
+}
+
+// IsRequiredEndorserBlockFetch reports whether ctx was marked by
+// WithRequiredEndorserBlockFetch.
+func IsRequiredEndorserBlockFetch(ctx context.Context) bool {
+	required, _ := ctx.Value(requiredEndorserBlockFetchKey{}).(bool)
+	return required
+}
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a
 // blockfetch request for a range of blocks. It returns the request ID the
@@ -1572,9 +1513,6 @@ type tipSnapshot struct {
 }
 
 type LedgerState struct {
-	// cleanupBatchSizeOverride replaces cleanupConsumedUtxoBatchSize when
-	// positive so tests can exercise the batch bound with a few rows.
-	cleanupBatchSizeOverride int
 	// A single successful-decode receipt retains only a manifest hash. Count
 	// readers still reload and hash every body before reusing that proof.
 	certifiedClosureReceipt atomic.Pointer[lcommon.Blake2b256]
@@ -1725,9 +1663,6 @@ type LedgerState struct {
 	// resumingUtxoSet is set while ResumeUtxoSetFrom rolls the ledger back
 	// to a set that already stands at the target.
 	resumingUtxoSet atomic.Bool
-	// drainedFamilies is the nodesettings.FamilyMask of ledger-state
-	// families whose SQL rows are gone. It only widens.
-	drainedFamilies atomic.Uint64
 	// utxoSetBatches holds each open write transaction's changes for
 	// config.UtxoSet until it commits.
 	utxoSetMu      sync.Mutex
@@ -1795,6 +1730,8 @@ type LedgerState struct {
 	// opCertsSetLoaded caches that the set holds every pool's op-cert
 	// counter.
 	opCertsSetLoaded atomic.Bool
+	// txIndexSetLoaded caches that the LedgerDB holds the transaction index.
+	txIndexSetLoaded atomic.Bool
 	// rewardBlocksSetLoaded caches that the set holds the block counts and
 	// fees of every epoch reward calculation can read.
 	rewardBlocksSetLoaded atomic.Bool
@@ -1834,12 +1771,10 @@ type LedgerState struct {
 	// mempool is installed by SetMempool but read by the forger on its own
 	// goroutine, so it is an atomic pointer: a late or repeated SetMempool
 	// is race-free and the latest provider wins.
-	mempool                     atomic.Pointer[MempoolProvider]
-	timerCleanupConsumedUtxos   *time.Timer
-	cleanupConsumedUtxosRunning atomic.Bool
-	Scheduler                   *Scheduler
-	chain                       *chain.Chain
-	db                          *database.Database
+	mempool   atomic.Pointer[MempoolProvider]
+	Scheduler *Scheduler
+	chain     *chain.Chain
+	db        *database.Database
 	// ldb, when set, replaces the LedgerDB derived from db; see ledgerDB.
 	ldb                         ledgerdb.LedgerDB
 	chainsyncState              ChainsyncState
@@ -1873,26 +1808,18 @@ type LedgerState struct {
 	slotClock    *SlotClock
 	slotTickChan <-chan SlotTick
 	ctx          context.Context
-	// cleanupMu owns timerCleanupConsumedUtxos and serializes cleanup-run
-	// registration against Close. Deliberately not the LedgerState RWMutex:
-	// Close waits on cleanupWG while an in-flight run still needs RLock to
-	// read the tip, so draining under the ledger lock would deadlock.
-	cleanupMu sync.Mutex
-	// cleanupWG counts consumed-UTxO cleanup runs that have passed the
-	// closed check, so Close can join one already touching the database.
-	cleanupWG sync.WaitGroup
 	// leiosBackfill prefetches historical Leios endorser blocks by point ahead
 	// of the apply cursor (nil when no endorser-block fetcher is configured).
 	leiosBackfill *leiosBackfiller
 	sync.RWMutex
 	chainsyncMutex sync.Mutex
-	// consumedUtxoPruneMutex serializes irreversible consumed-UTxO cleanup
-	// with rollback flows that may truncate the primary chain before restoring
-	// ledger metadata. It must never be held while acquiring chainsyncMutex;
-	// ChainSync handlers already hold chainsyncMutex when they enter rollback.
-	consumedUtxoPruneMutex sync.Mutex
-	// acquiredPins tracks LocalStateQuery points currently acquired, so the
-	// consumed-UTxO and pool-snapshot pruning paths retain what they need.
+	// rollbackMutex serializes the rollback flows that truncate the primary
+	// chain before they roll the ledger back. It must never be held while
+	// acquiring chainsyncMutex; ChainSync handlers already hold
+	// chainsyncMutex when they enter rollback.
+	rollbackMutex sync.Mutex
+	// acquiredPins tracks LocalStateQuery points currently acquired, so
+	// pool-snapshot pruning retains what they need.
 	// See acquiredPointPins.
 	acquiredPins                  acquiredPointPins
 	chainsyncBlockfetchMutex      sync.Mutex
@@ -1922,11 +1849,11 @@ type LedgerState struct {
 	// applied.
 	//
 	// Only the locally forged sibling adoption bumps it. The chainsync
-	// rollback paths (handleEventChainsyncRollback, tryResolveFork) re-queue
-	// the winning fork's headers and restart blockfetch under
-	// chainsyncBlockfetchMutex, which supersedes the in-flight batch by
-	// itself; AdoptLocalForgedSibling does neither -- it rolls back and
-	// adopts from the forge loop, holding only chainsyncMutex.
+	// rollback paths (handleEventChainsyncRollback, finishForkCandidate)
+	// re-queue the winning fork's headers and restart blockfetch or insert the
+	// validated fork's bodies under chainsyncBlockfetchMutex, which supersedes
+	// the in-flight batch by itself; AdoptLocalForgedSibling does neither -- it
+	// rolls back and adopts from the forge loop, holding only chainsyncMutex.
 	//
 	// Atomic because the bump happens under chainsyncMutex while the read
 	// happens under chainsyncBlockfetchMutex.
@@ -1998,6 +1925,7 @@ type LedgerState struct {
 	blockfetchContinuationPending bool
 	blockfetchContinuationMu      sync.Mutex
 	blockfetchContinuationWG      sync.WaitGroup
+	forkCandidate                 *forkCandidate
 	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
 	pendingBlockfetchEvents       []BlockfetchEvent
 	activeBlockfetchStart         time.Time           // when RequestRange was issued (for latency measurement)
@@ -2081,7 +2009,7 @@ type LedgerState struct {
 	// across the pool-snapshot prune (nor deletePersistedDeferredMarkers across
 	// its delete): those can open the single SQLite write connection, and block
 	// apply holds that connection before taking this mutex via
-	// consumeDeferredHeaderValidation, so holding it across that write inverts the
+	// takeDeferredHeaderValidation, so holding it across that write inverts the
 	// lock order and deadlocks the node. The eviction+floor read is
 	// atomic; a header admitted after the lock is released is handled by the next
 	// cleanup pass (the floor is a lower-watermark recomputed each pass). Each
@@ -2111,7 +2039,6 @@ type LedgerState struct {
 	closeMu                         sync.Mutex
 	closeDone                       chan struct{}
 	closeErr                        error
-	inRecovery                      bool // guards against recursive recovery in SubmitAsyncDBTxn
 	lastAtTipRecovery               *atTipRecoveryAttempt
 	atTipRecoveryFloor              *atTipRecoveryFloor
 	lastHeaderValidationFailure     *headerValidationError
@@ -2193,6 +2120,10 @@ type LedgerState struct {
 		uint64,
 		ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error)
+	// boundarySnapshotSeam holds the boundary snapshots in place of the live
+	// UTxO set's rows for the rebuild tests, which drop them to model a
+	// database that holds none. Production leaves it nil.
+	boundarySnapshotSeam governanceBoundarySeam
 	// lastIntersectAnchorFallbackWarn throttles
 	// warnIntersectAnchorFallback. Unix nanoseconds; 0 means never warned.
 	lastIntersectAnchorFallbackWarn atomic.Int64
@@ -2358,20 +2289,6 @@ type LedgerState struct {
 	// window in the normal block-apply path.
 	afterBlockApplyCommit func()
 
-	// afterBatchedTransactionWrite is a test-only observation hook, nil in
-	// production. LedgerDelta applies call it after each transaction body
-	// they write through the batched metadata path, so a test can tell that
-	// path from the per-row one, which stores the same state.
-	afterBatchedTransactionWrite func()
-	// afterBatchedTransactionStored is a test-only hook, nil in production.
-	// It runs where afterBatchedTransactionWrite does, inside the block-apply
-	// transaction, so a test can read the store mid-batch; its error fails
-	// the transaction write.
-	afterBatchedTransactionStored func(ledgerdb.Txn, lcommon.Transaction) error
-	// beforeReplayRowFlush is a test-only observation hook, nil in
-	// production. It runs immediately before a chunk's replay-row flush, so a
-	// test can place a known delay inside that flush's apply sample.
-	beforeReplayRowFlush func()
 	// externalIngest pauses the chain-iterator loop so ApplyTrustedBatch can
 	// be the only block-apply writer. See external_ingest.go.
 	externalIngest externalIngestState
@@ -2389,14 +2306,6 @@ type LedgerState struct {
 	// trustedBatchSplit is a test-only hook, nil in production, called with
 	// the number of blocks left whenever a trusted batch is split.
 	trustedBatchSplit func(remaining int)
-	// trustedBatchOverlayOff is a test-only switch, false in production. It
-	// keeps ApplyTrustedBatch on the per-row UTxO path, the reference the
-	// overlay path is compared against.
-	trustedBatchOverlayOff bool
-	// afterTrustedBatchOverlay is a test-only observation hook, nil in
-	// production, called each time a block-apply transaction enables the
-	// batch UTxO overlay.
-	afterTrustedBatchOverlay func()
 	// afterTrustedBatchGuard is a test-only sequencing hook, nil in
 	// production. ApplyTrustedBatch calls it after its tip guard passes and
 	// before it stores or applies anything.
@@ -2411,13 +2320,6 @@ type LedgerState struct {
 	// window between that snapshot and the later, transactionEventMutex-
 	// held undo-block resolution, without relying on scheduler timing.
 	beforeReconciliationUndoSnapshot func()
-	// beforeCommitRecoveryMutationBarrier is a test-only sequencing hook, nil
-	// in production. It runs after recovery samples the chain tip and before it
-	// enters the chain mutation barrier.
-	beforeCommitRecoveryMutationBarrier func()
-	// beforeCommitRecoveryCleanup is a test-only sequencing hook, nil in
-	// production. It runs after the chain rewind and before orphan cleanup.
-	beforeCommitRecoveryCleanup func() error
 
 	// beforeReadResultDoneSignal is a test-only hook called once per
 	// ledgerProcessBlocksFromSource outer-loop pass, immediately before that
@@ -2464,9 +2366,8 @@ type LedgerState struct {
 	// rollback bracket's generation bump. The write phase holds it from its
 	// guard through commit, and the bump takes it, so any write that passed
 	// the guard has committed before the rollback's truncation starts and
-	// that truncation deletes its rows. SQLite's single write connection
-	// already imposes this order; Postgres and MySQL run the two transactions
-	// concurrently, and without it the stale write lands after the delete.
+	// that truncation deletes its rows. The two transactions otherwise run
+	// concurrently, and the stale write would land after the delete.
 	rewardPrecomputeWriteMu sync.Mutex
 	// rewardPrecomputeBeforeSaveHook is a test seam, nil in production. It
 	// runs inside the precompute write transaction after the rollback guard
@@ -2598,6 +2499,9 @@ type LedgerState struct {
 	forkHeaderNonceCacheMutex sync.Mutex
 	forkHeaderNonceCache      map[string]map[uint64]peerForkNoncePrefix
 	forkHeaderPathCache       map[string]peerForkPathPrefix
+	// Admission and rollback replay share each peer's mutable fork proof.
+	// Stripes serialize those checks without retaining locks for closed peers.
+	peerHeaderVerificationMutex [64]sync.Mutex
 	// statelessHeaderVerdicts shares successful stateless header crypto
 	// verdicts across peer connections.
 	statelessHeaderVerdicts statelessHeaderVerdictCache
@@ -2612,24 +2516,6 @@ type LedgerState struct {
 	// Test hook called after Close releases the blockfetch continuation mutex
 	// and before it waits for continuation workers.
 	blockfetchContinuationSchedulingHook func()
-	// Test hook called at the top of the consumed-UTxO cleanup timer
-	// callback, before any shutdown check, so a lifecycle test can observe
-	// whether the timer itself is still armed.
-	cleanupConsumedUtxosTimerFiredHook func()
-	// Test hook called inside a cleanup run that has registered with
-	// cleanupWG, so a lifecycle test can hold a run in flight and assert
-	// that Close drains it.
-	cleanupConsumedUtxosRunHook func()
-	// trustedPruneRows, when positive, replaces trustedBatchPruneRows as the
-	// per-delete row limit of the trusted-batch cleanup. Test only.
-	trustedPruneRows int
-	// trustedPruneEvery, when positive, replaces trustedBatchPruneEvery as
-	// the number of trusted batches between trusted-batch cleanups. Test
-	// only.
-	trustedPruneEvery int
-	// trustedPruneBudget, when positive, replaces trustedBatchPruneBudget.
-	// Test only.
-	trustedPruneBudget time.Duration
 	// startupRewardPrecomputeHook is test-only observability for the startup
 	// catch-up boundary; it runs after the real queue call.
 	startupRewardPrecomputeHook func()
@@ -2790,9 +2676,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// enabled, validated) results back into submission order, which
 		// is the whole job dingo needs from it.
 		//
-		// This is a recorded decision, not an unfinished pipeline phase:
-		// see ARCHITECTURE.md, "Why dingo's ledger apply is not wired into
-		// pipeline.ApplyFunc". Although the library now stops on rejection,
+		// Although the library stops on rejection,
 		// its per-item callback still cannot express Dingo's batch transaction,
 		// epoch rollover, and synchronous retry contract.
 		workerCount := blockPipelineWorkerCount()
@@ -3247,8 +3131,6 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.config.Logger.Info("database worker pool disabled")
 	}
 
-	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
-	ls.scheduleCleanupConsumedUtxos(ctx)
 	// Load epoch info from DB
 	//nolint:contextcheck // loadEpochs reads through txn; only the bounded startup lab-nonce heal opens its own transaction
 	err := ls.SubmitAsyncDBTxn(ctx, func(txn ledgerdb.Txn) error {
@@ -3340,8 +3222,17 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.recoverRollbackIntent(ctx); err != nil {
 		return fmt.Errorf("recover interrupted ledger rollback: %w", err)
 	}
+	if err := ls.repeatInterruptedTipRevert(ctx); err != nil {
+		return fmt.Errorf("repeat interrupted ledger revert: %w", err)
+	}
 	if err := ls.resumePendingRatification(ctx); err != nil {
 		return err
+	}
+	// A Conway-or-later boundary that passed without a retained snapshot
+	// row, as on a database upgraded mid-window, is rebuilt from the stored
+	// chain before block processing resumes.
+	if err := ls.rebuildGovernanceBoundarySnapshots(ctx); err != nil {
+		return fmt.Errorf("rebuild governance boundary snapshots: %w", err)
 	}
 	// The subscription above cannot fire for an epoch that began before this
 	// process did, so catch up the in-progress epoch's reward round here.
@@ -3453,31 +3344,27 @@ func (ls *LedgerState) subscribeChainsyncEvents(
 	)
 }
 
-// rollbackBelowConsumedUtxoPruneFloor reports whether rolling back to point
-// would leave the live UTxO set short of outputs the consumed-UTxO sweep has
-// already removed, and returns the floor it compared against.
+// rollbackBelowUtxoSetJournal reports whether point is older than the live
+// UTxO set's journal reaches. The set is the only copy of the UTxO set and
+// rolls back from its journal alone, so a rollback below it is refused before
+// the chain or the ledger is touched.
 //
-// The persisted sync-state row is read directly rather than mirrored in memory.
-// A mirror is only ever refreshed after the sweep's own transaction commits, so
-// between that commit and the refresh it reports a floor lower than the one the
-// database holds -- permissive in exactly the direction that re-opens the
-// silent divergence this check exists to prevent. A rollback is
-// rare and already opens transactions of its own, so it can afford the read.
+// The set is asked at each check. It prunes its journal as the tip advances,
+// so an answer read earlier may no longer hold.
 //
-// It fails closed: a read or parse failure is returned, and the caller refuses
-// the rollback. Treating an unreadable floor as "nothing has been swept" would
-// defeat the check exactly when the metadata store is least trustworthy.
-func (ls *LedgerState) rollbackBelowConsumedUtxoPruneFloor(
+// A failed read is returned, and the caller refuses the rollback.
+func (ls *LedgerState) rollbackBelowUtxoSetJournal(
 	point ocommon.Point,
-) (bool, uint64, error) {
-	if ls.db == nil {
-		return false, 0, nil
+) (bool, error) {
+	rb, ok := ls.config.UtxoSet.(UtxoSetRollbacker)
+	if !ok {
+		return false, nil
 	}
-	floor, err := ls.ledgerDB().ConsumedUtxoPruneFloor(nil)
+	reaches, err := rb.JournalReaches(point)
 	if err != nil {
-		return false, 0, err
+		return false, fmt.Errorf("read live UTxO set journal: %w", err)
 	}
-	return floor > 0 && point.Slot < floor, floor, nil
+	return !reaches, nil
 }
 
 func (ls *LedgerState) loadMithrilTrustBoundary() error {
@@ -3499,7 +3386,7 @@ func (ls *LedgerState) loadMithrilTrustBoundary() error {
 	// boundary itself: the slot is already committed above, and
 	// mithrilTrustBoundaryPoint documents a fallback that derives the
 	// intersect hash from the authoritative chain when no hash is loaded.
-	hashStr, err := ls.ledgerDB().GetSyncState(mithrilLedgerHashSyncKey, nil)
+	hashStr, err := ls.ledgerDB().ImportedLedgerStateBoundaryHash()
 	if err != nil {
 		ls.config.Logger.Warn(
 			"failed to read Mithril trust boundary hash from database",
@@ -3537,369 +3424,6 @@ func (ls *LedgerState) loadMithrilTrustBoundary() error {
 	}
 	ls.config.Logger.Info("loaded Mithril trust boundary", attrs...)
 	return nil
-}
-
-func (ls *LedgerState) RecoverCommitTimestampConflict(
-	ctx context.Context,
-) error {
-	var committedRollbackErr error
-	if err := ls.ledgerDB().EnsureBlockInventory(); err != nil {
-		return fmt.Errorf("initialize block inventory for recovery: %w", err)
-	}
-	// Load current ledger tip
-	tmpTip, err := ls.ledgerDB().GetTip(nil)
-	if err != nil {
-		return fmt.Errorf("failed to get tip: %w", err)
-	}
-	containsTip, err := ls.primaryChainContainsPoint(ctx, tmpTip.Point)
-	if err != nil {
-		return fmt.Errorf("check ledger tip on primary chain: %w", err)
-	}
-	if !containsTip {
-		ancestor, found, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
-			ctx,
-			tmpTip.Point,
-			containsTip,
-			true,
-		)
-		if ancestorErr != nil {
-			return fmt.Errorf(
-				"find common primary-chain ancestor for ledger tip: %w",
-				ancestorErr,
-			)
-		}
-		if !found {
-			return fmt.Errorf(
-				"ledger tip %d/%s is not on primary chain and no common ancestor was found",
-				tmpTip.Point.Slot,
-				hex.EncodeToString(tmpTip.Point.Hash),
-			)
-		}
-		// Roll back metadata to the newest applied block that is still on the
-		// selected chain. The raw chain tip may already belong to another fork.
-		// Note: We do NOT hold ls.Lock() here because rollback() calls
-		// SubmitAsyncDBTxn() which may trigger PartialCommitError recovery
-		// that re-acquires ls.Lock(), causing a deadlock. The rollback
-		// method handles its own locking for in-memory state updates.
-		ls.RLock()
-		publishedAtAncestor := pointMatches(ls.currentTip.Point, ancestor)
-		ls.RUnlock()
-		if publishedAtAncestor {
-			// Recovery may start before the durable tip has been published in
-			// memory. Force the metadata repair when the selected ancestor is
-			// already the in-memory tip (notably origin).
-			err = ls.withConsumedUtxoPruneBoundary(func() error {
-				return ls.rollbackAppliedStateWithUndo(ctx, ancestor, true)
-			})
-		} else {
-			err = ls.rollback(ctx, ancestor)
-		}
-		if err != nil {
-			wrappedErr := fmt.Errorf(
-				"failed to rollback ledger: %w",
-				err,
-			)
-			if _, ok := errors.AsType[*rollbackCommittedError](err); !ok {
-				return wrappedErr
-			}
-			// The metadata truncate committed even though an in-memory reload
-			// or a post-commit repair failed. Continue through durable marker
-			// reconciliation before returning the original failure, so the
-			// next supervised start is not stranded behind a stale legacy
-			// classification for rows the committed rollback removed.
-			committedRollbackErr = wrappedErr
-		}
-	}
-	// Get the current tip after potential rollback for orphan cleanup.
-	// This ensures we use the post-rollback tip, not the stale tmpTip.
-	currentTip, err := ls.ledgerDB().GetTip(nil)
-	if err != nil {
-		return errors.Join(committedRollbackErr, fmt.Errorf(
-			"failed to get current tip for orphan cleanup: %w",
-			err,
-		))
-	}
-	// Clean up orphaned blobs that may exist beyond the metadata tip.
-	// This handles the case where blob committed but metadata failed.
-	cleaned, cleanupErr := ls.rewindPrimaryChainForOrphanCleanup(
-		ctx,
-		currentTip.Point,
-	)
-	if cleanupErr != nil {
-		return errors.Join(committedRollbackErr, cleanupErr)
-	}
-	if !cleaned {
-		ls.config.Logger.Warn(
-			"skipping orphaned blob cleanup: rewind exceeds the security parameter",
-			"tip_slot",
-			currentTip.Point.Slot,
-		)
-	}
-	return committedRollbackErr
-}
-
-// rewindPrimaryChainForOrphanCleanup rewinds the primary chain to the
-// metadata tip before cleanupOrphanedBlobs deletes the blocks above it. The
-// chain manager loads its tip from the newest stored block before recovery
-// runs, so deleting those blocks underneath it leaves the chain naming a block
-// that no longer exists, and every later add or iteration fails. Rewinding
-// through the manager deletes the same blocks and moves its tip with them.
-//
-// It reports false without an error only when the configured security parameter
-// refuses the rewind before any block is removed. Every other rewind or cleanup
-// failure is returned so startup or live recovery stops on an inconsistent
-// chain rather than continuing with a partially repaired store.
-func (ls *LedgerState) rewindPrimaryChainForOrphanCleanup(
-	ctx context.Context,
-	tip ocommon.Point,
-) (bool, error) {
-	if ls.chain == nil || ls.config.ChainManager == nil {
-		return false, errors.New(
-			"recover orphaned blobs: primary chain manager is unavailable",
-		)
-	}
-	ls.chainsyncBlockfetchMutex.Lock()
-	priorGeneration := ls.chainRollbackGeneration.Load()
-	ls.chainRollbackGeneration.Add(1)
-	priorAudit, auditGeneration := ls.takeContinuationAuditForRewind()
-	tipBeforeRewind := ls.chain.Tip().Point
-	if ls.beforeCommitRecoveryMutationBarrier != nil {
-		ls.beforeCommitRecoveryMutationBarrier()
-	}
-	if tipBeforeRewind.Slot < tip.Slot {
-		ls.chainRollbackGeneration.Store(priorGeneration)
-		ls.settleAuditAfterRewind(
-			priorAudit,
-			auditGeneration,
-			false,
-			tip,
-		)
-		ls.chainsyncBlockfetchMutex.Unlock()
-		return false, fmt.Errorf(
-			"recover orphaned blobs: primary chain tip %d is behind metadata tip %d",
-			tipBeforeRewind.Slot,
-			tip.Slot,
-		)
-	}
-	cleanup := func() error {
-		if ls.beforeCommitRecoveryCleanup != nil {
-			if err := ls.beforeCommitRecoveryCleanup(); err != nil {
-				return err
-			}
-		}
-		return ls.cleanupOrphanedBlobs(tip.Slot)
-	}
-	var rewindErr error
-	if ls.config.ChainManager.SecurityParamConfigured() {
-		_, rewindErr = ls.chain.RollbackDeferredThen(ctx, tip, cleanup)
-	} else {
-		_, rewindErr = ls.chain.RollbackUnboundedDeferredThen(ctx, tip, cleanup)
-	}
-	tipAfterRewind := ls.chain.Tip().Point
-	chainRegressed := primaryChainTipRegressed(tipBeforeRewind, tipAfterRewind)
-	safeRefusal := errors.Is(
-		rewindErr,
-		chain.ErrRollbackExceedsSecurityParam,
-	) &&
-		!chainRegressed
-	truncated := chainRegressed || (rewindErr != nil && !safeRefusal)
-	if safeRefusal {
-		ls.chainRollbackGeneration.Store(priorGeneration)
-	}
-	// A prior audit whose fork point remains on the retained prefix still
-	// describes this chain. Re-arm it at the recovery target so the existing
-	// carry-forward rules keep only producers the rewind did not remove.
-	if rewindErr == nil && truncated && priorAudit != nil &&
-		(priorAudit.forkPoint.Slot < tip.Slot ||
-			pointMatches(priorAudit.forkPoint, tip)) {
-		restored := false
-		ls.continuationAuditMutex.Lock()
-		if ls.continuationAudit.Load() == nil &&
-			ls.continuationAuditGen == auditGeneration {
-			ls.publishContinuationAudit(priorAudit)
-			restored = true
-		}
-		ls.continuationAuditMutex.Unlock()
-		if restored {
-			ls.armContinuationAudit(ctx, tip, "commit timestamp recovery")
-		}
-	}
-	ls.settleAuditAfterRewind(
-		priorAudit,
-		auditGeneration,
-		truncated,
-		tip,
-	)
-	ls.chainsyncBlockfetchMutex.Unlock()
-	// RollbackDeferredThen queues chain events while the blockfetch mutex is
-	// held. Publish only after releasing it so a backpressured subscriber cannot
-	// deadlock the chainsync drain.
-	ls.chain.PublishPendingChainUpdates()
-	if safeRefusal {
-		return false, nil
-	}
-	if rewindErr != nil {
-		return false, fmt.Errorf(
-			"rewind primary chain and clean orphaned blobs: %w",
-			rewindErr,
-		)
-	}
-	return true, nil
-}
-
-// orphanedBlock holds information needed to delete an orphaned block from blob store.
-type orphanedBlock struct {
-	slot uint64
-	hash []byte
-	id   uint64
-}
-
-// cleanupOrphanedBlobs removes blob blocks beyond the metadata tip.
-// Called during recovery when commit timestamp mismatch is detected.
-// This handles the case where blob committed successfully but metadata failed,
-// leaving orphaned blocks in the blob store.
-func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
-	// Pin rather than reading the installed store: this runs a scan, a
-	// separate write transaction, and a commit against one store, so it has
-	// to keep that store alive for the whole operation rather than sample
-	// whichever is installed at each step.
-	blobStore, releaseBlob := ls.db.PinBlob()
-	defer releaseBlob()
-	if blobStore == nil {
-		return nil // No blob store configured
-	}
-
-	ls.config.Logger.Info(
-		"starting orphaned blob cleanup",
-		"tip_slot", tipSlot,
-	)
-
-	// Phase 1: Scan for orphaned blocks (read-only transaction)
-	orphans, err := ls.scanOrphanedBlobs(blobStore, tipSlot)
-	if err != nil {
-		return err
-	}
-
-	if len(orphans) == 0 {
-		ls.config.Logger.Info("no orphaned blobs found")
-		return nil
-	}
-
-	// Phase 2: Delete orphaned blocks (read-write transaction)
-	writeTxn := blobStore.NewTransaction(true)
-	defer writeTxn.Rollback() //nolint:errcheck
-	deleted := 0
-
-	for _, orphan := range orphans {
-		// An orphan is above the metadata tip, which promotion never passes;
-		// a blob at or below the immutable tip is not one.
-		if err := ls.db.CheckImmutableSlot(orphan.slot); err != nil {
-			return fmt.Errorf("orphaned blob cleanup: %w", err)
-		}
-		if err := blobStore.DeleteBlock(writeTxn, orphan.slot, orphan.hash, orphan.id); err != nil {
-			return fmt.Errorf(
-				"delete orphaned block at slot %d (%s): %w",
-				orphan.slot,
-				hex.EncodeToString(orphan.hash),
-				err,
-			)
-		}
-		deleted++
-	}
-
-	if err := writeTxn.Commit(); err != nil {
-		return fmt.Errorf("failed to commit orphan cleanup: %w", err)
-	}
-
-	ls.config.Logger.Info(
-		"orphaned blob cleanup complete",
-		"scanned", len(orphans),
-		"deleted", deleted,
-	)
-	return nil
-}
-
-// scanOrphanedBlobs scans the blob store for blocks beyond the given tip slot.
-// Returns a slice of orphaned blocks that should be deleted.
-func (ls *LedgerState) scanOrphanedBlobs(
-	blobStore interface {
-		NewTransaction(readWrite bool) types.Txn
-		NewIterator(txn types.Txn, opts types.BlobIteratorOptions) types.BlobIterator
-		GetBlock(txn types.Txn, slot uint64, hash []byte) ([]byte, types.BlockMetadata, error)
-	},
-	tipSlot uint64,
-) ([]orphanedBlock, error) {
-	var orphans []orphanedBlock
-
-	readTxn := blobStore.NewTransaction(false)
-	defer readTxn.Rollback() //nolint:errcheck
-
-	iterOpts := types.BlobIteratorOptions{
-		Prefix: []byte(types.BlockBlobKeyPrefix),
-	}
-	it := blobStore.NewIterator(readTxn, iterOpts)
-	if it == nil {
-		return nil, errors.New("failed to create blob iterator")
-	}
-	defer it.Close()
-
-	// Build seek key for slot > tipSlot (tipSlot + 1)
-	seekSlot := tipSlot + 1
-	seekKey := make([]byte, 0, 10) // "bp" + 8 bytes for slot
-	seekKey = append(seekKey, []byte(types.BlockBlobKeyPrefix)...)
-	slotBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(slotBytes, seekSlot)
-	seekKey = append(seekKey, slotBytes...)
-
-	for it.Seek(seekKey); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
-		item := it.Item()
-		if item == nil {
-			continue
-		}
-		key := item.Key()
-		if key == nil {
-			continue
-		}
-		// Skip metadata keys (suffix "_metadata")
-		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
-			continue
-		}
-		// Parse slot from key: prefix (2 bytes) + slot (8 bytes) + hash (32 bytes)
-		if len(key) < 10 {
-			continue
-		}
-		blockSlot := binary.BigEndian.Uint64(key[2:10])
-		// Double-check slot is beyond tip (should be guaranteed by seek)
-		if blockSlot <= tipSlot {
-			continue
-		}
-		// Extract hash (remaining bytes after prefix + slot)
-		blockHash := make([]byte, len(key)-10)
-		copy(blockHash, key[10:])
-
-		// Get block metadata to retrieve the block ID
-		_, metadata, err := blobStore.GetBlock(readTxn, blockSlot, blockHash)
-		if err != nil {
-			ls.config.Logger.Warn(
-				"failed to get orphaned block metadata",
-				"slot", blockSlot,
-				"error", err,
-			)
-			continue
-		}
-
-		orphans = append(orphans, orphanedBlock{
-			slot: blockSlot,
-			hash: blockHash,
-			id:   metadata.ID,
-		})
-	}
-
-	if err := it.Err(); err != nil {
-		return nil, fmt.Errorf("iterator error during orphan scan: %w", err)
-	}
-
-	return orphans, nil
 }
 
 func (ls *LedgerState) Chain() *chain.Chain {
@@ -4022,16 +3546,6 @@ func (ls *LedgerState) LatestOpCertSequence(
 	)
 }
 
-// Datums looks up datums by hash in one read transaction for
-// query.ReadData. The result is aligned with hashes; an entry is nil when
-// that datum is not stored.
-func (ls *LedgerState) Datums(
-	ctx context.Context,
-	hashes [][]byte,
-) ([]*models.Datum, error) {
-	return ls.indexerDB().GetDatums(ctx, hashes)
-}
-
 // CloseDBWorkerPoolShutdownTimeout, CloseProcessBlocksDrainTimeout, and
 // CloseBlockfetchDrainTimeout bound the corresponding waits in Close()
 // below. Exported (not local consts) so tests — including cross-package
@@ -4093,6 +3607,9 @@ func (ls *LedgerState) Close() (retErr error) {
 	ls.closed.Store(true)
 	ls.closeMu.Unlock()
 	ls.stopQueuedBlockfetchFlush()
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.discardForkCandidateLocked()
+	ls.chainsyncBlockfetchMutex.Unlock()
 	defer func() {
 		ls.closeMu.Lock()
 		ls.closeErr = retErr
@@ -4138,28 +3655,6 @@ func (ls *LedgerState) Close() (retErr error) {
 	if ls.Scheduler != nil {
 		ls.Scheduler.Stop()
 	}
-
-	// Stop the periodic consumed-UTxO cleanup timer and drain a run already
-	// under way. Timer.Stop does not wait for an AfterFunc callback that has
-	// already fired, so the Wait is what keeps Close from returning while
-	// cleanup is still issuing deletes. closed was set above, so
-	// beginCleanupConsumedUtxosRun now rejects every new run and the timer
-	// callback cannot re-arm itself.
-	//
-	// Unconditional, like the header-replay and reward-precompute waits
-	// below and unlike this function's bounded ones: returning early here
-	// would reintroduce exactly the use-after-close this is meant to
-	// prevent. A run may first wait for an in-flight rollback or recovery to
-	// release consumedUtxoPruneMutex; that boundary never waits for cleanup, so
-	// the two cannot form a lock cycle. Once admitted, cleanup performs one
-	// cleanupConsumedUtxoBatchSize-bounded delete transaction, deliberately
-	// sized so it cannot monopolize SQLite.
-	ls.cleanupMu.Lock()
-	if ls.timerCleanupConsumedUtxos != nil {
-		ls.timerCleanupConsumedUtxos.Stop()
-	}
-	ls.cleanupMu.Unlock()
-	ls.cleanupWG.Wait()
 
 	// Stop the decode pipeline at the same time as the block-processing
 	// goroutine. decodeReadChainBatch drains the pipeline's Results channel
@@ -4964,430 +4459,6 @@ func nearUpstreamTip(slot, upstreamTip, stabilityWindow uint64) bool {
 	return upstreamTip-slot <= stabilityWindow
 }
 
-func (ls *LedgerState) scheduleCleanupConsumedUtxos(ctx context.Context) {
-	ls.cleanupMu.Lock()
-	defer ls.cleanupMu.Unlock()
-	// The timer callback re-arms itself, so a run already in flight when
-	// Close stopped the timer would otherwise install a fresh one behind
-	// Close's back -- leaving a self-perpetuating timer firing every
-	// interval, for the rest of the process, against a database the owner
-	// closes as soon as Close returns.
-	if ls.closed.Load() {
-		return
-	}
-	if ls.timerCleanupConsumedUtxos != nil {
-		ls.timerCleanupConsumedUtxos.Stop()
-	}
-	ls.timerCleanupConsumedUtxos = time.AfterFunc(
-		cleanupConsumedUtxosInterval,
-		func() {
-			if ls.cleanupConsumedUtxosTimerFiredHook != nil {
-				ls.cleanupConsumedUtxosTimerFiredHook()
-			}
-			ls.cleanupConsumedUtxos(ctx)
-			// Schedule the next run
-			ls.scheduleCleanupConsumedUtxos(ctx)
-		},
-	)
-}
-
-// beginCleanupConsumedUtxosRun registers a consumed-UTxO cleanup run with the
-// shutdown drain, reporting false once Close has begun. Both cleanup triggers
-// go through it: the periodic timer, and the epoch transition's bare
-// `go ls.cleanupConsumedUtxos()`, which stopping the timer does not constrain.
-//
-// closed is set before Close takes cleanupMu, and this re-checks it under that
-// same mutex, so no run can register after Close has started waiting.
-func (ls *LedgerState) beginCleanupConsumedUtxosRun() bool {
-	ls.cleanupMu.Lock()
-	defer ls.cleanupMu.Unlock()
-	if ls.closed.Load() {
-		return false
-	}
-	ls.cleanupWG.Add(1)
-	return true
-}
-
-func (ls *LedgerState) cleanupConsumedUtxos(ctx context.Context) {
-	// Refuse to begin database work once Close has started, and keep Close
-	// waiting for this run otherwise. LedgerState does not own the database
-	// (see the note at the end of Close); its owner closes it immediately
-	// after Close returns.
-	if !ls.beginCleanupConsumedUtxosRun() {
-		return
-	}
-	defer ls.cleanupWG.Done()
-	if ls.cleanupConsumedUtxosRunHook != nil {
-		ls.cleanupConsumedUtxosRunHook()
-	}
-	// Cleanup is advisory pruning. Never let the periodic timer and the epoch
-	// transition trigger occupy SQLite's single write connection at the same
-	// time. Each invocation handles one bounded batch so cleanup remains
-	// resumable and cannot hold the connection for an unbounded drain.
-	if !ls.cleanupConsumedUtxosRunning.CompareAndSwap(false, true) {
-		return
-	}
-	defer ls.cleanupConsumedUtxosRunning.Store(false)
-	if ls.ctx != nil {
-		select {
-		case <-ls.ctx.Done():
-			return
-		default:
-		}
-	}
-
-	// In API storage mode we retain spent UTxO metadata rows past the
-	// stability window so historical transaction queries can resolve
-	// input/collateral/reference-input details via spent_by_tx_id and the
-	// utxo_collateral_edge and utxo_reference_edge tables. Spent state is already
-	// encoded by deleted_slot and spent_by_tx_id; live-UTxO queries continue
-	// to filter on deleted_slot = 0.
-	if ls.ledgerDB().StorageMode() == types.StorageModeAPI {
-		return
-	}
-	// Get the current tip slot while holding the read lock to avoid TOCTOU race.
-	// We capture only the slot value we need, so even if currentTip changes after
-	// we release the lock, we're working with a consistent snapshot of the slot.
-	ls.RLock()
-	tipSlot := ls.currentTip.Point.Slot
-	eraId := ls.currentEra.Id
-	ls.RUnlock()
-	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
-	// Read once and gate on a KNOWN upstream tip only. An unknown one is not
-	// evidence of catching up: no peer has ever connected, or no active
-	// connection currently exposes the retained admitted-header frontier.
-	// Deferring on that would
-	// retain consumed rows forever on a node without peers, where cleanup
-	// previously ran off the local tip alone -- an unbounded utxo table in
-	// exactly the mode documented as minimal storage.
-	upstreamTip, upstreamActive := ls.UpstreamSyncStatus()
-	if upstreamActive && upstreamTip == 0 {
-		ls.config.Logger.Debug(
-			"deferring consumed UTxO cleanup until upstream target is known",
-			"component", "ledger",
-		)
-		return
-	}
-	if upstreamTip != 0 &&
-		!nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow) {
-		ls.config.Logger.Debug(
-			"deferring consumed UTxO cleanup while catching up",
-			"component", "ledger",
-			"tip_slot", tipSlot,
-			"upstream_tip_slot", upstreamTip,
-		)
-		return
-	}
-
-	// Delete UTxOs that are marked as deleted and older than our slot window
-	ls.config.Logger.Debug(
-		"cleaning up consumed UTxOs",
-		"component", "ledger",
-	)
-	if stabilityWindow == 0 || tipSlot <= stabilityWindow {
-		return
-	}
-	// The slot window alone is not a safe floor. k is a count of blocks, so on a
-	// chain sparser than the active-slot coefficient assumes, the block k deep
-	// can sit below tip-3k/f, and a rollback of at most k blocks (which the
-	// chain accepts) would then be refused as below the floor. Cap the target at
-	// that block's slot. A chain not yet k blocks deep may be replaced whole, so
-	// no spent row is safe to delete yet. The depth is read under
-	// consumedUtxoPruneMutex, which every chain truncation also holds, so a
-	// rollback cannot lower the k-deep point between the lookup and the delete.
-	ls.consumedUtxoPruneMutex.Lock()
-	defer ls.consumedUtxoPruneMutex.Unlock()
-	pruneTarget := tipSlot - stabilityWindow
-	if ls.chain != nil {
-		// The chain manager may retain a k larger than the fallback default,
-		// so an unknown k must skip the prune rather than guess a depth.
-		k, ok := ls.securityParamForEra(eraId)
-		if !ok {
-			return
-		}
-		depthPoint, found, err := ls.chain.PointAtDepth(ctx, k)
-		if err != nil {
-			ls.config.Logger.Error(
-				"failed to locate security-parameter depth; skipping consumed UTxO prune",
-				"component", "ledger",
-				"error", err,
-			)
-			return
-		}
-		if !found {
-			return
-		}
-		pruneTarget = min(pruneTarget, depthPoint.Slot)
-	}
-	_, _, _ = ls.pruneConsumedUtxosLocked(
-		ctx,
-		pruneTarget,
-		stabilityWindow,
-		ls.cleanupConsumedUtxoBatchLimit(),
-	)
-}
-
-func (ls *LedgerState) cleanupConsumedUtxoBatchLimit() int {
-	if ls.cleanupBatchSizeOverride > 0 {
-		return ls.cleanupBatchSizeOverride
-	}
-	return cleanupConsumedUtxoBatchSize
-}
-
-// pruneConsumedUtxosUpTo hard-deletes at most limit spent UTxO rows whose
-// spend is at or behind target, advancing the durable prune floor first. It
-// reports how many rows it removed and the floor it pruned to, which acquired
-// LocalStateQuery points may hold below target; an error is logged here and
-// leaves the floor and rows as they were. Callers hold
-// cleanupConsumedUtxosRunning and have ruled out API storage mode.
-func (ls *LedgerState) pruneConsumedUtxosUpTo(
-	ctx context.Context,
-	target, stabilityWindow uint64,
-	limit int,
-) (int, uint64, error) {
-	ls.consumedUtxoPruneMutex.Lock()
-	defer ls.consumedUtxoPruneMutex.Unlock()
-	return ls.pruneConsumedUtxosLocked(ctx, target, stabilityWindow, limit)
-}
-
-// pruneConsumedUtxosLocked is pruneConsumedUtxosUpTo for a caller that already
-// holds consumedUtxoPruneMutex.
-func (ls *LedgerState) pruneConsumedUtxosLocked(
-	ctx context.Context,
-	target, stabilityWindow uint64,
-	limit int,
-) (int, uint64, error) {
-	guardTxn := ls.ledgerDB().BeginLedgerOnly(ctx, false)
-	pendingFloor, protected, err := pendingRewardStakeInputHistoryFloor(
-		ls.ledgerDB(),
-		guardTxn,
-	)
-	releaseErr := guardTxn.Rollback()
-	if releaseErr != nil {
-		err = errors.Join(err, releaseErr)
-	}
-	if err != nil {
-		ls.config.Logger.Error(
-			"failed to inspect pending reward history; skipping consumed UTxO prune",
-			"component",
-			"ledger",
-			"error",
-			err,
-		)
-		return 0, 0, err
-	}
-	if protected {
-		target = min(target, pendingFloor)
-	}
-	// Capped at the oldest acquired LocalStateQuery point, and announced,
-	// before anything below is persisted or deleted -- see
-	// acquiredPointPins for why that order matters.
-	floor := ls.capUtxoPruneFloor(target, stabilityWindow)
-	// Persisted before the delete below, and this run must not proceed
-	// to delete anything if the persist itself fails: this durably
-	// records that rows at-or-behind floor are now ELIGIBLE for
-	// pruning, which is what checkUtxoRetentionWindow rejects a pin
-	// below. A delete that runs anyway on a failed persist would
-	// hard-delete real rows without ever advancing that durable
-	// record -- so a later pin at a slot the real deletion already
-	// reached, but that the stale (un-advanced) persisted floor
-	// doesn't cover, would not be rejected and would silently answer
-	// "absent" for a ref that was actually there. Returning here just skips
-	// this run; the next periodic tick tries again from the same (or a
-	// later) floor.
-	if err := ls.persistConsumedUtxoPruneFloor(floor, nil); err != nil {
-		ls.config.Logger.Error(
-			"failed to persist consumed UTxO prune floor",
-			"component", "ledger",
-			"error", err,
-		)
-		return 0, floor, err
-	}
-	// persistConsumedUtxoPruneFloor keeps a higher existing floor, so the
-	// gauge reports what is durable rather than this run's candidate. When
-	// the read fails the gauge is left as it was: the candidate can be below
-	// the durable floor, and the gauge must never report a lower boundary.
-	durableFloor, floorReadErr := ls.readConsumedUtxoPruneFloor(nil)
-	ls.metrics.observeConsumedUtxoSweepAt(durableFloor, floorReadErr, 0)
-	// No lock needed here - the database handles its own consistency
-	// and we're not accessing any in-memory LedgerState fields.
-	// The target was derived by the caller from a tip read under a lock.
-	pruneSlot := floor
-	pruned, err := ls.ledgerDB().UtxosDeleteConsumed(
-		ctx,
-		pruneSlot,
-		limit,
-		nil,
-	)
-	if err != nil {
-		ls.config.Logger.Error(
-			"failed to cleanup consumed UTxOs",
-			"component", "ledger",
-			"error", err,
-		)
-		return 0, floor, err
-	}
-	// These rows are gone for good: TruncateAfterSlot restores spent
-	// UTxOs with an UPDATE, which cannot reach a row that no longer
-	// exists. UtxosDeleteConsumed persisted the floor in the same
-	// transaction that removed them, so rollback already refuses to
-	// target a point below it.
-	ls.metrics.observeConsumedUtxoSweepAt(durableFloor, floorReadErr, pruned)
-	if pruned > 0 {
-		ls.config.Logger.Debug(
-			"consumed UTxO sweep raised the prune floor",
-			"component", "ledger",
-			"prune_floor_slot", pruneSlot,
-			"utxos", pruned,
-		)
-	}
-	return pruned, floor, nil
-}
-
-// trustedBatchPruneEvery is how many trusted batches commit between runs of
-// the trusted-batch consumed-UTxO cleanup, and trustedBatchPruneRows how many
-// rows each of its deletes removes. A spent row costs less to delete the more
-// rows its transaction deletes with it, so draining the rows sixteen batches
-// spent in one or two large transactions costs less than draining each
-// batch's in a small one.
-const (
-	trustedBatchPruneEvery = 16
-	trustedBatchPruneRows  = 10_000
-)
-
-// trustedBatchPruneBudget bounds how long one run of the trusted-batch
-// consumed-UTxO cleanup may take. The cleanup drains every prunable row it
-// can, in trustedBatchPruneRows deletes, so it keeps up with however many
-// outputs the batches since the last run spent; what the budget leaves behind
-// drains after the next batch, or in DrainTrustedPrune, which has no budget.
-// A stream catch-up's no-progress timeout is five minutes per committed
-// batch, and a batch commit itself takes seconds, so thirty seconds keeps the
-// cleanup well inside it.
-const trustedBatchPruneBudget = 30 * time.Second
-
-// trustedPruneOutcome is how a run of the trusted-batch consumed-UTxO
-// cleanup ended.
-type trustedPruneOutcome int
-
-const (
-	// trustedPruneDrained: nothing prunable is left up to the target.
-	trustedPruneDrained trustedPruneOutcome = iota
-	// trustedPruneSkipped: another cleanup run held the write connection.
-	trustedPruneSkipped
-	// trustedPruneUnfinished: the time budget ran out with rows left.
-	trustedPruneUnfinished
-	// trustedPruneStopped: the cleanup failed, its context ended or the
-	// ledger is closing.
-	trustedPruneStopped
-)
-
-// errTrustedPruneClosing stops a trusted-batch cleanup once Close has begun.
-var errTrustedPruneClosing = errors.New(
-	"consumed UTxO cleanup: ledger is closing",
-)
-
-// trustedPruneBacklogProbeLimit caps the rows read to report the backlog a
-// budget-limited cleanup leaves behind; a larger backlog is logged as capped.
-const trustedPruneBacklogProbeLimit = 10_000
-
-// pruneConsumedUtxosAfterTrustedBatch runs the routine consumed-UTxO cleanup
-// after trusted batches commit, without the catch-up deferral
-// cleanupConsumedUtxos applies, and up to target, the tip a trusted batch
-// committed, rather than the stability window behind it; a ledger tip below
-// target since a rollback caps it. A trusted batch lies at or below a certified
-// immutable tip, which no rollback can reach, and the batch's own
-// UtxosDeleteSpentInBatch already raises the prune floor to its last slot.
-// While trusted batches arrive the node is far behind the network tip, so the
-// periodic cleanup never runs: without this, rows spent in a later batch than
-// the one that created them would pile up for the whole catch-up, and every
-// index on utxo with them. The floor is capped by acquired LocalStateQuery
-// points and persisted before anything is deleted, exactly as in a routine
-// sweep, so pins and rollbacks below it are refused.
-//
-// It reports whether it drained every prunable row up to target, the rows it
-// deleted, and the error that stopped it when it failed, was cancelled or
-// found the ledger closing.
-func (ls *LedgerState) pruneConsumedUtxosAfterTrustedBatch(
-	ctx context.Context,
-	target uint64,
-) (trustedPruneOutcome, int, error) {
-	if ls.ledgerDB().StorageMode() == types.StorageModeAPI {
-		return trustedPruneDrained, 0, nil
-	}
-	if !ls.beginCleanupConsumedUtxosRun() {
-		return trustedPruneStopped, 0, errTrustedPruneClosing
-	}
-	defer ls.cleanupWG.Done()
-	// A periodic or epoch run in flight holds the write connection; the
-	// caller tries again.
-	if !ls.cleanupConsumedUtxosRunning.CompareAndSwap(false, true) {
-		return trustedPruneSkipped, 0, nil
-	}
-	defer ls.cleanupConsumedUtxosRunning.Store(false)
-	ls.RLock()
-	tipSlot := min(ls.currentTip.Point.Slot, target)
-	eraId := ls.currentEra.Id
-	ls.RUnlock()
-	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
-	rows := trustedBatchPruneRows
-	if ls.trustedPruneRows > 0 {
-		rows = ls.trustedPruneRows
-	}
-	budget := trustedBatchPruneBudget
-	if ls.trustedPruneBudget > 0 {
-		budget = ls.trustedPruneBudget
-	}
-	start := time.Now()
-	var (
-		total   int
-		floor   uint64
-		drained bool
-	)
-	for ctx.Err() == nil {
-		pruned, prunedTo, err := ls.pruneConsumedUtxosUpTo(
-			ctx, tipSlot, stabilityWindow, rows,
-		)
-		if err != nil {
-			return trustedPruneStopped, total, err
-		}
-		total += pruned
-		floor = prunedTo
-		if pruned < rows {
-			drained = true
-			break
-		}
-		if time.Since(start) >= budget {
-			break
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return trustedPruneStopped, total, err
-	}
-	backlog := 0
-	if !drained {
-		var err error
-		backlog, err = ls.ledgerDB().CountUtxosConsumedUpTo(
-			ctx, floor, trustedPruneBacklogProbeLimit,
-		)
-		if err != nil {
-			backlog = -1
-		}
-	}
-	ls.config.Logger.Debug(
-		"trusted batch consumed UTxO cleanup",
-		"component", "ledger",
-		"pruned", total,
-		"prune_floor_slot", floor,
-		"prunable_backlog", backlog,
-		"prunable_backlog_capped", backlog >= trustedPruneBacklogProbeLimit,
-		"duration", time.Since(start),
-	)
-	if !drained {
-		return trustedPruneUnfinished, total, nil
-	}
-	return trustedPruneDrained, total, nil
-}
-
 // withDestructiveDatabaseTransition keeps coordinated API and lifecycle
 // snapshots from opening while a logical rollback deletes primary-chain blobs
 // in one transaction and truncates the metadata they back in a later one.
@@ -5406,24 +4477,6 @@ func (ls *LedgerState) withDestructiveDatabaseTransition(
 	}
 	defer finish()
 	return op()
-}
-
-// utxoPruningDeferredForCatchup reports whether cleanupConsumedUtxos would
-// defer a run at tipSlot/stabilityWindow right now, mirroring its own two
-// defer conditions above (unknown upstream target, or known but not yet
-// near it) without duplicating its logging. checkUtxoRetentionWindow uses
-// this so its own "fresh from-tip" retention estimate only applies when
-// cleanup is actually keeping pace with the tip -- see that function's doc
-// comment for the false-rejection this closes.
-func (ls *LedgerState) utxoPruningDeferredForCatchup(
-	tipSlot, stabilityWindow uint64,
-) bool {
-	upstreamTip, upstreamActive := ls.UpstreamSyncStatus()
-	if upstreamActive && upstreamTip == 0 {
-		return true
-	}
-	return upstreamTip != 0 &&
-		!nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow)
 }
 
 // resolveRollbackTarget returns the point a rollback will actually truncate to,
@@ -5501,16 +4554,16 @@ func (ls *LedgerState) rollback(
 	ctx context.Context,
 	point ocommon.Point,
 ) error {
-	return ls.withConsumedUtxoPruneBoundary(func() error {
+	return ls.withRollbackBoundary(func() error {
 		return ls.rollbackAppliedStateWithUndo(ctx, point, false)
 	})
 }
 
-func (ls *LedgerState) withConsumedUtxoPruneBoundary(
+func (ls *LedgerState) withRollbackBoundary(
 	fn func() error,
 ) error {
-	ls.consumedUtxoPruneMutex.Lock()
-	defer ls.consumedUtxoPruneMutex.Unlock()
+	ls.rollbackMutex.Lock()
+	defer ls.rollbackMutex.Unlock()
 	return fn()
 }
 
@@ -5592,6 +4645,51 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	)
 }
 
+// truncateLedgerStateInTxn rolls the chain tables and the ledger state in txn
+// back to point, as a ledger rollback does. The ledger state rolls back from
+// the LedgerDB journal when txn commits. liveSet reports that txn is a
+// rollback that will commit: the live UTxO set rollback preview failing then
+// stops the set following the ledger. A caller that throws txn away passes
+// false and receives the preview error instead, because failing the set would
+// halt the node for work that never reaches it.
+func (ls *LedgerState) truncateLedgerStateInTxn(
+	ctx context.Context,
+	txn ledgerdb.Txn,
+	point ocommon.Point,
+	mithrilLedgerSlot uint64,
+	liveSet bool,
+) (ochainsync.Tip, []byte, error) {
+	if liveSet {
+		ls.stageUtxoSetRollback(txn, point) //nolint:contextcheck // the change is published after the commit, under the ledger lifecycle
+	} else if err := ls.stageUtxoSetRollbackChecked(txn, point); err != nil { //nolint:contextcheck // the change is never applied: the caller discards txn
+		return ochainsync.Tip{}, nil, err
+	}
+	var (
+		newTip   ochainsync.Tip
+		newNonce []byte
+		err      error
+	)
+	if ls.rollbackTruncateAfterSlotFunc != nil {
+		newTip, newNonce, err = ls.rollbackTruncateAfterSlotFunc(
+			point,
+			mithrilLedgerSlot,
+			txn,
+		)
+	} else {
+		newTip, newNonce, err = ls.ledgerDB().TruncateAfterSlot(
+			ctx,
+			point,
+			mithrilLedgerSlot,
+			txn,
+		)
+	}
+	if err != nil {
+		return ochainsync.Tip{}, nil, err
+	}
+	ls.discardPendingRatificationAfterSlot(txn, point.Slot)
+	return newTip, newNonce, nil
+}
+
 func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 	ctx context.Context,
 	point ocommon.Point,
@@ -5617,6 +4715,15 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 	ls.RUnlock()
 	sameTip := currentTip.Point.Slot == point.Slot &&
 		bytes.Equal(currentTip.Point.Hash, point.Hash)
+	if sameTip && !repairSameTip && !hasUntickedClosure {
+		// A revert that lowered the stored tip to this point and stopped
+		// before its metadata commit left the rows above it in place.
+		revertPending, err := ls.tipRevertPendingAt(point)
+		if err != nil {
+			return err
+		}
+		repairSameTip = revertPending
+	}
 	if sameTip && !repairSameTip && !hasUntickedClosure {
 		if err := ls.enforceDurableTipFloor(ctx); err != nil {
 			return err
@@ -5692,24 +4799,20 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
-	// Refuse a target the consumed-UTxO sweep has already made unrestorable.
-	// TruncateAfterSlot restores spent UTxOs with an UPDATE keyed on
-	// deleted_slot, so rows the sweep hard-deleted cannot come back; rolling
-	// back below the sweep floor would move the tip and report a repair while
-	// leaving the live set short of every output consumed above the target.
-	// Refusing before any mutation leaves the ledger where it was.
-	belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(
+	// Refusing a target the live UTxO set's journal does not reach before
+	// any mutation leaves the ledger where it was.
+	belowJournal, floorErr := ls.rollbackBelowUtxoSetJournal(
 		point,
 	)
 	if floorErr != nil {
 		return fmt.Errorf(
-			"determine consumed UTxO prune floor: %w",
+			"check the live UTxO set journal: %w",
 			floorErr,
 		)
 	}
-	if belowPruneFloor {
+	if belowJournal {
 		ls.config.Logger.Error(
-			"rollback target is below the consumed UTxO prune floor, refusing to rewind",
+			"rollback target is below the live UTxO set journal, refusing to rewind",
 			"component",
 			"ledger",
 			"rollback_slot",
@@ -5718,16 +4821,11 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 			hex.EncodeToString(point.Hash),
 			"ledger_tip_slot",
 			currentTip.Point.Slot,
-			"utxo_prune_floor_slot",
-			pruneFloor,
-			"hint",
-			"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
 		)
 		return fmt.Errorf(
-			"%w: target slot %d, prune floor %d",
-			ErrRollbackBelowUtxoPruneFloor,
+			"%w: target slot %d",
+			ErrRollbackBelowUtxoJournal,
 			point.Slot,
-			pruneFloor,
 		)
 	}
 	traceBlocks := ls.rollbackTraceBlocks(ctx, point, rollbackBlocks)
@@ -5843,29 +4941,15 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 	finishValidationTransition := ls.beginTxValidationTransition()
 	defer finishValidationTransition()
 	err = ls.SubmitAsyncDBTxn(ctx, func(txn ledgerdb.Txn) error {
-		// The metadata store holds no utxo rows; the set rolls back from its
-		// own journal after the commit and its net change is published.
-		ls.stageUtxoSetRollback(txn, point) //nolint:contextcheck // the change is published after the commit, under the ledger lifecycle
 		var err error
-		if ls.rollbackTruncateAfterSlotFunc != nil {
-			newTip, newNonce, err = ls.rollbackTruncateAfterSlotFunc(
-				point,
-				mithrilLedgerSlot,
-				txn,
-			)
-		} else {
-			newTip, newNonce, err = ls.ledgerDB().TruncateAfterSlot(
-				ctx,
-				point,
-				mithrilLedgerSlot,
-				txn,
-			)
-		}
-		if err != nil {
-			return err
-		}
-		ls.discardPendingRatificationAfterSlot(txn, point.Slot)
-		return nil
+		newTip, newNonce, err = ls.truncateLedgerStateInTxn(
+			ctx,
+			txn,
+			point,
+			mithrilLedgerSlot,
+			true,
+		)
+		return err
 	}, true)
 	if err != nil {
 		return err
@@ -6292,7 +5376,8 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 // pipeline's only submitter -- runs on its own goroutine, entirely
 // decoupled from the goroutine that decides a rollback. rollbackChainAndStateDeferred
 // in particular is reached from chainsync per-connection handling
-// (handleEventChainsyncRollback, tryResolveFork), never from
+// (handleEventChainsyncRollback), the validated fork switch
+// (finishForkCandidate) and local forged-sibling adoption, never from
 // ledgerProcessBlocks itself. Chain-selection can decide to abandon a fork
 // while the reader goroutine has already gathered and submitted a batch of
 // blocks -- from that very fork -- to the persisted decoder and is blocked
@@ -6370,12 +5455,13 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 // rollbackChainAndStateDeferred rewinds the primary chain and ledger state,
 // deferring the chain.update events the rewind produces rather than letting the
 // chain publish them inline. This method is reached from chainsync event
-// handling (handleEventChainsyncRollback, tryResolveFork) while chainsyncMutex
+// handling (handleEventChainsyncRollback), the validated fork switch
+// (finishForkCandidate) and local forged-sibling adoption while chainsyncMutex
 // is held; an inline, back-pressured chain.update publish under that mutex is
-// the drain deadlock (see pendingPublishes). RollbackDeferred enqueues those
-// events on the chain's shared sequencer under c.mutex, so they are ordered
-// against concurrent blockfetch adds in true chain-mutation order (the
-// rollback-before-add guarantee is now chain-wide, not merely within this
+// the drain deadlock (see pendingPublishes). RollbackDeferredWithPreflight
+// enqueues those events on the chain's shared sequencer under c.mutex, so they
+// are ordered against concurrent blockfetch adds in true chain-mutation order
+// (the rollback-before-add guarantee is now chain-wide, not merely within this
 // handler's queue); registering the chain on pubs.chainDrains drains that
 // sequencer after the mutex is released. A nil pubs drains immediately
 // (unlocked / test path).
@@ -6383,23 +5469,50 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 	point ocommon.Point,
 	pubs *pendingPublishes,
 ) error {
-	_, err := ls.rollbackChainAndStateDeferredDepth(ctx, point, pubs)
+	_, err := ls.rollbackChainAndStateDeferredDepthIf(
+		ctx, point, pubs, nil,
+	)
 	return err
 }
 
 // rollbackChainAndStateDeferredDepth is rollbackChainAndStateDeferred that also
 // returns the number of blocks the chain rollback removed. The count is taken
-// from the blocks chain.RollbackDeferred removed under the chain's own mutex,
-// so a concurrent blockfetch add cannot skew it the way a before/after
-// comparison of two tip samples can. It is zero when the rollback failed before
-// truncating the chain or removed only queued headers.
+// from the blocks chain.RollbackDeferredWithPreflight removed under the chain's
+// own mutex, so a concurrent blockfetch add cannot skew it the way a
+// before/after comparison of two tip samples can. It is zero when the rollback
+// failed before truncating the chain or removed only queued headers.
 func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 	point ocommon.Point,
 	pubs *pendingPublishes,
 ) (uint64, error) {
+	return ls.rollbackChainAndStateDeferredDepthIf(ctx, point, pubs, nil)
+}
+
+// rollbackChainAndStateDeferredIf is rollbackChainAndStateDeferred with a
+// preflight run under the chain's mutation barrier immediately before the undo
+// emit and truncation, so no concurrent chain change can land between them. A
+// preflight error leaves the chain and the ledger untouched.
+func (ls *LedgerState) rollbackChainAndStateDeferredIf(
+	ctx context.Context,
+	point ocommon.Point,
+	pubs *pendingPublishes,
+	preflight func() error,
+) error {
+	_, err := ls.rollbackChainAndStateDeferredDepthIf(
+		ctx, point, pubs, preflight,
+	)
+	return err
+}
+
+func (ls *LedgerState) rollbackChainAndStateDeferredDepthIf(
+	ctx context.Context,
+	point ocommon.Point,
+	pubs *pendingPublishes,
+	preflight func() error,
+) (uint64, error) {
 	var removed uint64
-	ls.consumedUtxoPruneMutex.Lock()
-	defer ls.consumedUtxoPruneMutex.Unlock()
+	ls.rollbackMutex.Lock()
+	defer ls.rollbackMutex.Unlock()
 	ls.RLock()
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	currentTip := ls.currentTip
@@ -6428,24 +5541,32 @@ func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 	if mithrilLedgerSlot > 0 && resolved.Slot < mithrilLedgerSlot {
 		return 0, ErrRollbackExceedsMithrilBoundary
 	}
-	belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(
+	belowJournal, floorErr := ls.rollbackBelowUtxoSetJournal(
 		resolved,
 	)
 	if floorErr != nil {
 		return 0, fmt.Errorf(
-			"determine consumed UTxO prune floor: %w",
+			"check the live UTxO set journal: %w",
 			floorErr,
 		)
 	}
-	if belowPruneFloor {
+	if belowJournal {
+		// A target deeper than the security parameter is reported as that
+		// refusal, which no journal depth would lift.
+		if ls.chain != nil {
+			if err := ls.chain.ValidateRollback(ctx, point); errors.Is(
+				err, chain.ErrRollbackExceedsSecurityParam,
+			) {
+				return 0, err
+			}
+		}
 		return 0, fmt.Errorf(
-			"%w: target slot %d, prune floor %d",
-			ErrRollbackBelowUtxoPruneFloor,
+			"%w: target slot %d",
+			ErrRollbackBelowUtxoJournal,
 			resolved.Slot,
-			pruneFloor,
 		)
 	}
-	// The prune-floor and Mithril refusals above are reads taken before the
+	// The journal-floor and Mithril refusals above are reads taken before the
 	// destructive boundary opens, so a refused rollback never blocks a
 	// coordinated snapshot.
 	if ls.db != nil {
@@ -6491,7 +5612,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 	//
 	// No ctx is threaded through the chainsync event-handling call chain
 	// that reaches this method (handleEventChainsyncRollback,
-	// tryResolveFork), so drainBlockPipelineBeforeRollback deliberately
+	// finishForkCandidate), so drainBlockPipelineBeforeRollback deliberately
 	// uses ctx, identical to decodeReadChainBatch's own
 	// Submit calls and for the same reason: this wait, like that
 	// submission, must not be cut short by an unrelated per-attempt
@@ -6511,24 +5632,32 @@ func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 		ls.chainRollbackGeneration.Add(1)
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
-		if err := ls.validateAndEmitRollbackUndo(ctx, point); err != nil {
-			// Validation refused the point before the chain was touched --
-			// over-K, ErrRollbackPointNotOnChain, or models.ErrBlockNotFound,
-			// all of which handleEventChainsyncRollback treats as
-			// recoverable. Restore the generation so an in-flight batch is
-			// not discarded for a rollback that never happened: a discard
-			// leaves batchBlocksApplied at zero, and
+		events, rbErr := ls.chain.RollbackDeferredWithPreflight(
+			ctx,
+			point,
+			func() error {
+				if preflight != nil {
+					if err := preflight(); err != nil {
+						return err
+					}
+				}
+				return ls.validateAndEmitRollbackUndo(ctx, point)
+			},
+		)
+		if rbErr != nil {
+			// The preflight or validation refused the point before the chain
+			// was touched -- a stale fork candidate, over-K,
+			// ErrRollbackPointNotOnChain, or models.ErrBlockNotFound, all of
+			// which leave nothing to undo. Restore the generation so an
+			// in-flight batch is not discarded for a rollback that never
+			// happened: a discard leaves batchBlocksApplied at zero, and
 			// handleEventBlockfetchBatchDone feeds that into the same-range
-			// failure streak, so blockfetchMaxSameRangeFailures refusals
-			// would drop a perfectly good header range. Both the bump and
-			// this restore run under chainsyncBlockfetchMutex, which every
+			// failure streak, so blockfetchMaxSameRangeFailures refusals would
+			// drop a perfectly good header range. Both the bump and this
+			// restore run under chainsyncBlockfetchMutex, which every
 			// blockfetchBatchStillCurrent reader also holds, so no reader can
 			// observe the intermediate value.
 			ls.chainRollbackGeneration.Store(priorGeneration)
-			return err
-		}
-		events, rbErr := ls.chain.RollbackDeferred(ctx, point)
-		if rbErr != nil {
 			return rbErr
 		}
 		for _, evt := range events {
@@ -6543,12 +5672,12 @@ func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 	}
 	// Publish the rollback's chain.update after chainsyncMutex is released.
 	// Under the mutex an inline back-pressured publish deadlocks the drain.
-	// RollbackDeferred has already enqueued these events on the chain's shared
-	// sequencer under c.mutex, so they are ordered against concurrent
-	// blockfetch adds in true chain-mutation order (rollback-before-add is no
-	// longer merely a within-handler property); registering the chain drains
-	// that sequencer once the mutex is released (a nil pubs drains
-	// immediately on the unlocked path). See
+	// RollbackDeferredWithPreflight has already enqueued these events on the
+	// chain's shared sequencer under c.mutex, so they are ordered against
+	// concurrent blockfetch adds in true chain-mutation order
+	// (rollback-before-add is no longer merely a within-handler property);
+	// registering the chain drains that sequencer once the mutex is released (a
+	// nil pubs drains immediately on the unlocked path). See
 	// chain.Chain.PublishPendingChainUpdates.
 	// Drained unconditionally: rollbackLocked queues this rollback's header
 	// invalidation on the sequencer even when no block was removed (the
@@ -6613,13 +5742,14 @@ func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
 // Mithril bootstrap can raise while this rollback waits on
 // blockPipelineGatherMutex and drainBlockPipelineBeforeRollback), or with
 // anything the metadata/blob truncation sweep returns. The first two are
-// exactly the identities handleEventChainsyncRollback and tryResolveFork treat
-// as "the rollback was refused, no state changed, re-intersect and carry on" --
+// exactly the identities handleEventChainsyncRollback treats as "the rollback
+// was refused, no state changed, re-intersect and carry on" --
 // a recovery that here resumes from a ledger tip naming a block the chain has
 // deleted. The cause is kept in the message but deliberately kept out of the
 // errors.Is chain so it cannot be classified that way;
-// ErrChainTruncatedLedgerRollbackFailed falls through to those callers'
-// hard-failure paths instead.
+// ErrChainTruncatedLedgerRollbackFailed falls through to
+// handleEventChainsyncRollback's hard-failure path instead; finishForkCandidate
+// logs any rollback error and drops its candidate.
 func (ls *LedgerState) reportFailedLedgerRollbackAfterTruncation(
 	point ocommon.Point,
 	cause error,
@@ -6813,7 +5943,7 @@ func (ls *LedgerState) processChainIteratorRollback(
 				"ledger_tip_hash",
 				hex.EncodeToString(currentTip.Point.Hash),
 			)
-			if err := ls.withConsumedUtxoPruneBoundary(rollback); err != nil {
+			if err := ls.withRollbackBoundary(rollback); err != nil {
 				return err
 			}
 			return errRestartLedgerPipeline
@@ -6824,7 +5954,7 @@ func (ls *LedgerState) processChainIteratorRollback(
 		}
 	}
 
-	return ls.withConsumedUtxoPruneBoundary(rollback)
+	return ls.withRollbackBoundary(rollback)
 }
 
 // transitionToEra performs an era transition and returns the result without
@@ -7371,89 +6501,6 @@ func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 		return blockfetchBatchSlotThresholdDefault
 	}
 	return window
-}
-
-// persistConsumedUtxoPruneFloor durably records floor as the highest slot
-// cleanupConsumedUtxos has ever begun pruning consumed UTxOs up to, so
-// checkUtxoRetentionWindow can reject a pin below it even after the tip
-// later moves in a way that would make a freshly-computed floor look more
-// lenient than what real cleanup already committed to:
-//
-//   - A rollback lowers the tip. Recomputing the floor from the new
-//     (lower) tip gives a smaller, more lenient floor than the one cleanup
-//     already used against the higher pre-rollback tip -- but rows already
-//     hard-deleted under that higher floor stay deleted; the rollback
-//     cannot undo them.
-//   - An era transition changes the stability-window formula (Byron's
-//     small 2k vs every Shelley+ era's much larger 3k/f). Cleanup
-//     recomputes its own window from whatever era was live each time it
-//     ran, so a row pruned while still in Byron can already be gone even
-//     though the current era's own (larger) window alone would compute a
-//     more lenient floor today.
-//
-// Monotonic: never writes a value lower than what's already persisted, and
-// never needs to be undone by rollback or truncate, since rows already
-// hard-deleted cannot become un-deleted -- unlike
-// SyntheticV2CostModelClearedEpochSyncKey, this marker has no
-// RecomputeAfterTruncate counterpart. It does have a reject-before-mutating
-// counterpart, though: database/lifecycle's disaster-recovery Truncate
-// reads this same marker (database.ConsumedUtxoPruneFloorSyncKey) before
-// touching anything, and refuses a target older than it -- see that
-// function's doc comment.
-func (ls *LedgerState) persistConsumedUtxoPruneFloor(
-	floor uint64,
-	txn ledgerdb.Txn,
-) error {
-	existing, err := ls.readConsumedUtxoPruneFloor(txn)
-	if err != nil {
-		return err
-	}
-	if floor <= existing {
-		return nil
-	}
-	if err := ls.ledgerDB().SetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey,
-		strconv.FormatUint(floor, 10),
-		txn,
-	); err != nil {
-		return fmt.Errorf(
-			"persist consumed UTxO prune floor: %w",
-			err,
-		)
-	}
-	return nil
-}
-
-// readConsumedUtxoPruneFloor reads the durable marker
-// persistConsumedUtxoPruneFloor writes. Zero (with no error) means cleanup
-// has never yet pruned anything on this database -- nothing eligible for
-// pruning has existed yet, so no historical pin can already have lost data
-// to it.
-func (ls *LedgerState) readConsumedUtxoPruneFloor(
-	txn ledgerdb.Txn,
-) (uint64, error) {
-	marker, err := ls.ledgerDB().GetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey,
-		txn,
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"read consumed UTxO prune floor: %w",
-			err,
-		)
-	}
-	if marker == "" {
-		return 0, nil
-	}
-	floor, err := strconv.ParseUint(marker, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"parse consumed UTxO prune floor marker %q: %w",
-			marker,
-			err,
-		)
-	}
-	return floor, nil
 }
 
 // CurrentTransitionInfo returns the current TransitionInfo from the lock-free
@@ -8252,9 +7299,8 @@ func (ls *LedgerState) drainBlockPipelineErrors() {
 //     nonce. This is expected for Byron and can be transient for later eras;
 //     this function cannot inspect the item's era, so the log remains neutral.
 //   - errHeaderVerificationDeferred: the pipeline's epoch cache has not yet
-//     caught up with a block already committed to ls.chain. ARCHITECTURE.md
-//     ("Block Processing Pipeline") documents this as a transient race that
-//     resolves once the epoch cache catches up, so it is not lumped in with
+//     caught up with a block already committed to ls.chain. This transient
+//     race resolves once the epoch cache catches up, so it is not lumped in with
 //     genuine decode/validate/apply problems below.
 //   - context.Canceled/context.DeadlineExceeded: the pipeline context is
 //     cancelled by Stop() *before* it drains, so a stage worker that is
@@ -9425,35 +8471,6 @@ func (ls *LedgerState) processBlocksFromSource(
 		}
 	}
 	defer releaseGate()
-	// Enable bulk-load optimizations when syncing from behind
-	var bulkOptimizer metadata.BulkLoadOptimizer
-	bulkLoadActive := false
-	ls.RLock()
-	bulkLoadAllowed := !ls.validationEnabled && !ls.reachedTip.Load()
-	ls.RUnlock()
-	if bulkLoadAllowed {
-		if opt, ok := ls.db.Metadata().(metadata.BulkLoadOptimizer); ok {
-			if err := opt.SetBulkLoadPragmas(); err != nil {
-				ls.config.Logger.Warn(
-					"failed to set bulk-load pragmas",
-					"error", err,
-				)
-			} else {
-				bulkOptimizer = opt
-				bulkLoadActive = true
-				defer func() {
-					if bulkLoadActive && bulkOptimizer != nil {
-						if restoreErr := bulkOptimizer.RestoreNormalPragmas(); restoreErr != nil {
-							ls.config.Logger.Error(
-								"failed to restore normal pragmas on exit",
-								"error", restoreErr,
-							)
-						}
-					}
-				}()
-			}
-		}
-	}
 	// Process blocks
 	var nextEpochEraId uint
 	var targetEpoch models.Epoch
@@ -10130,9 +9147,6 @@ func (ls *LedgerState) processBlocksFromSource(
 				}
 			}
 
-			// Start background cleanup goroutines
-			go ls.cleanupConsumedUtxos(ctx)
-
 			// Clean up old block nonces and keep only last 3 epochs along with checkpoints
 			if rolloverResult != nil {
 				var cutoffStart uint64
@@ -10526,13 +9540,6 @@ func (ls *LedgerState) processBlocksFromSource(
 							),
 						}
 					}
-					var trustedReplayRows database.BatchAccumulator
-					if trustedReplay {
-						trustedReplayRows = ls.ledgerDB().NewBatchAccumulator()
-						if trustedReplayRows != nil {
-							defer trustedReplayRows.Reset()
-						}
-					}
 					var aheadPrefetch *utxoPrefetchAhead
 					trustedReplayPrefetched := trustedReplayUtxos
 					if trustedReplay &&
@@ -10806,12 +9813,6 @@ func (ls *LedgerState) processBlocksFromSource(
 							blockCtx,
 							aheadSignatures.forBlock(offset),
 						)
-						if trustedReplayRows != nil {
-							blockCtx = withValidatedReplayAccumulator(
-								blockCtx,
-								trustedReplayRows,
-							)
-						}
 						if transactionOpCertCounters != nil {
 							blockCtx = withTrustedReplayOpCertCounterCache(
 								blockCtx,
@@ -10955,22 +9956,10 @@ func (ls *LedgerState) processBlocksFromSource(
 						return err
 					}
 					deltaBatch.Release()
-					// The replay-row flush is part of the same sample: it is
-					// the metadata write for this delta batch's rows.
-					if ls.beforeReplayRowFlush != nil {
-						ls.beforeReplayRowFlush()
-					}
-					flushErr := ls.ledgerDB().FlushBatch(trustedReplayRows, txn)
 					ls.metrics.observeBlockStage(
 						blockStageApply,
 						time.Since(applyStart),
 					)
-					if flushErr != nil {
-						return fmt.Errorf(
-							"flush trusted replay metadata batch: %w",
-							flushErr,
-						)
-					}
 					// Update tip in database only if blocks were processed
 					if blocksProcessed > 0 {
 						if err := ls.ledgerDB().SetTip(pendingTip, txn); err != nil {
@@ -11132,18 +10121,6 @@ func (ls *LedgerState) processBlocksFromSource(
 				}
 				ls.maybeQueueStakeRewardPrecomputeRetry(pendingTip.Point.Slot)
 				ls.notifyLeiosAnnouncementAtTip(pendingTip.Point.Hash)
-				// Restore normal DB options outside the lock after validation is enabled
-				if wantEnableValidation && bulkLoadActive &&
-					bulkOptimizer != nil {
-					if restoreErr := bulkOptimizer.RestoreNormalPragmas(); restoreErr != nil {
-						ls.config.Logger.Error(
-							"failed to restore normal pragmas",
-							"error", restoreErr,
-						)
-					} else {
-						bulkLoadActive = false
-					}
-				}
 			}
 			finishValidationTransition()
 			i = end
@@ -11511,17 +10488,19 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// independently of the fetch-path write: a certified endorser
 				// block is part of the chain. A block that a later check
 				// rejects leaves a volatile record the collector removes.
-				if err := ls.persistCertifiedEndorserBlock(
-					ebHash.Bytes(),
-					ebSlot,
-					ebManifest,
-					ebTxs,
-				); err != nil {
-					return nil, &leiosEndorserBlockStorageError{
-						err: fmt.Errorf(
-							"persist certified endorser block: %w",
-							err,
-						),
+				if !forkCandidateValidationFrom(ctx) {
+					if err := ls.persistCertifiedEndorserBlock(
+						ebHash.Bytes(),
+						ebSlot,
+						ebManifest,
+						ebTxs,
+					); err != nil {
+						return nil, &leiosEndorserBlockStorageError{
+							err: fmt.Errorf(
+								"persist certified endorser block: %w",
+								err,
+							),
+						}
 					}
 				}
 				ls.logLeiosEndorserBlockApplyResult(
@@ -11601,15 +10580,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 		)
 	}
 	blockTransactions := block.Transactions()
-	var validatedBlockRows database.BatchAccumulator
-	if shouldValidate && len(blockTransactions) > 0 &&
-		validatedReplayAccumulatorFrom(ctx) == nil {
-		validatedBlockRows = ls.ledgerDB().NewValidatedBlockBatchAccumulator()
-		if validatedBlockRows != nil {
-			defer validatedBlockRows.Reset()
-			ctx = withValidatedReplayAccumulator(ctx, validatedBlockRows)
-		}
-	}
 	// Process transactions
 	// Steady-state, at-tip, validated application refuses to recover an absent
 	// consumed-input producer from the blob store and treats it as a hard error
@@ -11634,6 +10604,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			delta.consensus = ls.forkValidationConsensus(txn)
 			delta.expandedIndexOffset = expandedIndexOffset
 			delta.strictConsumedInputs = strictConsumedInputs
 			if !shouldValidate && blockDonation > 0 {
@@ -11684,8 +10655,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// syntheticV2CostModel is a parameter, captured under the same
 				// RLock as pparams/prevEraPParams
 				// (ledgerProcessBlocksFromSource's snapshotSyntheticV2CostModel),
-				// not read live from ls here: a concurrent rollback
-				// (RecoverCommitTimestampConflict) can mutate
+				// not read live from ls here: a concurrent rollback can mutate
 				// ls.syntheticV2CostModel between that capture and this
 				// point, which would otherwise let this disagree with the
 				// already-snapshotted pp.
@@ -11855,24 +10825,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// validating block leaves its chunk's delta batch empty, so
 			// the batch flush alone would hide this time.
 			applyStart := time.Now()
-			validatedReplayRows := validatedReplayAccumulatorFrom(ctx)
-			var applyErr error
-			if validatedReplayRows != nil {
-				applyErr = delta.applyWithoutRecordingDonationsWithAccumulator(
-					ctx,
-					ls,
-					txn,
-					validatedReplayRows,
-				)
-				if applyErr == nil {
-					applyErr = ls.ledgerDB().FlushBatchStakeDeltas(
-						validatedReplayRows,
-						txn,
-					)
-				}
-			} else {
-				applyErr = delta.applyWithoutRecordingDonations(ctx, ls, txn)
-			}
+			applyErr := delta.applyWithoutRecordingDonations(ctx, ls, txn)
 			ls.metrics.observeBlockStage(
 				blockStageApply,
 				time.Since(applyStart),
@@ -11940,6 +10893,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			delta.consensus = ls.forkValidationConsensus(txn)
 		}
 		if err := delta.donate(blockDonation); err != nil {
 			delta.Release()
@@ -11951,25 +10905,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// (above); this write is what advances the stored counter, and it is
 	// rolled back with the transaction if the block is rejected.
 	if hasOpCert {
-		var err error
-		if acc := validatedReplayAccumulatorFrom(ctx); acc != nil {
-			err = ls.ledgerDB().UpdatePoolOpCertSequenceBatched(
-				ctx,
-				opCertPoolKeyHash,
-				opCertIssueNumber,
-				point.Slot,
-				acc,
-				txn,
-			)
-		} else {
-			err = ls.ledgerDB().UpdatePoolOpCertSequence(
-				ctx,
-				opCertPoolKeyHash,
-				opCertIssueNumber,
-				point.Slot,
-				txn,
-			)
-		}
+		err := ls.ledgerDB().UpdatePoolOpCertSequence(
+			ctx,
+			opCertPoolKeyHash,
+			opCertIssueNumber,
+			point.Slot,
+			txn,
+		)
 		if err != nil {
 			if delta != nil {
 				delta.Release()
@@ -11978,19 +10920,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 		if cache := trustedReplayOpCertCounterCacheFrom(ctx); cache != nil {
 			cache.advance(opCertPoolKeyHash, opCertIssueNumber)
-		}
-	}
-	if validatedBlockRows != nil {
-		flushStart := time.Now()
-		err := ls.ledgerDB().FlushBatch(validatedBlockRows, txn)
-		ls.metrics.observeBlockStage(blockStageApply, time.Since(flushStart))
-		if err != nil {
-			if delta != nil {
-				delta.Release()
-			}
-			return nil, fmt.Errorf(
-				"flush validated block API rows: %w", err,
-			)
 		}
 	}
 	if delta != nil {
@@ -12919,6 +11848,19 @@ func (ls *LedgerState) computePParams(
 	lcommon.ProtocolParameters,
 	error,
 ) {
+	return ls.computePParamsIn(epoch, era, epochCache, nil)
+}
+
+func (ls *LedgerState) computePParamsIn(
+	epoch models.Epoch,
+	era eras.EraDesc,
+	epochCache []models.Epoch,
+	txn ledgerdb.Txn,
+) (
+	lcommon.ProtocolParameters,
+	lcommon.ProtocolParameters,
+	error,
+) {
 	// Only query stored pparams when the era has a decode function.
 	// Byron has nil DecodePParamsFunc and never stores pparams, so
 	// we skip straight to the genesis fallback for Byron.
@@ -12928,7 +11870,7 @@ func (ls *LedgerState) computePParams(
 		pparams, err = ls.loadPersistedProtocolParameters(
 			epoch.EpochId,
 			era,
-			nil,
+			txn,
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf(
@@ -12965,7 +11907,7 @@ func (ls *LedgerState) computePParams(
 				prevPP, prevErr := ls.loadPersistedProtocolParameters(
 					ep.EpochId,
 					*prevEra,
-					nil,
+					txn,
 				)
 				if prevErr != nil {
 					// Historical block validation falls back to the
@@ -12997,62 +11939,7 @@ func (ls *LedgerState) loadPersistedProtocolParameters(
 	era eras.EraDesc,
 	txn ledgerdb.Txn,
 ) (lcommon.ProtocolParameters, error) {
-	return ls.loadPersistedProtocolParametersWith(
-		epoch, era, era.DecodePParamsFunc, txn,
-	)
-}
-
-func (ls *LedgerState) loadPersistedProtocolParametersWith(
-	epoch uint64,
-	era eras.EraDesc,
-	decode func([]byte) (lcommon.ProtocolParameters, error),
-	txn ledgerdb.Txn,
-) (lcommon.ProtocolParameters, error) {
-	if decode == nil {
-		return nil, nil
-	}
-	pparams, err := ls.ledgerDB().GetPParams(
-		epoch,
-		era.Id,
-		decode,
-		txn,
-	)
-	if err != nil || pparams == nil || era.Id != eras.DijkstraEraDesc.Id {
-		return pparams, err
-	}
-	dijkstraPParams, ok := pparams.(*dijkstra.DijkstraProtocolParameters)
-	if !ok || dijkstraPParams == nil {
-		return nil, fmt.Errorf(
-			"persisted Dijkstra pparams decoded as %T",
-			pparams,
-		)
-	}
-	if ls.config.CardanoNodeConfig != nil {
-		genesis := ls.config.CardanoNodeConfig.DijkstraGenesis()
-		if genesis != nil {
-			if dijkstraPParams.CommitteeStakeCoverage == nil {
-				dijkstraPParams.CommitteeStakeCoverage = cloneGenesisRat(
-					genesis.CommitteeStakeCoverage,
-				)
-			}
-			if dijkstraPParams.QuorumStakeThreshold == nil {
-				dijkstraPParams.QuorumStakeThreshold = cloneGenesisRat(
-					genesis.QuorumStakeThreshold,
-				)
-			}
-		}
-	}
-	if err := dijkstraPParams.ValidateLeiosCommitteeParameters(); err != nil {
-		return nil, fmt.Errorf("validate persisted Dijkstra pparams: %w", err)
-	}
-	return dijkstraPParams, nil
-}
-
-func cloneGenesisRat(value *lcommon.GenesisRat) *cbor.Rat {
-	if value == nil || value.Rat == nil {
-		return nil
-	}
-	return &cbor.Rat{Rat: new(big.Rat).Set(value.Rat)}
+	return ls.engine().LoadPersistedProtocolParameters(epoch, era, txn)
 }
 
 // computeGenesisProtocolParameters bootstraps protocol parameters
@@ -13435,7 +12322,7 @@ func (ls *LedgerState) healEmptyLabNonces(ctx context.Context) {
 // recent epochs. Epoch labs are immutable historical data, and only the
 // resume-tip epoch's lab feeds a nonce the node computes at runtime: the
 // current epoch nonce mixes the previous epoch's lab, forward boundaries
-// recompute labs fresh in calculateEpochNonce, and rollbacks are bounded by the
+// recompute labs fresh in CalculateEpochNonce, and rollbacks are bounded by the
 // security parameter (well under one epoch on real networks). Re-deriving every
 // historical epoch's lab from the chain on every restart is one canonical-block
 // lookup per epoch, which on a large blob store costs many minutes for no
@@ -13577,7 +12464,7 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(
 			)
 			continue
 		}
-		expectedNonce, err := assembleEpochNonce(
+		expectedNonce, err := epochengine.AssembleEpochNonce(
 			candidateNonce,
 			labForEta,
 			extraEntropy,
@@ -13654,7 +12541,7 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(
 // Pre-Praos (Byron) epochs carry no lab, and the FIRST Praos epoch's carried
 // lab is NeutralNonce (nil): cardano-ledger initialChainDepState sets
 // csLabNonce = NeutralNonce, and the initial-epoch branch of
-// calculateEpochNonce stores a nil lab. "Repairing" it to the last pre-Praos
+// CalculateEpochNonce stores a nil lab. "Repairing" it to the last pre-Praos
 // block's parent hash would diverge the next boundary's eta on any chain with
 // a Byron era. For every other epoch the carried lab is prevHashToNonce of the
 // boundary block — regardless of which epoch that block fell in, since an
@@ -13748,7 +12635,7 @@ func (ls *LedgerState) loadTip(ctx context.Context) error {
 func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip(
 	ctx context.Context,
 ) error {
-	return ls.withConsumedUtxoPruneBoundary(func() error {
+	return ls.withRollbackBoundary(func() error {
 		return ls.withDestructiveDatabaseTransition(ctx, func() error {
 			return ls.reconcilePrimaryChainTipWithLedgerTipLocked(ctx)
 		})
@@ -14001,19 +12888,18 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 		if mithrilLedgerSlot > 0 && ancestor.Slot < mithrilLedgerSlot {
 			return ErrRollbackExceedsMithrilBoundary
 		}
-		belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(ancestor)
+		belowJournal, floorErr := ls.rollbackBelowUtxoSetJournal(ancestor)
 		if floorErr != nil {
 			return fmt.Errorf(
-				"determine consumed UTxO prune floor: %w",
+				"check the live UTxO set journal: %w",
 				floorErr,
 			)
 		}
-		if belowPruneFloor {
+		if belowJournal {
 			return fmt.Errorf(
-				"%w: target slot %d, prune floor %d",
-				ErrRollbackBelowUtxoPruneFloor,
+				"%w: target slot %d",
+				ErrRollbackBelowUtxoJournal,
 				ancestor.Slot,
-				pruneFloor,
 			)
 		}
 		undoBlocks := ls.reconciliationUndoBlocks(
@@ -16316,13 +15202,30 @@ func (ls *LedgerState) TransactionByHash(ctx context.Context,
 	return ls.ledgerDB().GetTransactionByHash(ctx, hash, nil)
 }
 
-// ExistingTransactionHashes returns the subset of hashes that have a
-// transaction record, in no particular order, from one read transaction.
+// ExistingTransactionHashes returns the subset of hashes the ledger has
+// applied on its chain, each once, in the order given. It reads the
+// LedgerDB's transaction index, so a transaction is reported from the commit
+// that applied it until a rollback undoes that block.
 func (ls *LedgerState) ExistingTransactionHashes(
 	ctx context.Context,
 	hashes [][]byte,
 ) ([][]byte, error) {
-	return ls.indexerDB().GetExistingTransactionHashes(ctx, hashes)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	view, err := ls.txIndexView(nil, hashes)
+	if err != nil {
+		return nil, err
+	}
+	found := make([][]byte, 0, len(view))
+	for _, hash := range hashes {
+		if _, ok := view[string(hash)]; !ok {
+			continue
+		}
+		delete(view, string(hash))
+		found = append(found, hash)
+	}
+	return found, nil
 }
 
 // BlockByHash returns a block by its hash.
@@ -16458,191 +15361,6 @@ func (ls *LedgerState) UtxosByRefsBounded(
 		})
 	}
 	return utxos, nil
-}
-
-// UtxosByAddress returns all UTxOs that belong to any of the specified addresses
-func (ls *LedgerState) UtxosByAddress(
-	ctx context.Context,
-	addrs []ledger.Address,
-) ([]models.Utxo, error) {
-	utxos, err := ls.utxosByAddress(
-		addrs,
-		0,
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	ret := make([]models.Utxo, 0, len(utxos))
-	ret = append(ret, utxos...)
-	return ret, nil
-}
-
-// ScanUtxosByAddress visits every UTxO matching q's exact address patterns
-// one bounded page at a time from a single database snapshot and returns the
-// tip stored in that snapshot. See database.Database.ScanUtxosByAddress.
-func (ls *LedgerState) ScanUtxosByAddress(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-	visit func([]models.UtxoWithOrdering) error,
-) (ochainsync.Tip, error) {
-	return ls.indexerDB().
-		ScanUtxosByAddress(ctx, q, maxCandidates, maxBytes, visit)
-}
-
-// UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
-// bounding candidate work and retained CBOR.
-func (ls *LedgerState) UtxosByAddressBoundedPage(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-) (models.UtxoAddressPage, error) {
-	return ls.indexerDB().UtxosByAddressBoundedPage(
-		ctx,
-		q,
-		maxCandidates,
-		maxBytes,
-	)
-}
-
-// UtxoBalanceByAddressAtSlot aggregates a historical address balance without
-// materializing its UTxO set.
-func (ls *LedgerState) UtxoBalanceByAddressAtSlot(
-	ctx context.Context,
-	addr lcommon.Address,
-	slot uint64,
-) (models.AddressBalance, error) {
-	txn := database.NewTxnContext(ctx, ls.db, false)
-	defer txn.Release()
-	return ls.indexerDB().
-		UtxoBalanceByAddressAtSlot(ctx, addr, slot, dbadapter.Txn(txn))
-}
-
-// UtxoByRefIncludingSpent returns a UTxO by reference, including
-// spent outputs. This is needed for APIs that must resolve consumed
-// inputs to display source address and amount.
-func (ls *LedgerState) UtxoByRefIncludingSpent(
-	txId []byte,
-	outputIdx uint32,
-) (*models.Utxo, error) {
-	return ls.utxoIncludingSpent(context.Background(), nil, txId, outputIdx)
-}
-
-// GetTransactionsByBlockHash returns all transactions for a given
-// block hash.
-func (ls *LedgerState) GetTransactionsByBlockHash(
-	blockHash []byte,
-) ([]models.Transaction, error) {
-	return ls.indexerDB().GetTransactionsByBlockHash(
-		context.Background(),
-		blockHash,
-		nil,
-	)
-}
-
-// GetTransactionsByHashes returns transactions for the provided hashes.
-func (ls *LedgerState) GetTransactionsByHashes(
-	hashes [][]byte,
-) ([]models.Transaction, error) {
-	txs, err := ls.ledgerDB().
-		GetTransactionsByHashes(context.Background(), hashes, nil)
-	if err != nil {
-		return nil, fmt.Errorf("get transactions by hashes: %w", err)
-	}
-	return txs, nil
-}
-
-// GetTransactionsByAddress returns transactions involving the given
-// address.
-func (ls *LedgerState) GetTransactionsByAddress(
-	addr lcommon.Address,
-	limit int,
-	offset int,
-) ([]models.Transaction, error) {
-	return ls.indexerDB().GetTransactionsByAddress(
-		context.Background(),
-		addr,
-		limit,
-		offset,
-		nil,
-	)
-}
-
-// GetTransactionsByAddressWithOrder returns transactions
-// involving the given address with explicit ordering.
-func (ls *LedgerState) GetTransactionsByAddressWithOrder(
-	ctx context.Context,
-	addr lcommon.Address,
-	limit int,
-	offset int,
-	order string,
-	from *models.AddressTransactionPosition,
-	to *models.AddressTransactionPosition,
-) ([]models.Transaction, error) {
-	txs, err := ls.indexerDB().GetTransactionsByAddressWithOrder(
-		ctx,
-		addr,
-		limit,
-		offset,
-		order,
-		from,
-		to,
-		nil,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"get transactions by address (limit=%d offset=%d order=%s): %w",
-			limit,
-			offset,
-			order,
-			err,
-		)
-	}
-	return txs, nil
-}
-
-// CountTransactionsByAddress returns the total number of
-// transactions involving the given address.
-func (ls *LedgerState) CountTransactionsByAddress(
-	ctx context.Context,
-	addr lcommon.Address,
-	from *models.AddressTransactionPosition,
-	to *models.AddressTransactionPosition,
-) (int, error) {
-	count, err := ls.indexerDB().CountTransactionsByAddress(
-		ctx,
-		addr,
-		from,
-		to,
-		nil,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("count transactions by address: %w", err)
-	}
-	return count, nil
-}
-
-// CountTransactionsByMetadataLabel returns the total number of transactions
-// that include metadata for the requested label.
-func (ls *LedgerState) CountTransactionsByMetadataLabel(
-	label uint64,
-) (int, error) {
-	count, err := ls.indexerDB().CountTransactionsByMetadataLabel(
-		context.Background(),
-		label,
-		nil,
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"count transactions by metadata label %d: %w",
-			label,
-			err,
-		)
-	}
-	return count, nil
 }
 
 // resolveBlockValidationEra returns the era that validates a transaction from
@@ -16888,6 +15606,8 @@ type txValidationApplyFunc func(
 // no second connection.
 type txValidationResolveFunc func(refs []models.UtxoId) ([]models.Utxo, error)
 
+type txValidationAppliedFunc func(hash []byte) (bool, error)
+
 // beginTxValidationTransition excludes validation commits from a durable
 // state transition until its matching snapshots have been published.
 func (ls *LedgerState) beginTxValidationTransition() func() {
@@ -16962,6 +15682,7 @@ func (ls *LedgerState) WithTxValidationSessionAtSlot(
 // WithResolvingTxValidationSession is WithTxValidationSession for mempool
 // admission. resolve returns the live confirmed outputs among refs from the
 // session's database transaction, the snapshot its validations read.
+// isApplied reports whether a transaction has an applied row in that snapshot.
 func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
 	fn func(
 		validate func(
@@ -16973,6 +15694,7 @@ func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 		resolve func(refs []models.UtxoId) ([]models.Utxo, error),
+		isApplied func(hash []byte) (bool, error),
 	) error,
 ) error {
 	return ls.withResolvingTxValidationSession(
@@ -16988,9 +15710,10 @@ func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
 			commitIfCurrent func(func() error) (bool, error),
 			_ txValidationApplyFunc,
 			resolve txValidationResolveFunc,
+			isApplied txValidationAppliedFunc,
 			_ forging.TxRefScriptSizeFunc,
 		) error {
-			return fn(validate, stillCurrent, commitIfCurrent, resolve)
+			return fn(validate, stillCurrent, commitIfCurrent, resolve, isApplied)
 		},
 	)
 }
@@ -17024,6 +15747,7 @@ func (ls *LedgerState) WithLeiosSelectionSession(ctx context.Context,
 			_ func(func() error) (bool, error),
 			_ txValidationApplyFunc,
 			_ txValidationResolveFunc,
+			_ txValidationAppliedFunc,
 			refScriptSize forging.TxRefScriptSizeFunc,
 		) error {
 			return fn(validate, refScriptSize, stillCurrent)
@@ -17111,6 +15835,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 			commitIfCurrent func(func() error) (bool, error),
 			applyTx txValidationApplyFunc,
 			_ txValidationResolveFunc,
+			_ txValidationAppliedFunc,
 			_ forging.TxRefScriptSizeFunc,
 		) error {
 			return fn(validate, stillCurrent, commitIfCurrent, applyTx)
@@ -17234,6 +15959,7 @@ func (ls *LedgerState) tickTxValidationSnapshot(
 		plutusV2CostModelWritten,
 		transitionHardForkMajors,
 		true,
+		nil,
 	)
 	if err != nil {
 		return err
@@ -17287,6 +16013,7 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 		commitIfCurrent func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 		resolve txValidationResolveFunc,
+		isApplied txValidationAppliedFunc,
 		refScriptSize forging.TxRefScriptSizeFunc,
 	) error,
 ) error {
@@ -17486,6 +16213,14 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 		resolve := func(refs []models.UtxoId) ([]models.Utxo, error) {
 			return ls.utxosByRefsForValidation(refs, txn)
 		}
+		isApplied := func(hash []byte) (bool, error) {
+			_, found, err := ls.ledgerDB().GetTransactionSlotByHash(
+				ctx,
+				hash,
+				txn,
+			)
+			return found, err
+		}
 		refScriptSize := func(
 			tx ledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
@@ -17508,6 +16243,7 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 		}
 		if err := fn(
 			validate, stillCurrent, commitIfCurrent, applyTx, resolve,
+			isApplied,
 			refScriptSize,
 		); err != nil {
 			return err
@@ -18550,11 +17286,6 @@ func (ls *LedgerState) BlockfetchRangeExpectedBytes(
 		return 0
 	}
 	return size
-}
-
-// indexerDB returns the IndexerDB queries ledger state forwards for the APIs.
-func (ls *LedgerState) indexerDB() indexerdb.Reader {
-	return dbadapter.New(ls.db)
 }
 
 // ledgerDB returns the LedgerDB consensus reads and writes through: the one

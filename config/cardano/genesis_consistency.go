@@ -103,8 +103,8 @@ func (c *CardanoNodeConfig) validateMaxKESEvolutionsPresent() error {
 // and silently substitute blockfetchBatchSlotThresholdDefault (50000) as
 // both the security parameter and the stability window for every
 // consensus-relevant computation that depends on them: chain-selection
-// rollback depth, the consumed-UTxO prune window, and the hard-fork safe
-// zone. internal/node/load.go's loadSecurityParamForConfig and
+// rollback depth and the hard-fork safe zone.
+// internal/node/load.go's loadSecurityParamForConfig and
 // ledger/eras/shape.go's StabilityWindowForEra already reject the same
 // malformed genesis for the `load` replay path and the HFC shape builder;
 // this makes the `serve` genesis-load path consistent with them instead of

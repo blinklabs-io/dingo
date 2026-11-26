@@ -45,6 +45,15 @@ func newCoreTestDB(t *testing.T) *database.Database {
 
 func newTestDBWithStorageMode(t *testing.T, storageMode string) *database.Database {
 	t.Helper()
+	db := newTestDBAwaitingSet(t, storageMode)
+	OpenLiveSetForTest(t, db)
+	return db
+}
+
+// newTestDBAwaitingSet is a test database with no LedgerDB set open yet, for
+// a fixture that gives it a set the fixture opened itself before seeding it.
+func newTestDBAwaitingSet(t *testing.T, storageMode string) *database.Database {
+	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir:     "",
 		StorageMode: storageMode,
@@ -554,10 +563,10 @@ func seedStakedPools(
 	require.NoError(t, seedCreateAccount(t, db, t.Context(), nil, &models.Account{
 		StakingKey: stakeKey, Pool: poolA, Active: true,
 	}))
-	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
-		TxId:       bytes.Repeat([]byte{0xe6}, 32),
-		StakingKey: stakeKey, Amount: 700, AddedSlot: 15,
-	}))
+	seedTestStakedOutput(
+		t, seedLedgerOf(t, db), bytes.Repeat([]byte{0xe6}, 32), 0, stakeKey,
+		700,
+	)
 	return poolA, poolB
 }
 

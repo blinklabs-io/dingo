@@ -39,7 +39,10 @@ import (
 func TestReadSnapshotDoesNotHoldCommitBarrierForTheReadPool(t *testing.T) {
 	t.Parallel()
 
-	db, err := NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Role:    database.RoleIndexer,
+	})
 	require.NoError(t, err)
 
 	// Occupy every read connection, as concurrent streamed responses do.
@@ -111,7 +114,10 @@ func TestOpenReadSnapshotsLeaveAConnectionForDestructiveTransitionReads(
 ) {
 	t.Parallel()
 
-	db, err := NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Role:    database.RoleIndexer,
+	})
 	require.NoError(t, err)
 
 	holders := make([]*database.Txn, 0, sqlite.DefaultMaxConnections-1)

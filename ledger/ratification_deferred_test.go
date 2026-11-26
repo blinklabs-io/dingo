@@ -301,13 +301,6 @@ func TestResumePendingRatificationRewindsOrFails(t *testing.T) {
 				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			}}
 			fxAttachLedgerDB(t, ls)
-			// The record was written to the metadata store, as a v0.94.2
-			// node leaves it, and the LedgerDB set took it over.
-			left, err := db.Metadata().GetSyncState(
-				pendingRatificationSyncKey, nil,
-			)
-			require.NoError(t, err)
-			require.Empty(t, left)
 			err = ls.resumePendingRatificationIntent(context.Background())
 			if tc.fails {
 				require.ErrorIs(t, err, errRollbackIntentTooLarge)
@@ -493,9 +486,19 @@ func newGovDiffScenarioWithOptions(
 	opts govDiffScenarioOptions,
 ) *govDiffScenario {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	dbCfg := &database.Config{DataDir: t.TempDir()}
+	if opts.beforeMigration != nil {
+		// Only the v0.94.2 migration source keeps SQL ledger state.
+		dbCfg.Role = database.RoleReleased
+	}
+	db, err := dbtest.NewDatabase(t, dbCfg)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	closing := db
+	t.Cleanup(func() {
+		target := closing
+		closing = nil
+		require.NoError(t, dbtest.CloseDatabase(target))
+	})
 	if opts.beforeMigration != nil {
 		opts.beforeMigration(db)
 	}
@@ -555,7 +558,7 @@ func newGovDiffScenarioWithOptions(
 		)
 		if utxo > 0 {
 			seedTestStakedOutput(
-				t, seedLedgerOf(db), repeatByte(32, marker), 0, cred, utxo,
+				t, seedLedgerOf(t, db), repeatByte(32, marker), 0, cred, utxo,
 			)
 		}
 		s.credentials = append(s.credentials, cred)
@@ -1029,7 +1032,7 @@ func (s *govDiffScenario) seedRetiringPool(t *testing.T, retireEpoch uint64) {
 		s.credentials = append(s.credentials, account.StakingKey)
 	}
 	seedTestStakedOutput(
-		t, seedLedgerOf(s.db), repeatByte(32, 0xb4), 0, delegator, 2_222,
+		t, seedLedgerOf(t, s.db), repeatByte(32, 0xb4), 0, delegator, 2_222,
 	)
 	retireSlot := s.epoch.StartSlot + 1
 	deposit := uint64(500)
@@ -1055,30 +1058,19 @@ func (s *govDiffScenario) stakeInputRows(
 	epoch uint64,
 ) []string {
 	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, s.db)
+	rows, err := seedDB(t, s.db).GetRewardStakeInputs(epoch, nil)
 	require.NoError(t, err)
-	rows, err := raw.Query(`
-SELECT hex(pool_key_hash), credential_tag, hex(staking_key), stake, owner,
-    registered, captured_slot, boundary_slot
-FROM reward_stake_input WHERE epoch = ?
-ORDER BY pool_key_hash, credential_tag, staking_key`, epoch)
-	require.NoError(t, err)
-	defer rows.Close()
-	var ret []string
-	for rows.Next() {
-		var pool, key, stake string
-		var tag, captured, boundary int64
-		var owner, registered bool
-		require.NoError(t, rows.Scan(
-			&pool, &tag, &key, &stake, &owner, &registered, &captured,
-			&boundary,
-		))
+	ret := make([]string, 0, len(rows))
+	for _, r := range rows {
 		ret = append(ret, fmt.Sprintf(
-			"%s/%d/%s=%s owner=%t registered=%t captured=%d boundary=%d",
-			pool, tag, key, stake, owner, registered, captured, boundary,
+			"%X/%d/%X=%d owner=%t registered=%t captured=%d boundary=%d",
+			r.PoolKeyHash, r.CredentialTag, r.StakingKey, uint64(r.Stake),
+			r.Owner, r.Registered, r.CapturedSlot, r.BoundarySlot,
 		))
 	}
-	require.NoError(t, rows.Err())
+	// The digest orders rows by pool, credential tag and key; their hex
+	// forms have one length each, so sorting the rendered rows does that.
+	sort.Strings(ret)
 	return ret
 }
 

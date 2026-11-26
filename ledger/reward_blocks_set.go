@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -229,7 +230,7 @@ func (ls *LedgerState) rewardBlocksView(
 	return view, nil
 }
 
-// rewardBlockCountsFromSet answers rewardBlockCounts from the set. The
+// rewardBlockCountsFromSet answers RewardBlockCounts from the set. The
 // totals count every block of the epoch, the pools only the ones asked for,
 // as the metadata store does. ok is false when the set holds no counts for
 // the epoch.
@@ -250,19 +251,7 @@ func (ls *LedgerState) rewardBlockCountsFromSet(
 	return counts, view.Total, true, nil
 }
 
-func sameCounts(a, b map[string]uint64) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if w, ok := b[k]; !ok || w != v {
-			return false
-		}
-	}
-	return true
-}
-
-// rewardEpochFeesFor is rewardEpochFees answered from the set when the set
+// rewardEpochFeesFor is epochengine.RewardEpochFees answered from the set when the set
 // serves reward block rows.
 func (ls *LedgerState) rewardEpochFeesFor(
 	txn ledgerdb.Txn,
@@ -279,18 +268,25 @@ func (ls *LedgerState) rewardEpochFeesFor(
 		if view.FeesKnown {
 			return view.Fees, nil
 		}
-		return 0, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
+		return 0, ledgerStateUnserved(nodesettings.FamilyRewardBlocksFees)
 	}
-	return 0, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
+	return 0, ledgerStateUnserved(nodesettings.FamilyRewardBlocksFees)
 }
 
 // rewardEpochOfSlot resolves the epoch containing slot from the published
-// epoch cache. ok is false before the ledger has published a cache holding
+// epoch cache, or from the candidate's own cache while txn validates a fork
+// candidate that may open epochs the published one lacks. ok is false before the ledger has published a cache holding
 // any epoch, when there is no epoch to count in; a cache that holds epochs but
 // covers none of slot is an error.
 func (ls *LedgerState) rewardEpochOfSlot(
+	txn ledgerdb.Txn,
 	slot uint64,
 ) (epoch models.Epoch, ok bool, err error) {
+	// A fork candidate may open epochs the published cache does not hold yet.
+	if snapshot := ls.forkValidationConsensus(txn); snapshot != nil {
+		epoch, err = epochForSlotInCache(snapshot.epochCache, slot)
+		return epoch, err == nil, err
+	}
 	if ls.loadConsensusSnapshot() == nil {
 		return epoch, false, nil
 	}
@@ -312,18 +308,23 @@ func (ls *LedgerState) stageBlockMinted(
 	if ls.rewardBlocksReader(txn) == nil {
 		return
 	}
-	epoch, ok, err := ls.rewardEpochOfSlot(slot)
+	epoch, ok, err := ls.rewardEpochOfSlot(txn, slot)
 	if err != nil {
-		ls.failAccountStaging(fmt.Errorf("resolve block epoch: %w", err))
+		ls.failAccountStaging(txn, fmt.Errorf("resolve block epoch: %w", err))
 		return
 	}
 	if !ok {
 		return
 	}
 	overlay := false
-	if pparams := ls.ProtocolParamsForSlot(slot); pparams != nil {
+	pparams := ls.ProtocolParamsForSlot(slot)
+	if snapshot := ls.forkValidationConsensus(txn); snapshot != nil {
+		pparams = snapshot.currentPParams
+	}
+	if pparams != nil {
 		d := decentralizationParamRat(pparams)
-		overlay = d != nil && rewardIsOverlaySlot(epoch.StartSlot, d, slot)
+		overlay = d != nil &&
+			epochengine.RewardIsOverlaySlot(epoch.StartSlot, d, slot)
 	}
 	ls.stageLedgerChanges(
 		txn,
@@ -379,7 +380,7 @@ func (ls *LedgerState) stageTransactionFee(
 	}
 	fee, err := ls.transactionFeePot(txn, tx)
 	if err != nil {
-		ls.failAccountStaging(fmt.Errorf("resolve transaction fee: %w", err))
+		ls.failAccountStaging(txn, fmt.Errorf("resolve transaction fee: %w", err))
 		return
 	}
 	if fee == 0 {
@@ -389,9 +390,9 @@ func (ls *LedgerState) stageTransactionFee(
 	if opts.LedgerContextSlot != nil {
 		execSlot = *opts.LedgerContextSlot
 	}
-	epoch, ok, err := ls.rewardEpochOfSlot(execSlot)
+	epoch, ok, err := ls.rewardEpochOfSlot(txn, execSlot)
 	if err != nil {
-		ls.failAccountStaging(fmt.Errorf("resolve fee epoch: %w", err))
+		ls.failAccountStaging(txn, fmt.Errorf("resolve fee epoch: %w", err))
 		return
 	}
 	if !ok {
@@ -548,7 +549,7 @@ func rewardEpochBlocksFromStore(
 		allTotal++
 		allCounts[string(i.PoolKeyHash)]++
 		allNext = max(allNext, i.Slot+1)
-		if rewardIsOverlaySlot(start, d, i.Slot) {
+		if epochengine.RewardIsOverlaySlot(start, d, i.Slot) {
 			continue
 		}
 		total++
@@ -607,7 +608,7 @@ func rewardEpochBlocksFromStore(
 			}
 		}
 	}
-	fees, err := rewardEpochFees(ldb, txn, epoch)
+	fees, err := epochengine.RewardEpochFees(ldb, txn, epoch)
 	if err != nil {
 		return row, fmt.Errorf("sum fees: %w", err)
 	}

@@ -25,37 +25,32 @@ import (
 )
 
 const (
-	syncStateForgeFencePrefix = "forge_fence"
-
-	// ForgeFenceSyncKeyPrefix begins the sync_state key of every pool's
-	// fence. Sync-state cleanup must leave these rows untouched, including
-	// concurrent writes: the fence is not chain state, and losing it
-	// re-opens slots whose blocks may already have been signed.
-	ForgeFenceSyncKeyPrefix = syncStateForgeFencePrefix + ":"
-
 	// forgeFenceFormatVersion guards the on-disk record shape. A record
 	// written by a build with an incompatible layout must fail loudly
 	// rather than decode into a weaker fence.
 	forgeFenceFormatVersion = 1
 )
 
-type syncStateStore interface {
-	GetSyncState(key string, txn types.Txn) (string, error)
-	SetSyncState(key, value string, txn types.Txn) error
+// chainStateStore is the block store's chain state. A write returns only
+// once it is flushed: the fence is recorded before the header is signed, and
+// a fence lost to an unclean shutdown would let that slot be signed again.
+type chainStateStore interface {
+	ChainStateValue(name string) (string, error)
+	SetChainStateSynced(name, value string) error
 }
 
-// syncStateForgeFenceRecord is the persisted fence. LastForgedSlot is a
+// chainStateForgeFenceRecord is the persisted fence. LastForgedSlot is a
 // pointer so an absent field is distinguishable from an explicit zero: a
 // record missing it would otherwise decode to a zero fence, which permits
 // every positive slot and silently disables the protection.
-type syncStateForgeFenceRecord struct {
+type chainStateForgeFenceRecord struct {
 	FormatVersion  int     `json:"format_version"`
 	PoolID         string  `json:"pool_id"`
 	LastForgedSlot *uint64 `json:"last_forged_slot"`
 }
 
-// syncStateForgeFenceStore persists the last-forged-slot fence in
-// metadata sync state, alongside the leader schedule.
+// chainStateForgeFenceStore persists the last-forged-slot fence in the block
+// store's chain state.
 //
 // StoreLastForgedSlot is a read-modify-write, so mu makes the
 // forward-only guarantee a property of this type rather than of its
@@ -63,34 +58,34 @@ type syncStateForgeFenceRecord struct {
 // is not something an exported store should depend on. mu does not span
 // processes; two nodes sharing a data directory would corrupt the chain
 // database long before the fence mattered.
-type syncStateForgeFenceStore struct {
+type chainStateForgeFenceStore struct {
 	mu     sync.Mutex
-	store  syncStateStore
+	store  chainStateStore
 	poolID lcommon.PoolKeyHash
 	key    string
 }
 
-// NewSyncStateForgeFenceStore creates a ForgeFenceStore backed by sync
-// state. The fence is namespaced by pool id so a node re-keyed to
+// NewChainStateForgeFenceStore creates a ForgeFenceStore backed by the block
+// store's chain state. The fence is namespaced by pool id so a node re-keyed to
 // different credentials is not gated by a fence it never signed under.
-func NewSyncStateForgeFenceStore(
-	store syncStateStore,
+func NewChainStateForgeFenceStore(
+	store chainStateStore,
 	poolID lcommon.PoolKeyHash,
 ) ForgeFenceStore {
 	if store == nil {
 		return nil
 	}
-	return &syncStateForgeFenceStore{
+	return &chainStateForgeFenceStore{
 		store:  store,
 		poolID: poolID,
-		key:    syncStateForgeFenceKey(poolID),
+		key:    chainStateForgeFenceKey(poolID),
 	}
 }
 
 // LoadLastForgedSlot returns the persisted fence, if any. An unreadable
 // or foreign record is an error rather than "no fence": reporting no
 // fence would let the forger sign a slot it may already have used.
-func (s *syncStateForgeFenceStore) LoadLastForgedSlot() (
+func (s *chainStateForgeFenceStore) LoadLastForgedSlot() (
 	uint64,
 	bool,
 	error,
@@ -102,15 +97,15 @@ func (s *syncStateForgeFenceStore) LoadLastForgedSlot() (
 
 // loadLocked is LoadLastForgedSlot's body, for callers already holding
 // mu.
-func (s *syncStateForgeFenceStore) loadLocked() (uint64, bool, error) {
-	raw, err := s.store.GetSyncState(s.key, nil)
+func (s *chainStateForgeFenceStore) loadLocked() (uint64, bool, error) {
+	raw, err := s.store.ChainStateValue(s.key)
 	if err != nil {
 		return 0, false, fmt.Errorf("load forge fence %q: %w", s.key, err)
 	}
 	if raw == "" {
 		return 0, false, nil
 	}
-	var record syncStateForgeFenceRecord
+	var record chainStateForgeFenceRecord
 	if err := json.Unmarshal([]byte(raw), &record); err != nil {
 		return 0, false, fmt.Errorf(
 			"decode forge fence %q: %w",
@@ -146,7 +141,7 @@ func (s *syncStateForgeFenceStore) loadLocked() (uint64, bool, error) {
 
 // StoreLastForgedSlot records slot as used. The fence only ever moves
 // forward: a lower slot leaves the stronger recorded value in place.
-func (s *syncStateForgeFenceStore) StoreLastForgedSlot(slot uint64) error {
+func (s *chainStateForgeFenceStore) StoreLastForgedSlot(slot uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, ok, err := s.loadLocked()
@@ -156,7 +151,7 @@ func (s *syncStateForgeFenceStore) StoreLastForgedSlot(slot uint64) error {
 	if ok && current >= slot {
 		return nil
 	}
-	payload, err := json.Marshal(syncStateForgeFenceRecord{
+	payload, err := json.Marshal(chainStateForgeFenceRecord{
 		FormatVersion:  forgeFenceFormatVersion,
 		PoolID:         hex.EncodeToString(s.poolID[:]),
 		LastForgedSlot: &slot,
@@ -164,12 +159,12 @@ func (s *syncStateForgeFenceStore) StoreLastForgedSlot(slot uint64) error {
 	if err != nil {
 		return fmt.Errorf("encode forge fence for slot %d: %w", slot, err)
 	}
-	if err := s.store.SetSyncState(s.key, string(payload), nil); err != nil {
+	if err := s.store.SetChainStateSynced(s.key, string(payload)); err != nil {
 		return fmt.Errorf("save forge fence %q: %w", s.key, err)
 	}
 	return nil
 }
 
-func syncStateForgeFenceKey(poolID lcommon.PoolKeyHash) string {
-	return ForgeFenceSyncKeyPrefix + hex.EncodeToString(poolID[:])
+func chainStateForgeFenceKey(poolID lcommon.PoolKeyHash) string {
+	return types.ForgeFenceChainStatePrefix + hex.EncodeToString(poolID[:])
 }

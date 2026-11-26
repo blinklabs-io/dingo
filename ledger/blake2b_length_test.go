@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -46,21 +45,7 @@ func TestQueryDRepStateRejectsWrongLengthCredential(t *testing.T) {
 		uint(lcommon.CredentialTypeAddrKeyHash),
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.Metadata().ImportDrep(
-		&models.Drep{
-			CredentialTag: tag,
-			Credential:    credential,
-			AddedSlot:     100,
-			Active:        true,
-		},
-		&models.RegistrationDrep{
-			CredentialTag:  tag,
-			DrepCredential: credential,
-			AddedSlot:      100,
-			DepositAmount:  types.Uint64(400_000_000),
-		},
-		nil,
-	))
+	drepSeedRow(t, db, tag, credential, 100, 400_000_000)
 	ls := &LedgerState{db: db}
 	attachTestLiveSet(t, ls)
 	ls.publishSnapshotsLocked()
@@ -115,21 +100,7 @@ func TestQueryDRepStateRejectsPartialResultWhenOneCredentialIsCorrupt(
 	invalidBytes := append([]byte(nil), shortHash(0xb2)...)
 	tag, err := models.CredentialTagFromUint(uint(invalid.CredType))
 	require.NoError(t, err)
-	require.NoError(t, db.Metadata().ImportDrep(
-		&models.Drep{
-			CredentialTag: tag,
-			Credential:    invalidBytes,
-			AddedSlot:     101,
-			Active:        true,
-		},
-		&models.RegistrationDrep{
-			CredentialTag:  tag,
-			DrepCredential: invalidBytes,
-			AddedSlot:      101,
-			DepositAmount:  types.Uint64(400_000_000),
-		},
-		nil,
-	))
+	drepSeedRow(t, db, tag, invalidBytes, 101, 400_000_000)
 	ls := &LedgerState{db: db}
 	attachTestLiveSet(t, ls)
 	ls.publishSnapshotsLocked()

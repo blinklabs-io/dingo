@@ -48,6 +48,7 @@ var loadedMarkers = [][]byte{
 	witnessSlotsKey,
 	legacyWitnessSlotsKey, rewardBlocksKey, legacyRewardBlocksKey,
 	rewardInputsKey, rewardDerivedKey, closureUtxoKey, delegationsKey,
+	txIndexKey,
 	importedBlocksKey, drepHistoryLoadedKey, rewardRecordsKey,
 	inactivityKey, ratifyPendingKey,
 }
@@ -55,7 +56,7 @@ var loadedMarkers = [][]byte{
 // utxoMarkers describe the live outputs and the journal over them.
 var utxoMarkers = [][]byte{
 	tipKey, countKey, seqKey, formatKey, failedKey, rollbackPendingKey,
-	loadFloorKey,
+	loadFloorKey, addressIndexedKey, addressIndexAfterKey,
 }
 
 // valueMarkers hold values a full bootstrap resets with the rows they
@@ -74,10 +75,13 @@ var (
 	)
 	catchUpMarkers = utxoMarkers
 
-	catchUpPrefixes = [][]byte{{UTxOTag}, {JournalTag}, {AggTag}}
+	catchUpPrefixes = [][]byte{
+		{UTxOTag}, {JournalTag}, {AggTag}, addressIndexPrefix,
+	}
 	// bootstrapPrefixes drops every family a full bootstrap replaces.
 	bootstrapPrefixes = [][]byte{
 		{UTxOTag},
+		addressIndexPrefix,
 		{JournalTag},
 		{AggTag},
 		{NonceTag},
@@ -121,6 +125,7 @@ var (
 		{WitnessTag},
 		{RewardBlocksTag},
 		{ClosureUtxoTag},
+		{TxIndexTag},
 		{DelegationTag},
 		{RewardStakeInputTag},
 		{RewardPoolInputTag},
@@ -131,6 +136,7 @@ var (
 		{RewardCursorTag},
 		{ImportedBlocksTag},
 		{DRepHistoryTag},
+		{GovernanceBoundaryTag},
 		{InactivityTag},
 		{RatifyPendingTag},
 	}

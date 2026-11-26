@@ -607,21 +607,6 @@ func TestPlannerStatsRunSeriesExistBeforeAnyRun(t *testing.T) {
 	require.Equal(t, 16, series, "4 triggers x 4 results")
 }
 
-func TestHasPlannerStatsTracksSqliteStat1(t *testing.T) {
-	t.Parallel()
-
-	store := newFilePlannerStatsStore(t, prometheus.NewRegistry())
-	has, err := store.HasPlannerStats(t.Context())
-	require.NoError(t, err)
-	require.False(t, has, "a database never analyzed has no statistics")
-
-	seedPlannerStatsProbeUtxos(t, store)
-	require.NoError(t, store.UpdatePlannerStats())
-	has, err = store.HasPlannerStats(t.Context())
-	require.NoError(t, err)
-	require.True(t, has)
-}
-
 // BenchmarkPlannerStatsResume compares the full ANALYZE a resumed backfill
 // used to run with the incremental path. The grown cases analyze utxo, then
 // double it before the timed run, as an interrupted backfill does; each
@@ -693,9 +678,6 @@ SELECT tx_id, output_idx + ?, staking_key, credential_tag,
 		require.NoError(t, err)
 	}
 
-	has, err := store.HasPlannerStats(t.Context())
-	require.NoError(t, err)
-	require.True(t, has)
 	result, err := store.OptimizePlannerStatsContext(
 		t.Context(), PlannerStatsTriggerStartup,
 	)

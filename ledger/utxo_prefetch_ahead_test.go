@@ -24,7 +24,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -193,61 +192,6 @@ func TestUtxoPrefetchAheadStopJoinsAndReleasesReadTxn(t *testing.T) {
 			t.Fatal("read transaction not released when stop returned")
 		}
 	}
-}
-
-func TestUtxoPrefetchAheadTakeDoesNotWaitForReadPool(t *testing.T) {
-	t.Parallel()
-	fx := loadUtxoMemoPreprodFixture(t)
-	limit := fx.db.Metadata().(interface{ ReadSnapshotLimit() int }).
-		ReadSnapshotLimit()
-	// Hold every read-pool connection, as snapshot opens parked on the
-	// chunk's commit barrier do.
-	held := make([]*database.Txn, 0, limit+1)
-	releaseHeld := func() {
-		for _, h := range held {
-			h.Release()
-		}
-		held = nil
-	}
-	defer releaseHeld()
-	for range limit + 1 {
-		held = append(held, fx.db.Transaction(t.Context(), false))
-	}
-	blocks := []gledger.Block{
-		aheadFixtureBlock(fx),
-		aheadFixtureBlock(fx, fx.tx),
-	}
-	p := fx.dingoLS.startUtxoPrefetchAhead(
-		t.Context(), blocks, []bool{true, true},
-	)
-	defer stopWithin(t, p)
-
-	took := make(chan map[utxoref.Key]lcommon.Utxo, 1)
-	go func() {
-		p.take(0)
-		took <- p.take(1)
-	}()
-	select {
-	case got := <-took:
-		require.Nil(t, got)
-	case <-time.After(10 * time.Second):
-		t.Fatal("take waited for a read-pool connection")
-	}
-	select {
-	case <-p.ready:
-		t.Fatal("the read pool was not saturated")
-	default:
-	}
-
-	// Once a connection is free the goroutine serves blocks again.
-	releaseHeld()
-	select {
-	case <-p.ready:
-	case <-time.After(30 * time.Second):
-		t.Fatal("goroutine did not acquire a freed read connection")
-	}
-	p.ls.utxoPrefetchAheadAwaitReady = true
-	require.NotEmpty(t, p.take(1))
 }
 
 func TestUtxoPrefetchAheadResolvesFirstBlockDuringTakeZero(t *testing.T) {
@@ -437,16 +381,7 @@ func newAheadReplayEnvWith(
 		map[uint]any{0: keyAddrBytes, 1: uint64(10_000_000)},
 	)
 	require.NoError(t, err)
-	require.NoError(t, f.db.Transaction(t.Context(), true).Do(
-		func(txn *database.Txn) error {
-			if err := f.db.CreateUtxo(t.Context(), txn, &models.Utxo{
-				TxId: freeTxId, OutputIdx: 0, AddedSlot: 1, Address: keyAddrBytes,
-			}); err != nil {
-				return err
-			}
-			return f.db.Blob().SetUtxo(txn.Blob(), freeTxId, 0, freeOutput)
-		},
-	))
+	fxSeedOutput(t, f.db, freeTxId, 0, 1, freeOutput)
 
 	costModels := map[uint][]int64{
 		0: blockV3MachineCostModel(t, lang.LanguageVersionV1),

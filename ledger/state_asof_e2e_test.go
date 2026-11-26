@@ -24,7 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -146,7 +145,27 @@ func asOfScenario(
 	reads string,
 ) (ledger.BoundaryEpochStateScenario, uint64, ledgerdb.LedgerDB) {
 	t.Helper()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), HistorySlots: 1_000})
+	scenario, tip, store, _ := asOfScenarioSet(t)
+	return scenario, tip, store
+}
+
+// asOfJournalFloorScenario is asOfScenario with the set's journal pruned
+// below the scenario's tip, so the slots before it are outside the journal.
+func asOfJournalFloorScenario(t *testing.T) ledger.BoundaryEpochStateScenario {
+	t.Helper()
+	scenario, tip, _, set := asOfScenarioSet(t)
+	require.NotZero(t, tip)
+	require.NoError(t, set.PruneHistory(tip))
+	return scenario
+}
+
+func asOfScenarioSet(
+	t *testing.T,
+) (ledger.BoundaryEpochStateScenario, uint64, ledgerdb.LedgerDB, *utxoset.Set) {
+	t.Helper()
+	set, err := utxoset.Open(
+		utxoset.Config{Dir: t.TempDir(), HistorySlots: 1_000},
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
@@ -160,7 +179,7 @@ func asOfScenario(
 	// the set's journal reaches back to it.
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	require.NoError(t, set.ApplyUtxoChanges(&point, nil))
-	return scenario, point.Slot, store
+	return scenario, point.Slot, store, set
 }
 
 func slotsFrom(from, to uint64) []uint64 {
@@ -336,7 +355,7 @@ func TestAsOfPoolReadsFromTheLiveUtxoSet(t *testing.T) {
 // journal history to fail closed, while a slot it reaches remains readable.
 func TestAsOfReadsOutsideTheJournalWindow(t *testing.T) {
 	t.Parallel()
-	scenario, _, _ := asOfScenario(t, "set")
+	scenario := asOfJournalFloorScenario(t)
 	reached, hide := scenario.HideStoreReads(asOfReadNames...)
 	ldb := scenario.LedgerDB()
 	slots := scenario.Proposals()
@@ -370,30 +389,11 @@ func TestAsOfReadsOutsideTheJournalWindow(t *testing.T) {
 // an attached set's journal to fail without consulting metadata.
 func TestAsOfReadsFailClosedOutsideTheSetJournal(t *testing.T) {
 	t.Parallel()
-	needs := map[string]nodesettings.FamilyMask{
-		"GetDrepsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyDReps),
-		"GetDRepDelegatorsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyAccounts),
-		"GetDrepRegistrationDepositsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyDReps),
-		"GetGovernanceVotesAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyGovernance),
-		"GetPoolRegistrationsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyPoolsHistory),
-		"GetRetiringPoolsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyPoolsHistory),
-		"GetPoolDepositsHeldAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyPoolsHistory),
-		"GetAccountsByCredentialAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyAccounts),
-	}
-	require.Len(t, needs, len(asOfReadNames))
 	const outside = 0
 	for _, name := range asOfReadNames {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			scenario, _, _ := asOfScenario(t, "set")
+			scenario := asOfJournalFloorScenario(t)
 			reached, hide := scenario.HideStoreReads(asOfReadNames...)
 			scenario.Proposals()
 			read := asOfReadFuncs(t, scenario.LedgerDB())[name]

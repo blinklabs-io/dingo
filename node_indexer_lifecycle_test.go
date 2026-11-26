@@ -105,20 +105,20 @@ func (f *lifecycleIndexerWriters) all() []*lifecycleIndexerWriter {
 	return append([]*lifecycleIndexerWriter(nil), f.writers...)
 }
 
-// newSplitLifecycleTestNode is the live-lifecycle harness node switched to
-// the split layout, with the IndexerDB open and its writer started.
-func newSplitLifecycleTestNode(
+// newIndexerLifecycleTestNode is the live-lifecycle harness node switched to
+// the IndexerDB layout, with the IndexerDB open and its writer started.
+func newIndexerLifecycleTestNode(
 	t *testing.T,
 	numBlocks int,
 	rollbackTo func(IndexerWriterDeps, indexerdb.Tip) error,
 ) (*Node, []ocommon.Point, *lifecycleIndexerWriters) {
 	t.Helper()
-	return newSplitLifecycleTestNodeAtBlock(t, numBlocks, rollbackTo, 1)
+	return newIndexerLifecycleTestNodeAtBlock(t, numBlocks, rollbackTo, 1)
 }
 
-// newSplitLifecycleTestNodeAtBlock is newSplitLifecycleTestNode with the
+// newIndexerLifecycleTestNodeAtBlock is newIndexerLifecycleTestNode with the
 // block number the loaded chain starts at.
-func newSplitLifecycleTestNodeAtBlock(
+func newIndexerLifecycleTestNodeAtBlock(
 	t *testing.T,
 	numBlocks int,
 	rollbackTo func(IndexerWriterDeps, indexerdb.Tip) error,
@@ -131,18 +131,16 @@ func newSplitLifecycleTestNodeAtBlock(
 	)
 	// A node holds its live UTxO set open, so a snapshot carries it.
 	require.NoError(t, n.openUtxoSet())
-	// The latch a split node's first start writes; the harness database was
+	// The latch an API node's first start writes; the harness database was
 	// created before the layout was known.
-	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(
+	require.NoError(t, n.db.SetNodeSettingsGates(
 		t.Context(),
 		nodesettings.Values{
-			"indexer_layout": internalconfig.IndexerLayoutSplit,
+			"indexer_layout": internalconfig.IndexerLayoutIndexerDB,
 		},
-		0, 0,
-	),
-	)
+	))
 	writers := &lifecycleIndexerWriters{rollbackTo: rollbackTo}
-	n.config.splitIndexer = true
+	n.config.hasIndexerDB = true
 	n.config.indexerWriterFactory = writers.build
 	require.NoError(t, n.openIndexerWriter(t.Context()))
 	require.NoError(t, n.startIndexerWriter(n.ctx))
@@ -153,12 +151,12 @@ func newSplitLifecycleTestNodeAtBlock(
 	return n, points, writers
 }
 
-func TestLiveTruncateOnSplitRollsTheIndexerBackThenTheLedger(t *testing.T) {
+func TestLiveTruncateWithIndexerDBRollsTheIndexerBackThenTheLedger(t *testing.T) {
 	t.Parallel()
 	const numBlocks = 20
 	var ledgerHadTheBlocks atomic.Bool
 	var points []ocommon.Point
-	n, pts, writers := newSplitLifecycleTestNode(
+	n, pts, writers := newIndexerLifecycleTestNode(
 		t, numBlocks,
 		func(deps IndexerWriterDeps, _ indexerdb.Tip) error {
 			_, err := database.BlockByHash(
@@ -225,12 +223,12 @@ func TestLiveTruncateOnSplitRollsTheIndexerBackThenTheLedger(t *testing.T) {
 	)
 }
 
-func TestLiveTruncateOnSplitRefusedByTheIndexerLeavesTheLedgerWhole(
+func TestLiveTruncateWithIndexerDBRefusedByTheIndexerLeavesTheLedgerWhole(
 	t *testing.T,
 ) {
 	t.Parallel()
 	const numBlocks = 12
-	n, points, writers := newSplitLifecycleTestNode(
+	n, points, writers := newIndexerLifecycleTestNode(
 		t, numBlocks,
 		func(IndexerWriterDeps, indexerdb.Tip) error {
 			return errors.New("indexer rollback refused")
@@ -252,14 +250,14 @@ func TestLiveTruncateOnSplitRefusedByTheIndexerLeavesTheLedgerWhole(
 		"the node resumes with a running writer")
 }
 
-func TestLiveTruncateOnSplitRefusedByTheLedgerLeavesTheIndexerUntouched(
+func TestLiveTruncateWithIndexerDBRefusedByTheLedgerLeavesTheIndexerUntouched(
 	t *testing.T,
 ) {
 	t.Parallel()
 	const numBlocks = 12
-	n, points, writers := newSplitLifecycleTestNode(t, numBlocks, nil)
+	n, points, writers := newIndexerLifecycleTestNode(t, numBlocks, nil)
 	// A trust boundary above the target: the ledger refuses the truncate.
-	require.NoError(t, n.db.SetSyncState(
+	require.NoError(t, n.db.SetChainState(
 		"mithril_ledger_slot",
 		strconv.FormatUint(points[numBlocks-1].Slot, 10),
 		nil,
@@ -278,12 +276,12 @@ func TestLiveTruncateOnSplitRefusedByTheLedgerLeavesTheIndexerUntouched(
 }
 
 // Restore and Truncate both tear storage down with quiesce and close, and a
-// failed step resumes through reinitializeAndResume; on the split layout that
+// failed step resumes through reinitializeAndResume; with an IndexerDB that
 // whole path must stop the writer, close the IndexerDB before the ledger store
 // goes, and bring both back.
 func TestLiveLifecycleTeardownAndResumeCoverTheIndexer(t *testing.T) {
 	t.Parallel()
-	n, _, writers := newSplitLifecycleTestNode(t, 6, nil)
+	n, _, writers := newIndexerLifecycleTestNode(t, 6, nil)
 	first := writers.all()[0]
 
 	require.NoError(t, n.quiesceForLiveLifecycleOp(t.Context()))
@@ -335,9 +333,9 @@ func requireIndexerTip(t *testing.T, n *Node, want indexerdb.Tip) {
 	require.Equal(t, want.Hash, got.Hash)
 }
 
-func TestLiveSnapshotOnSplitCarriesTheIndexerDB(t *testing.T) {
+func TestLiveSnapshotWithIndexerDBCarriesTheIndexerDB(t *testing.T) {
 	t.Parallel()
-	n, points, _ := newSplitLifecycleTestNode(t, 12, nil)
+	n, points, _ := newIndexerLifecycleTestNode(t, 12, nil)
 	captured := setIndexerTip(t, n, points, 5)
 
 	dir := snapshotTestDir(t, "snap")
@@ -362,9 +360,9 @@ func TestLiveSnapshotOnSplitCarriesTheIndexerDB(t *testing.T) {
 	}
 }
 
-func TestLiveRestoreOnSplitReturnsTheIndexerDBToTheSnapshot(t *testing.T) {
+func TestLiveRestoreWithIndexerDBReturnsTheIndexerDBToTheSnapshot(t *testing.T) {
 	t.Parallel()
-	n, points, writers := newSplitLifecycleTestNode(t, 12, nil)
+	n, points, writers := newIndexerLifecycleTestNode(t, 12, nil)
 	captured := setIndexerTip(t, n, points, 5)
 	dir := snapshotTestDir(t, "snap")
 	_, err := n.Snapshot(t.Context(), dir, "", "")
@@ -385,11 +383,11 @@ func TestLiveRestoreOnSplitReturnsTheIndexerDBToTheSnapshot(t *testing.T) {
 	require.Equal(t, points[11].Slot, tip.Point.Slot)
 }
 
-func TestLiveRestoreOnSplitRefusesWhatCannotRestoreTheIndexerDB(t *testing.T) {
+func TestLiveRestoreWithIndexerDBRefusesWhatCannotRestoreTheIndexerDB(t *testing.T) {
 	t.Parallel()
 	t.Run("a snapshot without the payload", func(t *testing.T) {
 		t.Parallel()
-		n, points, _ := newSplitLifecycleTestNode(t, 6, nil)
+		n, points, _ := newIndexerLifecycleTestNode(t, 6, nil)
 		current := setIndexerTip(t, n, points, 3)
 		dir := snapshotTestDir(t, "ledger-only")
 		_, err := lifecycleSnapshot(t, n, dir)
@@ -402,7 +400,7 @@ func TestLiveRestoreOnSplitRefusesWhatCannotRestoreTheIndexerDB(t *testing.T) {
 	})
 	t.Run("a payload from another fork or with a bad digest", func(t *testing.T) {
 		t.Parallel()
-		n, points, writers := newSplitLifecycleTestNode(t, 6, nil)
+		n, points, writers := newIndexerLifecycleTestNode(t, 6, nil)
 		setIndexerTip(t, n, points, 3)
 		dir := snapshotTestDir(t, "snap")
 		_, err := n.Snapshot(t.Context(), dir, "", "")
@@ -442,7 +440,7 @@ func TestLiveRestoreOnSplitRefusesWhatCannotRestoreTheIndexerDB(t *testing.T) {
 	})
 	t.Run("a snapshot trust key", func(t *testing.T) {
 		t.Parallel()
-		n, _, _ := newSplitLifecycleTestNode(t, 3, nil)
+		n, _, _ := newIndexerLifecycleTestNode(t, 3, nil)
 		keyFile := filepath.Join(testutil.OwnerOnlyTempDir(t), "trust.key")
 		require.NoError(t, os.WriteFile(
 			keyFile, bytes.Repeat([]byte{0x42}, 64), 0o600,
@@ -458,7 +456,7 @@ func TestLiveRestoreOnSplitRefusesWhatCannotRestoreTheIndexerDB(t *testing.T) {
 	})
 	t.Run("a cloud destination", func(t *testing.T) {
 		t.Parallel()
-		n, _, _ := newSplitLifecycleTestNode(t, 3, nil)
+		n, _, _ := newIndexerLifecycleTestNode(t, 3, nil)
 		n.config.databaseLifecycle.SnapshotCloudDestination = "s3://bucket/x"
 		dir := snapshotTestDir(t, "snap")
 		_, err := n.Snapshot(t.Context(), dir, "", "")
@@ -473,7 +471,7 @@ func TestLiveRestoreOnSplitRefusesWhatCannotRestoreTheIndexerDB(t *testing.T) {
 // the new one over the same IndexerDB.
 func TestOpenIndexerWriterReleasesTheWriterStillRunning(t *testing.T) {
 	t.Parallel()
-	n, _, writers := newSplitLifecycleTestNode(t, 6, nil)
+	n, _, writers := newIndexerLifecycleTestNode(t, 6, nil)
 	oldDB := n.indexerDB
 	first := writers.all()[0]
 	testutil.RequireReceive(
@@ -510,14 +508,14 @@ func TestOpenIndexerWriterReleasesTheWriterStillRunning(t *testing.T) {
 // operation at that boundary with the node's hook, which resumes the node on
 // the disk state a restart would find, and then runs the truncate again as an
 // operator would.
-func TestLiveTruncateOnSplitCrashBetweenTheStepsKeepsTheIndexerBehindTheLedger(
+func TestLiveTruncateWithIndexerDBCrashBetweenTheStepsKeepsTheIndexerBehindTheLedger(
 	t *testing.T,
 ) {
 	t.Parallel()
 	const numBlocks = 12
 	const target = 5
 	var points []ocommon.Point
-	n, pts, writers := newSplitLifecycleTestNode(
+	n, pts, writers := newIndexerLifecycleTestNode(
 		t, numBlocks,
 		func(deps IndexerWriterDeps, to indexerdb.Tip) error {
 			store, err := indexerdb.NewStore(deps.Indexer, deps.Indexer, 0)
@@ -574,11 +572,11 @@ func TestLiveTruncateOnSplitCrashBetweenTheStepsKeepsTheIndexerBehindTheLedger(
 	requireIndexerTip(t, n, targetTip)
 }
 
-// The scheduled snapshot manager of a split node carries the IndexerDB, so
+// The scheduled snapshot manager of an API node carries the IndexerDB, so
 // the configurations a manual snapshot refuses are refused at startup.
-func TestSplitNodeSchedulesSnapshotsWithTheIndexerDB(t *testing.T) {
+func TestAPINodeSchedulesSnapshotsWithTheIndexerDB(t *testing.T) {
 	t.Parallel()
-	n, _, _ := newSplitLifecycleTestNode(t, 3, nil)
+	n, _, _ := newIndexerLifecycleTestNode(t, 3, nil)
 	n.config.databaseLifecycle.SnapshotEnabled = true
 	n.config.databaseLifecycle.SnapshotDir = testutil.OwnerOnlyTempDir(t)
 	n.config.databaseLifecycle.SnapshotCloudDestination = "s3://bucket/x"
@@ -623,7 +621,7 @@ func (refusingUtxoSet) RollbackTo(ocommon.Point) error { return nil }
 // where it is.
 func TestIndexerRollbackForTruncateHonoursTheUtxoSetRefusal(t *testing.T) {
 	t.Parallel()
-	n, points, _ := newSplitLifecycleTestNode(t, 12, nil)
+	n, points, _ := newIndexerLifecycleTestNode(t, 12, nil)
 	current := setIndexerTip(t, n, points, 9)
 	require.NoError(t, n.ledgerState.Close())
 	require.NoError(t, n.closeUtxoSet())

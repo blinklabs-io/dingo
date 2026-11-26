@@ -38,18 +38,12 @@ var ErrAnchorMismatch = errors.New(
 	"indexer: rows at the anchor do not match the imported ledger state",
 )
 
-// ErrAnchorUnserved is returned when the ledger no longer holds the state a
-// snapshot import established at the anchor in its metadata store, so an empty
-// IndexerDB cannot take it over.
+// ErrAnchorUnserved is returned when the ledger no longer holds the account
+// state a snapshot import established at the anchor, so an empty IndexerDB
+// cannot take it over.
 var ErrAnchorUnserved = errors.New(
-	"indexer: the ledger has drained the imported account state the " +
+	"indexer: the ledger no longer holds the imported account state the " +
 		"IndexerDB takes over at the Mithril anchor",
-)
-
-// Sync-state keys the ledger database records its Mithril anchor under.
-const (
-	mithrilLedgerSlotKey = "mithril_ledger_slot"
-	mithrilLedgerHashKey = "mithril_ledger_hash"
 )
 
 // AnchorChain is an optional ChainSource capability: the Mithril anchor the
@@ -71,7 +65,7 @@ func (s *DatabaseSource) Anchor(
 	if slot == 0 {
 		return indexerdb.Tip{}, false, nil
 	}
-	raw, err := s.db.GetSyncState(mithrilLedgerHashKey, nil)
+	raw, err := s.db.ImportedLedgerStateBoundaryHash()
 	if err != nil {
 		return indexerdb.Tip{}, false, fmt.Errorf(
 			"read Mithril anchor hash: %w",

@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"context"
 	"database/sql"
 	"reflect"
 	"regexp"
@@ -26,7 +25,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -78,12 +76,6 @@ func TestRollbackAcrossGovernanceBoundariesRestoresEveryTable(t *testing.T) {
 				firstTables := dumpComparableTables(t, raw)
 				firstState := ledgerDBDigest(t, s.ls)
 
-				require.NoError(t, s.db.RollbackMetadataAfterSlot(
-					context.Background(),
-					ocommon.Point{Slot: firstEpoch.StartSlot - 1},
-					0,
-					nil,
-				))
 				// Ledger state lives in the set, which rolls back along
 				// its journal.
 				fxRollback(t, s.ls, target)

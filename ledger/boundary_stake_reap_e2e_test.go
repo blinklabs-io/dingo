@@ -15,7 +15,6 @@
 package ledger_test
 
 import (
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -40,16 +39,15 @@ func TestBoundaryStakeReadsCountAPoolTheBoundaryReaped(t *testing.T) {
 	requireFixtureFigures(t, f, got)
 }
 
-// TestBoundaryStakeReadsCountAReapedPoolWhenTheSetOnlyHoldsTheState is the
+// TestBoundaryStakeReadsCountAReapedPool is the
 // reap scenario for a node whose metadata store holds no ledger state.
-func TestBoundaryStakeReadsCountAReapedPoolWhenTheSetOnlyHoldsTheState(
+func TestBoundaryStakeReadsCountAReapedPool(
 	t *testing.T,
 ) {
 	t.Parallel()
 	h := newBoundaryStakeHarness(t, "set")
 	f := h.scenario.BoundaryStake(6)
 	h.scenario.ApplyBoundary()
-	h.scenario.DrainFamilies(nodesettings.AllFamilies())
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
 	got := h.scenario.ReadBoundaryStake(f)
@@ -64,7 +62,7 @@ func TestBoundaryStakeReadsCountAReapedPoolWhenTheSetOnlyHoldsTheState(
 // the snapshot the boundary captures itself does.
 func TestDeferredBoundarySnapshotHoldsAPoolTheBoundaryReaped(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"set", "set only"} {
+	for _, name := range []string{"set", "set sources"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			own := newBoundaryStakeHarness(t, "set")
@@ -77,9 +75,8 @@ func TestDeferredBoundarySnapshotHoldsAPoolTheBoundaryReaped(t *testing.T) {
 			require.NotNil(t, want, "the boundary's own snapshot holds the pool")
 			h := newBoundaryStakeHarness(t, "set")
 			f := h.scenario.BoundaryStake(6)
-			if name == "set only" {
-				h.scenario.InstallDrainedSources()
-				h.scenario.DrainFamilies(nodesettings.AllFamilies())
+			if name == "set sources" {
+				h.scenario.InstallSetSources()
 			}
 			rows := h.scenario.DeferredBoundaryRows(f)
 			require.Len(t, rows, 1, "the reaped pool is in the snapshot")

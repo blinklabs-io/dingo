@@ -145,7 +145,7 @@ func TestDRepVotingPowerFromLiveStakeMatchesDefinition(t *testing.T) {
 				}
 				require.NoError(
 					t,
-					seedCreateAccount(t, db, context.Background(), nil, account),
+					db.Metadata().CreateAccount(nil, account),
 				)
 				for u := range 3 {
 					txID := make([]byte, 32)
@@ -382,7 +382,7 @@ func seedRewardBatchAccounts(t *testing.T, db *database.Database, n int) {
 	for i := range n {
 		require.NoError(
 			t,
-			seedCreateAccount(t, db, context.Background(), nil, &models.Account{
+			db.Metadata().CreateAccount(nil, &models.Account{
 				StakingKey: rewardBatchKey(0x31, i),
 				Pool:       rewardBatchKey(0x41, i%7),
 				Reward:     types.Uint64(1_000 + i),
@@ -541,7 +541,7 @@ func TestSaveRewardStakeInputsBatchUpsertsLikeRowByRow(t *testing.T) {
 			} {
 				inputs := build(base)
 				require.NoError(
-					t, seedDB(t, db).SaveRewardStakeInputs(inputs, nil),
+					t, dbadapter.New(db).SaveRewardStakeInputs(inputs, nil),
 				)
 				want := make(map[string]*models.RewardStakeInput)
 				for index, input := range inputs {
@@ -604,7 +604,7 @@ func TestPendingRewardCreditStoreAcrossBackends(t *testing.T) {
 			for i := range n {
 				require.NoError(
 					t,
-					seedCreateAccount(t, db, context.Background(), nil, &models.Account{
+					db.Metadata().CreateAccount(nil, &models.Account{
 						StakingKey: rewardBatchKey(0xf1, i),
 						Pool:       pool,
 						Drep:       drep,
@@ -780,7 +780,7 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 		} else {
 			txn := db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				return ls.precomputeStakeRewards(txn, 4, 200, 1_200)
+				return ls.precomputeStakeRewardsForTest(txn, 4, 200, 1_200)
 			}))
 		}
 		for _, index := range deregistered {
@@ -790,7 +790,7 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 		}
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.applyStakeRewards(context.Background(), txn, 4, 1_200, false)
+			return ls.engine().ApplyStakeRewards(context.Background(), txn, 4, 1_200, false)
 		}))
 		settleRewardCredits(t, ls)
 		return ledgerDBDigest(t, ls)
@@ -967,7 +967,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	require.NoError(t, err)
 	ls.currentEpoch = *epoch
 	ls.currentEra = eras.ShelleyEraDesc
-	cutoff, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 3)
+	cutoff, err := ls.engine().RewardPrefilterSlot(ls.ledgerDB(), nil, 3)
 	require.NoError(t, err)
 	member := rewardCalcHash(0x6a)
 	// The abandoned chain deregisters member after the rollback point and
@@ -1050,13 +1050,13 @@ func testRewardPrecomputeWriteRacesRollback(
 	var wantMember uint64
 	readTxn := db.Transaction(context.Background(), false)
 	require.NoError(t, readTxn.Do(func(txn *database.Txn) error {
-		want, ok, err := ls.calculateStakeRewardApplication(
+		want, ok, err := ls.engine().CalculateStakeRewardApplication(
 			context.Background(),
 			txn, 4, replacement.Slot, 1_200, false,
 		)
 		require.NoError(t, err)
 		require.True(t, ok)
-		for _, output := range want.accountOutputs {
+		for _, output := range want.AccountOutputs {
 			if string(output.StakingKey) == string(member) {
 				wantMember += uint64(output.Amount)
 			}
@@ -1067,7 +1067,7 @@ func testRewardPrecomputeWriteRacesRollback(
 		"control: the surviving chain pays member")
 	writeTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 4, 1_200, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 4, 1_200, false)
 	}))
 	settleRewardCredits(t, ls)
 	account, err := seedDB(t, db).GetAccountByCredential(
@@ -1087,7 +1087,11 @@ func openSQLiteRewardRaceBackend(
 	t *testing.T,
 ) (*database.Database, *sql.DB, string) {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	// The writers under test are the SQL metadata store's, which only a
+	// v0.94.2 database keeps for the ledger state.
+	db, err := dbtest.NewReleasedDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
@@ -1176,6 +1180,7 @@ func openPostgresRewardRaceBackend(
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{
 			DataDir: filepath.Join(t.TempDir(), "blob"),
+			Role:    database.RoleReleased,
 		},
 		Metadata: dbtest.StorageProvider{
 			Name:     "postgres",
@@ -1230,6 +1235,7 @@ func openMySQLRewardRaceBackend(
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{
 			DataDir: filepath.Join(t.TempDir(), "blob"),
+			Role:    database.RoleReleased,
 		},
 		Metadata: dbtest.StorageProvider{
 			Name:     "mysql",

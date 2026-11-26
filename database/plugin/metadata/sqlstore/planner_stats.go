@@ -313,23 +313,6 @@ func (s *Store) plannerStatsGrown(sizes map[string]int64) bool {
 	return grown
 }
 
-// HasPlannerStats reports whether sqlite_stat1 holds any rows. Backends
-// without an incremental form report false, so callers keep their full
-// refresh.
-func (s *Store) HasPlannerStats(ctx context.Context) (bool, error) {
-	if s.closed.Load() || !s.ready.Load() {
-		return false, errors.New("sqlstore: store is not ready")
-	}
-	if !s.dialect.HasIncrementalPlannerStats() {
-		return false, nil
-	}
-	_, rows, err := s.plannerStatsFingerprint(ctx)
-	if err != nil {
-		return false, err
-	}
-	return rows > 0, nil
-}
-
 func (s *Store) plannerStatsFailed(
 	trigger string,
 	started time.Time,

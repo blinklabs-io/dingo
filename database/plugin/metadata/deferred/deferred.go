@@ -108,23 +108,6 @@ type Index struct {
 	// depends on, other witness/redeemer secondary indexes, and any
 	// column that is only SELECTed or SET but never filtered.
 	Critical bool
-	// CatchUpDroppable marks critical indexes that a node-managed Mithril
-	// stream catch-up may drop while it holds the ledger, on top of the
-	// lazy entries. Every query that reads one serves only rollback, the
-	// API or LocalStateQuery, and none of those writes or rolls back while
-	// the run holds network and chain ingest; LSQ and API reads still run,
-	// and are slower until the rebuild. The run rebuilds them before it
-	// releases the hold, because the rollback and chain selection Ouroboros
-	// resumes need them at once.
-	//
-	// Criteria for CatchUpDroppable=true, on top of Critical=true:
-	//   - No statement of the trusted batch apply path, the post-batch
-	//     consumed-UTxO prune or an epoch rollover reads it, as a WHERE
-	//     predicate, a join or the child side of a foreign key whose
-	//     parent rows those paths delete or rekey.
-	//   - It is on utxo, transaction or asset_holding, the tables whose
-	//     index maintenance dominates a trusted batch commit.
-	CatchUpDroppable bool
 }
 
 // CriticalManifest returns the subset of Manifest entries that are
@@ -134,33 +117,6 @@ func CriticalManifest() []Index {
 	var out []Index
 	for _, idx := range Manifest {
 		if idx.Critical {
-			out = append(out, idx)
-		}
-	}
-	return out
-}
-
-// LazyManifest returns the Manifest entries that are not Critical. Nothing
-// that applies blocks, serves the API, or rolls back reads them, so they are
-// the only entries safe to drop on a database that keeps serving while it
-// catches up, as a node-managed Mithril stream catch-up does.
-func LazyManifest() []Index {
-	var out []Index
-	for _, idx := range Manifest {
-		if !idx.Critical {
-			out = append(out, idx)
-		}
-	}
-	return out
-}
-
-// CatchUpDroppableManifest returns the Manifest entries marked
-// CatchUpDroppable. A held stream catch-up drops them with the lazy entries
-// and rebuilds them before Ouroboros resumes.
-func CatchUpDroppableManifest() []Index {
-	var out []Index
-	for _, idx := range Manifest {
-		if idx.CatchUpDroppable {
 			out = append(out, idx)
 		}
 	}
@@ -194,14 +150,12 @@ var Manifest = []Index{
 		Name: "idx_utxo_payment_key", Table: "utxo",
 		Columns: []string{"payment_key"},
 		Notes:   "API address lookup", Critical: true,
-		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_utxo_staking_key", Table: "utxo",
 		Columns: []string{"staking_key"},
 		Where:   "staking_key IS NOT NULL",
 		Notes:   "API stake lookup", Critical: true,
-		CatchUpDroppable: true,
 	},
 	// The spender column's foreign key to transaction(id) needs this index so
 	// that deleting a transaction row does not scan utxo.
@@ -211,13 +165,11 @@ var Manifest = []Index{
 		Where:   "spent_at_tx_id IS NOT NULL",
 		Notes: "Consumer transaction lookup, rollback repair and " +
 			"foreign key child index", Critical: true,
-		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_utxo_added_slot", Table: "utxo",
 		Columns: []string{"added_slot"},
 		Notes:   "Rollback range scan", Critical: true,
-		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_utxo_deleted_staking_amount", Table: "utxo",
@@ -237,7 +189,7 @@ var Manifest = []Index{
 		// deleted_slot = 0 in id order, which grows, and a spend lands under
 		// the spend slot.
 		MySQLColumns: []string{"deleted_slot"},
-		Notes:        "Rollback un-spend and stake-credential sweep, spent-UTxO prune",
+		Notes:        "Rollback un-spend and stake-credential sweep",
 		Critical:     true,
 	},
 	// idx_utxo_staking_deleted_amount is deliberately NOT deferred.
@@ -259,7 +211,6 @@ var Manifest = []Index{
 		Name: "idx_applied_transaction_block_hash", Table: "applied_transaction",
 		Columns: []string{"block_hash"},
 		Notes:   "Block transaction grouping", Critical: true,
-		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_applied_transaction_slot", Table: "applied_transaction",
@@ -270,7 +221,6 @@ var Manifest = []Index{
 		Name: "idx_asset_holding_asset_id", Table: "asset_holding",
 		Columns: []string{"asset_id"},
 		Notes:   "Holders and UTxOs of one asset", Critical: true,
-		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_pool_opcert_sequence_slot", Table: "pool_opcert_sequence",
@@ -335,13 +285,7 @@ var Manifest = []Index{
 	// conflict target or read by backfill's write path: utxo_address and
 	// redeemer_script conflict on their primary keys and are cleared by
 	// transaction id or utxo id, which the primary key leads with. All serve
-	// API reads, so they are rebuilt before the API reports ready. None is
-	// CatchUpDroppable, which is limited to utxo, transaction and asset.
-	{
-		Name: "idx_utxo_address_address", Table: "utxo_address",
-		Columns: []string{"address"},
-		Notes:   "Address UTxO query", Critical: true,
-	},
+	// API reads, so they are rebuilt before the API reports ready.
 	{
 		Name: "idx_utxo_address_order", Table: "utxo_address",
 		Columns: []string{

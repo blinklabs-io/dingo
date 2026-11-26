@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -129,12 +130,24 @@ type EpochInput struct {
 	// boundary and sets it with RatificationPlan.SetBoundarySPOState before
 	// Decide.
 	BoundarySPOStateDeferred bool
+	// preBumpDRepExpiry holds DRep expiries from before the boundary's
+	// dormancy bump; ProcessEpoch sets it for RATIFY.
+	preBumpDRepExpiry map[string]uint64
 	// PendingTreasuryDonations is PrevEpoch's treasury donation total, which
 	// the caller moves into the treasury after ProcessEpoch returns. The
 	// RATIFY pass counts it, because Conway's EPOCH rule adds donations to
 	// the treasury before it seeds the next RATIFY state; this boundary's
 	// ENACT does not.
 	PendingTreasuryDonations uint64
+	// SaveBoundarySnapshot, when set, receives the boundary's governance
+	// snapshot once RATIFY has run, in the transaction that applies the
+	// decision. A deferred RATIFY calls it from the transaction that applies
+	// the deferred decision, after the boundary has committed.
+	SaveBoundarySnapshot func(
+		context.Context,
+		*models.GovernanceBoundarySnapshot,
+		ledgerdb.Txn,
+	) error
 }
 
 // EpochOutput reports what happened during the tick so the
@@ -467,6 +480,14 @@ func ProcessEpoch(
 		return nil, fmt.Errorf("remove orphaned proposals: %w", err)
 	}
 	out.OrphanedCount = orphanCount
+	// RATIFY reads the DRep expiries from before this boundary's dormancy
+	// bump (Epoch.lagda.md passes the pre-bump state to RATIFIES; the bump
+	// only reaches the output state). Capture them here: a deferred Decide
+	// runs against a snapshot that already holds the bump.
+	preBumpExpiry, err := snapshotDRepExpiries(ctx, in.DB, in.Txn)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot drep expiries: %w", err)
+	}
 	if err := BumpDormantDRepExpiryAtEpochBoundary(
 		ctx, in.DB, in.NewEpoch, in.BoundarySlot, in.Txn,
 	); err != nil {
@@ -504,6 +525,7 @@ func ProcessEpoch(
 		treasuryRemaining: ratificationTreasury,
 	}
 	plan.in.Txn = nil
+	plan.in.preBumpDRepExpiry = preBumpExpiry
 	if in.DeferRatification &&
 		(in.CurrentBoundarySPOState != nil || in.BoundarySPOStateDeferred) {
 		out.Ratification = plan
@@ -567,7 +589,13 @@ func (p *RatificationPlan) Decide(
 	}
 	in.Txn = txn
 	out := p.out
-	return decideRatification(ctx, &in, &out, p.conwayPParams, p.treasuryRemaining)
+	return decideRatification(
+		ctx,
+		&in,
+		&out,
+		p.conwayPParams,
+		p.treasuryRemaining,
+	)
 }
 
 // Apply writes a decision's ratified and expired marks at the plan's boundary
@@ -589,6 +617,7 @@ type RatificationDecision struct {
 	Ratified            []*models.GovernanceProposal
 	Expired             []*models.GovernanceProposal
 	ActiveProposalCount int
+	BoundarySnapshot    *models.GovernanceBoundarySnapshot
 	activeProposals     []models.GovernanceProposal
 }
 
@@ -644,11 +673,12 @@ func decideRatification(
 	}
 
 	// Active set changes as we ratify; snapshot once.
-	activeDRepCount, err := countActiveDReps(
+	activeDRepCount, err := countActiveDRepsWithExpiries(
 		ctx,
 		in.DB,
 		in.Txn,
 		in.NewEpoch,
+		in.preBumpDRepExpiry,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("count active dreps: %w", err)
@@ -705,13 +735,28 @@ func decideRatification(
 	// RATIFY loop below never calls TallyProposal, so this heavy read
 	// would be pure overhead (and a needless failure surface) on a no-op
 	// epoch boundary.
+	drepDistribution, err := loadDRepStakeDistribution(
+		ctx,
+		in.DB,
+		in.Txn,
+		in.PrevEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load boundary drep stake distribution: %w", err)
+	}
+	verdicts.BoundarySnapshot = &models.GovernanceBoundarySnapshot{
+		Epoch:            in.NewEpoch,
+		BoundarySlot:     in.BoundarySlot,
+		DRepDistribution: drepDistribution,
+	}
 	drepState := &DRepVotingState{}
 	spoState := &SPOVotingState{}
 	if len(stillActive) > 0 {
-		drepState, err = loadDRepVotingState(
+		drepState, err = loadDRepVotingStateWithExpiries(
 			ctx,
 			in.DB, in.Txn, in.NewEpoch, in.PrevEpoch,
 			in.DelegatorInactivityOn,
+			in.preBumpDRepExpiry,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("load drep voting state: %w", err)
@@ -807,6 +852,25 @@ func decideRatification(
 	if err != nil {
 		return nil, fmt.Errorf("get committee quorum: %w", err)
 	}
+	committee, err := in.DB.GetCommitteeMembers(ctx, in.Txn)
+	if err != nil {
+		return nil, fmt.Errorf("get post-enactment committee: %w", err)
+	}
+	constitution, err := in.DB.GetConstitution(in.Txn)
+	if err != nil {
+		return nil, fmt.Errorf("get post-enactment constitution: %w", err)
+	}
+	postEnactmentPParams, err := cbor.Encode(conwayPParams)
+	if err != nil {
+		return nil, fmt.Errorf("encode post-enactment pparams: %w", err)
+	}
+	verdicts.BoundarySnapshot.PostEnactmentPParams = postEnactmentPParams
+	verdicts.BoundarySnapshot.Committee = governanceCommitteeMembers(committee)
+	verdicts.BoundarySnapshot.CommitteeQuorum = ccQuorum.RatString()
+	verdicts.BoundarySnapshot.Constitution = cloneConstitution(constitution)
+	verdicts.BoundarySnapshot.PurposeRoots = governancePurposeRoots(
+		rootsByPurpose,
+	)
 
 	// Accepted withdrawals consume this budget immediately, even though they
 	// are not enacted until a later boundary.
@@ -1027,6 +1091,7 @@ func decideRatification(
 		// UpdateCommittee, NewConstitution, HardForkInitiation) in the same
 		// pass; only non-delaying actions keep the pass going.
 		if isDelayingActionPurpose(purpose) {
+			verdicts.BoundarySnapshot.Delayed = true
 			break
 		}
 	}
@@ -1053,6 +1118,9 @@ func decideRatification(
 		}
 		verdicts.Expired = append(verdicts.Expired, p)
 	}
+	verdicts.BoundarySnapshot.RatificationTreasury = ratificationTreasuryRemaining
+	verdicts.BoundarySnapshot.Ratified = governanceActionRefs(verdicts.Ratified)
+	verdicts.BoundarySnapshot.Expired = governanceActionRefs(verdicts.Expired)
 
 	if in.Logger != nil && len(stillActive) > 0 {
 		elapsed := time.Since(tallyStart)
@@ -1132,7 +1200,8 @@ func applyRatification(
 		if _, expired := expiredNow[proposalIdentityKey(&proposal)]; expired {
 			continue
 		}
-		if proposal.ExpiresEpoch >= in.NewEpoch && proposal.EnactedEpoch == nil &&
+		if proposal.ExpiresEpoch >= in.NewEpoch &&
+			proposal.EnactedEpoch == nil &&
 			proposal.ExpiredEpoch == nil &&
 			proposal.DeletedSlot == nil {
 			// The sweep writes lifecycle fields; keep the decision reusable.
@@ -1155,7 +1224,112 @@ func applyRatification(
 	if err != nil {
 		return 0, fmt.Errorf("remove expired proposal descendants: %w", err)
 	}
+	if decision.BoundarySnapshot != nil && in.SaveBoundarySnapshot != nil {
+		// A replayed boundary decides no new expirations because its
+		// proposals are already marked, and the save replaces the row, so the
+		// expirations stored at this boundary are the ones to retain.
+		snapshot := *decision.BoundarySnapshot
+		snapshot.Expired = boundaryExpiredRefs(
+			decision.Expired,
+			replayedExpired,
+		)
+		if err := in.SaveBoundarySnapshot(
+			ctx,
+			&snapshot,
+			in.Txn,
+		); err != nil {
+			return 0, fmt.Errorf("save governance boundary snapshot: %w", err)
+		}
+	}
 	return expiredOrphanCount, nil
+}
+
+// boundaryExpiredRefs lists the decided expirations in decision order,
+// followed by any other proposal already stored as expired at the boundary.
+func boundaryExpiredRefs(
+	decided []*models.GovernanceProposal,
+	stored []*models.GovernanceProposal,
+) []models.GovernanceActionRef {
+	all := make([]*models.GovernanceProposal, 0, len(decided)+len(stored))
+	all = append(all, decided...)
+	all = append(all, stored...)
+	seen := make(map[string]struct{}, len(all))
+	unique := all[:0:0]
+	for _, p := range all {
+		if p == nil {
+			continue
+		}
+		key := proposalIdentityKey(p)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, p)
+	}
+	return governanceActionRefs(unique)
+}
+
+func governanceActionRefs(
+	proposals []*models.GovernanceProposal,
+) []models.GovernanceActionRef {
+	refs := make([]models.GovernanceActionRef, 0, len(proposals))
+	for _, proposal := range proposals {
+		if proposal == nil {
+			continue
+		}
+		refs = append(refs, models.GovernanceActionRef{
+			TxHash:      append([]byte(nil), proposal.TxHash...),
+			ActionIndex: proposal.ActionIndex,
+		})
+	}
+	return refs
+}
+
+func governanceCommitteeMembers(
+	members []*models.CommitteeMember,
+) []models.GovernanceCommitteeMember {
+	ret := make([]models.GovernanceCommitteeMember, 0, len(members))
+	for _, member := range members {
+		ret = append(ret, models.GovernanceCommitteeMember{
+			ColdCredentialTag: member.ColdCredentialTag,
+			ColdCredential:    append([]byte(nil), member.ColdCredHash...),
+			ExpiresEpoch:      member.ExpiresEpoch,
+		})
+	}
+	return ret
+}
+
+func cloneConstitution(
+	constitution *models.Constitution,
+) *models.GovernanceConstitution {
+	if constitution == nil {
+		return nil
+	}
+	return &models.GovernanceConstitution{
+		AnchorURL:  constitution.AnchorURL,
+		AnchorHash: append([]byte(nil), constitution.AnchorHash...),
+		PolicyHash: append([]byte(nil), constitution.PolicyHash...),
+	}
+}
+
+// governancePurposeRoots records parameter, hard-fork, committee, and
+// constitution roots in that order. Nil entries preserve a missing root.
+func governancePurposeRoots(
+	roots map[govActionPurpose]*models.GovernanceProposal,
+) []*models.GovernanceActionRef {
+	ret := make([]*models.GovernanceActionRef, 0, len(chainedPurposes))
+	for _, purpose := range chainedPurposes {
+		proposal := roots[purpose]
+		if proposal == nil {
+			ret = append(ret, nil)
+			continue
+		}
+		ret = append(ret, &models.GovernanceActionRef{
+			TxHash:      append([]byte(nil), proposal.TxHash...),
+			ActionIndex: proposal.ActionIndex,
+		})
+	}
+	return ret
 }
 
 // orderParameterChangeChains keeps the candidate order, except that a
@@ -1420,22 +1594,72 @@ func countActiveDReps(
 	txn ledgerdb.Txn,
 	currentEpoch uint64,
 ) (int, error) {
+	return countActiveDRepsWithExpiries(ctx, db, txn, currentEpoch, nil)
+}
+
+// countActiveDRepsWithExpiries is countActiveDReps with stored DRep expiries
+// replaced by expiryOverride where it holds the DRep.
+func countActiveDRepsWithExpiries(
+	ctx context.Context,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
+	currentEpoch uint64,
+	expiryOverride map[string]uint64,
+) (int, error) {
 	dreps, err := db.GetActiveDreps(ctx, txn)
 	if err != nil {
 		return 0, err
 	}
 	active := 0
 	for _, drep := range dreps {
-		if drepActiveAtEpoch(drep, currentEpoch) {
+		if drepActiveAtEpoch(drep, currentEpoch, expiryOverride) {
 			active++
 		}
 	}
 	return active, nil
 }
 
-func drepActiveAtEpoch(drep *models.Drep, currentEpoch uint64) bool {
-	return drep != nil &&
-		(drep.ExpiryEpoch == 0 || drep.ExpiryEpoch >= currentEpoch)
+// drepActiveAtEpoch reports whether drep may vote in currentEpoch.
+// expiryOverride, when it holds the DRep, replaces the stored expiry.
+func drepActiveAtEpoch(
+	drep *models.Drep,
+	currentEpoch uint64,
+	expiryOverride map[string]uint64,
+) bool {
+	if drep == nil {
+		return false
+	}
+	expiry := drep.ExpiryEpoch
+	if override, ok := expiryOverride[drepExpiryKey(drep)]; ok {
+		expiry = override
+	}
+	return expiry == 0 || expiry >= currentEpoch
+}
+
+func drepExpiryKey(drep *models.Drep) string {
+	return models.StakeCredentialRef{
+		Tag: drep.CredentialTag,
+		Key: drep.Credential,
+	}.MapKey()
+}
+
+// snapshotDRepExpiries returns every registered DRep's stored expiry epoch.
+func snapshotDRepExpiries(
+	ctx context.Context,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
+) (map[string]uint64, error) {
+	dreps, err := db.GetActiveDreps(ctx, txn)
+	if err != nil {
+		return nil, err
+	}
+	expiries := make(map[string]uint64, len(dreps))
+	for _, drep := range dreps {
+		if drep != nil {
+			expiries[drepExpiryKey(drep)] = drep.ExpiryEpoch
+		}
+	}
+	return expiries, nil
 }
 
 func committeeNoConfidenceState(

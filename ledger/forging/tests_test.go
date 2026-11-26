@@ -4100,6 +4100,55 @@ func TestForgeCountsTheEmptyFallbackOnlyAfterAdoption(t *testing.T) {
 	})
 }
 
+func TestSharedKESSignerAlreadySignedDoesNotCountFallbackAsLost(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	builder := &fallbackTestBuilder{
+		selectErr: errTxValidationSnapshotChanged,
+		emptyErr:  sharedKESSlotAlreadySignedTestError{},
+	}
+	clock := &retryTestSlotClock{
+		currentSlot:       10,
+		chainTipSlot:      9,
+		slotsPerKESPeriod: 100,
+		slotEnd:           time.Now(),
+		upstreamLive:      true,
+	}
+	forger := newRetryForger(
+		t,
+		clock,
+		builder,
+		&forgerTestBroadcaster{},
+		func(cfg *ForgerConfig) {
+			cfg.SharedKESSigner = true
+			cfg.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+		},
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(t.Context()))
+	require.Equal(t, 1, builder.emptyCalls)
+	// A yield is not an outcome of the fallback, so no result is counted.
+	for _, result := range []string{
+		forgeSelectionResultRetried,
+		forgeSelectionResultEmpty,
+		forgeSelectionResultLost,
+	} {
+		require.Zero(t, testutil.ToFloat64(
+			forger.metrics.forgeSelectionFallback.WithLabelValues(result),
+		), result)
+	}
+	require.Zero(t, testutil.ToFloat64(forger.metrics.forgeCouldNot))
+	require.Zero(t, testutil.ToFloat64(
+		forger.metrics.forgeMissedLeaderSlots,
+	))
+	require.NotContains(t, logs.String(), `"level":"ERROR"`)
+	require.Contains(t, logs.String(),
+		`"outcome":"`+forgeTimingOutcomeSharedKESYielded+`"`)
+}
+
 // TestForgeCountsARetriedSlotOnlyAfterAdoption is the same rule for the
 // other half of the counter.
 func TestForgeCountsARetriedSlotOnlyAfterAdoption(t *testing.T) {

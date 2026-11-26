@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -895,7 +894,7 @@ func TestByronShelleyBoundaryClosesReadResultDoneOnEpochRolloverFailure(
 // TestByronShelleyBoundarySeedsEpochNonceOnProductionPath pins the multi-era
 // epoch-nonce seeding fix through the same production path as
 // TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams: without the
-// pre-rollover Byron-to-Shelley translation, calculateEpochNonce sees Byron
+// pre-rollover Byron-to-Shelley translation, CalculateEpochNonce sees Byron
 // and returns a nil nonce instead of seeding the Shelley genesis hash, and the
 // transitioned epoch is persisted with no nonce at all. That existing test
 // only asserts on era, pparams, and tip, so it still passes with the
@@ -1230,27 +1229,6 @@ func seedByronBoundaryUtxos(
 	require.NoError(t, seedDB(t, ls.db).SetNetworkState(
 		0, genesisReserves, 0, nil,
 	))
-	txn := ls.db.Transaction(context.Background(), true)
-	if liveUtxo > 0 {
-		require.NoError(t, ls.db.CreateUtxo(
-			context.Background(), txn, &models.Utxo{
-				TxId:      bytes.Repeat([]byte{0x01}, 32),
-				AddedSlot: 0,
-				Amount:    types.Uint64(liveUtxo),
-			},
-		))
-	}
-	if spentUtxo > 0 {
-		require.NoError(t, ls.db.CreateUtxo(
-			context.Background(), txn, &models.Utxo{
-				TxId:        bytes.Repeat([]byte{0x02}, 32),
-				AddedSlot:   0,
-				DeletedSlot: 100,
-				Amount:      types.Uint64(spentUtxo),
-			},
-		))
-	}
-	require.NoError(t, txn.Commit())
 	if liveUtxo > 0 {
 		require.NoError(t, ls.config.UtxoSet.ApplyUtxoChanges(&ls.currentTip.Point, []UtxoEvent{{
 			Added: []UtxoOutput{{
@@ -1258,6 +1236,30 @@ func seedByronBoundaryUtxos(
 				Cbor: boundaryOutputCbor(t, liveUtxo),
 			}},
 		}}))
+	}
+	if spentUtxo > 0 {
+		spent := models.UtxoId{Hash: bytes.Repeat([]byte{0x02}, 32)}
+		require.NoError(
+			t,
+			ls.config.UtxoSet.ApplyUtxoChanges(
+				&ls.currentTip.Point,
+				[]UtxoEvent{{
+					Added: []UtxoOutput{{
+						Ref:  spent,
+						Cbor: boundaryOutputCbor(t, spentUtxo),
+					}},
+				}},
+			),
+		)
+		require.NoError(
+			t,
+			ls.config.UtxoSet.ApplyUtxoChanges(
+				&ls.currentTip.Point,
+				[]UtxoEvent{{
+					Removed: []models.UtxoId{spent},
+				}},
+			),
+		)
 	}
 }
 

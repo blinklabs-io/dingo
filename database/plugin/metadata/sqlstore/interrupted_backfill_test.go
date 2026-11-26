@@ -54,11 +54,12 @@ func (b backfillStore) start(
 	t.Helper()
 	db := b.open(t)
 	store, err := New(Config{
-		WriteDB:         db,
-		Dialect:         b.dialect,
-		StorageMode:     mode,
-		Migrations:      b.registry[:versions],
-		MigrationLocker: b.locker,
+		WriteDB:           db,
+		Dialect:           b.dialect,
+		StorageMode:       mode,
+		Migrations:        b.registry[:versions],
+		MigrationLocker:   b.locker,
+		LazyHotStatements: true,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })

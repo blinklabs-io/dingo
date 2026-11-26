@@ -64,14 +64,14 @@ func TestInactivityActivationRollsBackWithItsBoundary(t *testing.T) {
 	key := models.NewStakeCredentialRef(0, cred).MapKey()
 
 	runRollbackRecompute(t, ls, db, 650)
-	epoch, activated, err := ls.delegatorInactivityActivationEpoch(nil)
+	epoch, activated, err := ls.engine().DelegatorInactivityActivationEpoch(nil)
 	require.NoError(t, err)
 	require.True(t, activated)
 	require.Equal(t, uint64(5), epoch)
 	require.Contains(t, inactivityMembership(t, ls, cred), key)
 
 	runRollbackRecompute(t, ls, db, 150)
-	_, activated, err = ls.delegatorInactivityActivationEpoch(nil)
+	_, activated, err = ls.engine().DelegatorInactivityActivationEpoch(nil)
 	require.NoError(t, err)
 	require.False(t, activated)
 	require.Empty(t, inactivityMembership(t, ls, cred))
@@ -86,12 +86,12 @@ func TestInactivityActivationRollsBackWithItsBoundary(t *testing.T) {
 
 // A store written by a release that kept ledger state in SQL holds the
 // activation epoch in sync_state and the stamped credentials in
-// account_inactivity_activation. Startup moves both into the set before it
-// deletes them, so the set answers as a node that ran the activation itself.
+// account_inactivity_activation. The migration copies both into the set, so
+// the set answers as a node that ran the activation itself.
 func TestMigratedInactivityActivationKeepsItsMembers(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	meta := db.Metadata()
 	stamped := renewTestCred(0x64)
@@ -130,8 +130,8 @@ func TestMigratedInactivityActivationKeepsItsMembers(t *testing.T) {
 		database.DelegatorInactivityActivatedSyncKey, nil,
 	)
 	require.NoError(t, err)
-	require.Empty(t, marker, "startup must delete the SQL marker")
-	epoch, activated, err := ls.delegatorInactivityActivationEpoch(nil)
+	require.Equal(t, "5", marker, "the migration leaves its source as it is")
+	epoch, activated, err := ls.engine().DelegatorInactivityActivationEpoch(nil)
 	require.NoError(t, err)
 	require.True(t, activated)
 	require.Equal(t, uint64(5), epoch)

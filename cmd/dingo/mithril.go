@@ -587,13 +587,6 @@ func runMithrilSyncWithRepair(
 					Percent: p.Percent,
 				})
 			}
-		case mithril.PhaseIndexRebuild:
-			// SyncProgress carries the rebuild duration as Description = d.String(),
-			// which is guaranteed round-trippable by time.ParseDuration.
-			if d, err := time.ParseDuration(p.Description); err == nil &&
-				d > 0 {
-				metrics.recordIndexRebuildDuration(d)
-			}
 		case mithril.PhasePostLedger:
 			// Phase-active gauge is updated above; no additional
 			// per-phase Prometheus counter for this phase in the CLI.
@@ -613,13 +606,11 @@ func runMithrilSyncWithRepair(
 	utxoSet, err := utxoset.Open(utxoset.Config{
 		Dir:    utxoset.DirFor(cfg.DatabasePath),
 		Logger: logger,
-		Only:   true,
 	})
 	if err != nil {
 		return fmt.Errorf("open live UTxO set: %w", err)
 	}
 	defer utxoSet.Close()
-	invalidateGovernance := utxoSet.InvalidateGovernance
 
 	res, err := mithril.Sync(ctx, mithril.SyncConfig{
 		Network:                 network,
@@ -650,8 +641,6 @@ func runMithrilSyncWithRepair(
 		Logger:          logger,
 		OnProgress:      onProgress,
 		Metrics:         metrics.pipeline,
-
-		InvalidateUtxoSetGovernance: invalidateGovernance,
 	})
 	if err != nil {
 		return err
@@ -667,8 +656,8 @@ func runMithrilSyncWithRepair(
 // alone, and an API node's IndexerDB replays the blocks into itself once it
 // runs.
 func mithrilSyncIndexerLayout(cfg *config.Config) string {
-	if cfg.SplitIndexer() {
-		return config.IndexerLayoutSplit
+	if cfg.HasIndexerDB() {
+		return config.IndexerLayoutIndexerDB
 	}
 	return ""
 }

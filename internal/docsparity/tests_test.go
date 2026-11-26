@@ -945,7 +945,7 @@ func splitYAMLScalarOrList(value string) []string {
 // koiosCoverageHeader is the header row that identifies it. Renaming either
 // fails this check rather than skipping it, so the table cannot be moved out
 // from under the rule.
-const koiosCoverageDoc = "ARCHITECTURE.md"
+const koiosCoverageDoc = "internal/koiosparity/README.md"
 
 var koiosCoverageHeader = []string{
 	"Koios endpoint",
@@ -998,7 +998,7 @@ func koiosCoverageDocEntries(
 //
 // Parsing is separated from reporting so the parser's own rules can be checked
 // against a table written to break them, rather than only against whatever
-// ARCHITECTURE.md happens to contain today.
+// the coverage document happens to contain today.
 type koiosCoverageTable struct {
 	exact    map[koiosFieldKey]koiosDocEntry
 	wildcard map[koiosFieldKey]koiosDocEntry
@@ -1151,7 +1151,7 @@ func koiosCoverageClasses() map[string]bool {
 	}
 }
 
-// TestArchitectureDocumentsKoiosCoverageMatrix checks the Koios coverage table
+// TestDocumentationMatchesKoiosCoverageMatrix checks the Koios coverage table
 // against koiosparity.KoiosCoverageMatrix, which is the contract the parity
 // checker actually applies.
 //
@@ -1161,7 +1161,7 @@ func koiosCoverageClasses() map[string]bool {
 // is not, or the reverse. This compares the endpoint, field and classification
 // in both directions and leaves the mapping/reason prose alone, so rewording a
 // reason does not fail the check.
-func TestArchitectureDocumentsKoiosCoverageMatrix(t *testing.T) {
+func TestDocumentationMatchesKoiosCoverageMatrix(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	exact, wildcard := koiosCoverageDocEntries(t, root)
@@ -2215,6 +2215,7 @@ var contributorDocs = []string{
 	"ARCHITECTURE.md",
 	"DATABASE.md",
 	"GENESIS_SYNC.md",
+	"internal/koiosparity/README.md",
 	"internal/test/devnet/README.md",
 }
 

@@ -859,7 +859,6 @@ func (b *Backfill) processBlockGovernanceLevel(
 	epochId uint64,
 	pp lcommon.ProtocolParameters,
 	txn *database.Txn,
-	validated *bool,
 ) error {
 	if !tx.IsValid() {
 		return nil
@@ -887,8 +886,6 @@ func (b *Backfill) processBlockGovernanceLevel(
 		proposalLifetime,
 		dbadapter.New(b.db),
 		dbadapter.Txn(txn),
-		pp,
-		validated,
 	); err != nil {
 		return fmt.Errorf("governance transaction effects: %w", err)
 	}
@@ -921,13 +918,6 @@ func (b *Backfill) Run(ctx context.Context) error {
 	)
 	if err != nil {
 		return fmt.Errorf("reading backfill checkpoint: %w", err)
-	}
-	if cp == nil || !cp.Completed {
-		// Backfill rewrites SQL ledger state a drained family no longer
-		// keeps, and reads rows it deleted.
-		if err := b.db.RefuseLedgerStateRewrite(ctx); err != nil {
-			return fmt.Errorf("backfill: %w", err)
-		}
 	}
 	if cp != nil {
 		hasIndex := cp.LastIndexID != nil
@@ -1629,7 +1619,6 @@ func (b *Backfill) processBlockTxsBatched(
 	}
 	var storageIndexOffset uint64
 	for txIndex, tx := range txs {
-		var proposalsValidated bool
 		levels := dledger.TransactionLevelsForApply(tx)
 		childCount := uint64(len(levels)) - 1
 		storageBaseIndex := uint64(txIndex) + storageIndexOffset
@@ -1679,6 +1668,17 @@ func (b *Backfill) processBlockTxsBatched(
 			if stats != nil {
 				stats.SetTransactionBatched += time.Since(setTxStart)
 			}
+			if err := b.creditDirectDeposits(
+				ctx, level, point.Slot, txn,
+			); err != nil {
+				return fmt.Errorf(
+					"direct deposits at slot %d tx %d body %d: %w",
+					point.Slot,
+					txIndex,
+					levelIndex,
+					err,
+				)
+			}
 			if err := b.processBlockGovernanceLevel(
 				ctx,
 				level,
@@ -1687,7 +1687,6 @@ func (b *Backfill) processBlockTxsBatched(
 				epochId,
 				pp,
 				txn,
-				&proposalsValidated,
 			); err != nil {
 				return fmt.Errorf(
 					"governance at slot %d tx %d body %d: %w",
@@ -1718,6 +1717,30 @@ func (b *Backfill) processBlockTxsBatched(
 		}
 	}
 	return nil
+}
+
+// creditDirectDeposits credits the reward accounts a Dijkstra transaction body,
+// of a ranking block or of a certified closure, deposits to, directly after
+// the body's certificates were stored and before the next body's withdrawals,
+// as the ledger orders them. The credit is then in the IndexerDB for an
+// account the same segment registers, which the writer's replay of the
+// ledger's reward credits cannot reach before the blocks are indexed. The
+// journal key makes a credit the replay already applied a no-op.
+//
+// Nothing is credited unless withdrawals debit: a replay that leaves balances
+// to an imported snapshot leaves its credits to the snapshot too.
+func (b *Backfill) creditDirectDeposits(
+	ctx context.Context,
+	level lcommon.Transaction,
+	slot uint64,
+	txn *database.Txn,
+) error {
+	if !b.debitWithdrawals {
+		return nil
+	}
+	return dledger.ApplyDijkstraDirectDeposits(
+		ctx, dbadapter.New(b.db), level, slot, dbadapter.Txn(txn),
+	)
 }
 
 // persistCheckpoint writes the current backfill progress.

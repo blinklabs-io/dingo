@@ -47,6 +47,7 @@ func TestCoreCopyPlanCarriesCoreModeTables(t *testing.T) {
 	for _, table := range []string{
 		"address_transaction", "redeemer_script",
 		"asset_identity", "asset_holding",
+		"utxo_offset", "transaction_offset",
 	} {
 		require.NotContains(t, plan.Copied, table)
 	}

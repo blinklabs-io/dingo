@@ -34,14 +34,13 @@ func creditRows(rows metadata.FactRows) metadata.FactRows {
 	return projectFactRows(rows, creditColumns)
 }
 
-// With the accounts family drained, the live UTxO set exports the reward
-// credits the metadata store journaled: each source once at its slot, the
-// post-snapshot ones flagged, and a credit written later under an older slot
-// follows the position a reader holds.
-func TestDrainedSetExportsTheRewardCreditJournal(t *testing.T) {
+// The live UTxO set exports the reward credits the ledger journaled: each
+// source once at its slot, the post-snapshot ones flagged, and a credit written
+// later under an older slot follows the position a reader holds.
+func TestSetExportsTheRewardCreditJournal(t *testing.T) {
 	t.Parallel()
-	var h0 *p5Harness
-	out, _ := allGraduatedRun(t, func(h *p5Harness) func() []string {
+	var h0 *setHarness
+	out, _ := releasedFactsRun(t, func(h *setHarness) func() []string {
 		h0 = h
 		ref := h.refs[0]
 		h.scenario.Credit(ref, 40)
@@ -81,11 +80,11 @@ func TestDrainedSetExportsTheRewardCreditJournal(t *testing.T) {
 
 // A reader that holds the position of its last read gets the credit journaled
 // after it even when the credit is dated before everything it read.
-func TestDrainedRewardCreditJournalResumesAfterALateCreditAtAnOldSlot(
+func TestRewardCreditJournalResumesAfterALateCreditAtAnOldSlot(
 	t *testing.T,
 ) {
 	t.Parallel()
-	allGraduatedRun(t, func(h *p5Harness) func() []string {
+	releasedFactsRun(t, func(h *setHarness) func() []string {
 		ref := h.refs[0]
 		credit := func(slot uint64, source byte) {
 			ldb := h.scenario.LedgerDB()

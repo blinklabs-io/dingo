@@ -16,7 +16,6 @@ package database
 
 import (
 	"encoding/hex"
-	"fmt"
 	"strconv"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -39,14 +38,4 @@ const LedgerReimportSwappedSyncKey = "ledger.state_reimport.swapped"
 // imported point.
 func LedgerReimportPointMark(point ocommon.Point) string {
 	return strconv.FormatUint(point.Slot, 10) + ":" + hex.EncodeToString(point.Hash)
-}
-
-// DeleteFamilySyncState deletes a sync_state key a ledger-state family owns.
-// The migration that moves the family into the LedgerDB calls it for the
-// family's keys, which DeleteSyncState refuses once the family is latched.
-func (d *Database) DeleteFamilySyncState(key string) error {
-	if err := d.metadata.DeleteSyncState(key, nil); err != nil {
-		return fmt.Errorf("Database.DeleteFamilySyncState(%q): %w", key, err)
-	}
-	return nil
 }

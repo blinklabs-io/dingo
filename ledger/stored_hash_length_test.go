@@ -24,10 +24,12 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -97,9 +99,13 @@ func newStoredHashDB(
 ) (*database.Database, *storedHashStore) {
 	t.Helper()
 	store := &storedHashStore{}
+	// Rows a release that kept ledger state in SQL left behind are read only
+	// from a v0.94.2 database.
 	db, err := dbtest.NewDatabaseWithMetadataWrapper(
 		t,
-		dbtest.Options{Config: &database.Config{DataDir: ""}},
+		dbtest.Options{Config: &database.Config{
+			DataDir: "", Role: database.RoleReleased,
+		}},
 		func(inner metadata.MetadataStore) metadata.MetadataStore {
 			store.MetadataStore = inner
 			configure(store)
@@ -144,7 +150,7 @@ func TestMIRPendingRejectsMalformedStoredCredential(t *testing.T) {
 		ls,
 		models.Epoch{StartSlot: 100, LengthInSlots: 432_000},
 	)
-	seedMIRDistribution(t, db, mirPotReserves, 150,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{{
 			Credential: shortStoredHash(lcommon.Blake2b224Size, 0x77),
 			Amount:     big.NewInt(10),
@@ -153,7 +159,7 @@ func TestMIRPendingRejectsMalformedStoredCredential(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	err := txn.Do(func(txn *database.Txn) error {
 		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
-		_, err := lv.InstantaneousRewardsTotal(mirPotReserves)
+		_, err := lv.InstantaneousRewardsTotal(epochengine.MIRPotReserves)
 		return err
 	})
 	require.ErrorContains(t, err, "MIR reward credential")
@@ -386,8 +392,8 @@ func TestRewardBlockCountsRejectsMalformedPoolInput(t *testing.T) {
 	ls := &LedgerState{config: LedgerStateConfig{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
-	_, _, _, err := ls.rewardBlockCounts(
-		seedDB(t, db),
+	_, _, _, err := ls.engine().RewardBlockCounts(
+		dbadapter.New(db),
 		nil,
 		5,
 		[]*models.RewardPoolInput{{
@@ -412,14 +418,14 @@ func TestRebuildPrunedRewardStakeInputsRejectsMalformedPoolInput(t *testing.T) {
 	ls := &LedgerState{config: LedgerStateConfig{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
-	_, err := ls.rebuildPrunedRewardStakeInputs(
-		seedDB(t, db),
+	_, err := ls.engine().RebuildPrunedRewardStakeInputs(
+		dbadapter.New(db),
 		nil,
 		5,
 		&models.RewardSnapshot{CapturedSlot: 150, BoundarySlot: 199},
 		[]*models.RewardPoolInput{{PoolKeyHash: short}},
 	)
-	require.ErrorIs(t, err, errRewardStakeInputsUnrecoverable)
+	require.ErrorIs(t, err, epochengine.ErrRewardStakeInputsUnrecoverable)
 	require.ErrorContains(t, err, "reward pool input for epoch 5")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Empty(t, store.registrationsSeen,
@@ -437,8 +443,8 @@ func TestRebuildPrunedRewardStakeInputsKeepsQueryFailureRetryable(
 	ls := &LedgerState{config: LedgerStateConfig{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
-	_, err := ls.rebuildPrunedRewardStakeInputs(
-		seedDB(t, db),
+	_, err := ls.engine().RebuildPrunedRewardStakeInputs(
+		dbadapter.New(db),
 		nil,
 		5,
 		&models.RewardSnapshot{CapturedSlot: 150, BoundarySlot: 199},
@@ -447,5 +453,5 @@ func TestRebuildPrunedRewardStakeInputsKeepsQueryFailureRetryable(
 		}},
 	)
 	require.ErrorIs(t, err, queryErr)
-	require.NotErrorIs(t, err, errRewardStakeInputsUnrecoverable)
+	require.NotErrorIs(t, err, epochengine.ErrRewardStakeInputsUnrecoverable)
 }

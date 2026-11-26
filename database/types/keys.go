@@ -167,6 +167,21 @@ const (
 	// ledger apply. Key format: "dh" + "<slot>:<hash hex>"; the value is a
 	// single byte and only the key's presence is meaningful.
 	DeferredHeaderMarkerKeyPrefix = "dh"
+	// RolledBackBlockKeyPrefix is the key prefix for the body of a block a
+	// rollback removed from the primary chain, kept until no rollback intent
+	// names it. Key format: "rb" + slot(8 bytes big-endian) + hash; the value
+	// is the block CBOR.
+	RolledBackBlockKeyPrefix = "rb"
+	// ChainStateKeyPrefix is the key prefix for chain state kept with the
+	// blocks it describes. Key format: "chainstate/" + name.
+	ChainStateKeyPrefix = "chainstate/"
+	// ForgeFenceChainStatePrefix begins the chain state name of every pool's
+	// last-forged-slot fence. Name format: "forge_fence:" + pool id hex.
+	ForgeFenceChainStatePrefix = "forge_fence:"
+	// LeaderScheduleChainStatePrefix begins the chain state name of every
+	// persisted leader schedule. Name format: "leader_schedule:" + pool id
+	// hex + ":" + epoch.
+	LeaderScheduleChainStatePrefix = "leader_schedule:"
 )
 
 // LeiosEBManifestKey builds the blob key for one occurrence of a Leios

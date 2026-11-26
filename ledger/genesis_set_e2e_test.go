@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -238,8 +237,7 @@ func TestGenesisStateIsComputedInTheSet(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
 			scenario := ledger.NewGenesisScenarioForTest(t, set)
-			store := dbadapter.New(scenario.DB)
-			require.NoError(t, set.LoadLedgerState(t.Context(), store))
+			ledger.AdoptLiveSetForTest(t, scenario.DB, set)
 			hidden := slices.Clone(genesisReadBackNames)
 			if reads == "set" {
 				hidden = append(hidden,
@@ -311,8 +309,7 @@ func TestGenesisSeedStagesTheExpiryHistoryOfADRepTheSetHolds(t *testing.T) {
 	scenario := ledger.NewGenesisScenarioForTest(
 		t, set,
 	)
-	store := dbadapter.New(scenario.DB)
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
+	ledger.AdoptLiveSetForTest(t, scenario.DB, set)
 	scenario.CreateGenesis()
 	var staker []byte
 	require.NoError(

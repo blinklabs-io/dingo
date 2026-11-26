@@ -15,84 +15,18 @@
 package indexer
 
 import (
-	"context"
-	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/internal/test/factledger"
 	"github.com/stretchr/testify/require"
 )
 
-// storeLedger stands in for the ledger in tests of the copy: it serves the
-// fact rows, the pending record and the reward cursors a test seeded in db,
-// and no state at an anchor.
-type storeLedger struct {
-	metadata.FactRowReader
-	db *database.Database
-}
+type storeLedger = factledger.Ledger
 
 func newStoreLedger(t *testing.T, db *database.Database) storeLedger {
 	t.Helper()
-	rows, ok := db.Metadata().(metadata.FactRowReader)
-	require.True(t, ok)
-	return storeLedger{FactRowReader: rows, db: db}
-}
-
-func (s storeLedger) RewardStakeInputsPendingState() (string, error) {
-	return s.db.Metadata().GetSyncState(
-		models.RewardStakeInputsPendingKey, nil,
-	)
-}
-
-func (s storeLedger) RewardPrecomputeCursors() (map[uint64]string, error) {
-	keys, err := s.db.ListSyncStateKeysByPrefix(
-		models.RewardPrecomputeCursorPrefix, nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[uint64]string, len(keys))
-	for _, k := range keys {
-		epoch, err := strconv.ParseUint(
-			strings.TrimPrefix(k, models.RewardPrecomputeCursorPrefix), 10, 64,
-		)
-		if err != nil {
-			continue
-		}
-		if out[epoch], err = s.db.Metadata().GetSyncState(k, nil); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
-}
-
-func (storeLedger) AnchorOpCertCounters(
-	context.Context, uint64,
-) ([]metadata.OpCertCounter, error) {
-	return nil, nil
-}
-
-func (storeLedger) AnchorStateReady(context.Context) error { return nil }
-
-func (storeLedger) AnchorImportedAccounts(
-	context.Context, uint64, []byte, int,
-) ([]metadata.ImportedAccount, []byte, error) {
-	return nil, nil, nil
-}
-
-func (storeLedger) EachAnchorRewardJournal(
-	context.Context, uint64, func(metadata.RewardJournalEntry) error,
-) error {
-	return nil
-}
-
-func (storeLedger) AnchorUtxoDigest(
-	context.Context, uint64,
-) (metadata.UtxoSetDigest, error) {
-	return metadata.UtxoSetDigest{}, nil
+	return factledger.New(t, db)
 }
 
 // newStoreFacts copies the facts seeded in src into dst.

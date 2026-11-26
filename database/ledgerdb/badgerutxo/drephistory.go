@@ -153,12 +153,8 @@ func DecodeDRepHistoryRow(k, v []byte) (DRepHistoryRow, error) {
 }
 
 // LoadDRepHistory replaces the store's DRep history rows with the ones feed
-// supplies, each as a primary key and value, and marks them loaded. When the
-// metadata store had drained the rows before they could be read, lost is set:
-// the store is marked as holding the history from the tip on only, so a
-// reader can tell its rows are not the whole history.
+// supplies, each as a primary key and value, and marks them loaded.
 func (s *Store) LoadDRepHistory(
-	lost bool,
 	feed func(put func(k, v []byte) error) error,
 ) error {
 	if err := s.dropPrefix([]byte{DRepHistoryTag}); err != nil {
@@ -179,7 +175,7 @@ func (s *Store) LoadDRepHistory(
 		return fmt.Errorf("badgerutxo: load DRep history: %w", err)
 	}
 	return s.update(func(txn *badger.Txn) error {
-		return txn.Set(drepHistoryLoadedKey, markerValue(lost))
+		return txn.Set(drepHistoryLoadedKey, loadedMarker)
 	})
 }
 
@@ -189,38 +185,5 @@ func (s *Store) DRepHistoryLoaded() (bool, error) {
 	return s.hasMarker(drepHistoryLoadedKey)
 }
 
-// DRepHistoryLost reports whether the metadata store had drained the DRep
-// history before the store could load it, so the rows below the load are
-// gone.
-func (s *Store) DRepHistoryLost() (bool, error) {
-	return s.markerLost(drepHistoryLoadedKey)
-}
-
-func markerValue(lost bool) []byte {
-	if lost {
-		return []byte{markerLost}
-	}
-	return []byte{1}
-}
-
-// markerLost is the value of a load marker whose rows the metadata store had
-// already drained.
-const markerLost byte = 2
-
-func (s *Store) markerLost(marker []byte) (bool, error) {
-	var lost bool
-	err := s.view(func(txn *badger.Txn) error {
-		item, err := txn.Get(marker)
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		return item.Value(func(v []byte) error {
-			lost = len(v) == 1 && v[0] == markerLost
-			return nil
-		})
-	})
-	return lost, err
-}
+// loadedMarker is the value of a family's load marker.
+var loadedMarker = []byte{1}

@@ -30,7 +30,11 @@ func newEpochFeeStore(t testing.TB) *Store {
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
 	db.SetMaxOpenConns(1)
-	store, err := New(Config{WriteDB: db, Dialect: SQLiteDialect()})
+	store, err := New(Config{
+		WriteDB:           db,
+		Dialect:           SQLiteDialect(),
+		LazyHotStatements: true,
+	})
 	require.NoError(t, err)
 	require.NoError(t, store.Start(context.Background()))
 	t.Cleanup(func() { require.NoError(t, store.Close()) })

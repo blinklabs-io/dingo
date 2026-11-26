@@ -27,7 +27,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
 )
@@ -117,10 +118,10 @@ func NewMCPServer(
 		"Dingo is a pure Go, modular Cardano node implementation developed by Blink Labs.\n" +
 		"Key concepts & guidance for agents:\n" +
 		"- Node & Block Identification: Dingo identifies blocks it forges on-chain using identifier 69 (BlockHeaderProtocolMinor = 69 by default), optionally with a CIP-0203 release-version payload. This fingerprints Dingo-forged blocks without altering the ledger protocol major version. In network handshakes, it identifies as Dingo with its version string.\n" +
-		"- Block Production: When running with --block-producer, Dingo maintains a durable forge fence in SQLite ('forge_fence:<pool_id>' in table sync_state) to prevent double-signing, and tracks minting in 'pool_opcert_sequence'.\n" +
-		"- Storage Modes: 'core' (Badger block blobs + SQLite metadata) and 'api' (PostgreSQL / indexed store).\n" +
+		"- Block Production: When running with --block-producer, Dingo keeps a durable forge fence as block-store chain state ('forge_fence:<pool_id>'), which no SQL table holds, to prevent double-signing, and keeps operational certificate counters in the LedgerDB.\n" +
+		"- Storage Modes: 'core' (block store, ImmutableDB and LedgerDB; no SQL store) and 'api' (core plus an IndexerDB on SQLite, PostgreSQL or MySQL, which the SQL tools query).\n" +
 		"- Documentation Resources: Inspect 'dingo://docs/identity' for details on node and block identification, 'dingo://docs/faq' for frequently asked questions, 'dingo://docs/architecture' for node internals, and 'dingo://dbsync/cheatsheet' for schema mappings.\n" +
-		"- Active Tools (21 total): Use 'get_node_info' for architecture/FAQ/identity queries, 'get_cardano_tip' for sync status, 'get_protocol_parameters' for fee/ExUnit pricing, 'get_mempool_info' for in-flight pending txs, 'decode_address' for address decomposition, 'get_governance_proposal' for CIP-1694 vote tallies, 'calculate_min_utxo' for CIP-55 deposit sizing, 'get_pool_performance' for SPO metrics, 'get_governance_state' for Voltaire governance, and 'sqlite_query' for arbitrary read-only queries.\n" +
+		"- Active Tools (21 total): Use 'get_node_info' for architecture/FAQ/identity queries, 'get_cardano_tip' for sync status, 'get_protocol_parameters' for fee/ExUnit pricing, 'get_mempool_info' for in-flight pending txs, 'decode_address' for address decomposition, 'get_governance_proposal' for CIP-1694 vote tallies, 'calculate_min_utxo' for CIP-55 deposit sizing, 'get_pool_performance' for SPO metrics, 'get_governance_state' for Voltaire governance, and 'sqlite_query' for arbitrary read-only queries of the IndexerDB.\n" +
 		"- Official Agent Prompts: Pre-engineered workflows available via prompts/list and prompts/get: 'diagnose_node_health' (node sync and health), 'simulate_and_diagnose_tx' (Plutus transaction dry-run & redeemer ExUnits), 'audit_pool_rewards' (SPO performance audit), 'track_asset_portfolio' (Kupo-style asset intelligence), 'conway_governance_brief' (CIP-1694 governance brief), and 'investigate_address' (EUTxO state analysis)."
 
 	opts := &mcp.ServerOptions{
@@ -144,23 +145,20 @@ func NewMCPServer(
 		Version: "0.1.0",
 	}, opts)
 
-	var addressLookup utxoAddressLookup
-	if deps.Database != nil {
-		addressLookup = deps.Database.UtxosByAddressPage
+	// A node whose database holds no UTxO rows supplies AddressLookup over its
+	// live UTxO set; otherwise the IndexerDB's address index pages addresses.
+	// With neither and no database, get_utxos reads the live UTxO set itself.
+	var reads indexerReads
+	reads.addressLookup = deps.AddressLookup
+	if deps.Database != nil && deps.Database.Metadata() != nil {
+		if reads.addressLookup == nil {
+			reads.addressLookup = deps.Database.UtxosByAddressPage
+		}
+		reads.epochBlocks = indexerEpochBlocks(deps.Database)
 	}
 
 	// Register tools, resources & prompts
 	limits := newReadLimits()
-	limits.drained = func() nodesettings.FamilyMask {
-		var mask nodesettings.FamilyMask
-		if deps.LedgerState != nil {
-			mask |= deps.LedgerState.DrainedFamilies()
-		}
-		if deps.Database != nil {
-			mask |= deps.Database.DrainedMask()
-		}
-		return mask
-	}
 	registerSQLiteTools(server, db, cfg.QueryTimeout, cfg.MaxRows, limits)
 	registerCardanoTools(
 		server,
@@ -170,7 +168,7 @@ func NewMCPServer(
 		deps.Network,
 		cfg.QueryTimeout,
 		limits,
-		addressLookup,
+		reads,
 	)
 	resourceLogger := deps.Logger
 	if resourceLogger == nil {
@@ -189,4 +187,23 @@ func NewMCPServer(
 	RegisterPrompts(server, db, deps.LedgerState, deps.Network)
 
 	return server, openedDB, nil
+}
+
+// indexerEpochBlocks counts blocks from the IndexerDB's block nonces, which it
+// keeps for every block it indexes, or is nil when its store has no slot-range
+// statistics.
+func indexerEpochBlocks(db *database.Database) epochBlockCounter {
+	slotRanges, ok := db.Metadata().(metadata.SlotRangeStore)
+	if !ok {
+		return nil
+	}
+	return func(ctx context.Context, start, end uint64) (int, error) {
+		txn := db.Transaction(ctx, false)
+		defer txn.Release()
+		stats, err := slotRanges.GetBlockSlotRangeStats(start, end, txn.Metadata())
+		if err != nil {
+			return 0, err
+		}
+		return stats.Count, nil
+	}
 }

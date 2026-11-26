@@ -25,9 +25,10 @@ import (
 
 // captureEndorserUndo returns, for each ranking block in blocks that applied a
 // certified endorser block, the endorser transactions it applied, in
-// application order. An entry already in prior is kept, because a block whose
-// rollback was already recorded may be truncated, and the transaction rows
-// that say which block applied each endorser transaction go with it.
+// application order, by position in the endorser block. An entry already in
+// prior is kept, because a block whose rollback was already recorded may be
+// truncated, and the transaction rows that say which block applied each
+// endorser transaction go with it.
 //
 // It reads the metadata store, so a rollback calls it before truncating. A
 // block whose endorser block cannot be resolved is logged and skipped: the
@@ -51,7 +52,7 @@ func (ls *LedgerState) captureEndorserUndo(
 		if _, ok := ret[string(block.Hash)]; ok {
 			continue
 		}
-		txs, err := ls.endorserTxsAppliedBy(ctx, block)
+		applied, err := ls.endorserTxsAppliedBy(ctx, block)
 		if err != nil {
 			ls.config.Logger.Error(
 				"failed to capture endorser transactions for rollback undo",
@@ -62,13 +63,13 @@ func (ls *LedgerState) captureEndorserUndo(
 			)
 			continue
 		}
-		if len(txs) == 0 {
+		if len(applied.txs) == 0 {
 			continue
 		}
 		if ret == nil {
 			ret = make(endorserUndo)
 		}
-		ret[string(block.Hash)] = txs
+		ret[string(block.Hash)] = applied
 	}
 	return ret
 }
@@ -80,26 +81,26 @@ func (ls *LedgerState) captureEndorserUndo(
 func (ls *LedgerState) endorserTxsAppliedBy(
 	ctx context.Context,
 	block models.Block,
-) ([]durableEndorserTx, error) {
+) (endorserApplied, error) {
 	blk, err := block.Decode()
 	if err != nil {
-		return nil, err
+		return endorserApplied{}, err
 	}
 	ebHash, ebSlot, announced, err := ls.leiosEndorserBlockForApply(ctx, blk)
 	if err != nil || !announced {
-		return nil, err
+		return endorserApplied{}, err
 	}
 	raws, ok := ls.config.EndorserBlockProvider(ebHash.Bytes(), ebSlot)
 	if !ok {
-		return nil, errCertifiedEndorserBlockUnavailable
+		return endorserApplied{}, errCertifiedEndorserBlockUnavailable
 	}
 	ids, err := endorserBlockTxIds(raws)
 	if err != nil {
-		return nil, err
+		return endorserApplied{}, err
 	}
 	rows, err := ls.ledgerDB().GetTransactionsByHashes(ctx, ids, nil)
 	if err != nil {
-		return nil, err
+		return endorserApplied{}, err
 	}
 	appliedHere := make(map[string]struct{}, len(rows))
 	for _, row := range rows {
@@ -107,15 +108,14 @@ func (ls *LedgerState) endorserTxsAppliedBy(
 			appliedHere[string(row.Hash)] = struct{}{}
 		}
 	}
-	var ret []durableEndorserTx
+	ret := endorserApplied{ebHash: ebHash.Bytes(), ebSlot: ebSlot}
 	for i, id := range ids {
 		if _, ok := appliedHere[string(id)]; !ok {
 			continue
 		}
 		// An endorser block can repeat a transaction; apply keeps the first.
 		delete(appliedHere, string(id))
-		ret = append(ret, durableEndorserTx{
-			Cbor:  bytes.Clone(raws[i]),
+		ret.txs = append(ret.txs, durableEndorserTx{
 			Index: uint32(i), //nolint:gosec // bounded by the endorser block
 		})
 	}

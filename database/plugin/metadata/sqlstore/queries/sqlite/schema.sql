@@ -35,6 +35,19 @@ CREATE TABLE sync_state (
     value TEXT NOT NULL
 );
 
+CREATE TABLE utxo_offset (
+    tx_id BLOB NOT NULL,
+    output_idx INTEGER NOT NULL,
+    data BLOB NOT NULL,
+    PRIMARY KEY (tx_id, output_idx)
+) WITHOUT ROWID;
+
+CREATE TABLE transaction_offset (
+    hash BLOB NOT NULL,
+    data BLOB NOT NULL,
+    PRIMARY KEY (hash)
+) WITHOUT ROWID;
+
 CREATE TABLE epoch (
     nonce BLOB,
     evolving_nonce BLOB,
@@ -478,7 +491,6 @@ CREATE TABLE utxo_address (
     FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_utxo_address_address ON utxo_address(address);
 CREATE INDEX idx_utxo_address_order ON utxo_address(address, slot, block_index, output_idx, tx_id);
 
 CREATE TABLE asset_mint_burn (

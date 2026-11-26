@@ -17,10 +17,13 @@ package settingsresolve_test
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/dbinfo"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -69,17 +72,27 @@ func isolateConfigSnapshot(t *testing.T) {
 	})
 }
 
-// seedDatabase opens a real sqlite-backed metadata store in a fresh
-// directory, persists gates directly into node_settings_gate, and closes
-// it again -- reproducing exactly the state a real prior `dingo` start
-// would have left behind, without going through settingsresolve.Apply
-// itself (which is what these tests exercise).
+// seedDatabase leaves a data directory as this release does after a prior
+// start: a migrated metadata store, and the node settings in the dbinfo file.
 func seedDatabase(t *testing.T, gates map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
+	template, err := dbtest.MetadataTemplateBytes()
+	require.NoError(t, err)
+	require.NoError(t, dbtest.SeedMetadataTemplateBytes(dir, template))
+	values := nodesettings.Values{"metadata_plugin": "sqlite"}
+	maps.Copy(values, gates)
+	require.NoError(t, dbinfo.WriteGates(dir, values))
+	return dir
+}
+
+// seedReleasedDatabase leaves a data directory as v0.94.2 does: the node
+// settings in the metadata store, and a format 1 dbinfo file naming the
+// plugin.
+func seedReleasedDatabase(t *testing.T, gates map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
 	ctx := context.Background()
-	// Start from an already-migrated metadata file so neither this store nor
-	// the Apply under test runs the full schema migration.
 	template, err := dbtest.MetadataTemplateBytes()
 	require.NoError(t, err)
 	require.NoError(t, dbtest.SeedMetadataTemplateBytes(dir, template))
@@ -111,10 +124,53 @@ func seedDatabase(t *testing.T, gates map[string]string) string {
 		nodesettings.Values(gates), 0, 0,
 	))
 	require.NoError(t, dbinfo.Write(dir, dbinfo.Info{
-		FormatVersion:  dbinfo.CurrentFormatVersion,
+		FormatVersion:  dbinfo.ReleasedFormatVersion,
 		MetadataPlugin: "sqlite",
 	}))
 	return dir
+}
+
+// A data directory v0.94.2 left resumes from the settings in its metadata
+// store, which the first open by this release has not moved yet.
+func TestApplyResumesNetworkFromAReleasedDatabase(t *testing.T) {
+	isolateConfigSnapshot(t)
+	dir := seedReleasedDatabase(t, map[string]string{"network": "preprod"})
+	cfg := config.GetConfig()
+	cfg.DatabasePath = dir
+	cfg.Network = "preview"
+	require.NoError(t, settingsresolve.Apply(cfg))
+	require.Equal(t, "preprod", cfg.Network)
+}
+
+// A data directory this release opened resumes from its dbinfo file without
+// opening any store, so it reads no node settings table.
+func TestApplyResumesWithoutOpeningAStore(t *testing.T) {
+	isolateConfigSnapshot(t)
+	dir := t.TempDir()
+	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
+		Config: &database.Config{
+			DataDir:        dir,
+			StorageMode:    "core",
+			Network:        "preprod",
+			BlobPlugin:     "badger",
+			MetadataPlugin: "sqlite",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	opened := false
+	defer settingsresolve.SetNewHost(func() (*plugin.Host, error) {
+		opened = true
+		return nil, errors.New("the read must not open a store")
+	})()
+	cfg := config.GetConfig()
+	cfg.DatabasePath = dir
+	cfg.Network = "preview"
+	cfg.Plugins.Storage.Metadata.Provider = "sqlite"
+	require.NoError(t, settingsresolve.Apply(cfg))
+	require.Equal(t, "preprod", cfg.Network)
+	require.False(t, opened)
 }
 
 // No test in this package calls t.Parallel: settingsresolve.Apply ends in
@@ -269,7 +325,7 @@ func TestApplyFailsOnIncompleteSidecar(t *testing.T) {
 	isolateConfigSnapshot(t)
 	dir := t.TempDir()
 	require.NoError(t, dbinfo.Write(dir, dbinfo.Info{
-		FormatVersion:  dbinfo.CurrentFormatVersion,
+		FormatVersion:  dbinfo.ReleasedFormatVersion,
 		MetadataPlugin: "",
 	}))
 	cfg := config.GetConfig()
@@ -279,24 +335,20 @@ func TestApplyFailsOnIncompleteSidecar(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestApplyProceedsOnUnreadableSidecar pins the other half of the same
-// fix, in the opposite direction: a sidecar this build cannot read for a
-// reason unrelated to ErrIncompleteSidecar -- here, an unrecognised newer
-// FormatVersion -- must keep today's deliberate forward-compatibility
-// behavior of warning and proceeding, not fail startup. Only the
-// incomplete-sidecar case changes.
+// TestApplyProceedsOnUnreadableSidecar: a dbinfo file this build cannot
+// read, here one of a newer format, is not Apply's to report. It warns,
+// resolves nothing and leaves the open that follows to refuse the file.
 func TestApplyProceedsOnUnreadableSidecar(t *testing.T) {
 	isolateConfigSnapshot(t)
 	dir := seedDatabase(t, map[string]string{"network": "preprod"})
 	require.NoError(t, dbinfo.Write(dir, dbinfo.Info{
-		FormatVersion:  dbinfo.CurrentFormatVersion + 1,
-		MetadataPlugin: "sqlite",
+		FormatVersion: dbinfo.CurrentFormatVersion + 1,
 	}))
 	cfg := config.GetConfig()
 	cfg.DatabasePath = dir
 	cfg.Network = "preview"
 	require.NoError(t, settingsresolve.Apply(cfg))
-	require.Equal(t, "preprod", cfg.Network)
+	require.Equal(t, "preview", cfg.Network)
 }
 
 // TestApplyResumesNetworkFromDefaultPublishesToGetConfig pins a real bug
@@ -486,10 +538,10 @@ func TestApplyPreservesExplicitMidnightFieldOnResumedNetwork(t *testing.T) {
 	)
 }
 
-// On the split layout the consensus store persists core while the
+// On the IndexerDB layout the consensus store persists core while the
 // configuration says api, because the IndexerDB is the API store. A restart
 // must compare the store against the consensus mode, not the configured one.
-func TestApplyAcceptsASplitNodeRestart(t *testing.T) {
+func TestApplyAcceptsAnAPINodeRestart(t *testing.T) {
 	for name, source := range map[string]config.Source{
 		"configured":   config.SourceFlag,
 		"by default":   config.SourceDefault,
@@ -499,7 +551,7 @@ func TestApplyAcceptsASplitNodeRestart(t *testing.T) {
 			isolateConfigSnapshot(t)
 			dir := seedDatabase(t, map[string]string{
 				"storage_mode":   "core",
-				"indexer_layout": config.IndexerLayoutSplit,
+				"indexer_layout": config.IndexerLayoutIndexerDB,
 			})
 			cfg := config.GetConfig()
 			cfg.DatabasePath = dir
@@ -512,8 +564,8 @@ func TestApplyAcceptsASplitNodeRestart(t *testing.T) {
 	}
 }
 
-// A split layout still refuses to move a consensus store back from core.
-func TestApplyOnSplitStillRefusesTheWrongNetwork(t *testing.T) {
+// A IndexerDB layout still refuses to move a consensus store back from core.
+func TestApplyWithIndexerDBStillRefusesTheWrongNetwork(t *testing.T) {
 	isolateConfigSnapshot(t)
 	dir := seedDatabase(t, map[string]string{
 		"storage_mode": "core", "network": "preprod",
@@ -557,52 +609,13 @@ func serverAsSQLiteHost(provider string) func() (*plugin.Host, error) {
 	}
 }
 
-// TestReadPersistedGateValuesReadsTheConsensusNamespace reads the settings of
-// an adopted PostgreSQL store from its consensus namespace, as the SQLite
-// consensus store's are read, not from the IndexerDB the configuration names.
-// Not t.Parallel: it swaps the package's host factory.
-func TestReadPersistedGateValuesReadsTheConsensusNamespace(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	template, err := dbtest.MetadataTemplateBytes()
-	require.NoError(t, err)
-	factory := serverAsSQLiteHost("postgres")
-	for _, seed := range []struct {
-		dir   string
-		core  bool
-		gates nodesettings.Values
-	}{
-		{dir, false, nodesettings.Values{"network": "preview", "storage_mode": "api", "indexer_layout": "split"}},
-		{filepath.Join(dir, "core"), true, nodesettings.Values{"network": "preview", "storage_mode": "core", "indexer_layout": "split"}},
-	} {
-		require.NoError(t, dbtest.SeedMetadataTemplateBytes(seed.dir, template))
-		host, err := factory()
-		require.NoError(t, err)
-		store, err := plugin.Resolve[metadata.MetadataStore](
-			ctx, host, plugin.CapabilityStorageMetadata, "postgres", nil,
-			metadata.ProviderDependencies{DataDir: dir, CoreNamespace: seed.core, StorageMode: seed.gates["storage_mode"]},
-		)
-		require.NoError(t, err)
-		require.NoError(t, store.SetNodeSettingsGates(ctx, seed.gates, 0, 0))
-		require.NoError(t, host.Stop(ctx))
-	}
-	defer settingsresolve.SetNewHost(factory)()
-	cfg := &config.Config{StorageMode: "api", DatabasePath: dir}
-	cfg.Plugins.Storage.Metadata = plugin.Selection{Provider: "postgres"}
-	values, ok, err := settingsresolve.ReadPersistedGateValues(cfg)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, "core", values["storage_mode"],
-		"the node's settings are the consensus namespace's")
-}
-
 // A v0.94.2 API store interrupted during its metadata backfill is refused
 // before the store is opened; one that has since been latched as core keeps
 // no API history to finish and resolves as any other.
 func TestApplyRefusesAnInterruptedBackfillOfAnAPIStore(t *testing.T) {
 	isolateConfigSnapshot(t)
 	for mode, refused := range map[string]bool{"api": true, "core": false} {
-		dir := seedDatabase(t, map[string]string{"storage_mode": mode})
+		dir := seedReleasedDatabase(t, map[string]string{"storage_mode": mode})
 		raw, err := sql.Open("sqlite", filepath.Join(dir, "metadata.sqlite"))
 		require.NoError(t, err)
 		_, err = raw.Exec(
@@ -620,6 +633,31 @@ func TestApplyRefusesAnInterruptedBackfillOfAnAPIStore(t *testing.T) {
 		}
 		require.NoError(t, err, mode)
 	}
+}
+
+// Once the node settings have moved into the dbinfo file, this release has
+// opened the metadata store and upgraded its schema, so v0.94.2 can no longer
+// finish a backfill there and startup does not read the store again.
+func TestApplyReadsNoReleasedStoreOnceTheSettingsMoved(t *testing.T) {
+	isolateConfigSnapshot(t)
+	dir := seedReleasedDatabase(t, map[string]string{"storage_mode": "api"})
+	raw, err := sql.Open("sqlite", filepath.Join(dir, "metadata.sqlite"))
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		`INSERT INTO sync_state(sync_key,value) VALUES('sync_status','backfill')`,
+	)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+	require.NoError(t, dbinfo.WriteGates(dir, nodesettings.Values{
+		"metadata_plugin": "sqlite",
+		"storage_mode":    "api",
+	}))
+	cfg := config.GetConfig()
+	cfg.DatabasePath = dir
+	cfg.StorageMode = "api"
+	cfg.Plugins.Storage.Metadata.Provider = "sqlite"
+
+	require.NoError(t, settingsresolve.Apply(cfg))
 }
 
 // A v0.94.2 API store interrupted during its metadata backfill is refused by

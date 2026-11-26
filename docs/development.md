@@ -68,7 +68,7 @@ complete node conformance.
 
 | Profile | Command | Scope |
 | --- | --- | --- |
-| Ledger rules | `go test ./internal/test/conformance/` | Pinned Cardano Blueprint ledger vectors from `ouroboros-mock`, Dingo era validation entry points, and real metadata backends |
+| Ledger rules | `go test ./internal/test/conformance/` | Pinned Cardano Blueprint ledger vectors from `ouroboros-mock`, Dingo era validation entry points, and the LedgerDB set |
 | Deterministic consensus | `go test ./ouroboros/ -run TestConsensusConformance` | Shared `ouroboros-mock` consensus scenarios: final chain choice, rollback points, and the ChainSync Dingo serves downstream |
 | Reference node | `./internal/test/devnet/run-tests.sh --conformance` | Dingo beside `cardano-node` on the live DevNet; not run by either deterministic profile |
 

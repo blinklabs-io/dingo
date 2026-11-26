@@ -50,5 +50,5 @@ func TestPostSnapshotCreditEventsRefuseALoadedTotal(t *testing.T) {
 		{Slot: 9, Ref: models.NewStakeCredentialRef(0, []byte{0x01}), Amount: 5, Loaded: true},
 		{Slot: 9, Ref: models.NewStakeCredentialRef(0, []byte{0x02}), Source: []byte{0x01}, Amount: 4},
 	}, 9)
-	require.ErrorIs(t, err, ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ErrLedgerStateUnserved)
 }

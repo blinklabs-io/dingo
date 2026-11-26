@@ -502,7 +502,7 @@ func TestDrepUpdateRequiresActiveRegistration(t *testing.T) {
 		},
 	}
 
-	_, err = applyDrepUpdateCertificate(ctx, db, cert, 0, 11, false)
+	_, err = applyDrepUpdateCertificate(ctx, db, cert, 0, 11)
 	require.ErrorIs(t, err, models.ErrDrepNotFound,
 		"an inactive historical row must not authorize a DRep update")
 
@@ -517,7 +517,7 @@ func TestDrepUpdateRequiresActiveRegistration(t *testing.T) {
 		true,
 		false,
 	))
-	_, err = applyDrepUpdateCertificate(ctx, db, cert, 0, 13, false)
+	_, err = applyDrepUpdateCertificate(ctx, db, cert, 0, 13)
 	require.NoError(t, err,
 		"a new registration must make subsequent updates valid")
 	updated, err := store.GetDrepByCredential(0, credential[:], true, nil)
@@ -539,7 +539,7 @@ func TestDrepUpdateRequiresActiveRegistration(t *testing.T) {
 			Credential: activeCredential,
 		},
 	}
-	_, err = applyDrepUpdateCertificate(ctx, db, validUpdate, 0, 21, false)
+	_, err = applyDrepUpdateCertificate(ctx, db, validUpdate, 0, 21)
 	require.NoError(t, err)
 	updated, err = store.GetDrepByCredential(1, activeCredential[:], true, nil)
 	require.NoError(t, err)

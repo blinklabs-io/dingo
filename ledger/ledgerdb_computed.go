@@ -169,7 +169,7 @@ func (s stagingLedgerDB) SaveEpochSummary(
 ) error {
 	er, sr, _ := s.ls.epochSummaryReader(txn)
 	if er == nil || sr == nil {
-		return drainedUnserved(nodesettings.FamilySummaries)
+		return ledgerStateUnserved(nodesettings.FamilySummaries)
 	}
 	s.ls.utxoSetApplyMu.RLock()
 	prior, setErr := s.ls.summaryViewLocked(er, sr, txn, summary.Epoch)

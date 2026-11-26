@@ -22,68 +22,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
-
-// A reward round a boundary applies from the per-pool precompute is recorded
-// as credited (models.RewardCreditRound) instead of being written account by
-// account. Its spendable, unguarded reward_account_output rows are the
-// credits: a credential's balance is its account reward plus its unfolded
-// outputs in credited rounds. The store adds those outputs wherever it reads
-// balances in aggregate, pendingRewardCredit adds them for one credential,
-// and foldRewardCreditFor writes them to the account, with the journal rows
-// the boundary would have written, only where a stored balance must change.
-
-func registerAppliedRewardCreditRound(
-	meta ledgerdb.LedgerDB,
-	metaTxn ledgerdb.Txn,
-	round models.RewardCreditRound,
-) error {
-	return meta.AddAppliedRewardCreditRound(round, metaTxn)
-}
-
-// rewardCreditsForOutputs returns the credits a boundary writes for outputs:
-// every spendable, unguarded output, journaled at the round's boundary slot.
-func rewardCreditsForOutputs(
-	round models.RewardCreditRound,
-	outputs []*models.RewardAccountOutput,
-) ([]models.AccountRewardCredit, error) {
-	credits := make([]models.AccountRewardCredit, 0, len(outputs))
-	for _, output := range outputs {
-		if output == nil || !output.Spendable || output.Guarded {
-			continue
-		}
-		reward, err := rewardFromAccountOutput(output)
-		if err != nil {
-			return nil, err
-		}
-		credits = append(credits, models.AccountRewardCredit{
-			CredentialTag: reward.Credential.Tag,
-			StakingKey:    reward.Credential.Hash[:],
-			Amount:        reward.Amount,
-			Slot:          round.BoundarySlot,
-			SourceHash:    stakeRewardSourceHash(round.SnapshotEpoch, reward),
-		})
-	}
-	return credits, nil
-}
-
-// rewardRoundCredited reports whether the round applied at the boundary into
-// newEpoch is credited. Its outputs are then account balances, so nothing may
-// recompute or replace them.
-func (ls *LedgerState) rewardRoundCredited(
-	txn ledgerdb.Txn,
-	newEpoch uint64,
-) (bool, error) {
-	epochs, ok := stakeRewardEpochsForApplication(newEpoch)
-	if !ok {
-		return false, nil
-	}
-	return ls.ledgerDB().HasAppliedRewardCreditRound(
-		epochs.snapshot,
-		txn,
-	)
-}
 
 // pendingRewardCreditOutputsFrom returns one credential's unfolded credits in
 // the credited rounds, read from ldb.
@@ -101,7 +42,7 @@ func pendingRewardCreditOutputsFrom(
 	}
 	var credits []models.AccountRewardCredit
 	for _, output := range outputs {
-		roundCredits, err := rewardCreditsForOutputs(
+		roundCredits, err := epochengine.RewardCreditsForOutputs(
 			models.RewardCreditRound{
 				SnapshotEpoch: output.Epoch,
 				BoundarySlot:  output.BoundarySlot,
@@ -159,7 +100,7 @@ func pendingRewardCreditFrom(
 	}
 	var total uint64
 	for _, credit := range credits {
-		sum, overflow := addRewardUint64(total, credit.Amount)
+		sum, overflow := epochengine.AddRewardUint64(total, credit.Amount)
 		if overflow {
 			return 0, fmt.Errorf(
 				"pending reward credit overflow for %x", stakingKey,
@@ -210,7 +151,7 @@ func (ls *LedgerState) writeClaimedRewardCredits(
 ) error {
 	var credits []models.AccountRewardCredit
 	for _, output := range outputs {
-		roundCredits, err := rewardCreditsForOutputs(
+		roundCredits, err := epochengine.RewardCreditsForOutputs(
 			models.RewardCreditRound{
 				SnapshotEpoch: output.Epoch,
 				BoundarySlot:  output.BoundarySlot,

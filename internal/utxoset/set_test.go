@@ -32,9 +32,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The metadata store here is empty, so a rebuild empties the set and a kept
-// set still holds the output applied to it.
-func TestReconcileKeepsASetAtTheLedgerTipAndResumesOrRebuildsOneBehind(
+// A kept set still holds the output applied to it.
+func TestReconcileKeepsASetAtTheLedgerTipAndResumesOneBehind(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -49,7 +48,6 @@ func TestReconcileKeepsASetAtTheLedgerTipAndResumesOrRebuildsOneBehind(
 	}{
 		{"at the tip", tip, true, false, true},
 		{"behind, resumed", behind, true, true, true},
-		{"behind, not resumable", behind, false, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -64,6 +62,7 @@ func TestReconcileKeepsASetAtTheLedgerTipAndResumesOrRebuildsOneBehind(
 			set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
+			require.NoError(t, set.StartEmptyForTest())
 			require.NoError(
 				t,
 				set.ApplyUtxoChanges(&tc.setTip, []ledger.UtxoEvent{{
@@ -139,7 +138,7 @@ func TestSetPrunesItsJournalBehindTheHistoryWindow(t *testing.T) {
 
 func TestUtxoSetAtRejectsPointOutsideJournalLineage(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	tip := ocommon.NewPoint(10, bytes.Repeat([]byte{1}, 32))
@@ -162,7 +161,7 @@ func TestReconcileWithoutAMetadataUtxoSetRefusesToRebuild(t *testing.T) {
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	tip := ocommon.NewPoint(5, bytes.Repeat([]byte{5}, 32))
 	require.NoError(t, db.SetTip(ochainsync.Tip{Point: tip}, nil))
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	behind := ocommon.NewPoint(4, bytes.Repeat([]byte{4}, 32))
@@ -188,12 +187,12 @@ func TestReconcileWithoutAMetadataUtxoSetRefusesToRebuild(t *testing.T) {
 	require.Equal(t, behind.Slot, setTip.Slot, "the set is left as it was")
 }
 
-// TestRebuildReloadsPParamUpdates requires a rebuild from the metadata store
-// to replace the proposals the set held with the store's, which it does only
-// if the rebuild clears the loaded marker.
+// TestRebuildReloadsPParamUpdates requires a rebuild from a v0.94.2 metadata
+// store to replace the proposals the set held with the store's, which it does
+// only if the rebuild clears the loaded marker.
 func TestRebuildReloadsPParamUpdates(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	tip := ocommon.NewPoint(5, bytes.Repeat([]byte{5}, 32))
@@ -230,10 +229,7 @@ func TestRebuildReloadsPParamUpdates(t *testing.T) {
 	}
 	require.Equal(t, []models.PParamUpdate{storedRow, stale}, updates())
 
-	require.NoError(t, set.Reconcile(
-		t.Context(), ldb,
-		func(context.Context, ocommon.Point) (bool, error) { return false, nil },
-	))
+	require.NoError(t, set.ReconcileReleased(t.Context(), ldb))
 	require.Equal(t, []models.PParamUpdate{storedRow}, updates())
 }
 
@@ -242,7 +238,7 @@ func TestRebuildReloadsPParamUpdates(t *testing.T) {
 // the store gave it, a vote's proposal ID included.
 func TestSetLoadsGovernanceRowsWithTheStoresRowIDs(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	store := dbadapter.New(db)

@@ -485,16 +485,7 @@ func seedByronInputFromWitness(
 	})
 	require.NoError(t, err)
 	input := tx.Inputs()[0]
-	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:      input.Id().Bytes(),
-		OutputIdx: input.Index(),
-		AddedSlot: 0,
-	}))
-	require.NoError(t, db.Blob().SetUtxo(
-		txn.Blob(), input.Id().Bytes(), input.Index(), out,
-	))
-	require.NoError(t, txn.Commit())
+	fxSeedOutput(t, db, input.Id().Bytes(), input.Index(), 0, out)
 }
 
 // TestLedgerProcessBlocksFromSourceUsesAdoptedByronParameters covers the

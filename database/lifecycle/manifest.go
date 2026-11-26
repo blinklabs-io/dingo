@@ -372,10 +372,9 @@ type Manifest struct {
 	StorageMode string `json:"storageMode"`
 	Network     string `json:"network"`
 
-	// CommitTimestamp is the value SetCommitTimestamp wrote to both
-	// stores at backup time, so database.New's checkCommitTimestamp
-	// passes immediately after restore rather than reporting a
-	// mismatch that was actually just "restore in progress".
+	// CommitTimestamp is read by nothing and written as zero. It stays
+	// because checksum() re-encodes the whole struct: dropping the key
+	// would make every v0.94.2 manifest fail its checksum.
 	CommitTimestamp int64 `json:"commitTimestamp"`
 
 	// Chain position captured at backup time, for CLI/gRPC display and
@@ -418,7 +417,9 @@ type Manifest struct {
 	DingoVersion string `json:"dingoVersion"`
 
 	// BlobBytes/MetadataBytes are informational (display, progress),
-	// not required for correctness.
+	// not required for correctness. A zero MetadataBytes with no
+	// MetadataSHA256 declares no metadata backup: the snapshot of a database
+	// without a metadata store. Every v0.94.2 manifest declares one.
 	BlobBytes     int64 `json:"blobBytes"`
 	MetadataBytes int64 `json:"metadataBytes"`
 
@@ -638,7 +639,7 @@ func (m Manifest) CheckCompatibility(
 	gates nodesettings.Values,
 ) error {
 	if gates["indexer_layout"] == "split" && m.StorageMode == "core" && m.IndexerSHA256 == "" {
-		return errors.New("snapshot has no IndexerDB payload for the split layout")
+		return errors.New("snapshot has no IndexerDB payload for the IndexerDB layout")
 	}
 	if err := m.CheckPluginMatch(blobPlugin, metadataPlugin); err != nil {
 		return err

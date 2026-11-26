@@ -59,7 +59,9 @@ func openCheckpointSet(t *testing.T, cfg utxoset.Config) *utxoset.Set {
 	t.Helper()
 	cfg.CheckpointDir = filepath.Join(t.TempDir(), "checkpoints")
 	cfg.CheckpointKeep = 2
-	return openRecoverySet(t, cfg)
+	set := openRecoverySet(t, cfg)
+	require.NoError(t, set.StartEmptyForTest())
+	return set
 }
 
 // TestWriteCheckpointKeepsTheNewestAndRefusesAFailedSet requires a rolling
@@ -67,7 +69,7 @@ func openCheckpointSet(t *testing.T, cfg utxoset.Config) *utxoset.Set {
 // that carries a failure mark.
 func TestWriteCheckpointKeepsTheNewestAndRefusesAFailedSet(t *testing.T) {
 	t.Parallel()
-	set := openCheckpointSet(t, utxoset.Config{Only: true})
+	set := openCheckpointSet(t, utxoset.Config{})
 	for _, slot := range []uint64{2, 3, 4} {
 		applyRange(t, set, slot, slot)
 		cp, err := set.WriteCheckpoint(t.Context())
@@ -97,7 +99,7 @@ func TestWriteCheckpointKeepsTheNewestAndRefusesAFailedSet(t *testing.T) {
 
 func TestWriteCheckpointNeedsADirectory(t *testing.T) {
 	t.Parallel()
-	set := openRecoverySet(t, utxoset.Config{Only: true})
+	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 2)
 	_, err := set.WriteCheckpoint(t.Context())
 	require.ErrorIs(t, err, utxoset.ErrNoCheckpointDir)
@@ -174,8 +176,7 @@ func TestReconcileRestoresACheckpointWhenTheJournalCannotHelp(t *testing.T) {
 	for _, tc := range recoveryCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			set := openCheckpointSet(t, utxoset.Config{Only: true})
-			set.SetDrainedFamilies(drainedMask(true))
+			set := openCheckpointSet(t, utxoset.Config{})
 			applyRange(t, set, 1, 4)
 			cp, err := set.WriteCheckpoint(t.Context())
 			require.NoError(t, err)
@@ -274,8 +275,7 @@ func TestReconcileReimportsFromMithrilWithoutACheckpoint(t *testing.T) {
 		for _, tc := range recoveryCases {
 			t.Run(v.name+"/"+tc.name, func(t *testing.T) {
 				t.Parallel()
-				set := openCheckpointSet(t, utxoset.Config{Only: true})
-				set.SetDrainedFamilies(drainedMask(true))
+				set := openCheckpointSet(t, utxoset.Config{})
 				applyRange(t, set, 1, 4)
 				if v.write {
 					_, err := set.WriteCheckpoint(t.Context())
@@ -308,8 +308,7 @@ func TestReconcileReimportsFromMithrilWithoutACheckpoint(t *testing.T) {
 // after the ledger's tip to be left alone and the older one used.
 func TestReconcileSkipsACheckpointAboveTheLedgerTip(t *testing.T) {
 	t.Parallel()
-	set := openCheckpointSet(t, utxoset.Config{Only: true})
-	set.SetDrainedFamilies(drainedMask(true))
+	set := openCheckpointSet(t, utxoset.Config{})
 	applyRange(t, set, 1, 2)
 	_, err := set.WriteCheckpoint(t.Context())
 	require.NoError(t, err)
@@ -341,8 +340,7 @@ func TestReconcileNamesWhatRecoveryLacks(t *testing.T) {
 	for _, tc := range recoveryCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			set := openRecoverySet(t, utxoset.Config{Only: true})
-			set.SetDrainedFamilies(drainedMask(true))
+			set := openRecoverySet(t, utxoset.Config{})
 			applySlots(t, set, 8)
 			ledgerTip := tc.setup(t, set)
 			var asked []uint64
@@ -360,8 +358,7 @@ func TestReconcileNamesWhatRecoveryLacks(t *testing.T) {
 
 	t.Run("a directory with nothing usable", func(t *testing.T) {
 		t.Parallel()
-		set := openCheckpointSet(t, utxoset.Config{Only: true})
-		set.SetDrainedFamilies(drainedMask(true))
+		set := openCheckpointSet(t, utxoset.Config{})
 		applySlots(t, set, 8)
 		require.NoError(t, set.PruneHistory(8))
 		err := set.Reconcile(
@@ -378,8 +375,7 @@ func TestReconcileNamesWhatRecoveryLacks(t *testing.T) {
 // returned beside the journal's reason.
 func TestReconcileReportsAFailedReimport(t *testing.T) {
 	t.Parallel()
-	set := openRecoverySet(t, utxoset.Config{Only: true})
-	set.SetDrainedFamilies(drainedMask(true))
+	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 8)
 	require.NoError(t, set.PruneHistory(8))
 	cause := errors.New("the aggregator serves no snapshot at or below the tip")
@@ -399,7 +395,7 @@ func TestReconcileReportsAFailedReimport(t *testing.T) {
 // commit made when the barrier is taken is in the checkpoint.
 func TestWriteCheckpointFixesItsVersionInsideTheBarrier(t *testing.T) {
 	t.Parallel()
-	set := openCheckpointSet(t, utxoset.Config{Only: true})
+	set := openCheckpointSet(t, utxoset.Config{})
 	applyRange(t, set, 1, 4)
 	var events []string
 	set.SetCheckpointBarrier(func(context.Context) (func(), error) {
@@ -428,7 +424,7 @@ func TestWriteCheckpointFixesItsVersionInsideTheBarrier(t *testing.T) {
 // for, so the checkpoint's tip, rows and journal are one state.
 func TestWriteCheckpointIsOneSnapshotAfterTheBarrier(t *testing.T) {
 	t.Parallel()
-	set := openCheckpointSet(t, utxoset.Config{Only: true})
+	set := openCheckpointSet(t, utxoset.Config{})
 	applyRange(t, set, 1, 4)
 	set.SetCheckpointBarrier(func(context.Context) (func(), error) {
 		return func() { applyRange(t, set, 5, 5) }, nil
@@ -462,8 +458,7 @@ func TestFailedCheckpointRecoveryLeavesTheSetUntouched(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			set := openCheckpointSet(t, utxoset.Config{Only: true})
-			set.SetDrainedFamilies(drainedMask(true))
+			set := openCheckpointSet(t, utxoset.Config{})
 			applyRange(t, set, 1, 4)
 			cp, err := set.WriteCheckpoint(t.Context())
 			require.NoError(t, err)
@@ -494,8 +489,7 @@ func TestFailedCheckpointRecoveryLeavesTheSetUntouched(t *testing.T) {
 // using the part-restored set.
 func TestReconcileFinishesAnInterruptedRestore(t *testing.T) {
 	t.Parallel()
-	set := openCheckpointSet(t, utxoset.Config{Only: true})
-	set.SetDrainedFamilies(drainedMask(true))
+	set := openCheckpointSet(t, utxoset.Config{})
 	applyRange(t, set, 1, 4)
 	cp, err := set.WriteCheckpoint(t.Context())
 	require.NoError(t, err)
@@ -559,8 +553,7 @@ func TestRecoveryLogsAnErrorFromACommittedResume(t *testing.T) {
 			t.Parallel()
 			var logs syncBuffer
 			logger := slog.New(slog.NewTextHandler(&logs, nil))
-			set := openCheckpointSet(t, utxoset.Config{Only: true, Logger: logger})
-			set.SetDrainedFamilies(drainedMask(true))
+			set := openCheckpointSet(t, utxoset.Config{Logger: logger})
 			applyRange(t, set, 1, 4)
 			if tc.ckpt {
 				_, err := set.WriteCheckpoint(t.Context())
@@ -611,7 +604,7 @@ func (b *syncBuffer) String() string {
 // it can.
 func TestWriteCheckpointSkipsWhenTheDiskIsFull(t *testing.T) {
 	t.Parallel()
-	set := openCheckpointSet(t, utxoset.Config{Only: true})
+	set := openCheckpointSet(t, utxoset.Config{})
 	applyRange(t, set, 1, 4)
 	set.SetAvailableDiskForTest(func(string) (uint64, error) { return 0, nil })
 	_, err := set.WriteCheckpoint(t.Context())
@@ -634,7 +627,7 @@ func TestWriteCheckpointSkipsWhenTheDiskIsFull(t *testing.T) {
 // start.
 func TestCheckpointDirectoryDropsAndCountsRestoreScratchStores(t *testing.T) {
 	t.Parallel()
-	set := openCheckpointSet(t, utxoset.Config{Only: true})
+	set := openCheckpointSet(t, utxoset.Config{})
 	applyRange(t, set, 1, 2)
 	cp, err := set.WriteCheckpoint(t.Context())
 	require.NoError(t, err)
@@ -671,7 +664,7 @@ func TestCheckpointDirectoryDropsAndCountsRestoreScratchStores(t *testing.T) {
 // would bring back rows that are partly the snapshot's.
 func TestWriteCheckpointRefusesASetWithAPendingMerge(t *testing.T) {
 	t.Parallel()
-	set := openCheckpointSet(t, utxoset.Config{Only: true})
+	set := openCheckpointSet(t, utxoset.Config{})
 	applyRange(t, set, 1, 4)
 	require.NoError(t, set.LoadUtxoSetCatchUp(slotPoint(4), func(
 		put func([]byte, uint32, []byte) error,
@@ -694,13 +687,12 @@ func TestRecoveryRefusesACheckpointThatCarriesAFailureMark(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "checkpoints")
 	set := openRecoverySet(t, utxoset.Config{
-		Only: true, CheckpointDir: dir, CheckpointKeep: 2,
+		CheckpointDir: dir, CheckpointKeep: 2,
 	})
-	set.SetDrainedFamilies(drainedMask(true))
 	applyRange(t, set, 1, 8)
 	require.NoError(t, set.PruneHistory(8))
 
-	marked := openRecoverySet(t, utxoset.Config{Only: true})
+	marked := openRecoverySet(t, utxoset.Config{})
 	applyRange(t, marked, 1, 4)
 	require.NoError(t, marked.MarkUtxoSetFailed(4))
 	var buf bytes.Buffer

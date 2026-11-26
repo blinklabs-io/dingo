@@ -274,8 +274,7 @@ var ErrUtxoConflict = errors.New("UTxO already spent")
 
 // ErrBatchUtxoOverlayConflict reports a UNIQUE constraint failure while a
 // batch UTxO overlay wrote its rows. The overlay writes without conflict
-// clauses, so the caller applies the batch again on the per-row path, which
-// repairs rows a snapshot import created ahead of their producer.
+// clauses, so a row it did not expect fails the batch.
 var ErrBatchUtxoOverlayConflict = errors.New(
 	"batch UTxO overlay write conflict",
 )
@@ -531,6 +530,31 @@ func IsBlockTombstone(data []byte) bool {
 	return bytes.HasPrefix(data, BlockTombstoneMagic[:])
 }
 
+// TxLocation is where the ledger applied a transaction: the block, the
+// transaction's position in it, its era and its phase-2 validity. A Leios
+// closure transaction is located by the ranking block that certified its
+// endorser block.
+type TxLocation struct {
+	BlockHash  []byte
+	Slot       uint64
+	BlockIndex uint32
+	Type       uint8
+	Valid      bool
+}
+
+// TxIndexSource serves applied transactions for a database whose metadata
+// store keeps no transaction rows, because the LedgerDB holds the
+// transaction index. txn is the metadata transaction the caller is working
+// in; the source answers as that transaction sees the index. txn may be nil.
+type TxIndexSource interface {
+	// TxHashesAfterSlot returns the hash of every transaction applied after
+	// slot.
+	TxHashesAfterSlot(txn Txn, slot uint64) ([][]byte, error)
+	// TxLocation returns where the transaction with hash was applied, and
+	// false when the ledger has applied none.
+	TxLocation(txn Txn, hash []byte) (TxLocation, bool, error)
+}
+
 // LiveUtxoSource resolves live outputs for a metadata store that keeps no
 // utxo rows, because the ledger holds the live UTxO set elsewhere. txn is the
 // metadata transaction the store is writing in; the source answers as that
@@ -565,18 +589,4 @@ type PointerStake struct {
 	TxIndex   uint64
 	CertIndex uint64
 	Lovelace  uint64
-}
-
-// RewardStateSkips names the reward-state tables a rollback leaves alone
-// because a drained family owns them.
-type RewardStateSkips struct {
-	// BlockCounts skips the imported pool block counts and epoch block
-	// totals.
-	BlockCounts bool
-	// Inputs skips the ADA pots, snapshots, seed failures, pool inputs and
-	// stake inputs, and the reset of a reward pot whose round has no outputs.
-	Inputs bool
-	// Outputs skips the pool and account outputs and the credited rounds,
-	// and the unfold of an output whose round the rollback removes.
-	Outputs bool
 }

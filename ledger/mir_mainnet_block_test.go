@@ -24,7 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -97,18 +96,7 @@ func mainnetMIRView(
 		OutputAmount:  mainnetMIRInputAmount,
 	})
 	require.NoError(t, err)
-	require.NoError(
-		t,
-		db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-			if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
-				TxId:   inputTxId,
-				Amount: types.Uint64(mainnetMIRInputAmount),
-			}); err != nil {
-				return err
-			}
-			return db.Blob().SetUtxo(txn.Blob(), inputTxId, 0, encoded)
-		}),
-	)
+	fxSeedOutput(t, db, inputTxId, 0, 0, encoded)
 	require.NoError(t, seedDB(t, db).SetNetworkState(
 		0, mainnetEpoch209Reserves, 4_492_800, nil,
 	))

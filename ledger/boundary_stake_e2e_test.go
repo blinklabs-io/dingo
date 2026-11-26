@@ -22,7 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -189,18 +188,16 @@ func TestBoundaryStakeReadsServeFromTheSetWithALeiosValidatorBeforeDijkstra(
 	requireFixtureFigures(t, f, got)
 }
 
-// TestBoundaryStakeReadsServeFromTheSetWhenTheSetOnlyHoldsTheState requires a
-// node whose metadata store holds no ledger state, on a chain that certifies
-// Leios closures, to answer the five reads from the set without a read of the
-// store.
-func TestBoundaryStakeReadsServeFromTheSetWhenTheSetOnlyHoldsTheState(
+// TestBoundaryStakeReadsServeFromTheSet requires a node on a chain that
+// certifies Leios closures to answer the five reads from the set without a
+// read of the store.
+func TestBoundaryStakeReadsServeFromTheSet(
 	t *testing.T,
 ) {
 	t.Parallel()
 	h := newBoundaryStakeHarness(t, "set")
 	f := h.scenario.BoundaryStake(0)
 	h.scenario.CertifyLeios()
-	h.scenario.DrainFamilies(nodesettings.AllFamilies())
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
 	got := h.scenario.ReadBoundaryStake(f)
@@ -271,42 +268,10 @@ func boundaryStakeReadFuncs(
 	}
 }
 
-// TestBoundaryStakeReadsServeFromTheSetOnceAFamilyIsDrained turns the
-// set-only switch on, on a chain that certifies Leios closures, and requires
-// every read to be the set's, without a read of the store, as each family the
-// reads need is drained in turn.
-func TestBoundaryStakeReadsServeFromTheSetOnceAFamilyIsDrained(t *testing.T) {
-	t.Parallel()
-	h := newBoundaryStakeHarness(t, "set")
-	f := h.scenario.BoundaryStake(0)
-	h.scenario.CertifyLeios()
-	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
-	hide(true)
-	db := h.scenario.LedgerDB()
-	reads := boundaryStakeReadFuncs(db, f)
-	require.Len(t, reads, len(boundaryStakeReads))
-
-	for _, drained := range []nodesettings.Family{
-		nodesettings.FamilyNonces,
-		nodesettings.FamilyLiveStake,
-		nodesettings.FamilyAccounts,
-		nodesettings.FamilyPoolsHistory,
-	} {
-		h.scenario.DrainFamilies(nodesettings.FamilyMask(0).With(drained))
-		for _, name := range boundaryStakeReads {
-			require.NoError(
-				t, reads[name](), "%s with %s drained", name, drained,
-			)
-			require.Zero(t, reached(), "%s with %s drained", name, drained)
-		}
-	}
-}
-
-// Every epoch-boundary stake read of the metadata store reads the protocol
-// parameters that decide whether the snapshot follows the enactment. The set
-// keeps them, so each is the set's once the pparams-updates family is drained,
-// without a read of the store.
-func TestBoundaryStakeReadsServeFromTheSetOnceProtocolParametersAreDrained(
+// Every epoch-boundary stake read, each on its own, is answered from the set
+// without a read of the store, including the protocol parameters that decide
+// whether the snapshot follows the enactment.
+func TestBoundaryStakeReadsEachServeFromTheSet(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -316,9 +281,6 @@ func TestBoundaryStakeReadsServeFromTheSetOnceProtocolParametersAreDrained(
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
 	reads := boundaryStakeReadFuncs(h.scenario.LedgerDB(), f)
-	h.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyPParamsUpdates),
-	)
 	for _, name := range boundaryStakeReads {
 		require.NoError(t, reads[name](), name)
 		require.Zero(t, reached(), name)

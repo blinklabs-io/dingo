@@ -64,15 +64,13 @@ func setStableMithrilLedgerTip(
 		)
 	}
 	// Ledger snapshots do not carry the absolute block number. Populate it
-	// from the same certified immutable block while keeping the metadata
-	// cursor at the stable point; otherwise envelope validation would compare
-	// the first replayed block against a synthetic block number zero.
-	if err := db.MetadataTxn(ctx, true).Do(func(txn *database.Txn) error {
-		return db.SetTip(ochainsync.Tip{
-			Point:       point,
-			BlockNumber: block.Number,
-		}, txn)
-	}); err != nil {
+	// from the same certified immutable block while keeping the tip at the
+	// stable point; otherwise envelope validation would compare the first
+	// replayed block against a synthetic block number zero.
+	if err := db.SetTip(ochainsync.Tip{
+		Point:       point,
+		BlockNumber: block.Number,
+	}, nil); err != nil {
 		return fmt.Errorf(
 			"recording stable Mithril anchor block number: %w",
 			err,
@@ -85,7 +83,7 @@ func verifyRewardRepairStateNotBehindStablePoint(
 	db *database.Database,
 	prepared *preparedLedgerStateImport,
 ) error {
-	anchorSlotText, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	anchorSlotText, err := db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("reading existing Mithril ledger slot: %w", err)
 	}
@@ -108,17 +106,47 @@ func verifyRewardRepairStateNotBehindStablePoint(
 	return nil
 }
 
+// verifyRewardRepairSetReachesState refuses, before the repair's first write,
+// a state the LedgerDB set cannot be rolled back to. The catch-up load rolls a
+// set past the state back to it through the set's journal, which is what
+// leaves the set holding no rows above the state's slot. A set whose journal
+// stops above the state, such as one the v0.94.2 migration has just built at
+// its tip, would refuse the load after the repair has pinned the artifact and
+// begun writing, and every resume would stop there again. A later artifact
+// whose state is at or past the set's tip needs no rollback, so the repair
+// waits for one.
+func verifyRewardRepairSetReachesState(
+	set ledgerstate.CatchUpLoader,
+	prepared *preparedLedgerStateImport,
+) error {
+	reaches, err := set.CatchUpReaches(prepared.point())
+	if err != nil {
+		return fmt.Errorf(
+			"checking the LedgerDB set against the selected state: %w", err,
+		)
+	}
+	if !reaches {
+		return fmt.Errorf(
+			"%w: the LedgerDB set's rollback journal does not reach the "+
+				"selected state at slot %d",
+			ErrRewardStateRepairWaitingForSnapshot,
+			prepared.state.Tip.Slot,
+		)
+	}
+	return nil
+}
+
 func verifyRewardRepairLocalTail(
 	ctx context.Context,
 	db *database.Database,
 	localTip models.Block,
 	prepared *preparedLedgerStateImport,
 ) (map[string]struct{}, error) {
-	anchorSlotText, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	anchorSlotText, err := db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 	if err != nil {
 		return nil, fmt.Errorf("reading existing Mithril ledger slot: %w", err)
 	}
-	anchorHashText, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	anchorHashText, err := db.GetChainState(mithrilLedgerHashSyncKey, nil)
 	if err != nil {
 		return nil, fmt.Errorf("reading existing Mithril ledger hash: %w", err)
 	}
@@ -246,7 +274,7 @@ func determineSyncMode(
 	ctx context.Context,
 	db *database.Database,
 ) (syncMode, error) {
-	status, err := db.GetSyncState("sync_status", nil)
+	status, err := db.GetChainState("sync_status", nil)
 	if err != nil {
 		return syncModeBootstrap, fmt.Errorf("reading sync_status: %w", err)
 	}
@@ -409,7 +437,6 @@ const (
 	PhaseLedgerImport  SyncPhase = "ledger_import"
 	PhaseImmutableCopy SyncPhase = "immutable_copy"
 	PhasePostLedger    SyncPhase = "post_ledger_state"
-	PhaseIndexRebuild  SyncPhase = "index_rebuild"
 	PhaseComplete      SyncPhase = "complete"
 )
 
@@ -480,33 +507,6 @@ type SyncConfig struct {
 	// UtxoSet is the LedgerDB set that receives the ledger state's UTxO set
 	// and families; see ledgerstate.ImportConfig.UtxoSet.
 	UtxoSet ledgerstate.CatchUpLoader
-	// InvalidateUtxoSetGovernance, when set, is called after a volatile-block
-	// cleanup has deleted governance rows from the metadata store, so a live UTxO
-	// set that kept copies of them reloads them at its next startup instead
-	// of serving rows the store no longer has.
-	InvalidateUtxoSetGovernance func() error
-}
-
-// deleteVolatileBlocksAbove is deleteBlobBlocksAboveSlotExcept followed by the
-// governance invalidation, which runs even when the cleanup failed part way
-// since its deletes are not atomic with the set.
-func (cfg SyncConfig) deleteVolatileBlocksAbove(
-	ctx context.Context,
-	db *database.Database,
-	slot uint64,
-	preserved map[string]struct{},
-) error {
-	err := deleteBlobBlocksAboveSlotExcept(ctx, db, slot, preserved)
-	if cfg.InvalidateUtxoSetGovernance == nil {
-		return err
-	}
-	if invErr := cfg.InvalidateUtxoSetGovernance(); invErr != nil {
-		return errors.Join(
-			err,
-			fmt.Errorf("invalidate live UTxO set governance: %w", invErr),
-		)
-	}
-	return err
 }
 
 // StoragePlugins contains canonical storage provider selections used during
@@ -538,10 +538,10 @@ func pctOf(cur, total int64) float64 {
 	return float64(cur) / float64(total) * 100
 }
 
-// errSplitCatchUp refuses to advance a complete API node's database to a newer
-// snapshot: the IndexerDB's rows belong to the anchor it was built at, and a
-// catch-up import rewrites the ledger state under it.
-var errSplitCatchUp = errors.New(
+// errIndexerDBCatchUp refuses to advance a complete API node's database to a
+// newer snapshot: the IndexerDB's rows belong to the anchor it was built at,
+// and a catch-up import rewrites the ledger state under it.
+var errIndexerDBCatchUp = errors.New(
 	"mithril sync cannot advance a complete database that has an " +
 		"IndexerDB: the IndexerDB follows the ledger from the anchor it " +
 		"was built at; sync a new data directory instead",
@@ -557,7 +557,7 @@ func markSyncInProgress(
 	repairLegacyRewardState bool,
 ) error {
 	if repairLegacyRewardState {
-		if err := db.SetSyncState(
+		if err := db.SetChainState(
 			RewardStateRepairActiveKey, "1", nil,
 		); err != nil {
 			return fmt.Errorf(
@@ -566,8 +566,10 @@ func markSyncInProgress(
 			)
 		}
 	}
-	if err := db.SetSyncState(
-		"sync_status", syncStatusInProgress, nil,
+	// Flushed before the caller's first write, so an unclean shutdown cannot
+	// leave a part-written import on a database that reads as complete.
+	if err := db.SetChainStateSynced(
+		database.SyncStatusKey, syncStatusInProgress,
 	); err != nil {
 		return fmt.Errorf("marking sync in-progress: %w", err)
 	}
@@ -660,27 +662,6 @@ func Sync(
 		return SyncResult{}, fmt.Errorf("locking immutable database: %w", err)
 	}
 	defer unlockImmutable()
-	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		// Tolerate a recoverable commit-timestamp mismatch from a previously
-		// interrupted run; mithril import heals it on forward progress.
-		if cte, ok := errors.AsType[database.CommitTimestampError](
-			recoveryErr,
-		); ok {
-			logger.Warn(
-				"opened database with commit timestamp mismatch; "+
-					"continuing mithril sync — import will heal it",
-				"component", "mithril",
-				"metadata_timestamp", cte.MetadataTimestamp,
-				"blob_timestamp", cte.BlobTimestamp,
-			)
-		} else {
-			return SyncResult{}, fmt.Errorf(
-				"opening database: %w",
-				recoveryErr,
-			)
-		}
-	}
-
 	// Catch-up dispatch. A complete database (chain data present, sync_status
 	// clear) running against the v2 backend is advanced with
 	// catch-up semantics instead of a blind re-bootstrap: the import first
@@ -695,7 +676,7 @@ func Sync(
 		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
 	}
 	if cfg.IndexerLayout == "split" && mode == syncModeCatchUp {
-		return SyncResult{}, errSplitCatchUp
+		return SyncResult{}, errIndexerDBCatchUp
 	}
 	pinnedDigest := cfg.PinnedDigest
 	if cfg.RepairLegacyRewardState {
@@ -1159,6 +1140,13 @@ func Sync(
 			); err != nil {
 				return SyncResult{}, err
 			}
+			if mode != syncModeResume {
+				if err := verifyRewardRepairSetReachesState(
+					cfg.UtxoSet, prepared,
+				); err != nil {
+					return SyncResult{}, err
+				}
+			}
 			if localTip.Slot > certifiedTip.Slot {
 				preservedLocalTail, err = verifyRewardRepairLocalTail(
 					ctx, db, localTip, prepared,
@@ -1206,25 +1194,6 @@ func Sync(
 			)
 		}
 	}()
-
-	// Enable bulk-load optimizations before launching parallel
-	// goroutines so both importLedgerState and LoadBlobsWithDB
-	// share the same pragma settings without racing.
-	cleanupBulkLoadPragmas := node.WithBulkLoadPragmas(db, logger)
-	defer func() {
-		if err := cleanupBulkLoadPragmas(); err != nil {
-			logger.Error("failed to restore normal settings", "error", err)
-		}
-	}()
-
-	// Drop the deferred-index manifest BEFORE inserting any rows
-	// so secondary indexes are not maintained during ledger-state
-	// import, immutable blob load, or API backfill. The rebuild is
-	// triggered explicitly below — before updateMithrilReadyState
-	// clears sync_status — so a crash between drop and rebuild
-	// leaves sync_status set and triggers the recovery path on
-	// the next startup.
-	deferredIndexes := node.WithDeferredIndexes(ctx, db, logger)
 
 	// The Mithril certificate commits to the ImmutableDB content up to the
 	// certified tip, and the ancillary signature to the chunk after it. A
@@ -1430,31 +1399,6 @@ func Sync(
 	if err := importLedgerStatePhase(); err != nil {
 		return SyncResult{}, err
 	}
-	if cfg.RepairLegacyRewardState {
-		// Rolling back to the selected state must discard post-state metadata
-		// and restore spends, whether or not the local chain has a tail beyond
-		// the ImmutableDB tip.
-		if deferredIndexes != nil {
-			if err := deferredIndexes.BuildCritical(); err != nil {
-				return SyncResult{}, fmt.Errorf(
-					"rebuilding indexes before reward-repair metadata rollback: %w",
-					err,
-				)
-			}
-		}
-		if err := db.RollbackMetadataAfterSlot(
-			ctx,
-			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
-			0,
-			nil,
-		); err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"rolling back metadata above reward-repair state slot %d: %w",
-				ledgerStateSlot,
-				err,
-			)
-		}
-	}
 	// The pipelined copy stores produced-UTxO offsets per block but does not
 	// advance the offsets-complete marker, and the post-bootstrap copy only
 	// marks it when it copied at least one block (so it is skipped when the
@@ -1487,7 +1431,7 @@ func Sync(
 		// The selected state can precede the certified tip. Keep the verified
 		// local chain after that point, including certified blocks, and remove
 		// same-range fork blobs before ordinary ledger replay sees them.
-		if cleanupErr := cfg.deleteVolatileBlocksAbove(
+		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
 			ctx, db, ledgerStateSlot, preservedLocalTail,
 		); cleanupErr != nil {
 			return SyncResult{}, fmt.Errorf(
@@ -1514,7 +1458,7 @@ func Sync(
 			"stored_tip_slot", recentBlocks[0].Slot,
 			"ledger_state_slot", ledgerStateSlot,
 		)
-		if cleanupErr := cfg.deleteVolatileBlocksAbove(
+		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
 			ctx,
 			db, immutableTipSlot,
 			preservedLocalTail,
@@ -1535,12 +1479,9 @@ func Sync(
 	); err != nil {
 		return SyncResult{}, err
 	}
-	indexRebuildElapsed, err := finishMithrilImport(
-		ctx, db, logger, cfg.emit, deferredIndexes, cleanupBulkLoadPragmas,
-		loadResult, ledgerStateSlot, ledgerStateHash,
-		mode == syncModeBootstrap,
-	)
-	if err != nil {
+	if err := updateMithrilReadyState(
+		db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
+	); err != nil {
 		return SyncResult{}, err
 	}
 	syncComplete = true
@@ -1578,84 +1519,12 @@ func Sync(
 		bootstrapResult.Snapshot.Beacon.Epoch,
 		"immutable_file_number",
 		bootstrapResult.Snapshot.Beacon.ImmutableFileNumber,
-		"index_rebuild_elapsed",
-		indexRebuildElapsed,
-		"lazy_index_rebuild_mode",
-		"maintenance",
 	)
 
 	return SyncResult{
 		Snapshot:   bootstrapResult.Snapshot,
 		LedgerSlot: ledgerStateSlot,
 	}, nil
-}
-
-// finishMithrilImport makes an imported database servable: it rebuilds the
-// critical deferred indexes, restores normal metadata settings and planner
-// statistics, and only then clears the transient sync state and records the
-// stable ledger anchor. The rebuild runs before the clear so a crash during it
-// leaves sync_status set (serve refuses to start, or the node resumes its own
-// restore) and metadata_indexes_pending set (the next run rebuilds first).
-// freshBootstrap selects the running-total planner finalization, which is safe
-// only after a complete fresh ledger-state import. It returns how long the
-// index rebuild took.
-func finishMithrilImport(
-	ctx context.Context,
-	db *database.Database,
-	logger *slog.Logger,
-	emit func(SyncProgress),
-	deferredIndexes *node.DeferredIndexRebuilder,
-	cleanupBulkLoadPragmas func() error,
-	loadResult *node.LoadBlobsResult,
-	ledgerStateSlot uint64,
-	ledgerStateHash []byte,
-	freshBootstrap bool,
-) (time.Duration, error) {
-	emit(SyncProgress{Phase: PhaseIndexRebuild, Active: true})
-	indexRebuildStart := time.Now()
-	if err := deferredIndexes.BuildCritical(); err != nil {
-		emit(SyncProgress{Phase: PhaseIndexRebuild, Active: false})
-		return 0, err
-	}
-	indexRebuildElapsed := time.Since(indexRebuildStart)
-	emit(
-		SyncProgress{
-			Phase:       PhaseIndexRebuild,
-			Active:      true,
-			Description: indexRebuildElapsed.String(),
-		},
-	)
-	emit(SyncProgress{Phase: PhaseIndexRebuild, Active: false})
-	logger.Info(
-		"critical deferred metadata indexes rebuilt; lazy indexes deferred to maintenance",
-		"component",
-		"mithril",
-		"duration",
-		indexRebuildElapsed,
-	)
-
-	if err := cleanupBulkLoadPragmas(); err != nil {
-		return 0, fmt.Errorf(
-			"restoring normal metadata settings: %w", err,
-		)
-	}
-
-	if err := node.FinalizeMithrilBackfillPlannerStats(
-		ctx,
-		db,
-		logger,
-		freshBootstrap,
-	); err != nil {
-		return 0, err
-	}
-
-	if err := updateMithrilReadyState(
-		ctx,
-		db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
-	); err != nil {
-		return 0, err
-	}
-	return indexRebuildElapsed, nil
 }
 
 // NeedsSync reports whether the database at cfg.DataDir requires a (re)sync —
@@ -1676,12 +1545,7 @@ func NeedsSync(cfg SyncConfig) (bool, error) {
 	}
 	db := runtime.Database
 	defer runtime.Close(context.Background())
-	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
-			return false, fmt.Errorf("opening database: %w", recoveryErr)
-		}
-	}
-	val, err := db.GetSyncState("sync_status", nil)
+	val, err := db.GetChainState("sync_status", nil)
 	if err != nil {
 		return false, fmt.Errorf("checking sync state: %w", err)
 	}
@@ -1789,9 +1653,9 @@ func openDatabase(
 			Immutable: immutableCfg,
 		},
 		internalplugins.StorageSelections{
-			Blob:         storagePlugins.Blob,
-			Metadata:     storagePlugins.Metadata,
-			SplitIndexer: cfg.IndexerLayout == "split" || cfg.ServerCoreNamespace,
+			Blob:      storagePlugins.Blob,
+			Metadata:  storagePlugins.Metadata,
+			IndexerDB: cfg.IndexerLayout == "split" || cfg.ServerCoreNamespace,
 		},
 		internalplugins.StorageDependencies{
 			GenesisStakingEmpty: genesisStakingEmpty,

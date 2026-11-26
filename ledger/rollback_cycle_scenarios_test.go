@@ -23,7 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
@@ -524,10 +524,11 @@ type rewardPool struct {
 // and registered, whose stake the seeded reward rounds distribute.
 func (s *govDiffScenario) addRewardPool(t *testing.T) rewardPool {
 	t.Helper()
+	key := repeatByte(28, 0xc1)
 	rp := rewardPool{
-		key:    repeatByte(28, 0xc1),
-		owner:  s.addAccount(t, 0xc2, nil, ""),
-		member: s.addAccount(t, 0xc3, nil, ""),
+		key:    key,
+		owner:  s.addAccount(t, 0xc2, nil, string(key)),
+		member: s.addAccount(t, 0xc3, nil, string(key)),
 	}
 	margin := &types.Rat{Rat: big.NewRat(1, 10)}
 	require.NoError(t, fxImportPool(t, s.db, context.Background(), nil, &models.Pool{
@@ -546,14 +547,6 @@ func (s *govDiffScenario) addRewardPool(t *testing.T) rewardPool {
 		VrfKeyHash:    make([]byte, 32),
 		RewardAccount: rp.owner,
 	}))
-	raw, err := dbtest.RawSQLiteMetadata(t, s.db)
-	require.NoError(t, err)
-	for _, cred := range [][]byte{rp.owner, rp.member} {
-		_, err := raw.Exec(
-			`UPDATE account SET pool = ? WHERE staking_key = ?`, rp.key, cred,
-		)
-		require.NoError(t, err)
-	}
 	return rp
 }
 
@@ -567,9 +560,9 @@ func (s *govDiffScenario) seedRewardRound(
 	blocks int,
 ) {
 	t.Helper()
-	epochs, ok := stakeRewardEpochsForApplication(epoch.EpochId + 1)
+	epochs, ok := epochengine.StakeRewardEpochsForApplication(epoch.EpochId + 1)
 	require.True(t, ok)
-	perf, err := seedDB(t, s.db).GetEpoch(epochs.performance, nil)
+	perf, err := seedDB(t, s.db).GetEpoch(epochs.Performance, nil)
 	require.NoError(t, err)
 	require.NotNil(t, perf)
 	var poolID lcommon.PoolKeyHash
@@ -585,7 +578,7 @@ func (s *govDiffScenario) seedRewardRound(
 	}
 	captured, boundary := epoch.StartSlot, epoch.StartSlot
 	require.NoError(t, seedDB(t, s.db).SaveRewardSnapshot(&models.RewardSnapshot{
-		Epoch:            epochs.snapshot,
+		Epoch:            epochs.Snapshot,
 		SnapshotType:     "mark",
 		TotalActiveStake: 60_000_000,
 		TotalPoolCount:   1,
@@ -595,7 +588,7 @@ func (s *govDiffScenario) seedRewardRound(
 		ProtocolVersion:  10,
 	}, nil))
 	require.NoError(t, seedDB(t, s.db).SaveRewardPoolInputs([]*models.RewardPoolInput{{
-		Epoch:                      epochs.snapshot,
+		Epoch:                      epochs.Snapshot,
 		PoolKeyHash:                rp.key,
 		RewardAccount:              rp.owner,
 		RewardAccountCredentialTag: 0,
@@ -610,12 +603,12 @@ func (s *govDiffScenario) seedRewardRound(
 	}}, nil))
 	require.NoError(t, seedDB(t, s.db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
-			Epoch: epochs.snapshot, PoolKeyHash: rp.key, StakingKey: rp.owner,
+			Epoch: epochs.Snapshot, PoolKeyHash: rp.key, StakingKey: rp.owner,
 			Stake: 10_000_000, Owner: true, Registered: true,
 			CapturedSlot: captured, BoundarySlot: boundary,
 		},
 		{
-			Epoch: epochs.snapshot, PoolKeyHash: rp.key, StakingKey: rp.member,
+			Epoch: epochs.Snapshot, PoolKeyHash: rp.key, StakingKey: rp.member,
 			Stake: 50_000_000, Registered: true,
 			CapturedSlot: captured, BoundarySlot: boundary,
 		},

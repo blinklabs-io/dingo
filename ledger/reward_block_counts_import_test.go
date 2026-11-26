@@ -18,9 +18,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 )
 
 // The imported counts are not an approximation: for the same epoch they
@@ -31,13 +32,13 @@ func TestStakeRewardRoundFromImportedBlockCountsMatchesObservedHistory(
 ) {
 	t.Parallel()
 
-	observed := stakeRewardApplicationForTest(t, false)
-	imported := stakeRewardApplicationForTest(t, true)
+	observed := stakeRewardApplicationForTest(t, false, 0, 0)
+	imported := stakeRewardApplicationForTest(t, true, 10, 10)
 
-	require.Len(t, observed.poolOutputs, 1)
-	require.Len(t, imported.poolOutputs, len(observed.poolOutputs))
-	for i, want := range observed.poolOutputs {
-		got := imported.poolOutputs[i]
+	require.Len(t, observed.PoolOutputs, 1)
+	require.Len(t, imported.PoolOutputs, len(observed.PoolOutputs))
+	for i, want := range observed.PoolOutputs {
+		got := imported.PoolOutputs[i]
 		assert.Equal(t, want.PoolKeyHash, got.PoolKeyHash)
 		assert.Equal(t, want.TotalReward, got.TotalReward)
 		assert.Equal(t, want.LeaderReward, got.LeaderReward)
@@ -47,51 +48,61 @@ func TestStakeRewardRoundFromImportedBlockCountsMatchesObservedHistory(
 			got.ApparentPerformance.String(),
 		)
 	}
-	require.NotEmpty(t, observed.accountOutputs)
-	require.Len(t, imported.accountOutputs, len(observed.accountOutputs))
-	for i, want := range observed.accountOutputs {
-		got := imported.accountOutputs[i]
+	require.NotEmpty(t, observed.AccountOutputs)
+	require.Len(t, imported.AccountOutputs, len(observed.AccountOutputs))
+	for i, want := range observed.AccountOutputs {
+		got := imported.AccountOutputs[i]
 		assert.Equal(t, want.StakingKey, got.StakingKey)
 		assert.Equal(t, want.RewardType, got.RewardType)
 		assert.Equal(t, want.Amount, got.Amount)
 	}
-	assert.Positive(t, uint64(observed.poolOutputs[0].TotalReward))
-	assert.Equal(t, observed.effectiveRewards, imported.effectiveRewards)
+	assert.Positive(t, uint64(observed.PoolOutputs[0].TotalReward))
+	assert.Equal(t, observed.EffectiveRewards, imported.EffectiveRewards)
 }
 
 // stakeRewardApplicationForTest computes the epoch 4 reward round twice over
 // the same state: once from the ten blocks the node itself applied in epoch 2,
-// and once with those blocks hidden behind a trust anchor and supplied instead
-// as the snapshot's imported counts for the same epoch.
+// and once with those observed rows dropped and the epoch's counts supplied
+// only by a snapshot import.
 func stakeRewardApplicationForTest(
 	t *testing.T,
 	fromImport bool,
-) *stakeRewardApplication {
+	importedBlocks, importedTotal uint64,
+) *epochengine.StakeRewardApplication {
 	t.Helper()
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 	if fromImport {
-		require.NoError(t, seedDB(t, db).SetSyncState(
+		importer := fxImporter(t, db)
+		// The seed counted epoch 2's ten blocks as observed, and the live
+		// set keeps those rows whatever the snapshot imports. Drop them so
+		// the round can learn the epoch's blocks only from the import.
+		writer, ok := ls.config.UtxoSet.(importRowsWriter)
+		require.True(t, ok)
+		require.NoError(t, writer.ReplaceRewardBlocks(
+			map[uint64]RewardEpochBlocks{},
+		))
+		held, err := ls.rewardBlocksReader(nil).RewardBlocksEpoch(2, nil)
+		require.NoError(t, err)
+		require.Empty(t, held.Pools)
+		require.False(t, held.CountsKnown)
+
+		require.NoError(t, db.SetChainState(
 			mithrilLedgerSlotSyncKey,
 			"199",
 			nil,
 		))
-		require.NoError(t, meta.SaveImportedPoolBlockCounts(
-			[]models.ImportedPoolBlockCount{
-				{
-					Epoch:          2,
-					PoolKeyHash:    rewardCalcHash(0x4a),
-					BlocksProduced: 10,
-					CapturedSlot:   199,
-				},
-			},
+		require.NoError(t, importer.ReplaceImportedBlockCounts(
+			2,
+			map[string]uint64{string(rewardCalcHash(0x4a)): importedBlocks},
+			importedTotal,
+			199,
 			nil,
 		))
-		require.NoError(t, meta.SaveImportedEpochBlockTotal(2, 10, 199, nil))
+		require.NoError(t, importer.ImportRewardBlocks(t.Context(), 199))
 	}
 	txn := db.Transaction(context.Background(), false)
 	t.Cleanup(func() { _ = txn.Rollback() })
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,

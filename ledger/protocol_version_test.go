@@ -117,12 +117,12 @@ func TestEvaluateProtocolVersionBump_DetectsQuorumMetUpdate(t *testing.T) {
 		14: lcommon.ProtocolParametersProtocolVersion{Major: 9, Minor: 0},
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate(
+	require.NoError(t, fxSeedPParamUpdate(
+		t, db,
 		[]byte{0xaa}, // genesis key delegate hash
 		updateCbor,
 		10, // slot within epoch 0
 		0,  // submission epoch
-		nil,
 	))
 
 	pparams := &babbage.BabbageProtocolParameters{

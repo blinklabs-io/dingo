@@ -24,8 +24,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -160,23 +160,6 @@ func answerAsOf[T any](
 		)
 	}
 	return r.fromSetAt(ls, txn, slot)
-}
-
-// SetDrainedFamilies records the families whose SQL rows are gone. The mask
-// only widens: a drained family's rows are never restored.
-func (ls *LedgerState) SetDrainedFamilies(mask nodesettings.FamilyMask) {
-	for {
-		cur := ls.drainedFamilies.Load()
-		next := cur | uint64(mask)
-		if cur == next || ls.drainedFamilies.CompareAndSwap(cur, next) {
-			return
-		}
-	}
-}
-
-// DrainedFamilies returns the families whose SQL rows are gone.
-func (ls *LedgerState) DrainedFamilies() nodesettings.FamilyMask {
-	return nodesettings.FamilyMask(ls.drainedFamilies.Load())
 }
 
 func (ls *LedgerState) unavailableAsOf(what string) error {
@@ -593,7 +576,10 @@ func (ls *LedgerState) accountsAt(
 		if err != nil {
 			return nil, err
 		}
-		reward, overflow := addRewardUint64(uint64(a.Reward), pending)
+		reward, overflow := epochengine.AddRewardUint64(
+			uint64(a.Reward),
+			pending,
+		)
 		if overflow {
 			return nil, fmt.Errorf(
 				"reward account balance overflow for %x", ref.Key,

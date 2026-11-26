@@ -1427,7 +1427,7 @@ func TestSyncV2CancellationDuringLedgerImportResumes(t *testing.T) {
 		DataDir: dataDir, StorageMode: "core", Logger: discard,
 	})
 	require.NoError(t, err)
-	status, err := db.GetSyncState("sync_status", nil)
+	status, err := db.GetChainState("sync_status", nil)
 	require.NoError(t, err)
 	require.Equal(t, syncStatusInProgress, status)
 	mode, err := determineSyncMode(t.Context(), db)
@@ -1444,7 +1444,7 @@ func TestSyncV2CancellationDuringLedgerImportResumes(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
-	status, err = db.GetSyncState("sync_status", nil)
+	status, err = db.GetChainState("sync_status", nil)
 	require.NoError(t, err)
 	require.Empty(t, status)
 }

@@ -373,13 +373,13 @@ func (ls *LedgerState) stagePoolBoundary(
 	}
 	pools, err := ls.poolKeys(r, txn)
 	if err != nil {
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 		return
 	}
 	for _, p := range pools {
 		st, err := ls.poolView(r, txn, p)
 		if err != nil {
-			ls.failAccountStaging(err)
+			ls.failAccountStaging(txn, err)
 			return
 		}
 		if st == nil {
@@ -447,7 +447,7 @@ func (s stagingLedgerDB) GetPoolRegistrationsEffectiveForEpoch(
 	snapshotSlot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRegistration, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRegistration, error) {
+	return setPoolRead(s, txn, func(b *poolBook) ([]models.PoolRegistration, error) {
 		return b.effective(
 			poolKeyHashes, epochStartSlot, endedEpoch, snapshotSlot,
 		)
@@ -464,7 +464,7 @@ func (s stagingLedgerDB) GetActivePoolKeyHashes(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
+	return setPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
 		return b.active()
 	})
 }
@@ -474,7 +474,7 @@ func (s stagingLedgerDB) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
+	return setPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
 		return b.activeAtSlot(slot)
 	})
 }

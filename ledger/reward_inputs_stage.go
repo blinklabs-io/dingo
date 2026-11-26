@@ -15,9 +15,7 @@
 package ledger
 
 import (
-	"bytes"
 	"context"
-	"reflect"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -147,21 +145,6 @@ func (s stagingLedgerDB) DeleteRewardInputsForEpoch(
 	return nil
 }
 
-func (s stagingLedgerDB) DeleteRewardStakeInputBeforeEpoch(
-	ctx context.Context,
-	epoch uint64,
-	txn ledgerdb.Txn,
-) error {
-	s.stageRewardInput( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-		txn,
-		RewardInputChange{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-			Kind:       RewardInputPrune,
-			PruneBelow: s.ls.rewardPruneBelow(epoch),
-		},
-	)
-	return nil
-}
-
 // DeleteRewardStateBeforeEpoch prunes the reward account outputs too, and the
 // derived reward rows of the set.
 func (s stagingLedgerDB) DeleteRewardStateBeforeEpoch(
@@ -204,20 +187,6 @@ func (s stagingLedgerDB) GetRewardAdaPots(
 	return v.pots(epoch)
 }
 
-func samePots(a, b *models.RewardAdaPots) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	x, y := *a, *b
-	x.ID, y.ID = 0, 0
-	if (x.ImportedEpochFees == nil) != (y.ImportedEpochFees == nil) ||
-		(x.ImportedEpochFees != nil && *x.ImportedEpochFees != *y.ImportedEpochFees) {
-		return false
-	}
-	x.ImportedEpochFees, y.ImportedEpochFees = nil, nil
-	return reflect.DeepEqual(x, y)
-}
-
 func (s stagingLedgerDB) GetRewardSnapshot(
 	epoch uint64,
 	snapshotType string,
@@ -228,23 +197,6 @@ func (s stagingLedgerDB) GetRewardSnapshot(
 		return nil, err
 	}
 	return v.snapshot(epoch, snapshotType)
-}
-
-func sameSnapshot(a, b *models.RewardSnapshot) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	x, y := *a, *b
-	x.ID, y.ID = 0, 0
-	if (x.ExcludedActiveStake == nil) != (y.ExcludedActiveStake == nil) ||
-		(x.ExcludedActiveStake != nil && *x.ExcludedActiveStake != *y.ExcludedActiveStake) ||
-		(x.EpochNonce == nil) != (y.EpochNonce == nil) ||
-		!bytes.Equal(x.EpochNonce, y.EpochNonce) {
-		return false
-	}
-	x.ExcludedActiveStake, y.ExcludedActiveStake = nil, nil
-	x.EpochNonce, y.EpochNonce = nil, nil
-	return reflect.DeepEqual(x, y)
 }
 
 func (s stagingLedgerDB) GetRewardSeedFailure(
@@ -268,40 +220,6 @@ func (s stagingLedgerDB) GetRewardPoolInputs(
 		return nil, err
 	}
 	return v.pools(epoch)
-}
-
-func samePoolInputs(a, b []*models.RewardPoolInput) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !samePoolInput(a[i], b[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func samePoolInput(a, b *models.RewardPoolInput) bool {
-	x, y := *a, *b
-	x.ID, y.ID = 0, 0
-	if (x.Margin == nil || x.Margin.Rat == nil) != (y.Margin == nil || y.Margin.Rat == nil) ||
-		(x.Margin != nil && x.Margin.Rat != nil && x.Margin.Cmp(y.Margin.Rat) != 0) ||
-		(x.BlocksProduced == nil) != (y.BlocksProduced == nil) ||
-		(x.BlocksProduced != nil && *x.BlocksProduced != *y.BlocksProduced) ||
-		(x.TotalBlocksInEpoch == nil) != (y.TotalBlocksInEpoch == nil) ||
-		(x.TotalBlocksInEpoch != nil && *x.TotalBlocksInEpoch != *y.TotalBlocksInEpoch) ||
-		(x.RewardAccount == nil) != (y.RewardAccount == nil) ||
-		!bytes.Equal(x.RewardAccount, y.RewardAccount) ||
-		!bytes.Equal(x.PoolKeyHash, y.PoolKeyHash) {
-		return false
-	}
-	x.Margin, y.Margin = nil, nil
-	x.BlocksProduced, y.BlocksProduced = nil, nil
-	x.TotalBlocksInEpoch, y.TotalBlocksInEpoch = nil, nil
-	x.RewardAccount, y.RewardAccount = nil, nil
-	x.PoolKeyHash, y.PoolKeyHash = nil, nil
-	return reflect.DeepEqual(x, y)
 }
 
 func (s stagingLedgerDB) GetRewardStakeInputs(
@@ -332,29 +250,9 @@ func (s stagingLedgerDB) stakeInputs(
 	return v.stakes(epoch, lo, hi)
 }
 
-func sameStakeInputs(a, b []*models.RewardStakeInput) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		x, y := *a[i], *b[i]
-		x.ID, y.ID = 0, 0
-		if !bytes.Equal(x.PoolKeyHash, y.PoolKeyHash) ||
-			!bytes.Equal(x.StakingKey, y.StakingKey) {
-			return false
-		}
-		x.PoolKeyHash, y.PoolKeyHash = nil, nil
-		x.StakingKey, y.StakingKey = nil, nil
-		if !reflect.DeepEqual(x, y) {
-			return false
-		}
-	}
-	return true
-}
-
 // ResolvePoolRewardAccountAutoVotes resolves from the pools and accounts the
-// ledger reads, which the set serves once those families are drained, rather
-// than from the metadata store's tables.
+// ledger reads, which the set serves, rather than from the metadata store's
+// tables.
 func (s stagingLedgerDB) ResolvePoolRewardAccountAutoVotes(
 	ctx context.Context,
 	snapshots []*models.PoolStakeSnapshot,

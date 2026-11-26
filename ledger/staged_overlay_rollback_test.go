@@ -212,17 +212,16 @@ func TestOpCertViewDropsByCurrentRollbackTarget(t *testing.T) {
 	require.NotNil(t, st, "the counter staged at slot 60 survives a rollback to 100")
 }
 
-// A drained family's SQL write is skipped, so a write the set cannot stage
-// must fail rather than return success.
+// The set holds the only copy, so a write the set cannot stage must fail
+// rather than return success.
 
-func drainedStaging(f nodesettings.Family) stagingLedgerDB {
+func stagingForFamily(f nodesettings.Family) stagingLedgerDB {
 	ls := &LedgerState{}
 	ls.config.Logger = slog.New(slog.DiscardHandler)
-	ls.SetDrainedFamilies(nodesettings.FamilyMask(0).With(f))
 	return stagingLedgerDB{ls: ls}
 }
 
-func TestDrainedDRepWritesFailWhenSetCannotStage(t *testing.T) {
+func TestDRepWritesFailWhenSetCannotStage(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	cred := []byte{1}
@@ -244,15 +243,15 @@ func TestDrainedDRepWritesFailWhenSetCannotStage(t *testing.T) {
 	for name, write := range writes {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			err := write(drainedStaging(nodesettings.FamilyDReps))
-			require.ErrorIs(t, err, ErrDrainedFamilyUnserved)
+			err := write(stagingForFamily(nodesettings.FamilyDReps))
+			require.ErrorIs(t, err, ErrLedgerStateUnserved)
 		})
 	}
 }
 
-func TestDrainedAccountWriteStopsSetWhenUnstageable(t *testing.T) {
+func TestAccountWriteStopsSetWhenUnstageable(t *testing.T) {
 	t.Parallel()
-	s := drainedStaging(nodesettings.FamilyAccounts)
+	s := stagingForFamily(nodesettings.FamilyAccounts)
 	err := s.AddAccountRewardsByCredential(
 		context.Background(),
 		[]models.AccountRewardCredit{{StakingKey: []byte{1}, Amount: 5, Slot: 3}},
@@ -265,50 +264,49 @@ func TestDrainedAccountWriteStopsSetWhenUnstageable(t *testing.T) {
 	)
 }
 
-// drainedBumpSet is a set that serves the DRep and account readers of a
+// dormantBumpSet is a set that serves the DRep and account readers of a
 // drained ledger; its committed dormancy counter steps to 1 at bumpSlot.
-type drainedBumpSet struct {
+type dormantBumpSet struct {
 	LedgerChangesWriter
 	AccountReader
 	DRepReader
 	bumpSlot uint64
 }
 
-func (drainedBumpSet) Dreps(func(*models.Drep) error) error { return nil }
-func (drainedBumpSet) DormantEpochs() (uint64, error)       { return 1, nil }
-func (d drainedBumpSet) DormantEpochsAt(slot uint64) (uint64, error) {
+func (dormantBumpSet) Dreps(func(*models.Drep) error) error { return nil }
+func (dormantBumpSet) DormantEpochs() (uint64, error)       { return 1, nil }
+func (d dormantBumpSet) DormantEpochsAt(slot uint64) (uint64, error) {
 	if slot >= d.bumpSlot {
 		return 1, nil
 	}
 	return 0, nil
 }
 
-// drainedBumpLedger returns the ledger and the transaction whose batch is the
+// dormantBumpLedger returns the ledger and the transaction whose batch is the
 // last one, registered up front so staging into it needs no database
 // transaction.
-func drainedBumpLedger(
-	set drainedBumpSet,
+func dormantBumpLedger(
+	set dormantBumpSet,
 	batches ...*utxoSetBatch,
 ) (stagingLedgerDB, ledgerdb.Txn) {
 	own := &utxoSetBatch{}
 	ls := overlayLedger(append(batches, own)...)
 	ls.config.Logger = slog.New(slog.DiscardHandler)
 	ls.config.UtxoSet = set
-	ls.SetDrainedFamilies(nodesettings.FamilyMask(0).With(nodesettings.FamilyDReps))
 	return stagingLedgerDB{ls: ls}, own.txn
 }
 
 // A boundary bump a staged rollback undid is applied again when the
 // boundary replays, in the same window, exactly once.
-func TestDrainedDormantBumpReappliesAfterStagedRollbackOfStagedBump(t *testing.T) {
+func TestDormantBumpReappliesAfterStagedRollbackOfStagedBump(t *testing.T) {
 	t.Parallel()
-	s, txn := drainedBumpLedger(
-		drainedBumpSet{bumpSlot: 1 << 62},
+	s, txn := dormantBumpLedger(
+		dormantBumpSet{bumpSlot: 1 << 62},
 		&utxoSetBatch{dormancy: []DormancyChange{{Slot: 200, Epochs: 1}}},
 		rollbackBatch(150),
 	)
 	for range 2 {
-		_, err := s.bumpDrainedDormantDRepExpiries(200, txn)
+		_, err := s.bumpDormantDRepExpiriesInSet(200, txn)
 		require.NoError(t, err)
 	}
 	n, err := s.ls.dormancyView(s.ls.drepReader(txn), txn)
@@ -316,11 +314,11 @@ func TestDrainedDormantBumpReappliesAfterStagedRollbackOfStagedBump(t *testing.T
 	require.Equal(t, uint64(1), n, "the replayed boundary bumps once")
 }
 
-func TestDrainedDormantBumpReappliesAfterStagedRollbackOfCommittedBump(t *testing.T) {
+func TestDormantBumpReappliesAfterStagedRollbackOfCommittedBump(t *testing.T) {
 	t.Parallel()
-	s, txn := drainedBumpLedger(drainedBumpSet{bumpSlot: 200}, rollbackBatch(150))
+	s, txn := dormantBumpLedger(dormantBumpSet{bumpSlot: 200}, rollbackBatch(150))
 	for range 2 {
-		_, err := s.bumpDrainedDormantDRepExpiries(200, txn)
+		_, err := s.bumpDormantDRepExpiriesInSet(200, txn)
 		require.NoError(t, err)
 	}
 	n, err := s.ls.dormancyView(s.ls.drepReader(txn), txn)
@@ -328,14 +326,14 @@ func TestDrainedDormantBumpReappliesAfterStagedRollbackOfCommittedBump(t *testin
 	require.Equal(t, uint64(1), n, "the committed bump was rolled back, so the replay applies it")
 }
 
-func TestDrainedDormantBumpSkipsWhenBumpSurvivesRollback(t *testing.T) {
+func TestDormantBumpSkipsWhenBumpSurvivesRollback(t *testing.T) {
 	t.Parallel()
-	s, txn := drainedBumpLedger(
-		drainedBumpSet{bumpSlot: 1 << 62},
+	s, txn := dormantBumpLedger(
+		dormantBumpSet{bumpSlot: 1 << 62},
 		&utxoSetBatch{dormancy: []DormancyChange{{Slot: 200, Epochs: 1}}},
 		rollbackBatch(250),
 	)
-	_, err := s.bumpDrainedDormantDRepExpiries(200, txn)
+	_, err := s.bumpDormantDRepExpiriesInSet(200, txn)
 	require.NoError(t, err)
 	n, err := s.ls.dormancyView(s.ls.drepReader(txn), txn)
 	require.NoError(t, err)

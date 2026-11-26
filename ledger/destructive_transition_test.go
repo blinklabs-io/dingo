@@ -112,10 +112,10 @@ func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
 	// Hold the prune lock so reconciliation pauses before taking the
 	// destructive barrier. Another destructive transition must still be able
 	// to enter while reconciliation is waiting for the prune lock.
-	fixture.ls.consumedUtxoPruneMutex.Lock()
+	fixture.ls.rollbackMutex.Lock()
 	var releasePruneOnce sync.Once
 	releasePrune := func() {
-		releasePruneOnce.Do(fixture.ls.consumedUtxoPruneMutex.Unlock)
+		releasePruneOnce.Do(fixture.ls.rollbackMutex.Unlock)
 	}
 	var wg sync.WaitGroup
 	joinBeforeFixtureClose(t, &wg, releasePrune)
@@ -129,7 +129,7 @@ func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
 		func() bool {
 			return testutil.GoroutineParkedIn(
 				"sync.(*Mutex).Lock",
-				"(*LedgerState).withConsumedUtxoPruneBoundary",
+				"(*LedgerState).withRollbackBoundary",
 			)
 		},
 		testutil.AsyncWait,

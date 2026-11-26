@@ -24,9 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/governance"
-	"github.com/blinklabs-io/dingo/utxoref"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -78,11 +76,11 @@ type LedgerDelta struct {
 	// expandedIndexOffset reserves block indexes consumed by child bodies in
 	// earlier validation deltas for the same block.
 	expandedIndexOffset uint64
-	// skipConsumedInputRecovery applies transaction effects without the
-	// consumed-utxo recovery/repair pass (see Database.SetTransactionWithOpts).
-	// Set only for Leios endorser-block closure application, which mirrors the
-	// reference ledger's applyLeiosClosure; false for all ranking-block deltas so
-	// their behavior is unchanged.
+	// skipConsumedInputRecovery leaves a consumed input absent from the
+	// ledger state as a no-op instead of recovering its producer from the
+	// blob store (see Database.SetTransactionWithOpts). Set only for Leios
+	// endorser-block closure application, as the reference ledger's
+	// applyLeiosClosure folds the closure without storage recovery.
 	skipConsumedInputRecovery bool
 	// offsetsPersisted marks a delta whose transactions' blob offsets the
 	// caller has already written (see BatchedTxIngestOpts.OffsetsPersisted).
@@ -99,7 +97,20 @@ type LedgerDelta struct {
 	// LedgerDeltaBatch.apply keeps such a batch on the per-transaction path.
 	validated          bool
 	closureContextSlot *uint64
-	stageApplyEvents   func([]TransactionEvent)
+	// consensus replaces the live consensus snapshot for a delta applied to
+	// a fork candidate, whose epoch cache and protocol parameters differ
+	// from the selected chain's once it crosses a boundary.
+	consensus        *consensusSnapshot
+	stageApplyEvents func([]TransactionEvent)
+}
+
+// consensusFor is the consensus snapshot the delta's rules read: the
+// candidate's when one is set, the live one otherwise.
+func (d *LedgerDelta) consensusFor(ls *LedgerState) *consensusSnapshot {
+	if d.consensus != nil {
+		return d.consensus
+	}
+	return ls.loadConsensusSnapshot()
 }
 
 func NewLedgerDelta(
@@ -119,6 +130,7 @@ func NewLedgerDelta(
 	delta.strictConsumedInputs = false
 	delta.validated = false
 	delta.closureContextSlot = nil
+	delta.consensus = nil
 	delta.stageApplyEvents = nil
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
 	delta.Transactions = (*slicePtr)[:0] // Reset slice
@@ -144,6 +156,7 @@ func (d *LedgerDelta) Release() {
 	d.strictConsumedInputs = false
 	d.validated = false
 	d.closureContextSlot = nil
+	d.consensus = nil
 	d.stageApplyEvents = nil
 	// Return the delta to the pool
 	ledgerDeltaPool.Put(d)
@@ -165,7 +178,7 @@ func (d *LedgerDelta) apply(
 	ls *LedgerState,
 	txn ledgerdb.Txn,
 ) error {
-	return d.applyWithDonationRecording(ctx, ls, txn, true, nil)
+	return d.applyWithDonationRecording(ctx, ls, txn, true)
 }
 
 func (d *LedgerDelta) applyWithoutRecordingDonations(
@@ -173,45 +186,7 @@ func (d *LedgerDelta) applyWithoutRecordingDonations(
 	ls *LedgerState,
 	txn ledgerdb.Txn,
 ) error {
-	return d.applyWithDonationRecording(ctx, ls, txn, false, nil)
-}
-
-func (d *LedgerDelta) applyWithoutRecordingDonationsWithAccumulator(
-	ctx context.Context,
-	ls *LedgerState,
-	txn ledgerdb.Txn,
-	acc database.BatchAccumulator,
-) error {
-	return d.applyWithDonationRecording(ctx, ls, txn, false, acc)
-}
-
-type validatedReplayAccumulatorContextKey struct{}
-
-func withValidatedReplayAccumulator(
-	ctx context.Context,
-	acc database.BatchAccumulator,
-) context.Context {
-	return context.WithValue(
-		ctx,
-		validatedReplayAccumulatorContextKey{},
-		acc,
-	)
-}
-
-func validatedReplayAccumulatorFrom(
-	ctx context.Context,
-) database.BatchAccumulator {
-	acc, _ := ctx.Value(validatedReplayAccumulatorContextKey{}).(database.BatchAccumulator)
-	return acc
-}
-
-func (d *LedgerDelta) applyWithAccumulator(
-	ctx context.Context,
-	ls *LedgerState,
-	txn ledgerdb.Txn,
-	acc database.BatchAccumulator,
-) error {
-	return d.applyWithDonationRecording(ctx, ls, txn, true, acc)
+	return d.applyWithDonationRecording(ctx, ls, txn, false)
 }
 
 func (d *LedgerDelta) applyWithDonationRecording(
@@ -219,7 +194,6 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	ls *LedgerState,
 	txn ledgerdb.Txn,
 	recordDonations bool,
-	acc database.BatchAccumulator,
 ) error {
 	// Keep one immutable protocol-parameter snapshot for every certificate in
 	// this delta. A parameter publication between certificates must not mix
@@ -269,7 +243,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				}
 			}
 			if len(certs) > 0 && !snapshotLoaded {
-				snapshot := ls.loadConsensusSnapshot()
+				snapshot := d.consensusFor(ls)
 				if snapshot == nil {
 					certDepositsMapPool.Put(certDeposits)
 					return errors.New(
@@ -315,41 +289,18 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
 				ProtocolMajor:                  protocolMajor,
 			}
-			var setErr error
-			if acc != nil {
-				setErr = ls.ledgerDB().SetTransactionBatchedWithOpts(
-					ctx,
-					level,
-					d.Point,
-					uint32(storageIndex), //nolint:gosec
-					updateEpoch,
-					paramUpdates,
-					certDeposits,
-					d.Offsets,
-					acc,
-					txn,
-					opts,
-				)
-				if setErr == nil && ls.afterBatchedTransactionWrite != nil {
-					ls.afterBatchedTransactionWrite()
-				}
-				if setErr == nil && ls.afterBatchedTransactionStored != nil {
-					setErr = ls.afterBatchedTransactionStored(txn, level)
-				}
-			} else {
-				setErr = ls.ledgerDB().SetTransactionWithOpts(
-					ctx,
-					level,
-					d.Point,
-					uint32(storageIndex), //nolint:gosec
-					updateEpoch,
-					paramUpdates,
-					certDeposits,
-					d.Offsets,
-					txn,
-					opts,
-				)
-			}
+			setErr := ls.ledgerDB().SetTransactionWithOpts(
+				ctx,
+				level,
+				d.Point,
+				uint32(storageIndex), //nolint:gosec
+				updateEpoch,
+				paramUpdates,
+				certDeposits,
+				d.Offsets,
+				txn,
+				opts,
+			)
 			certDepositsMapPool.Put(certDeposits)
 			if setErr != nil {
 				if errors.Is(setErr, models.ErrRewardWithdrawalExceedsBalance) {
@@ -419,9 +370,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// validation, once per transaction while validating, where each tx is its
 	// own delta) yields the same final expiration as applying it once per block.
 	if ls.config.DelegatorInactivityEnabled {
-		ls.RLock()
-		currentEpoch := ls.currentEpoch.EpochId
-		ls.RUnlock()
+		currentEpoch := ls.stagingEpoch(txn)
 		witnessTxs := make([]lcommon.Transaction, 0, len(d.Transactions))
 		for i, tr := range d.Transactions {
 			if !appliedTxs[i] {
@@ -561,9 +510,7 @@ func (d *LedgerDelta) recordNetworkDonations(
 		return nil
 	}
 
-	ls.RLock()
-	epoch := ls.currentEpoch.EpochId
-	ls.RUnlock()
+	epoch := ls.stagingEpoch(txn)
 	if err := ls.ledgerDB().AddNetworkDonation(
 		d.Point.Slot,
 		epoch,
@@ -606,7 +553,7 @@ func (d *LedgerDelta) processGovernance(
 	if d.closureContextSlot != nil {
 		contextSlot = *d.closureContextSlot
 	}
-	snapshot := ls.loadConsensusSnapshot()
+	snapshot := d.consensusFor(ls)
 	if snapshot == nil {
 		return errors.New("governance consensus snapshot not yet published")
 	}
@@ -747,161 +694,6 @@ func (b *LedgerDeltaBatch) addDelta(delta *LedgerDelta) {
 }
 
 func (b *LedgerDeltaBatch) apply(
-	ctx context.Context,
-	ls *LedgerState,
-	txn ledgerdb.Txn,
-) error {
-	if ls.externalIngest.trusted.Load() {
-		// ApplyTrustedBatch's beforeCommit deletes outputs spent within
-		// the batch only if a delta batch applied without the overlay.
-		usedOverlay := false
-		defer func() { ls.externalIngest.recordApply(usedOverlay) }()
-		return b.applyBatched(ctx, ls, txn, &usedOverlay)
-	}
-	return b.applyBatched(ctx, ls, txn, nil)
-}
-
-// applyBatched is apply; usedOverlay, when not nil, is set when the batch
-// applied through a batch UTxO overlay.
-func (b *LedgerDeltaBatch) applyBatched(
-	ctx context.Context,
-	ls *LedgerState,
-	txn ledgerdb.Txn,
-	usedOverlay *bool,
-) (err error) {
-	// API mode and ApplyTrustedBatch batch without the flag. Other storage
-	// modes batch only when ApplyRowBatchingEnabled is set; the stored state
-	// is the same either way.
-	if ls.ledgerDB().StorageMode() != types.StorageModeAPI &&
-		!ls.config.ApplyRowBatchingEnabled &&
-		!ls.externalIngest.trusted.Load() {
-		return b.applyUnbatched(ctx, ls, txn)
-	}
-	// The accumulator path does not implement Leios closure context or its
-	// conflict-tolerant input semantics, so keep those batches on the live path.
-	// Validated blocks are outside the batched scope too.
-	for _, delta := range b.deltas {
-		if delta != nil && (delta.closureContextSlot != nil ||
-			delta.skipConsumedInputRecovery || delta.strictConsumedInputs ||
-			delta.validated) {
-			return b.applyUnbatched(ctx, ls, txn)
-		}
-	}
-
-	acc := ls.ledgerDB().NewBatchAccumulator()
-	if acc == nil {
-		return b.applyUnbatched(ctx, ls, txn)
-	}
-	defer acc.Reset()
-	// Every statement of the overlay's lifetime returns through here, so a
-	// conflict a read barrier recorded but could not return reaches
-	// ApplyTrustedBatch's per-row fallback. Runs before acc.Reset.
-	defer func() { err = database.WithBatchUtxoOverlayError(acc, err) }()
-	overlay, err := b.enableTrustedUtxoOverlay(ls, txn, acc)
-	if err != nil {
-		return err
-	}
-	if usedOverlay != nil {
-		*usedOverlay = overlay
-	}
-	for _, delta := range b.deltas {
-		if delta == nil {
-			continue // Skip nil deltas (shouldn't happen in normal operation)
-		}
-		err := delta.applyWithAccumulator(ctx, ls, txn, acc)
-		if err != nil {
-			return err
-		}
-		// With the overlay this only ends the block's stake segment; the
-		// overlay writes it at FlushBatch or at a read barrier.
-		if err := ls.ledgerDB().FlushBatchStakeDeltas(acc, txn); err != nil {
-			return fmt.Errorf("flush ledger delta stake metadata: %w", err)
-		}
-	}
-	if err := ls.ledgerDB().FlushBatch(acc, txn); err != nil {
-		return fmt.Errorf("flush ledger delta metadata batch: %w", err)
-	}
-	return nil
-}
-
-// enableTrustedUtxoOverlay attaches a batch UTxO overlay to acc when b is
-// applied by ApplyTrustedBatch and every delta is a plain ranking-block
-// delta. It reads the batch's pre-batch inputs once, in bulk; the store
-// declines outside SQLite core storage mode. Dijkstra blocks stay on the
-// per-row path because endorser closures consume inputs their ranking
-// transactions do not name, and so do later eras until they are known not
-// to.
-func (b *LedgerDeltaBatch) enableTrustedUtxoOverlay(
-	ls *LedgerState,
-	txn ledgerdb.Txn,
-	acc database.BatchAccumulator,
-) (bool, error) {
-	e := &ls.externalIngest
-	if !e.trusted.Load() || e.overlayOff.Load() || ls.trustedBatchOverlayOff {
-		return false, nil
-	}
-	_, protected, err := pendingRewardStakeInputHistoryFloor(
-		ls.ledgerDB(),
-		txn,
-	)
-	if err != nil {
-		return false, err
-	}
-	if protected {
-		return false, nil
-	}
-	produced := make(map[utxoref.Key]struct{})
-	var (
-		inputs    []models.UtxoId
-		producers [][]byte
-	)
-	for _, delta := range b.deltas {
-		if delta == nil {
-			continue
-		}
-		if delta.BlockEraId >= dijkstra.EraIdDijkstra {
-			return false, nil
-		}
-		for _, tr := range delta.Transactions {
-			levels := TransactionLevelsForApply(tr.Tx)
-			if len(levels) != 1 {
-				return false, nil
-			}
-			producers = append(producers, tr.Tx.Hash().Bytes())
-			for _, input := range levels[0].Consumed() {
-				if _, ok := produced[utxoref.ForInput(input)]; ok {
-					continue
-				}
-				inputs = append(inputs, models.UtxoId{
-					Hash: input.Id().Bytes(),
-					Idx:  input.Index(),
-				})
-			}
-			for _, utxo := range levels[0].Produced() {
-				produced[utxoref.ForUtxo(utxo)] = struct{}{}
-			}
-		}
-	}
-	if len(inputs) == 0 && len(produced) == 0 {
-		return false, nil
-	}
-	var deleteOnSpend []models.UtxoId
-	if spends := e.spends.Load(); spends != nil {
-		deleteOnSpend = spends.committedAmong(inputs)
-	}
-	enabled, err := ls.ledgerDB().EnableBatchUtxoOverlay(
-		acc, txn, inputs, deleteOnSpend, producers,
-	)
-	if err != nil {
-		return false, fmt.Errorf("enable batch UTxO overlay: %w", err)
-	}
-	if enabled && ls.afterTrustedBatchOverlay != nil {
-		ls.afterTrustedBatchOverlay()
-	}
-	return enabled, nil
-}
-
-func (b *LedgerDeltaBatch) applyUnbatched(
 	ctx context.Context,
 	ls *LedgerState,
 	txn ledgerdb.Txn,

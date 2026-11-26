@@ -27,10 +27,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -42,8 +40,7 @@ const loadNodeChunks = 4
 
 // requireLoadedStorage opens the stores of the stopped data directory dir and
 // requires the layout a node leaves: the ledger and the live UTxO set at tip,
-// the database marked as holding its UTxO set only in the set, and every
-// graduated ledger-state family drained from the metadata store.
+// and the database marked as holding its UTxO set only in the set.
 func requireLoadedStorage(t *testing.T, dir string, tip ocommon.Point) {
 	t.Helper()
 	cfg := parityConfig(dir)
@@ -82,13 +79,9 @@ func requireLoadedStorage(t *testing.T, dir string, tip ocommon.Point) {
 	require.NoError(t, err)
 	require.Equal(t, tip.Slot, ledgerTip.Point.Slot)
 	require.Equal(t, tip.Hash, ledgerTip.Point.Hash)
-	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
-	require.NoError(t, err)
-	require.NotEmpty(t, marked, "the database holds its UTxO set in the set")
 
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(dir), Logger: logger, Only: true,
-		RetainRewardRecords: cfg.SplitIndexer(),
+		Dir: utxoset.DirFor(dir), Logger: logger, RetainRewardRecords: cfg.HasIndexerDB(),
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, set.Close()) }()
@@ -100,22 +93,12 @@ func requireLoadedStorage(t *testing.T, dir string, tip ocommon.Point) {
 	count, err := set.Count()
 	require.NoError(t, err)
 	require.NotZero(t, count, "the live UTxO set holds the UTxO set")
-
-	drained, err := db.EffectiveDrainedFamilies(t.Context())
-	require.NoError(t, err)
-	var graduated nodesettings.FamilyMask
-	for _, entry := range statedrain.Graduated(nil) {
-		graduated = graduated.With(entry.Family)
-	}
-	require.NotZero(t, graduated)
-	require.Equal(t, graduated, drained, "every graduated family is drained")
 }
 
 // TestNodeServesTheTipDingoLoadWrote loads real blocks into a new data
 // directory as `dingo load` does and starts a node over it. The load must
-// leave the storage a node writes -- the live UTxO set at the loaded tip and
-// the ledger-state families drained into it -- so the node opens it without a
-// migration and serves the loaded tip.
+// leave the storage a node writes -- the live UTxO set at the loaded tip --
+// so the node opens it without a migration and serves the loaded tip.
 func TestNodeServesTheTipDingoLoadWrote(t *testing.T) {
 	t.Parallel()
 	immutableDir := copyImmutableChunkPrefix(t, loadNodeChunks)
@@ -149,10 +132,9 @@ func TestNodeServesTheTipDingoLoadWrote(t *testing.T) {
 }
 
 // TestLoadExtendsADatabaseItLoaded loads a chain prefix into a new data
-// directory and then a longer one into the same directory. Every database is
-// drained into the live UTxO set by its first start, so the second load runs
-// on a drained database: it must find the ledger state in the set the first
-// one wrote and extend it.
+// directory and then a longer one into the same directory. The first load
+// leaves the ledger state in the live UTxO set, so the second load must find
+// the ledger state the first one wrote and extend it.
 func TestLoadExtendsADatabaseItLoaded(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -176,9 +158,9 @@ func TestLoadExtendsADatabaseItLoaded(t *testing.T) {
 }
 
 // TestLoadRefusesALedgerWithoutItsUtxoSet removes the live UTxO set of a
-// loaded data directory. The metadata store drained its ledger state into
-// that set, so nothing can rebuild it, and a load that replayed onto an empty
-// set would write state that matches no chain.
+// loaded data directory. The set is the only copy of the ledger state, so
+// nothing can rebuild it, and a load that replayed onto an empty set would
+// write state that matches no chain.
 func TestLoadRefusesALedgerWithoutItsUtxoSet(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -188,7 +170,9 @@ func TestLoadRefusesALedgerWithoutItsUtxoSet(t *testing.T) {
 
 	err := Load(t.Context(), parityConfig(dir), logger, immutableDir)
 	require.ErrorContains(t, err, "cannot be caught up to the ledger")
-	require.ErrorContains(t, err, "has drained ledger-state families")
+	require.ErrorContains(
+		t, err, "no metadata store holds an earlier copy of the ledger state",
+	)
 }
 
 // TestLoadWithDBRefusesAnUnfinishedImport leaves an import into the LedgerDB
@@ -197,16 +181,14 @@ func TestLoadRefusesALedgerWithoutItsUtxoSet(t *testing.T) {
 func TestLoadWithDBRefusesAnUnfinishedImport(t *testing.T) {
 	t.Parallel()
 	db := newFileTestDB(t)
-	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(db.DataDir()), Only: true,
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: utxoset.DirFor(db.DataDir())})
 	require.NoError(t, err)
 	require.NoError(t, set.LoadUtxoSet(
 		ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{1}, 32)},
 		func(func([]byte, uint32, []byte) error) error { return nil },
 	))
 	require.NoError(t, set.Close())
-	require.NoError(t, db.SetSyncState("sync_status", "in_progress", nil))
+	require.NoError(t, db.SetChainState("sync_status", "in_progress", nil))
 
 	err = LoadWithDB(
 		t.Context(),

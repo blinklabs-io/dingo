@@ -1241,27 +1241,27 @@ func TestMidnightServerActiveRequiresExplicitEnablement(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		storageMode StorageMode
-		config      MidnightConfig
-		want        bool
+		name     string
+		features []plugin.StorageFeature
+		config   MidnightConfig
+		want     bool
 	}{
 		{
-			name:        "disabled despite configured default port",
-			storageMode: StorageModeAPI,
-			config:      MidnightConfig{Port: 50051},
+			name:     "disabled despite configured default port",
+			features: []plugin.StorageFeature{plugin.StorageFeatureMidnight},
+			config:   MidnightConfig{Port: 50051},
 		},
 		{
-			name:        "indexer enabled without server",
-			storageMode: StorageModeAPI,
+			name:     "indexer enabled without server",
+			features: []plugin.StorageFeature{plugin.StorageFeatureMidnight},
 			config: MidnightConfig{
 				Enabled: true,
 				Port:    50051,
 			},
 		},
 		{
-			name:        "enabled in api mode",
-			storageMode: StorageModeAPI,
+			name:     "enabled in api mode",
+			features: []plugin.StorageFeature{plugin.StorageFeatureMidnight},
 			config: MidnightConfig{
 				ServerEnabled: true,
 				Port:          50051,
@@ -1269,23 +1269,22 @@ func TestMidnightServerActiveRequiresExplicitEnablement(t *testing.T) {
 			want: true,
 		},
 		{
-			name:        "enabled in core mode",
-			storageMode: StorageModeCore,
+			name: "enabled in core mode",
 			config: MidnightConfig{
 				ServerEnabled: true,
 				Port:          50051,
 			},
 		},
 		{
-			name:        "enabled with zero port",
-			storageMode: StorageModeAPI,
-			config:      MidnightConfig{ServerEnabled: true},
+			name:     "enabled with zero port",
+			features: []plugin.StorageFeature{plugin.StorageFeatureMidnight},
+			config:   MidnightConfig{ServerEnabled: true},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := midnightServerActive(tt.storageMode, tt.config); got != tt.want {
+			if got := midnightServerActive(tt.features, tt.config); got != tt.want {
 				t.Fatalf("midnightServerActive() = %v, want %v", got, tt.want)
 			}
 		})
@@ -1709,7 +1708,16 @@ func registerAPIProbe(
 	probe *apiLifecycleProbe,
 ) {
 	t.Helper()
-	descriptor := plugin.Descriptor{Capability: capability, Name: name}
+	descriptor := plugin.Descriptor{
+		Capability: capability,
+		Name:       name,
+		Storage: plugin.StorageRequirements{
+			Tier: plugin.StorageTierCore,
+			Features: []plugin.StorageFeature{
+				plugin.StorageFeature("test-" + capability.Name()),
+			},
+		},
+	}
 	var err error
 	switch capability {
 	case plugin.CapabilityAPIUtxorpc:
@@ -2183,28 +2191,9 @@ func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {
 	require.Equal(t, int32(total), handled.Load())
 }
 
-// TestNodeSettingsGateValuesAssemblesLedgerAndGenesisGates covers the one
-// piece of the phase 2 gate-enforcement wiring that is reachable without
-// booting a full Node: nodeSettingsGateValues, the assembly function Run
-// calls from both the normal-startup call site and the deferred,
-// post-recovery call site. Testing it here is exactly what makes "factor
-// so both call sites use the same values" a real guarantee rather than an
-// aspiration -- a future edit that changes one call site's inputs without
-// updating this function would be caught here.
-//
-// This does not, and cannot without booting a real Node through Run,
-// exercise the control flow itself: that dbNeedsRecovery defers the call
-// rather than skipping it, and that the deferred call runs immediately
-// after RecoverCommitTimestampConflict and before history expiry, the
-// Midnight indexer, or any network listener starts. Run is a single large
-// method whose body constructs the ledger state, event bus, chain
-// selector, and every network listener as a side effect of reaching that
-// code, so isolating just the recovery-then-enforce sequence would require
-// either duplicating most of Run's setup or refactoring Run to extract a
-// narrower seam -- out of scope for this fix. That gap is a known,
-// explicitly accepted one (see the coordinator's note deferring a
-// DevNet/integration-level test of the real Node.Run wiring), not a gap
-// this test is pretending to close.
+// TestNodeSettingsGateValuesAssemblesLedgerAndGenesisGates covers
+// nodeSettingsGateValues, the phase 2 gate values Run passes to
+// EnforceNodeSettings.
 func TestNodeSettingsGateValuesAssemblesLedgerAndGenesisGates(t *testing.T) {
 	t.Parallel()
 
@@ -2677,76 +2666,6 @@ func TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled(t *testing.T) {
 	require.Equal(t, "", effectiveBarkHost("", false))
 	require.Equal(t, "0.0.0.0", effectiveBarkHost("0.0.0.0", true))
 	require.Equal(t, "10.0.0.5", effectiveBarkHost("10.0.0.5", false))
-}
-
-func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
-	t.Parallel()
-
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: t.TempDir(),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	stakeKey := make([]byte, 28)
-	stakeKey[0] = 0x51
-	missingStakeKey := make([]byte, 28)
-	missingStakeKey[0] = 0x52
-	_, err = raw.Exec(`
-INSERT INTO account (staking_key, pool, added_slot, active)
-VALUES (?, ?, 50, TRUE), (?, ?, 60, TRUE)`,
-		stakeKey, make([]byte, 28),
-		missingStakeKey, make([]byte, 28),
-	)
-	require.NoError(t, err)
-	// Simulate a post-upgrade write that populated only one credential. The
-	// startup check must detect the missing canonical credential, not merely
-	// test whether reward_live_stake is empty.
-	_, err = raw.Exec(`
-INSERT INTO reward_live_stake
-    (staking_key, credential_tag, utxo_stake, reward_stake, total_stake,
-     registered, updated_slot)
-VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
-		stakeKey,
-	)
-	require.NoError(t, err)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(100, make([]byte, 32)),
-	}, nil))
-	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
-	require.NoError(t, err)
-	require.True(t, needed)
-
-	n := &Node{
-		db:      db,
-		utxoSet: openTestUtxoSet(t),
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	}
-	n.utxoSetReconciled = true
-	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
-
-	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
-	require.NoError(t, err)
-	require.False(t, needed)
-	for _, key := range [][]byte{stakeKey, missingStakeKey} {
-		var live models.RewardLiveStake
-		require.NoError(t, raw.QueryRow(`
-SELECT staking_key, credential_tag, registered, updated_slot
-FROM reward_live_stake
-WHERE credential_tag = ? AND staking_key = ?`,
-			0, key,
-		).Scan(
-			&live.StakingKey,
-			&live.CredentialTag,
-			&live.Registered,
-			&live.UpdatedSlot,
-		))
-		require.Equal(t, uint64(100), live.UpdatedSlot)
-	}
 }
 
 func newNodeTestConnId(id uint) ouroboros.ConnectionId {
@@ -3327,7 +3246,7 @@ func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
 	)}
 
 	assert.True(t, node.config.blockProducer)
-	assert.True(t, node.config.splitIndexer)
+	assert.True(t, node.config.hasIndexerDB)
 	assert.Equal(t, StorageModeCore, node.config.storageMode)
 	assert.False(t, node.ledgerStateConfig().ForgeBlocks)
 }
@@ -3901,8 +3820,8 @@ func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(
 // down becomes available -- so driving the real path here would mean
 // injecting a failure at a specific point inside that sequence rather than
 // calling one self-contained function. This test therefore only proves the
-// guard logic is correct given the order Run() is documented (here and in
-// ARCHITECTURE.md) to register it in; it cannot catch a future edit to Run()
+// guard logic is correct given Run()'s current registration order;
+// it cannot catch a future edit to Run()
 // that reorders the db.Close/pluginHost.Stop/ledgerState.Close registrations
 // relative to each other. Matches this file's existing convention for
 // exercising cleanupFailedStartup with a hand-built `started` (see the
@@ -4416,83 +4335,10 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 	)
 }
 
-// seedIncompleteRewardLiveStake reproduces a post-upgrade database whose
-// reward_live_stake aggregate covers only one of two registered credentials,
-// which is the state RewardLiveStakeNeedsBackfill is meant to detect.
-func seedIncompleteRewardLiveStake(
-	t *testing.T,
-	db *database.Database,
-) {
-	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	stakeKey := make([]byte, 28)
-	stakeKey[0] = 0x51
-	missingStakeKey := make([]byte, 28)
-	missingStakeKey[0] = 0x52
-	_, err = raw.Exec(`
-INSERT INTO account (staking_key, pool, added_slot, active)
-VALUES (?, ?, 50, TRUE), (?, ?, 60, TRUE)`,
-		stakeKey, make([]byte, 28),
-		missingStakeKey, make([]byte, 28),
-	)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO reward_live_stake
-    (staking_key, credential_tag, utxo_stake, reward_stake, total_stake,
-     registered, updated_slot)
-VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
-		stakeKey,
-	)
-	require.NoError(t, err)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(100, make([]byte, 32)),
-	}, nil))
-}
-
-// TestBackfillRewardLiveStakeSkipsScanWhenConfigured pins the opt-out: with
-// the flag set the whole-UTxO consistency scan must not run, so a database
-// that genuinely needs a backfill is left untouched rather than rebuilt.
-// Without the flag the sibling test above rebuilds the same fixture, so this
-// fails if the flag ever stops being honored.
-func TestBackfillRewardLiveStakeSkipsScanWhenConfigured(t *testing.T) {
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: t.TempDir(),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-	seedIncompleteRewardLiveStake(t, db)
-
-	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
-	require.NoError(t, err)
-	require.True(t, needed)
-	set := openTestUtxoSet(t)
-
-	n := &Node{
-		db:      db,
-		utxoSet: set,
-		config: Config{
-			logger: slog.New(
-				slog.NewTextHandler(io.Discard, nil),
-			),
-			skipRewardLiveStakeBackfillCheck: true,
-		},
-	}
-	n.utxoSetReconciled = true
-	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
-
-	// Still needed: the scan was skipped, so no rebuild happened.
-	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
-	require.NoError(t, err)
-	require.True(t, needed)
-}
-
-// TestBackfillRewardLiveStakeChecksProvenanceWhenSkipping pins the boundary
-// of the opt-out: the flag suppresses only the reward_live_stake scan, never
-// the stake-snapshot provenance probe, which fails closed because such a
-// database cannot be safely reconstructed.
-func TestBackfillRewardLiveStakeChecksProvenanceWhenSkipping(t *testing.T) {
+// TestCheckStakeSnapshotProvenanceRefusesOlderAccounting pins that a LedgerDB
+// holding a stake snapshot from an older accounting version fails closed,
+// because such a database cannot be safely reconstructed.
+func TestCheckStakeSnapshotProvenanceRefusesOlderAccounting(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -4521,11 +4367,10 @@ func TestBackfillRewardLiveStakeChecksProvenanceWhenSkipping(t *testing.T) {
 			logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),
 			),
-			skipRewardLiveStakeBackfillCheck: true,
 		},
 	}
 	n.utxoSetReconciled = true
-	err = n.backfillRewardLiveStake(context.Background())
+	err = n.checkStakeSnapshotProvenance()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "older accounting")
 }

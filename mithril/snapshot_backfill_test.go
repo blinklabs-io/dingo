@@ -164,9 +164,17 @@ func requireEmptyDB(t *testing.T, db *database.Database) {
 	require.NoError(t, err)
 	assert.Zero(t, tip.Point.Slot, "a ledger tip was recorded")
 	assert.Empty(t, tip.Point.Hash, "a ledger tip was recorded")
-	keys, err := db.ListSyncStateKeysByPrefix("", nil)
-	require.NoError(t, err)
-	assert.Empty(t, keys, "sync state was written")
+	written := append([]string{
+		mithrilLedgerSlotSyncKey,
+		mithrilLedgerHashSyncKey,
+		database.ImportedLedgerStateSlotKey,
+		database.ImportedLedgerStateHashKey,
+	}, importProgressKeys...)
+	for _, key := range written {
+		value, err := db.GetChainState(key, nil)
+		require.NoError(t, err)
+		assert.Empty(t, value, "chain state %s was written", key)
+	}
 	state, err := SnapshotStartupState(t.Context(), db)
 	require.NoError(t, err)
 	assert.Equal(t, SnapshotStartupFresh, state)
@@ -210,7 +218,7 @@ func TestSnapshotBackfillSetsTrustBoundary(t *testing.T) {
 	_, err := RunSnapshotBackfill(t.Context(), f.config(t, db, 150))
 	require.NoError(t, err)
 
-	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	slot, err := db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 	require.NoError(t, err)
 	assert.Equal(t, strconv.FormatUint(f.ledger.Slot, 10), slot)
 	bootstrapped, err := WasBootstrapped(db)
@@ -218,13 +226,13 @@ func TestSnapshotBackfillSetsTrustBoundary(t *testing.T) {
 	assert.True(t, bootstrapped)
 	requireMarker(t, db, 9)
 
-	status, err := db.GetSyncState("sync_status", nil)
+	status, err := db.GetChainState("sync_status", nil)
 	require.NoError(t, err)
 	assert.Empty(t, status, "the restore did not complete")
 	for _, key := range []string{
 		syncKeySnapshotRestoreActive, syncKeyPinnedArtifact,
 	} {
-		val, err := db.GetSyncState(key, nil)
+		val, err := db.GetChainState(key, nil)
 		require.NoError(t, err)
 		assert.Empty(t, val, "%s outlived the restore", key)
 	}
@@ -249,7 +257,7 @@ func TestSnapshotBackfillLeavesCoreUtxoOffsetMarkerUnset(t *testing.T) {
 	cfg := f.config(t, db, 150)
 	checked := false
 	cfg.OnProgress = func(p SyncProgress) {
-		if checked || p.Phase != PhaseIndexRebuild || !p.Active {
+		if checked || p.Phase != PhaseComplete || !p.Active {
 			return
 		}
 		checked = true
@@ -259,7 +267,7 @@ func TestSnapshotBackfillLeavesCoreUtxoOffsetMarkerUnset(t *testing.T) {
 	}
 	_, err := RunSnapshotBackfill(t.Context(), cfg)
 	require.NoError(t, err)
-	require.True(t, checked, "the restore never rebuilt indexes")
+	require.True(t, checked, "the restore never completed")
 }
 
 // A manifest signed with the wrong key fails the restore before anything is
@@ -372,7 +380,7 @@ func TestSnapshotBackfillResumesInterruptedImport(t *testing.T) {
 	tip, err := RunSnapshotBackfill(t.Context(), cfg)
 	require.NoError(t, err)
 	assert.True(t, samePoint(f.ledger, tip))
-	status, err := db.GetSyncState("sync_status", nil)
+	status, err := db.GetChainState("sync_status", nil)
 	require.NoError(t, err)
 	assert.Empty(t, status)
 	var want []uint64
@@ -407,7 +415,7 @@ func TestSnapshotStartupState(t *testing.T) {
 	assert.Equal(t, SnapshotStartupFresh, state)
 
 	// A manual sync's interruption is not the node's to resume.
-	require.NoError(t, db.SetSyncState("sync_status", syncStatusInProgress, nil))
+	require.NoError(t, db.SetChainState("sync_status", syncStatusInProgress, nil))
 	state, err = SnapshotStartupState(t.Context(), db)
 	require.NoError(t, err)
 	assert.Equal(t, SnapshotStartupPopulated, state)
@@ -415,7 +423,7 @@ func TestSnapshotStartupState(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, own)
 
-	require.NoError(t, db.SetSyncState(syncKeySnapshotRestoreActive, "1", nil))
+	require.NoError(t, db.SetChainState(syncKeySnapshotRestoreActive, "1", nil))
 	state, err = SnapshotStartupState(t.Context(), db)
 	require.NoError(t, err)
 	assert.Equal(t, SnapshotStartupResume, state)
@@ -483,7 +491,7 @@ func requireRestoreComplete(
 ) {
 	t.Helper()
 	assert.True(t, samePoint(f.ledger, tip), "restored ledger point")
-	status, err := db.GetSyncState("sync_status", nil)
+	status, err := db.GetChainState("sync_status", nil)
 	require.NoError(t, err)
 	assert.Empty(t, status)
 	var want []uint64
@@ -517,7 +525,7 @@ func interruptDuringBlockLoad(
 	_, err := RunSnapshotBackfill(ctx, cfg)
 	require.Error(t, err)
 	require.True(t, interrupted, "the restore never stored a block")
-	phase, err := db.GetSyncState(syncKeySnapshotRestoreActive, nil)
+	phase, err := db.GetChainState(syncKeySnapshotRestoreActive, nil)
 	require.NoError(t, err)
 	require.Equal(t, restorePhaseBlocks, phase)
 	require.NotEmpty(t, storedSlots(t, db))
@@ -605,7 +613,7 @@ func TestSnapshotBackfillPrunedPinAfterLedgerImportIsUnrecoverable(
 	require.ErrorIs(t, err, ErrSnapshotRestoreUnrecoverable)
 	assert.False(t, imported, "a ledger import was attempted")
 	assert.Empty(t, b.requestedImmutables(), "the restore went on")
-	phase, err := db.GetSyncState(syncKeySnapshotRestoreActive, nil)
+	phase, err := db.GetChainState(syncKeySnapshotRestoreActive, nil)
 	require.NoError(t, err)
 	assert.Equal(t, restorePhaseLedger, phase)
 	_, after, err := set.Get(oldTx, 0)
@@ -637,10 +645,10 @@ func TestSnapshotBackfillResumeRefusesForeignBlocks(t *testing.T) {
 				ImmutableFileNumber: b.artifact.Beacon.ImmutableFileNumber,
 				CertificateHash:     b.artifact.CertificateHash,
 			}))
-			require.NoError(t, db.SetSyncState(
+			require.NoError(t, db.SetChainState(
 				syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
 			))
-			require.NoError(t, db.SetSyncState(
+			require.NoError(t, db.SetChainState(
 				"sync_status", syncStatusInProgress, nil,
 			))
 
@@ -702,10 +710,10 @@ func TestSnapshotBackfillReplacesTailConflictingWithAncillary(t *testing.T) {
 		ImmutableFileNumber: fixture.artifact.Beacon.ImmutableFileNumber,
 		CertificateHash:     fixture.artifact.CertificateHash,
 	}))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
 	))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		"sync_status", syncStatusInProgress, nil,
 	))
 
@@ -781,7 +789,7 @@ func TestSnapshotRestoreProgress(t *testing.T) {
 		prev = next
 	}
 	step("phase", func() {
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
 		))
 	})
@@ -793,13 +801,11 @@ func TestSnapshotRestoreProgress(t *testing.T) {
 		}, nil))
 	})
 	step("import checkpoint", func() {
-		require.NoError(t, db.SetSyncState(
+		require.NoError(t, db.SetChainState(
 			syncKeySnapshotImportKey, "abcd:10", nil,
 		))
-		require.NoError(t, db.Metadata().SetImportCheckpoint(
-			&models.ImportCheckpoint{
-				ImportKey: "abcd:10", Phase: models.ImportPhaseUTxO,
-			}, nil,
+		require.NoError(t, db.SetImportCheckpoint(
+			"abcd:10", models.ImportPhaseUTxO,
 		))
 	})
 	assert.Equal(t, prev, progress())
@@ -828,12 +834,12 @@ func TestSnapshotBackfillClearsStrayRestoreKeys(t *testing.T) {
 		o.badAncillarySig = true
 	})
 	db := newSyncModeTestDB(t)
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		syncKeyPinnedArtifact,
 		`{"backend":"v2","network":"preprod","digest":"`+
 			strings.Repeat("ab", 32)+`"}`, nil,
 	))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
 	))
 	state, err := SnapshotStartupState(t.Context(), db)
@@ -844,7 +850,7 @@ func TestSnapshotBackfillClearsStrayRestoreKeys(t *testing.T) {
 	require.Error(t, err)
 	requireEmptyDB(t, db)
 
-	require.NoError(t, db.SetSyncState("sync_status", syncStatusInProgress, nil))
+	require.NoError(t, db.SetChainState("sync_status", syncStatusInProgress, nil))
 	own, err := SnapshotRestoreInterrupted(db)
 	require.NoError(t, err)
 	assert.False(t, own, "a manual sync's interruption read as the node's")
@@ -932,7 +938,7 @@ func interruptDuringLedgerImport(
 	_, err := RunSnapshotBackfill(ctx, cfg)
 	require.ErrorIs(t, err, context.Canceled)
 	require.True(t, interrupted)
-	phase, err := db.GetSyncState(syncKeySnapshotRestoreActive, nil)
+	phase, err := db.GetChainState(syncKeySnapshotRestoreActive, nil)
 	require.NoError(t, err)
 	require.Equal(t, restorePhaseLedger, phase)
 }
@@ -994,7 +1000,7 @@ func TestSnapshotBackfillLedgerResumeOutageIsNotPruning(t *testing.T) {
 			require.Error(t, err)
 			assert.NotErrorIs(t, err, ErrSnapshotRestoreUnrecoverable)
 			assert.ErrorIs(t, err, ErrSnapshotRestoreUnavailable)
-			phase, err := db.GetSyncState(syncKeySnapshotRestoreActive, nil)
+			phase, err := db.GetChainState(syncKeySnapshotRestoreActive, nil)
 			require.NoError(t, err)
 			assert.Equal(t, restorePhaseLedger, phase)
 

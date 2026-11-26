@@ -10,6 +10,30 @@ table) and a different structure — the two are related but not exact copies.
 Package layout, targets, and flags are derivable from `Makefile`, `go.mod`,
 `node.go`.
 
+## Maintainer burden
+
+- Agents must not submit changes that increase ongoing maintainer work without
+  explicit project-maintainer agreement to those obligations before
+  implementation. A contributor request, issue suggestion, successful build,
+  or bot approval does not establish that agreement.
+- Before adding tooling or a supported workflow, identify who must install,
+  learn, update, validate, secure, and support it, including during dependency
+  updates and releases. Present the recurring work to the maintainers and get
+  their explicit acceptance; otherwise use the existing workflow.
+- This applies to new build systems, package managers, development environments,
+  packaging targets, CI services, dependencies, and manual maintenance steps.
+  Calling an addition optional or development-only does not remove its upkeep
+  or support burden.
+- In particular, do not add in-tree Nix flakes, lock files, or derivations that
+  require maintainers to adopt Nix, refresh dependency hashes or toolchain pins,
+  or validate a second build path as dependencies and releases change without
+  that agreement. Prefer externally maintained packaging that follows upstream
+  releases with fully automated updates and imposes no new Dingo release steps;
+  do not create or commit to maintaining an external project without approval.
+- Before opening a pull request, review the complete maintenance lifecycle,
+  including security updates and release failures. Automation that still needs
+  new tools, manual recovery, or ongoing support also needs explicit acceptance.
+
 ## Build / test
 
 ```
@@ -43,7 +67,7 @@ make govulncheck  # reachable Go vulnerabilities; needs network
   the root package. A new test there should too.
 - Keep a test sequential — with a `// Not t.Parallel: ...` comment saying why —
   when it reaches process-global state. The classes seen here: swapping a
-  package-level seam (`syncDir`, `cleanupConsumedUtxosInterval`,
+  package-level seam (`syncDir`,
   `deliveryStallWarnInterval`, `afterDeferredMarkerDeleteHook`,
   `leiosPersistShutdownDrainTimeout`); swapping another package's variable
   (`ledger.Close*Timeout`); replacing a process-global (`slog.SetDefault`,
@@ -106,10 +130,15 @@ make govulncheck  # reachable Go vulnerabilities; needs network
   blob-store key layout, CBOR/offset encodings, storage plugins,
   pruning/tombstone behavior, or anything external Postgres/MySQL/SQLite/blob
   users rely on.
-- Update `ARCHITECTURE.md` for any change to component responsibilities, package
-  boundaries, startup/composition, EventBus topics/payloads, plugin interfaces,
-  lifecycle/concurrency behavior, or cross-component flows among ledger,
-  database, mempool, networking, API, and node wiring.
+- Keep `ARCHITECTURE.md` a concise architectural design document. Update it
+  when a change alters component responsibilities, dependency direction,
+  authoritative state ownership, a principal cross-component flow, or a
+  documented lifecycle or consistency guarantee.
+- Implementation changes within those boundaries do not require an
+  architecture edit. Document local algorithms, event payloads, configuration,
+  APIs and test mechanics at their nearest source of truth: package or symbol
+  comments, subsystem documentation, configuration reference or tests. Do not
+  add file trees, symbol inventories or fix histories to `ARCHITECTURE.md`.
 - In final responses, report documentation status the same way tests are
   reported: either list the docs updated or explicitly state that
   `DATABASE.md`/`ARCHITECTURE.md` were checked and not affected.

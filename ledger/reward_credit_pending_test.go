@@ -288,7 +288,7 @@ func TestFencedPrecomputeChunkDoesNotWrite(t *testing.T) {
 	t.Parallel()
 	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 7, 4, 7)
 	ls.rewardPrecomputeChunkPoolsOverride = 2
-	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	round, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		survivalNewEpoch, survivalCapturedSlot, survivalBoundarySlot,
 	)
 	require.NoError(t, err)
@@ -297,7 +297,7 @@ func TestFencedPrecomputeChunkDoesNotWrite(t *testing.T) {
 	done, err := ls.stakeRewardPrecomputeChunkStep(round)
 	require.NoError(t, err)
 	require.True(t, done, "a fenced chunk must stop")
-	outputs, err := db.Metadata().
+	outputs, err := seedDB(t, db).
 		GetRewardPoolOutputs(survivalSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Empty(t, outputs, "a fenced chunk must not write")
@@ -315,7 +315,7 @@ func TestPendingRewardStakeInputsHoldBackTheRound(t *testing.T) {
 			ls.ledgerDB(), txn, survivalSnapshotEpoch, 100,
 		)
 	}))
-	_, ok, err := ls.resolveStakeRewardPrecomputeRound(
+	_, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 		survivalNewEpoch, survivalCapturedSlot, survivalBoundarySlot,
 	)
 	require.NoError(t, err)
@@ -375,8 +375,7 @@ type pendingRoundReads struct {
 	drepPower      string
 	drepSingle     string
 	// Readers with no reward term, which a pending round cannot move.
-	utxoStake  string
-	controlled string
+	utxoStake string
 }
 
 func renderStakeMaps(stakes, delegators map[string]uint64) string {
@@ -438,14 +437,6 @@ func observePendingRoundReaders(
 	stakes, delegators, err = seedDB(t, f.db).GetStakeByPools(t.Context(), pools, nil)
 	require.NoError(t, err)
 	ret.utxoStake = renderStakeMaps(stakes, delegators)
-	amounts := make([]string, 0, len(credits))
-	for key := range credits {
-		amount, err := f.db.GetControlledAmountByCredential(context.Background(), 0, []byte(key), nil)
-		require.NoError(t, err)
-		amounts = append(amounts, fmt.Sprintf("%x=%d", key, amount))
-	}
-	sort.Strings(amounts)
-	ret.controlled = strings.Join(amounts, "\n")
 	return ret
 }
 
@@ -503,8 +494,6 @@ func TestPendingRewardRoundAggregateReadsCountEachCreditOnce(t *testing.T) {
 			"%s: single DRep voting power", name)
 		require.Equal(t, after.utxoStake, got.utxoStake,
 			"%s: UTxO-only pool stake", name)
-		require.Equal(t, after.controlled, got.controlled,
-			"%s: controlled amount", name)
 	}
 }
 

@@ -205,10 +205,10 @@ bench-storage-scale: ## Run the scale-parameterised storage benchmarks (DINGO_BE
 .PHONY: bench-leios-db-cached
 
 bench-leios-db: ## Run the LeiosDB latency benchmark against the default storage providers
-	go run $(GO_TAG_FLAGS) ./cmd/leios-db-bench $(LEIOS_DB_BENCH_ARGS)
+	DINGO_BENCH_LEIOS_DB=1 go test $(GO_TAG_FLAGS) -run='^$$' -bench='^BenchmarkLeiosDBLatency$$' -benchtime=1x -benchmem -timeout=0 ./database -args $(LEIOS_DB_BENCH_ARGS)
 
 bench-leios-db-cached: ## Run the LeiosDB latency benchmark with shared cached reads
-	go run $(GO_TAG_FLAGS) ./cmd/leios-db-bench -cached-reads $(LEIOS_DB_BENCH_ARGS)
+	DINGO_BENCH_LEIOS_DB=1 go test $(GO_TAG_FLAGS) -run='^$$' -bench='^BenchmarkLeiosDBLatency$$' -benchtime=1x -benchmem -timeout=0 ./database -args -leiosdb.cached-reads $(LEIOS_DB_BENCH_ARGS)
 
 bench-gate: ## Run the pull-request gate benchmark set on this checkout (BENCH_GATE_OUT, BENCH_GATE_ROUNDS)
 	bash .github/scripts/bench-gate.sh --record . $(BENCH_GATE_OUT) $(BENCH_GATE_ROUNDS)
@@ -245,6 +245,12 @@ test-load-profile: dingo ## Build Dingo, then load test data with CPU/memory pro
 test-devnet: ## Run the default all-Dingo DevNet integration tests
 	./internal/test/devnet/run-tests.sh
 
+# Every binary shares dingo's dependency tree, but Go's default -pgo=auto only
+# applies a profile to the main package that owns default.pgo. Passing it
+# explicitly keeps the tools on the same PGO-built packages instead of
+# recompiling them. Empty when the file is absent, so such a tree still builds.
+GO_PGO_FLAGS=$(addprefix -pgo=,$(wildcard $(ROOT_DIR)/cmd/dingo/default.pgo))
+
 # Build our program binaries
 # Depends on GO_FILES to determine when rebuild is needed
 # This order-only prerequisite keeps mod-tidy ahead of direct binary builds
@@ -256,5 +262,6 @@ $(BINARIES): $(GO_FILES) go.mod go.sum $(wildcard $(ROOT_DIR)/cmd/*/default.pgo)
 	go build \
 		$(GO_TAG_FLAGS) \
 		$(GO_LDFLAGS) \
+		$(GO_PGO_FLAGS) \
 		-o $(@)$(if $(filter windows,$(GOOS)),.exe,)  \
 		./cmd/$(@)

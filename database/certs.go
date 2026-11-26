@@ -31,6 +31,9 @@ func (d *Database) DeleteCertificatesAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if err := d.requireStore("DeleteCertificatesAfterSlot"); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.certificateStore().DeleteCertificatesAfterSlot(
 			slot,
@@ -51,7 +54,12 @@ func (d *Database) DeleteCertificatesAfterSlot(
 // retention window. known false means no live value is available. This is
 // an in-memory cache update, not a durable write, so it takes no
 // transaction. See metadata.CertificateStore.SetCommitteeAuthImmutableSlot.
+// A database without a metadata store, as the ledger's is, keeps no
+// authorization rows to prune and ignores it.
 func (d *Database) SetCommitteeAuthImmutableSlot(slot uint64, known bool) {
+	if d.metadata == nil {
+		return
+	}
 	d.certificateStore().SetCommitteeAuthImmutableSlot(slot, known)
 }
 
@@ -60,12 +68,15 @@ func (d *Database) GetPoolRegistrations(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn *Txn,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
-	if d.poolsDrained() {
+	if d.poolsFromSource() {
 		src, err := d.poolSourceOrErr()
 		if err != nil {
 			return nil, err
 		}
 		return src.PoolRegistrations(poolKeyHash)
+	}
+	if err := d.requireStore("GetPoolRegistrations"); err != nil {
+		return nil, err
 	}
 	if txn == nil {
 		return d.metadata.GetPoolRegistrations(poolKeyHash, nil)
@@ -80,8 +91,8 @@ func (d *Database) GetStakeRegistrationsByCredential(
 	stakingKey []byte,
 	txn *Txn,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
-	if d.FamilyDrained(nodesettings.FamilyAccounts) {
-		err := drainedWrite(nodesettings.FamilyAccounts)
+	if d.metadata == nil {
+		err := errNoMetadataStore(nodesettings.FamilyAccounts)
 		return nil, err
 	}
 	var metaTxn types.Txn

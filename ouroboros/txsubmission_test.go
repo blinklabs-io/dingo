@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -246,6 +247,69 @@ func (v txsubmissionSelectiveRejectingValidator) ValidateTxWithOverlay(
 	_ *utxoref.StateOverlay,
 ) error {
 	return v.ValidateTx(tx)
+}
+
+type txsubmissionAlreadyAppliedValidator struct {
+	txsubmissionSelectiveRejectingValidator
+}
+
+func (v txsubmissionAlreadyAppliedValidator) WithResolvingTxValidationSession(
+	_ context.Context,
+	fn func(
+		func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		func() bool,
+		func(func() error) (bool, error),
+		func([]models.UtxoId) ([]models.Utxo, error),
+		func([]byte) (bool, error),
+	) error,
+) error {
+	return fn(
+		v.ValidateTxWithOverlay,
+		func() bool { return true },
+		func(commit func() error) (bool, error) { return true, commit() },
+		nil,
+		func(hash []byte) (bool, error) {
+			return hex.EncodeToString(hash) == v.rejectedHash, nil
+		},
+	)
+}
+
+// txsubmissionAppliedElsewhereValidator rejects rejectedHash but reports only
+// appliedHash as applied, so the rejected transaction is not applied.
+type txsubmissionAppliedElsewhereValidator struct {
+	txsubmissionSelectiveRejectingValidator
+	appliedHash string
+}
+
+func (v txsubmissionAppliedElsewhereValidator) WithResolvingTxValidationSession(
+	_ context.Context,
+	fn func(
+		func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		func() bool,
+		func(func() error) (bool, error),
+		func([]models.UtxoId) ([]models.Utxo, error),
+		func([]byte) (bool, error),
+	) error,
+) error {
+	return fn(
+		v.ValidateTxWithOverlay,
+		func() bool { return true },
+		func(commit func() error) (bool, error) { return true, commit() },
+		nil,
+		func(hash []byte) (bool, error) {
+			return hex.EncodeToString(hash) == v.appliedHash, nil
+		},
+	)
 }
 
 type txsubmissionCorruptingConsumer struct {
@@ -1880,6 +1944,123 @@ func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 		10*time.Millisecond,
 		"expected a valid transaction after a rejection to be processed on the same connection",
 	)
+}
+
+func TestTxSubmissionServerInitClassifiesAlreadyAppliedTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixtures := txsubmissionTestFixtures(t)
+	applied := fixtures[0]
+	accepted := fixtures[1]
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger: logger,
+		validatorA: txsubmissionAlreadyAppliedValidator{
+			txsubmissionSelectiveRejectingValidator: txsubmissionSelectiveRejectingValidator{
+				rejectedHash: applied.hash,
+			},
+		},
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, applied)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return strings.Contains(
+				logBuf.String(),
+				"ignored peer transaction already applied to ledger",
+			)
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the applied transaction to be classified separately",
+	)
+	require.Contains(t, logBuf.String(), applied.hash)
+	require.NotContains(
+		t,
+		logBuf.String(),
+		"failed to add tx "+applied.hash,
+	)
+	_, present := h.mA.GetTransaction(applied.hash)
+	require.False(t, present)
+
+	addTxSubmissionTestFixtures(t, h.mB, accepted)
+	require.Eventually(
+		t,
+		func() bool {
+			_, ok := h.mA.GetTransaction(accepted.hash)
+			return ok
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected intake to continue after an already-applied transaction",
+	)
+}
+
+// TestTxSubmissionServerInitKeepsNotAppliedRejectionAsAdmissionError verifies
+// a rejection whose hash the ledger does not report as applied is still logged
+// as a failed admission, even when another hash is applied.
+func TestTxSubmissionServerInitKeepsNotAppliedRejectionAsAdmissionError(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixtures := txsubmissionTestFixtures(t)
+	rejected := fixtures[0]
+	other := fixtures[1]
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger: logger,
+		validatorA: txsubmissionAppliedElsewhereValidator{
+			txsubmissionSelectiveRejectingValidator: txsubmissionSelectiveRejectingValidator{
+				rejectedHash: rejected.hash,
+			},
+			appliedHash: other.hash,
+		},
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, rejected)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return strings.Contains(
+				logBuf.String(),
+				"failed to add tx "+rejected.hash,
+			)
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the not-applied rejection to stay an admission error",
+	)
+	require.NotContains(
+		t,
+		logBuf.String(),
+		"ignored peer transaction already applied to ledger",
+	)
+	_, present := h.mA.GetTransaction(rejected.hash)
+	require.False(t, present)
 }
 
 // TestTxSubmissionServerInitRejectsMalformedReply verifies a reply body that

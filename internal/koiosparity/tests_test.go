@@ -2781,10 +2781,7 @@ func TestDatabaseSourcePropagatesApplyingEpochLookupError(t *testing.T) {
 		DelegatedStake: types.Uint64(1000),
 		DelegatorCount: 1,
 	}).Error)
-	require.NoError(t, sqlDB.Exec(
-		`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
-		[]byte{0x01}, 100, 1,
-	).Error)
+	setSourceTip(t, db, []byte{0x01}, 100)
 	require.NoError(t, sqlDB.Exec(`DROP TABLE epoch`).Error)
 
 	source, err := NewDatabaseSource(db)
@@ -2829,10 +2826,7 @@ func TestMissingApplyingEpochIsThePendingCase(t *testing.T) {
 			DelegatedStake: types.Uint64(1000),
 			DelegatorCount: 1,
 		}).Error)
-		require.NoError(t, sqlDB.Exec(
-			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
-			[]byte{0x01}, 100, 1,
-		).Error)
+		setSourceTip(t, db, []byte{0x01}, 100)
 
 		source, err := NewDatabaseSource(db)
 		require.NoError(t, err)
@@ -2875,10 +2869,7 @@ func TestPositiveSlotWithoutTipHashIsNotPending(t *testing.T) {
 		require.NoError(t, sqlDB.Create(&models.RewardPoolInput{
 			PoolKeyHash: pool, Epoch: 9, DelegatedStake: types.Uint64(1000), DelegatorCount: 1,
 		}).Error)
-		require.NoError(t, sqlDB.Exec(
-			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
-			[]byte{}, 100, 1,
-		).Error)
+		setSourceTip(t, db, []byte{}, 100)
 
 		source, err := NewDatabaseSource(db)
 		require.NoError(t, err)
@@ -2918,10 +2909,7 @@ func TestZeroSlotWithTipHashIsNotPending(t *testing.T) {
 		require.NoError(t, sqlDB.Create(&models.RewardPoolInput{
 			PoolKeyHash: pool, Epoch: 9, DelegatedStake: types.Uint64(1000), DelegatorCount: 1,
 		}).Error)
-		require.NoError(t, sqlDB.Exec(
-			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
-			[]byte{0x01}, 0, 1,
-		).Error)
+		setSourceTip(t, db, []byte{0x01}, 0)
 		source, err := NewDatabaseSource(db)
 		require.NoError(t, err)
 		m, err := source.GetPoolEpochDataMap(context.Background(), 9, 10)

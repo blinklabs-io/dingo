@@ -34,7 +34,7 @@ func (ls *LedgerState) accountFactRows(
 	r := ls.accountReader(nil)
 	lister, ok := r.(accountLister)
 	if r == nil || !ok {
-		return metadata.FactRows{}, drainedUnserved(nodesettings.FamilyAccounts)
+		return metadata.FactRows{}, ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	var accounts []models.Account
 	err := lister.Accounts(func(a *models.Account) error {
@@ -80,7 +80,7 @@ func (ls *LedgerState) drepFactRows(
 ) (metadata.FactRows, error) {
 	r := ls.drepReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(nodesettings.FamilyDReps)
+		return metadata.FactRows{}, ledgerStateUnserved(nodesettings.FamilyDReps)
 	}
 	var dreps []models.Drep
 	err := r.Dreps(func(d *models.Drep) error {
@@ -134,7 +134,7 @@ func (ls *LedgerState) governanceProposals(
 ) ([]models.GovernanceProposal, error) {
 	r := ls.governanceReader(nil)
 	if r == nil {
-		return nil, drainedUnserved(nodesettings.FamilyGovernance)
+		return nil, ledgerStateUnserved(nodesettings.FamilyGovernance)
 	}
 	all, err := r.ProposalsAt(nil)
 	if err != nil {
@@ -225,7 +225,7 @@ func (ls *LedgerState) poolStakeSnapshotFactRows(
 ) (metadata.FactRows, error) {
 	r, _ := ls.epochStateReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(nodesettings.FamilyEpochs)
+		return metadata.FactRows{}, ledgerStateUnserved(nodesettings.FamilyEpochs)
 	}
 	view, err := ls.epochStateView(r, nil)
 	if err != nil {

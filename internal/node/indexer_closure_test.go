@@ -23,7 +23,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/leiosclosurefixture"
 	dledger "github.com/blinklabs-io/dingo/ledger"
@@ -33,13 +32,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newClosureTestDB(t *testing.T) (*database.Database, *sql.DB) {
+// newClosureLedgerDB returns a ledger database, which holds the chain and
+// the Leios endorser blocks a closure is read from.
+func newClosureLedgerDB(t *testing.T) *database.Database {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		StorageMode: types.StorageModeAPI,
-		DataDir:     t.TempDir(),
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+	require.NoError(t, err)
+	return db
+}
+
+// newClosureIndexerDB returns an IndexerDB over core and its SQLite tables.
+func newClosureIndexerDB(
+	t *testing.T,
+	core *database.Database,
+) (*database.Database, *sql.DB) {
+	t.Helper()
+	db, err := dbtest.NewIndexerDatabase(t, core, dbtest.IndexerOptions{})
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -55,9 +66,9 @@ func closureTestBackfill(
 	boundary bool,
 ) (*Backfill, *database.Database, *sql.DB) {
 	t.Helper()
-	core, _ := newClosureTestDB(t)
+	core := newClosureLedgerDB(t)
 	scenario.StoreChain(t, core)
-	idx, raw := newClosureTestDB(t)
+	idx, raw := newClosureIndexerDB(t, core)
 	scenario.Seed(t, idx)
 	if boundary {
 		require.NoError(t, idx.SetEpoch(
@@ -185,7 +196,7 @@ func TestIndexBlocksFailsWhenClosureIsUnavailable(t *testing.T) {
 	scenario, err := leiosclosurefixture.New()
 	require.NoError(t, err)
 	bf, idx, _ := closureTestBackfill(t, scenario, false)
-	empty, _ := newClosureTestDB(t)
+	empty := newClosureLedgerDB(t)
 	require.NoError(
 		t,
 		empty.BlockCreate(leiosclosurefixture.Model(scenario.Announcing), nil),
@@ -238,4 +249,67 @@ func TestRollbackRemovesCertifiedClosure(t *testing.T) {
 			)
 		})
 	}
+}
+
+// An endorser block the ledger keeps as a standalone closure blob is served
+// from that blob, so the indexed offsets must use its layout.
+func TestIndexBlocksOffsetsFollowStandaloneClosureBacking(t *testing.T) {
+	t.Parallel()
+	scenario, err := leiosclosurefixture.New()
+	require.NoError(t, err)
+	bf, idx, _ := closureTestBackfill(t, scenario, false)
+	ctx := context.Background()
+	core := newClosureLedgerDB(t)
+	scenario.StoreChain(t, core)
+	closure, err := dledger.LoadCertifiedClosure(
+		ctx, dledger.NewDatabaseClosureSource(core), scenario.Certifying,
+	)
+	require.NoError(t, err)
+	txs, err := closure.Decode()
+	require.NoError(t, err)
+	bodies, err := closure.BodyCbors()
+	require.NoError(t, err)
+	standalone, err := dledger.EndorserBlockOffsets(
+		txs, bodies, closure.EndorserBlockSlot, closure.EndorserBlockHash,
+	)
+	require.NoError(t, err)
+	listed, err := dledger.EndorserBlockTransactionOffsets(
+		txs, bodies, closure.RawTransactions(), closure.EndorserBlockSlot,
+		closure.EndorserBlockHash,
+	)
+	require.NoError(t, err)
+	var end uint32
+	for _, off := range standalone.TxOffsets {
+		end = max(end, off.ByteOffset+off.ByteLength)
+	}
+	for _, off := range standalone.UtxoOffsets {
+		end = max(end, off.ByteOffset+off.ByteLength)
+	}
+	require.NoError(t, core.PutLeiosClosure(
+		closure.EndorserBlockSlot,
+		closure.EndorserBlockHash.Bytes(),
+		make([]byte, end),
+	))
+	bf.SetClosureSource(dledger.NewDatabaseClosureSource(core))
+	require.NoError(t, idx.Transaction(ctx, true).Do(
+		func(txn *database.Txn) error {
+			return bf.IndexBlocks(ctx, txn, []models.Block{
+				leiosclosurefixture.Model(scenario.Announcing),
+				leiosclosurefixture.Model(scenario.Certifying),
+			})
+		}))
+	require.NoError(t, idx.BlobTxn(false).Do(func(txn *database.Txn) error {
+		for _, tx := range scenario.Txs {
+			var hash [32]byte
+			copy(hash[:], tx.Hash().Bytes())
+			data, err := idx.Blob().GetTx(txn.Blob(), hash[:])
+			require.NoError(t, err)
+			offset, err := database.DecodeTxOffset(data)
+			require.NoError(t, err)
+			require.Equal(t, standalone.TxOffsets[hash].ByteOffset, offset.ByteOffset)
+			require.Equal(t, standalone.TxOffsets[hash].ByteLength, offset.ByteLength)
+			require.NotEqual(t, listed.TxOffsets[hash].ByteOffset, offset.ByteOffset)
+		}
+		return nil
+	}))
 }

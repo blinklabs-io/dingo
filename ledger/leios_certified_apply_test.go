@@ -278,7 +278,7 @@ func (f *leiosCertApplyFixture) requireEndorserEffects(want bool) {
 	txHash := f.ebTx.Hash().Bytes()
 	_, live, err := f.ls.config.UtxoSet.(UtxoSetReader).Get(txHash, 0)
 	require.NoError(t, err)
-	txs, err := f.db.GetTransactionsByHashes(
+	txs, err := f.ls.ledgerDB().GetTransactionsByHashes(
 		context.Background(),
 		[][]byte{txHash},
 		nil,
@@ -927,7 +927,7 @@ func TestLeiosRollbackSkipsUndoForEndorserTransactionRecordedElsewhere(
 		[]gledger.Block{certifier},
 	))
 	require.NoError(t, f.process(certifier, offsets, envParent))
-	recorded, err := f.db.GetTransactionsByHashes(
+	recorded, err := f.ls.ledgerDB().GetTransactionsByHashes(
 		t.Context(),
 		[][]byte{f.ebTx.Hash().Bytes()},
 		nil,

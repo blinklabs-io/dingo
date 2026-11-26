@@ -109,7 +109,7 @@ func SnapshotStartupState(
 	ctx context.Context,
 	db *database.Database,
 ) (SnapshotStartup, error) {
-	status, err := db.GetSyncState("sync_status", nil)
+	status, err := db.GetChainState("sync_status", nil)
 	if err != nil {
 		return 0, fmt.Errorf("reading sync_status: %w", err)
 	}
@@ -143,14 +143,14 @@ func SnapshotStartupState(
 // SnapshotRestoreInterrupted reports whether db holds a snapshot restore the
 // node itself started and did not finish.
 func SnapshotRestoreInterrupted(db *database.Database) (bool, error) {
-	status, err := db.GetSyncState("sync_status", nil)
+	status, err := db.GetChainState("sync_status", nil)
 	if err != nil {
 		return false, fmt.Errorf("reading sync_status: %w", err)
 	}
 	if status != syncStatusInProgress {
 		return false, nil
 	}
-	active, err := db.GetSyncState(syncKeySnapshotRestoreActive, nil)
+	active, err := db.GetChainState(syncKeySnapshotRestoreActive, nil)
 	if err != nil {
 		return false, fmt.Errorf("reading mithril snapshot restore flag: %w", err)
 	}
@@ -285,7 +285,7 @@ func RunSnapshotBackfill(
 	resume := state == SnapshotStartupResume
 	phase := ""
 	if resume {
-		phase, err = db.GetSyncState(syncKeySnapshotRestoreActive, nil)
+		phase, err = db.GetChainState(syncKeySnapshotRestoreActive, nil)
 		if err != nil {
 			return ocommon.Point{}, fmt.Errorf(
 				"reading mithril snapshot restore phase: %w", err,
@@ -496,7 +496,7 @@ func RunSnapshotBackfill(
 	// node's own, and that a sync is in progress, so no interruption leaves
 	// one without the others.
 	if !resume || repinned {
-		if err := db.MetadataTxn(ctx, true).Do(func(txn *database.Txn) error {
+		if err := db.BlobTxn(true).Do(func(txn *database.Txn) error {
 			if err := setPinnedArtifactTxn(db, pinnedArtifact{
 				Backend:             BackendV2,
 				Network:             artifact.Network,
@@ -509,14 +509,14 @@ func RunSnapshotBackfill(
 			}, txn); err != nil {
 				return err
 			}
-			if err := db.SetSyncState(
+			if err := db.SetChainState(
 				syncKeySnapshotRestoreActive, nextPhase, txn,
 			); err != nil {
 				return fmt.Errorf(
 					"marking mithril snapshot restore active: %w", err,
 				)
 			}
-			if err := db.SetSyncState(
+			if err := db.SetChainState(
 				"sync_status", syncStatusInProgress, txn,
 			); err != nil {
 				return fmt.Errorf("marking sync in-progress: %w", err)
@@ -526,6 +526,11 @@ func RunSnapshotBackfill(
 			}
 			return nil
 		}); err != nil {
+			return ocommon.Point{}, err
+		}
+		// The marks go to disk before the restore changes anything they
+		// would have to explain.
+		if err := db.SyncChainState(); err != nil {
 			return ocommon.Point{}, err
 		}
 	}
@@ -562,13 +567,6 @@ func RunSnapshotBackfill(
 			return ocommon.Point{}, err
 		}
 	}
-	cleanupBulkLoadPragmas := node.WithBulkLoadPragmas(db, logger)
-	defer func() {
-		if err := cleanupBulkLoadPragmas(); err != nil {
-			logger.Error("failed to restore normal settings", "error", err)
-		}
-	}()
-	deferredIndexes := node.WithDeferredIndexes(ctx, db, logger)
 
 	loaded, tipOnChain, err := loadSnapshotBlocks(
 		ctx, cfg, bcfg, probes, start, found, target,
@@ -600,14 +598,14 @@ func RunSnapshotBackfill(
 	}
 
 	if nextPhase == restorePhaseBlocks {
-		if err := db.MetadataTxn(ctx, true).Do(func(txn *database.Txn) error {
-			if err := db.SetSyncState(
+		if err := db.BlobTxn(true).Do(func(txn *database.Txn) error {
+			if err := db.SetChainState(
 				syncKeySnapshotImportKey,
 				ledgerImportKey(artifact.Hash, ledgerPoint.Slot), txn,
 			); err != nil {
 				return err
 			}
-			return db.SetSyncState(
+			return db.SetChainState(
 				syncKeySnapshotRestoreActive, restorePhaseLedger, txn,
 			)
 		}); err != nil {
@@ -652,13 +650,12 @@ func RunSnapshotBackfill(
 	); err != nil {
 		return ocommon.Point{}, err
 	}
-	if _, err := finishMithrilImport(
-		ctx, db, logger, cfg.emit, deferredIndexes, cleanupBulkLoadPragmas,
-		&node.LoadBlobsResult{
+	if err := updateMithrilReadyState(
+		db, logger, &node.LoadBlobsResult{
 			BlocksCopied:     loaded,
 			ImmutableTipSlot: immutableTip.Slot,
 		},
-		ledgerPoint.Slot, ledgerPoint.Hash, true,
+		ledgerPoint.Slot, ledgerPoint.Hash,
 	); err != nil {
 		return ocommon.Point{}, err
 	}
@@ -712,7 +709,7 @@ func discardStoredBlocks(
 			"blocks", deleted,
 		)
 	}
-	if err := db.SetSyncState(
+	if err := db.SetChainState(
 		syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
 	); err != nil {
 		return fmt.Errorf("marking mithril snapshot restore active: %w", err)
@@ -759,7 +756,7 @@ func discardStoredVolatileTail(
 		"blocks", deleted,
 		"immutable_floor_index", floor,
 	)
-	if err := db.SetSyncState(
+	if err := db.SetChainState(
 		syncKeySnapshotRestoreActive, restorePhaseBlocks, nil,
 	); err != nil {
 		return fmt.Errorf("marking mithril snapshot restore active: %w", err)
@@ -775,7 +772,7 @@ func SnapshotRestoreProgress(
 	ctx context.Context,
 	db *database.Database,
 ) (string, error) {
-	phase, err := db.GetSyncState(syncKeySnapshotRestoreActive, nil)
+	phase, err := db.GetChainState(syncKeySnapshotRestoreActive, nil)
 	if err != nil {
 		return "", fmt.Errorf("reading mithril snapshot restore phase: %w", err)
 	}
@@ -788,17 +785,17 @@ func SnapshotRestoreProgress(
 		tipText = fmt.Sprintf("%d.%x", tip.Slot, tip.Hash)
 	}
 	checkpoint := "none"
-	key, err := db.GetSyncState(syncKeySnapshotImportKey, nil)
+	key, err := db.GetChainState(syncKeySnapshotImportKey, nil)
 	if err != nil {
 		return "", fmt.Errorf("reading mithril snapshot import key: %w", err)
 	}
 	if key != "" {
-		cp, err := db.Metadata().GetImportCheckpoint(key, nil)
+		phase, err := db.ImportCheckpoint(key)
 		if err != nil {
 			return "", fmt.Errorf("reading import checkpoint: %w", err)
 		}
-		if cp != nil {
-			checkpoint = cp.Phase
+		if phase != "" {
+			checkpoint = phase
 		}
 	}
 	return phase + "|" + tipText + "|" + checkpoint, nil
@@ -813,7 +810,7 @@ func clearStrayRestoreKeys(db *database.Database) error {
 		syncKeySnapshotRestoreActive, syncKeyPinnedArtifact,
 		syncKeySnapshotImportKey,
 	} {
-		if err := db.DeleteSyncState(key, nil); err != nil {
+		if err := db.DeleteChainState(key, nil); err != nil {
 			return fmt.Errorf("clearing stray %s: %w", key, err)
 		}
 	}

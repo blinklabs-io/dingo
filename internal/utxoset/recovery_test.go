@@ -72,6 +72,19 @@ func ledgerAt(t *testing.T, tip ocommon.Point) *database.Database {
 	return db
 }
 
+// releasedAt is ledgerAt for a v0.94.2 database, whose metadata store holds
+// the ledger state a test seeds for the set to load.
+func releasedAt(t *testing.T, tip ocommon.Point) *database.Database {
+	t.Helper()
+	db, err := dbtest.NewReleasedDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
+	require.NoError(t, db.SetTip(ochainsync.Tip{Point: tip}, nil))
+	return db
+}
+
 func neverResume(context.Context, ocommon.Point) (bool, error) {
 	return false, nil
 }
@@ -86,7 +99,6 @@ func TestReconcileRollsASetAheadOfTheLedgerBack(t *testing.T) {
 	const applied = 8
 	for _, tc := range []struct {
 		name      string
-		cfg       utxoset.Config
 		ledgerTip ocommon.Point
 		prune     uint64
 		wantSlot  uint64
@@ -94,20 +106,17 @@ func TestReconcileRollsASetAheadOfTheLedgerBack(t *testing.T) {
 		wantErr   string
 	}{
 		{
-			name:      "only, journal point",
-			cfg:       utxoset.Config{Only: true},
+			name:      "journal point",
 			ledgerTip: slotPoint(5),
 			wantSlot:  5, wantCount: 5,
 		},
 		{
-			name:      "set reads, journal point",
-			cfg:       utxoset.Config{Authoritative: true},
+			name:      "earlier journal point",
 			ledgerTip: slotPoint(3),
 			wantSlot:  3, wantCount: 3,
 		},
 		{
-			name: "only, tip on another fork",
-			cfg:  utxoset.Config{Only: true},
+			name: "tip on another fork",
 			ledgerTip: ocommon.NewPoint(
 				5, bytes.Repeat([]byte{0xee}, 32),
 			),
@@ -115,23 +124,17 @@ func TestReconcileRollsASetAheadOfTheLedgerBack(t *testing.T) {
 			wantErr: "ahead of",
 		},
 		{
-			name:      "only, below the journal",
-			cfg:       utxoset.Config{Only: true},
+			name:      "below the journal",
 			ledgerTip: slotPoint(2),
 			prune:     6,
 			wantSlot:  applied, wantCount: applied,
 			wantErr: "rollback journal reaches back only to slot 5",
 		},
-		{
-			name:      "not authoritative, rebuilt from the store",
-			cfg:       utxoset.Config{},
-			ledgerTip: slotPoint(5),
-			wantSlot:  5, wantCount: 0,
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			set := openRecoverySet(t, tc.cfg)
+			set := openRecoverySet(t, utxoset.Config{})
+			require.NoError(t, set.StartEmptyForTest())
 			applySlots(t, set, applied)
 			if tc.prune != 0 {
 				require.NoError(t, set.PruneHistory(tc.prune))
@@ -172,7 +175,8 @@ func TestReconcileRewindsASetThatFailedAnUpdate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			set := openRecoverySet(t, utxoset.Config{Only: true})
+			set := openRecoverySet(t, utxoset.Config{})
+			require.NoError(t, set.StartEmptyForTest())
 			applySlots(t, set, applied)
 			require.NoError(t, set.MarkUtxoSetFailed(tc.markSlot))
 			db := ledgerAt(t, slotPoint(applied))
@@ -204,7 +208,7 @@ func TestReconcileRewindsASetThatFailedAnUpdate(t *testing.T) {
 // with an error naming the missing state, and keeps the mark.
 func TestReconcileRefusesAFailedSetItCannotRewind(t *testing.T) {
 	t.Parallel()
-	set := openRecoverySet(t, utxoset.Config{Only: true})
+	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 6)
 	require.NoError(t, set.PruneHistory(5))
 	require.NoError(t, set.MarkUtxoSetFailed(2))

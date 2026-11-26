@@ -562,6 +562,11 @@ type TransactionMetadataLabel struct {
 	JsonValue     sql.NullString
 }
 
+type TransactionOffset struct {
+	Hash []byte
+	Data []byte
+}
+
 type Utxo struct {
 	ID                      int64
 	TxID                    int64
@@ -585,4 +590,10 @@ type UtxoAddress struct {
 	OutputIdx  sql.NullInt64
 	Slot       sql.NullInt64
 	BlockIndex sql.NullInt64
+}
+
+type UtxoOffset struct {
+	TxID      []byte
+	OutputIdx int64
+	Data      []byte
 }

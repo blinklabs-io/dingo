@@ -19,19 +19,19 @@ import (
 	"strconv"
 )
 
-// RollbackHighWaterSyncKey is the sync_state key holding the highest block
+// RollbackHighWaterKey is the chain state name holding the highest block
 // index the persistent chain held before its most recent rollback. The chain
 // measures every peer rollback against it, so successive shallow rollbacks
 // cannot add up to more than the security parameter. Only the chain raises it
 // during normal operation; an operator truncate lowers it with
 // LowerRollbackHighWater because blocks above the target no longer exist to
 // be rolled back.
-const RollbackHighWaterSyncKey = "chain_rollback_high_water"
+const RollbackHighWaterKey = "chain_rollback_high_water"
 
 // LowerRollbackHighWater caps the rollback high-water mark at blockIndex. A
 // mark at or below blockIndex, or an absent one, is left unchanged.
 func (d *Database) LowerRollbackHighWater(blockIndex uint64, txn *Txn) error {
-	raw, err := d.GetSyncState(RollbackHighWaterSyncKey, txn)
+	raw, err := d.GetChainState(RollbackHighWaterKey, txn)
 	if err != nil {
 		return fmt.Errorf("read rollback high-water mark: %w", err)
 	}
@@ -42,8 +42,8 @@ func (d *Database) LowerRollbackHighWater(blockIndex uint64, txn *Txn) error {
 	if err == nil && mark <= blockIndex {
 		return nil
 	}
-	if err := d.SetSyncState(
-		RollbackHighWaterSyncKey,
+	if err := d.SetChainState(
+		RollbackHighWaterKey,
 		strconv.FormatUint(blockIndex, 10),
 		txn,
 	); err != nil {

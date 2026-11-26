@@ -109,10 +109,7 @@ func (s *Service) SetLiveNode(n LiveNode) {
 	s.liveNode = n
 }
 
-// openDatabase opens the configured database. Unlike the `load`/`mithril`
-// bootstrap paths, it does not tolerate a commit-timestamp mismatch —
-// lifecycle operations should fail loudly on a database that looks
-// inconsistent rather than operate on it.
+// openDatabase opens the configured database.
 func (s *Service) openDatabase(
 	ctx context.Context,
 ) (*internalplugins.DatabaseRuntime, error) {
@@ -128,13 +125,6 @@ func (s *Service) openDatabase(
 			_ = runtime.Close(ctx)
 		}
 		return nil, fmt.Errorf("open database: %w", err)
-	}
-	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		_ = runtime.Close(ctx)
-		return nil, fmt.Errorf(
-			"database is in a recoverable but inconsistent state: %w",
-			recoveryErr,
-		)
 	}
 	return runtime, nil
 }
@@ -155,8 +145,8 @@ func (s *Service) Snapshot(
 	if s.liveNode != nil {
 		return s.liveNode.Snapshot(ctx, destDir, name, description)
 	}
-	if s.cfg.SplitIndexer() {
-		if err := s.checkSplitSupported(); err != nil {
+	if s.cfg.HasIndexerDB() {
+		if err := s.checkIndexerSupported(); err != nil {
 			return lifecycle.Manifest{}, err
 		}
 	}
@@ -185,7 +175,7 @@ func (s *Service) Snapshot(
 		stagedIndexer string
 		indexerMeta   IndexerPayload
 	)
-	if s.cfg.SplitIndexer() {
+	if s.cfg.HasIndexerDB() {
 		// The IndexerDB first, so its tip is never past the ledger's.
 		var cleanup func()
 		stagedIndexer, indexerMeta, cleanup, err = s.captureIndexer(
@@ -317,7 +307,7 @@ func (s *Service) RestoreStorageConfig() lifecycle.RestoreStorageConfig {
 			nil, s.cfg.CardanoConfig, s.cfg.Network,
 		),
 	}
-	if s.cfg.SplitIndexer() {
+	if s.cfg.HasIndexerDB() {
 		switch s.cfg.Plugins.Storage.Metadata.Provider {
 		case "sqlite":
 			restoreStorage.AdoptLegacyAPI = func(ctx context.Context, stagingDir string) error {
@@ -352,11 +342,11 @@ func (s *Service) RestoreStorageConfig() lifecycle.RestoreStorageConfig {
 // dingo.
 func intendedGateValues(cfg *config.Config) nodesettings.Values {
 	values := make(nodesettings.Values, 7)
-	if cfg.SplitIndexer() {
-		values["indexer_layout"] = config.IndexerLayoutSplit
+	if cfg.HasIndexerDB() {
+		values["indexer_layout"] = config.IndexerLayoutIndexerDB
 	}
 	// A zero NetworkMagic means "not known yet" (the same convention
-	// database/commit_timestamp.go's phase1GateValues and
+	// database/node_settings.go's phase1GateValues and
 	// internal/settingsresolve use), not a meaningful configured value of
 	// zero, so it is omitted rather than compared.
 	if cfg.NetworkMagic != 0 {
@@ -366,7 +356,7 @@ func intendedGateValues(cfg *config.Config) nodesettings.Values {
 	}
 	// cfg is always a fully-resolved *config.Config, never one of
 	// database.Config's partial callers (see phase1GateValues's guard in
-	// database/commit_timestamp.go), so an empty StartEra is unambiguously
+	// database/node_settings.go), so an empty StartEra is unambiguously
 	// "no start era" rather than "unknown" -- record the same
 	// nodesettings.NoStartEra sentinel that writer and internal/
 	// settingsresolve use, rather than omitting the key, so a restore
@@ -421,7 +411,7 @@ func (s *Service) Truncate(
 		return s.liveNode.Truncate(ctx, target)
 	}
 
-	if s.cfg.SplitIndexer() && s.rollbackFactory == nil {
+	if s.cfg.HasIndexerDB() && s.rollbackFactory == nil {
 		return 0, errors.New(
 			"truncate of an API node's database needs the IndexerDB rolled " +
 				"back first and this build wires no indexer writer",
@@ -446,8 +436,6 @@ func (s *Service) Truncate(
 			db.Database,
 			models.Block{},
 			0,
-			s.cfg.DelegatorInactivityEnabled,
-			s.cfg.DelegatorInactivity,
 			setOpts...,
 		)
 	}
@@ -460,7 +448,7 @@ func (s *Service) Truncate(
 	// finds exact ancestors by parent links. A stop between the two steps
 	// leaves the IndexerDB at or below the ledger tip, which the writer
 	// heals.
-	if s.cfg.SplitIndexer() {
+	if s.cfg.HasIndexerDB() {
 		if err := s.rollbackIndexer(ctx, db.Database, block, setOpts...); err != nil {
 			return 0, err
 		}
@@ -470,8 +458,6 @@ func (s *Service) Truncate(
 		db.Database,
 		block,
 		0,
-		s.cfg.DelegatorInactivityEnabled,
-		s.cfg.DelegatorInactivity,
 		setOpts...,
 	)
 }

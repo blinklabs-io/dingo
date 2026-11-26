@@ -23,7 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -111,12 +110,12 @@ func allBaselines(t *testing.T, set *utxoset.Set) []ledger.ImportBaseline {
 
 // A set that first loads the import baselines takes the delegations the
 // import recorded along with the registration, so an imported account's
-// delegation at the anchor survives the metadata store drain.
+// delegation at the anchor survives the migration.
 func TestSetLoadsTheDelegationsOfItsImportBaselines(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
+	db := releasedAt(t, slotPoint(8))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	pool, drep := bytes.Repeat([]byte{0xaa}, 28), bytes.Repeat([]byte{0xbb}, 28)
@@ -126,9 +125,6 @@ func TestSetLoadsTheDelegationsOfItsImportBaselines(t *testing.T) {
 
 	loadBaselines(t, set, db)
 
-	lost, err := set.ImportBaselineDelegationsLost()
-	require.NoError(t, err)
-	require.False(t, lost)
 	deposit := uint64(2_000_000)
 	require.Equal(t, []ledger.ImportBaseline{
 		{Ref: baselineRef(1), Active: true, AddedSlot: 9, Deposit: &deposit,
@@ -145,7 +141,7 @@ func TestSetReloadsLegacyImportBaselinesWhileTheRowsExist(t *testing.T) {
 	t.Parallel()
 	set := legacySet(t, baselineRef(1))
 	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
+	db := releasedAt(t, slotPoint(8))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	pool := bytes.Repeat([]byte{0xaa}, 28)
@@ -153,35 +149,7 @@ func TestSetReloadsLegacyImportBaselinesWhileTheRowsExist(t *testing.T) {
 
 	loadBaselines(t, set, db)
 
-	lost, err := set.ImportBaselineDelegationsLost()
-	require.NoError(t, err)
-	require.False(t, lost)
 	got := allBaselines(t, set)
 	require.Len(t, got, 1)
 	require.Equal(t, pool, got[0].Pool)
-}
-
-// Once the metadata store has drained the rows, the delegations of a legacy
-// baseline are in neither store: the set keeps the baseline it has and marks
-// the delegations lost rather than reading them as none.
-func TestSetMarksLegacyImportBaselineDelegationsLostOnceDrained(t *testing.T) {
-	t.Parallel()
-	set := legacySet(t, baselineRef(1))
-	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
-	set.SetDrainedFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-	)
-
-	loadBaselines(t, set, db)
-
-	lost, err := set.ImportBaselineDelegationsLost()
-	require.NoError(t, err)
-	require.True(t, lost)
-	b, err := set.ImportBaseline(baselineRef(1))
-	require.NoError(t, err)
-	deposit := uint64(2_000_000)
-	require.Equal(t, &ledger.ImportBaseline{
-		Ref: baselineRef(1), Active: true, AddedSlot: 9, Deposit: &deposit,
-	}, b, "the registration the set held is still served")
 }

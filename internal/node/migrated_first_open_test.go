@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/nodestorage"
@@ -40,8 +39,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// migratedLedger is a ledger over the consensus database of a split data
-// directory, reconciled with its live UTxO set as a node's is at startup.
+// migratedLedger is a ledger over the consensus database of an API node's
+// data directory, reconciled with its live UTxO set as a node's is at startup.
 type migratedLedger struct {
 	db    *database.Database
 	set   *utxoset.Set
@@ -64,7 +63,7 @@ func openMigratedLedger(
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	m := &migratedLedger{fatal: make(chan error, 1)}
 	var closeDB func()
-	m.db, closeDB = openConsensus(t, dir)
+	m.db, closeDB = openConsensusRewound(t, dir, rewind)
 	var err error
 	m.set, _, err = nodestorage.OpenUtxoSet(nodestorage.UtxoSetConfig{
 		DataDir:             dir,
@@ -99,16 +98,10 @@ func openMigratedLedger(
 		closeDB()
 	})
 	require.NoError(t, (nodestorage.Reconcile{
-		DB:      m.db,
-		Set:     m.set,
-		DataDir: dir,
-		Logger:  logger,
-		Publish: func(mask nodesettings.FamilyMask) {
-			m.ls.SetDrainedFamilies(mask)
-			m.set.SetDrainedFamilies(mask)
-		},
-		Resume:       m.ls.ResumeUtxoSetFrom,
-		RewindBlocks: rewind,
+		DB:     m.db,
+		Set:    m.set,
+		Logger: logger,
+		Resume: m.ls.ResumeUtxoSetFrom,
 	}).Run(ctx))
 	require.NoError(t, cm.SetLedger(m.ls))
 	return m
@@ -142,7 +135,7 @@ func TestLoadedReleasedDatabaseRollsBackBelowItsReleasedTip(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	nodeCfg := previewNodeConfig(t)
 	dir := unpackLegacyDatabase(t, legacyParityArchive)
-	require.NoError(t, MigrateToSplit(ctx, parityConfig(dir), logger))
+	require.NoError(t, MigrateToIndexerDB(ctx, parityConfig(dir), logger))
 	// One chunk past the released tip.
 	require.NoError(t, Load(
 		ctx, parityConfig(dir), logger,
@@ -208,7 +201,7 @@ func TestMigratedDatabaseInEpochZeroKeepsItsGenesisSnapshot(t *testing.T) {
 				_, err = raw.Exec("DELETE FROM epoch_summary WHERE epoch=0")
 				require.NoError(t, errors.Join(err, raw.Close()))
 			}
-			require.NoError(t, MigrateToSplit(ctx, parityConfig(dir), logger))
+			require.NoError(t, MigrateToIndexerDB(ctx, parityConfig(dir), logger))
 			m := openMigratedLedger(t, dir, nodeCfg, previewSecurityParam(t))
 			tip, err := m.db.GetTip(nil)
 			require.NoError(t, err)
