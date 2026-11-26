@@ -417,7 +417,7 @@ func TestOptimizePlannerStatsMetrics(t *testing.T) {
 	seedStakeRefLookupUtxos(t, store, 300, 16)
 	for _, trigger := range []string{
 		PlannerStatsTriggerStartup, PlannerStatsTriggerEpoch,
-		PlannerStatsTriggerResume, types.PlannerStatsTriggerAnchor,
+		types.PlannerStatsTriggerAnchor,
 	} {
 		_, err := store.OptimizePlannerStatsContext(
 			context.Background(),
@@ -449,10 +449,6 @@ func TestOptimizePlannerStatsMetrics(t *testing.T) {
 		"result=unchanged,trigger=epoch,":   0,
 		"result=skipped,trigger=epoch,":     1,
 		"result=error,trigger=epoch,":       0,
-		"result=changed,trigger=resume,":    0,
-		"result=unchanged,trigger=resume,":  1,
-		"result=skipped,trigger=resume,":    0,
-		"result=error,trigger=resume,":      0,
 		"result=changed,trigger=anchor,":    0,
 		"result=unchanged,trigger=anchor,":  1,
 		"result=skipped,trigger=anchor,":    0,
@@ -604,7 +600,7 @@ func TestPlannerStatsRunSeriesExistBeforeAnyRun(t *testing.T) {
 			series = len(family.GetMetric())
 		}
 	}
-	require.Equal(t, 16, series, "4 triggers x 4 results")
+	require.Equal(t, 12, series, "3 triggers x 4 results")
 }
 
 // BenchmarkPlannerStatsResume compares the full ANALYZE a resumed backfill
@@ -777,9 +773,7 @@ func TestOptimizePlannerStatsEpochPassWaitsForGrowth(t *testing.T) {
 		"the anchor pass must run without growth")
 	require.False(t, optimize(PlannerStatsTriggerStartup).Skipped,
 		"the startup pass must run without growth")
-	require.False(t, optimize(PlannerStatsTriggerResume).Skipped,
-		"the resume pass must run without growth")
-	require.Equal(t, int64(6), passes.Load())
+	require.Equal(t, int64(5), passes.Load())
 }
 
 // A large file whose tables are small must still be re-analyzed once a table

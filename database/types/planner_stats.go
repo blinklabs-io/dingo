@@ -21,10 +21,6 @@ const (
 	PlannerStatsTriggerStartup = "startup"
 	// PlannerStatsTriggerEpoch labels a run made after an epoch rollover.
 	PlannerStatsTriggerEpoch = "epoch"
-	// PlannerStatsTriggerResume labels the run made when a deferral of the
-	// epoch runs ends, after a write burst that the growth rule need not
-	// have measured.
-	PlannerStatsTriggerResume = "resume"
 	// PlannerStatsTriggerAnchor labels the IndexerDB's run when it reaches
 	// the Mithril anchor.
 	PlannerStatsTriggerAnchor = "anchor"

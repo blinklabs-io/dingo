@@ -155,7 +155,7 @@ again at 6250, though that is still below the last completed pass. The
 measure is per table and not the file size: a large database whose
 `transaction` and `certs` tables were recorded at almost no rows still passes as
 they fill, and a vacuum that shrinks the file does not suppress later passes.
-Startup, resume and anchor passes always run. The table sizes of the last pass
+Startup and anchor passes always run. The table sizes of the last pass
 are held in memory, since a restart runs a startup pass. `PRAGMA
 optimize` is not used because it re-analyzes a table only after a large change
 in its row count, leaving a steadily growing table with stale statistics. The
@@ -399,7 +399,7 @@ the partial index for a spent-row range.
 `dingo_database_sql_planner_stats_runs_total{trigger,result}`,
 `dingo_database_sql_planner_stats_duration_seconds{trigger}` and
 `dingo_database_sql_planner_stats_errors_total` report runs (`trigger` is
-`startup`, `epoch`, `resume` or `anchor`; `result` is `changed`, `unchanged`, `skipped`
+`startup`, `epoch` or `anchor`; `result` is `changed`, `unchanged`, `skipped`
 or `error`). `plannerStatsRefreshEnabled` (environment
 `DINGO_PLANNER_STATS_REFRESH_ENABLED`, default true) disables the whole
 mechanism and exists only as an escape hatch.

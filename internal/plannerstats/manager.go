@@ -51,14 +51,6 @@ type Manager struct {
 	// covers every transition that arrived before it started.
 	pending chan struct{}
 
-	// deferMu guards deferrals, the outstanding Defer calls, skipped,
-	// whether a trigger arrived while any was outstanding, and resumed,
-	// whether the queued run follows a deferral.
-	deferMu   sync.Mutex
-	deferrals int
-	skipped   bool
-	resumed   bool
-
 	mu             sync.Mutex
 	cancel         context.CancelFunc
 	subscriptionID event.EventSubscriberId
@@ -168,63 +160,6 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
-// Defer holds back the epoch runs until resume is called, for a
-// write burst such as a Mithril stream catch-up: a run holds SQLite's only
-// write connection, and on a database growing that fast its statistics are
-// stale again within the next epoch. Every trigger that arrives while
-// deferred collapses into one run queued when the last resume is called; none is queued if nothing
-// arrived. A run already in flight when Defer is called finishes. Nested
-// calls are counted, and calling one resume more than once has no further
-// effect. Defer on a nil Manager returns a no-op.
-func (m *Manager) Defer() (resume func()) {
-	if m == nil {
-		return func() {}
-	}
-	m.deferMu.Lock()
-	m.deferrals++
-	m.deferMu.Unlock()
-	return sync.OnceFunc(func() {
-		m.deferMu.Lock()
-		m.deferrals--
-		queue := m.deferrals == 0 && m.skipped
-		if queue {
-			m.skipped = false
-			m.resumed = true
-		}
-		m.deferMu.Unlock()
-		if queue {
-			m.signal()
-		}
-	})
-}
-
-// deferred reports whether runs are deferred, recording the skipped trigger
-// when they are. Both the event handler and the worker call it, so a trigger
-// accepted before a deferral ends is recorded whichever reaches it first.
-func (m *Manager) deferred() bool {
-	m.deferMu.Lock()
-	defer m.deferMu.Unlock()
-	if m.deferrals == 0 {
-		return false
-	}
-	m.skipped = true
-	return true
-}
-
-// nextTrigger names the run the worker is about to make. One that follows a
-// deferral is labeled so the store runs it unconditionally: the write burst
-// it follows replaced the statistics' basis, which the growth rule that
-// spares epoch runs does not measure.
-func (m *Manager) nextTrigger() string {
-	m.deferMu.Lock()
-	defer m.deferMu.Unlock()
-	if m.resumed {
-		m.resumed = false
-		return types.PlannerStatsTriggerResume
-	}
-	return types.PlannerStatsTriggerEpoch
-}
-
 func (m *Manager) signal() {
 	select {
 	case m.pending <- struct{}{}:
@@ -249,12 +184,6 @@ func (m *Manager) handleEpochTransition(evt event.Event) {
 		epochEvent.ProtocolVersion >= shelleyProtocolMajor {
 		return
 	}
-	// Recorded here as well as in the worker: a deferral that ends before the
-	// worker takes the signal would otherwise see no skipped trigger, and the
-	// run would go out as an epoch pass the growth rule can skip.
-	if m.deferred() {
-		return
-	}
 	m.signal()
 }
 
@@ -264,9 +193,7 @@ func (m *Manager) worker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-m.pending:
-			if !m.deferred() {
-				_, _ = m.run(ctx, m.nextTrigger())
-			}
+			_, _ = m.run(ctx, types.PlannerStatsTriggerEpoch)
 		}
 	}
 }

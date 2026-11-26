@@ -319,59 +319,6 @@ func asyncStop(m *Manager) <-chan error {
 	return ch
 }
 
-// TestDeferHoldsRunsUntilResumeThenRunsOnce defers every trigger while a
-// catch-up holds the manager and collapses them into one run on resume.
-func TestDeferHoldsRunsUntilResumeThenRunsOnce(t *testing.T) {
-	t.Parallel()
-	u := newFakeUpdater()
-	close(u.release)
-	m := newTestManager(u, event.NewEventBus(nil, nil))
-	require.NoError(t, m.Start(t.Context()))
-	defer func() { require.NoError(t, m.Stop()) }()
-
-	resume := m.Defer()
-	resumeNested := m.Defer()
-	for range 3 {
-		m.handleEpochTransition(epochEvent([]byte{1}))
-	}
-	require.Never(t, func() bool { return u.calls.Load() != 0 },
-		200*time.Millisecond, 10*time.Millisecond)
-	require.Zero(t, u.calls.Load(), "a deferred trigger ran")
-
-	resumeNested()
-	require.Never(t, func() bool { return u.calls.Load() > 0 },
-		200*time.Millisecond, 10*time.Millisecond,
-		"ran before the last resume")
-
-	resume()
-	resume() // idempotent
-	require.Equal(
-		t, types.PlannerStatsTriggerResume,
-		receive(t, u.entered, "the deferred run"),
-		"the run after a deferral must not be subject to the growth rule",
-	)
-	require.Never(t, func() bool { return u.calls.Load() > 1 },
-		200*time.Millisecond, 10*time.Millisecond,
-		"deferred triggers must collapse to one run")
-}
-
-// TestDeferWithoutTriggerQueuesNothing resumes a deferral nothing arrived
-// during, which must not cost a run.
-func TestDeferWithoutTriggerQueuesNothing(t *testing.T) {
-	t.Parallel()
-	u := newFakeUpdater()
-	close(u.release)
-	m := newTestManager(u, event.NewEventBus(nil, nil))
-	require.NoError(t, m.Start(t.Context()))
-	defer func() { require.NoError(t, m.Stop()) }()
-
-	m.Defer()()
-	require.Never(t, func() bool { return u.calls.Load() != 0 },
-		200*time.Millisecond, 10*time.Millisecond)
-	var nilManager *Manager
-	nilManager.Defer()()
-}
-
 // countingUpdater records every trigger without ever blocking, so a run the
 // manager should not make shows up as a count rather than a stuck goroutine.
 type countingUpdater struct {
@@ -431,36 +378,4 @@ func TestNoRunWithoutStartupOrEpochTrigger(t *testing.T) {
 			u.seen(),
 		)
 	})
-}
-
-// TestDeferredTriggerQueuedBeforeWorkerSeesItRunsAsResume delivers an epoch
-// trigger during a deferral while the worker is busy, so the deferral ends
-// before the worker takes the trigger. The run that follows must still be the
-// unconditional resume pass, not an epoch pass the growth rule can skip.
-func TestDeferredTriggerQueuedBeforeWorkerSeesItRunsAsResume(t *testing.T) {
-	t.Parallel()
-	u := newFakeUpdater()
-	m := newTestManager(u, event.NewEventBus(nil, nil))
-	require.NoError(t, m.StartWithStartup(t.Context()))
-	defer func() { require.NoError(t, m.Stop()) }()
-	var once sync.Once
-	releaseOnce := func() { once.Do(func() { close(u.release) }) }
-	defer releaseOnce()
-
-	require.Equal(
-		t, types.PlannerStatsTriggerStartup,
-		receive(t, u.entered, "startup run"),
-	)
-	resume := m.Defer()
-	m.handleEpochTransition(epochEvent([]byte{1}))
-	resume()
-	releaseOnce()
-	require.Equal(
-		t, types.PlannerStatsTriggerResume,
-		receive(t, u.entered, "the run after the deferral"),
-		"a trigger accepted during a deferral must yield the resume pass",
-	)
-	require.Never(t, func() bool { return u.calls.Load() > 2 },
-		200*time.Millisecond, 10*time.Millisecond,
-		"the deferred trigger must collapse into the one resume run")
 }

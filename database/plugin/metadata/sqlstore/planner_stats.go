@@ -32,9 +32,6 @@ const (
 	PlannerStatsTriggerStartup = types.PlannerStatsTriggerStartup
 	// PlannerStatsTriggerEpoch labels a run made after an epoch rollover.
 	PlannerStatsTriggerEpoch = types.PlannerStatsTriggerEpoch
-	// PlannerStatsTriggerResume labels the run made when a deferral of the
-	// epoch runs ends.
-	PlannerStatsTriggerResume = types.PlannerStatsTriggerResume
 
 	// plannerStatsGrowthNumerator and plannerStatsGrowthDenominator express
 	// the growth threshold, 25%, as a fraction, and plannerStatsMinGrowthRows
@@ -79,7 +76,7 @@ func newPlannerStatsMetrics(
 			prometheus.CounterOpts{
 				Name: sqlMetricNamePrefix + "planner_stats_runs_total",
 				Help: "Incremental planner-statistics runs by trigger " +
-					"(startup, epoch, resume, anchor) and result " +
+					"(startup, epoch, anchor) and result " +
 					"(changed, unchanged, skipped, error).",
 			}, []string{"trigger", "result"},
 		)),
@@ -104,7 +101,7 @@ func newPlannerStatsMetrics(
 	// has not happened yet reads zero instead of no data.
 	for _, trigger := range []string{
 		PlannerStatsTriggerStartup, PlannerStatsTriggerEpoch,
-		PlannerStatsTriggerResume, types.PlannerStatsTriggerAnchor,
+		types.PlannerStatsTriggerAnchor,
 	} {
 		for _, result := range []string{
 			"changed", "unchanged", "skipped", "error",
