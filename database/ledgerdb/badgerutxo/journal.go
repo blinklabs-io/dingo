@@ -628,10 +628,10 @@ func (s *Store) RollbackReaches(point ocommon.Point) (bool, error) {
 // ahead of its transactions, when the state journal entries it undoes are
 // more than one transaction takes, which it then undoes in several, newest
 // first, before any batch, or when it undoes a point written in parts, whose
-// tip stays on the point until its first part is undone. Until the last transaction clears the mark the
-// set holds a mix of states, so a store that starts with the mark finishes
-// the rollback (ResumeRollback), and ApplyLedgerBatch refuses until then.
-// Readers wait while the mark is set.
+// tip stays on the point until the part written first is undone. Until the
+// last transaction clears the mark the set holds a mix of states, so a store
+// that starts with the mark finishes the rollback (ResumeRollback), and
+// ApplyLedgerBatch refuses until then. Readers wait while the mark is set.
 func (s *Store) Rollback(point ocommon.Point) (RollbackResult, error) {
 	if _, err := s.ResumeRollback(); err != nil {
 		return RollbackResult{}, err

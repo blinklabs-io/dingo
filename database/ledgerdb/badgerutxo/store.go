@@ -492,8 +492,9 @@ func (s *Store) Apply(
 // The writes include a journal record per point the changes belong to, or
 // per part of a point written in parts, holding every touched output's state
 // before those changes, which Rollback restores. A tip past the last
-// change's point gets a record of its own. It reports, but still applies past, removed outputs that are not live
-// and added outputs that already are.
+// change's point gets a record of its own. It reports, but still applies
+// past, removed outputs that are not live and added outputs that already
+// are.
 func (s *Store) ApplyBatch(
 	tip *ocommon.Point,
 	changes []Change,
