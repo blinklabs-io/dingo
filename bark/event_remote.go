@@ -80,6 +80,10 @@ type RemoteEventsConfig struct {
 	// Zero selects one second and thirty seconds.
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+
+	// maxMessageBytes replaces remoteEventMaxMessageBytes when positive, so
+	// a test can exercise the bound without moving a 16 MiB message.
+	maxMessageBytes int
 }
 
 // RemoteEvents follows the Event Service of other nodes and republishes what
@@ -243,11 +247,15 @@ func eventSourceOrigin(rawURL string) string {
 func (r *RemoteEvents) follow(ctx context.Context, src RemoteEventSource) {
 	log := r.cfg.Logger.With("component", "remote-events", "source", src.Name)
 	reach := &reachabilityClient{next: r.httpClient(src.URL), log: log}
+	maxMessage := remoteEventMaxMessageBytes
+	if r.cfg.maxMessageBytes > 0 {
+		maxMessage = r.cfg.maxMessageBytes
+	}
 	client := eventclient.New(
 		reach,
 		src.URL,
-		connect.WithReadMaxBytes(remoteEventMaxMessageBytes),
-		connect.WithInterceptors(&refusalLogger{log: log}),
+		connect.WithReadMaxBytes(maxMessage),
+		connect.WithInterceptors(&refusalLogger{log: log, maxMessage: maxMessage}),
 	)
 	initial := r.cfg.InitialBackoff
 	if initial <= 0 {
@@ -361,8 +369,9 @@ func (c *reachabilityClient) reachable() {
 // without reporting it, so the source would otherwise go quiet with no log
 // line. The warning repeats only after an event has been received again.
 type refusalLogger struct {
-	log    *slog.Logger
-	warned atomic.Bool
+	log        *slog.Logger
+	maxMessage int
+	warned     atomic.Bool
 }
 
 func (l *refusalLogger) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
@@ -401,7 +410,7 @@ func (c *refusalConn) Receive(msg any) error {
 		c.l.log.Warn(
 			"remote event source stream refused; retrying",
 			"error", err,
-			"maxMessageBytes", remoteEventMaxMessageBytes,
+			"maxMessageBytes", c.l.maxMessage,
 		)
 	}
 	return err

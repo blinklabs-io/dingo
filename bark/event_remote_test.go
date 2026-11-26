@@ -490,23 +490,25 @@ func TestRemoteEventsLogUnreachableSourceOncePerOutage(t *testing.T) {
 }
 
 // TestRemoteEventsRefuseOversizedMessage checks a source's message over
-// remoteEventMaxMessageBytes is not accepted, even when it arrives
+// the source's message limit is not accepted, even when it arrives
 // compressed, and that the refusal is logged rather than retried silently.
 func TestRemoteEventsRefuseOversizedMessage(t *testing.T) {
 	t.Parallel()
+	const maxMessage = 64 << 10
 	nodeA := newEventFixture(t, nil, false)
 	busB := event.NewEventBus(nil, nil)
 	t.Cleanup(busB.Close)
 	got := newRemoteCollector(busB)
 	logs := &syncBuffer{}
 	remote, err := NewRemoteEvents(RemoteEventsConfig{
-		Logger:         slog.New(slog.NewTextHandler(logs, nil)),
-		EventBus:       busB,
-		NodeID:         "node-b",
-		Sources:        []RemoteEventSource{{Name: "a", URL: nodeA.srv.URL}},
-		HTTPClient:     nodeA.srv.Client(),
-		InitialBackoff: 10 * time.Millisecond,
-		MaxBackoff:     20 * time.Millisecond,
+		Logger:          slog.New(slog.NewTextHandler(logs, nil)),
+		EventBus:        busB,
+		NodeID:          "node-b",
+		Sources:         []RemoteEventSource{{Name: "a", URL: nodeA.srv.URL}},
+		HTTPClient:      nodeA.srv.Client(),
+		InitialBackoff:  10 * time.Millisecond,
+		MaxBackoff:      20 * time.Millisecond,
+		maxMessageBytes: maxMessage,
 	})
 	require.NoError(t, err)
 	require.NoError(t, remote.Start(context.Background()))
@@ -517,7 +519,7 @@ func TestRemoteEventsRefuseOversizedMessage(t *testing.T) {
 	})
 
 	waitActive(t, nodeA, 1)
-	nodeA.publishChurn(strings.Repeat("a", remoteEventMaxMessageBytes+1))
+	nodeA.publishChurn(strings.Repeat("a", maxMessage+1))
 	require.Eventually(t, func() bool {
 		return logs.count("remote event source stream refused") == 1
 	}, 5*time.Second, 5*time.Millisecond)
