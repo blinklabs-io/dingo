@@ -600,6 +600,17 @@ func (s *Store) ApplyLedgerBatch(
 			)
 		}
 	}
+	// A prune can find more nonces than one transaction deletes, so they go
+	// in transactions of their own first; the batch's own prune then finds
+	// only the nonces the batch wrote.
+	if batch.PruneNoncesBefore > 0 {
+		if err := s.pruneNoncesBulk(batch.PruneNoncesBefore); err != nil {
+			return ApplyResult{}, fmt.Errorf(
+				"badgerutxo: prune nonces before slot %d: %w",
+				batch.PruneNoncesBefore, err,
+			)
+		}
+	}
 	err := s.applyChunked(tip, batch, &res, pre)
 	if err != nil {
 		slot := uint64(0)

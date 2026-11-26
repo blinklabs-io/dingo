@@ -3080,6 +3080,13 @@ It is not journaled, so a stopped attempt leaves part of the epoch's outputs
 and the batch applied again deletes the rest, then writes the puts after the
 wipe.
 
+A batch's `PruneNoncesBefore` first deletes the non-checkpoint nonces before
+its slot in as many transactions as they need, ahead of everything else the
+batch writes, because nothing bounds how many nonces a prune finds and the
+estimate does not count them. The batch's own prune then finds only the nonces
+the batch wrote. The delete is not journaled and does not move the tip, so a
+stopped attempt leaves part of them and the next prune finishes it.
+
 Snapshot and reward block ops that do not fit beside the batch's other rows
 follow, in order, in transactions of their own before the last. The batch's
 accounts, rows and reward records then go ahead of them in transactions of

@@ -146,20 +146,37 @@ func deleteNoncesAfter(txn *badger.Txn, slot uint64) error {
 	return nil
 }
 
-// pruneNonces deletes the non-checkpoint nonces before slot.
-func pruneNonces(txn *badger.Txn, slot uint64) error {
-	var keys [][]byte
+// eachPrunableNonce calls fn with the key of every non-checkpoint nonce
+// before slot, in slot order, until fn returns an error.
+func eachPrunableNonce(
+	txn *badger.Txn,
+	slot uint64,
+	fn func(key []byte) error,
+) error {
+	var ferr error
 	if err := eachNonceFrom(txn, 0,
 		func(key []byte, n Nonce) (bool, error) {
 			if n.Point.Slot >= slot {
 				return false, nil
 			}
 			if !n.Checkpoint {
-				keys = append(keys, key)
+				ferr = fn(key)
 			}
-			return true, nil
+			return ferr == nil, ferr
 		},
 	); err != nil {
+		return err
+	}
+	return ferr
+}
+
+// pruneNonces deletes the non-checkpoint nonces before slot.
+func pruneNonces(txn *badger.Txn, slot uint64) error {
+	var keys [][]byte
+	if err := eachPrunableNonce(txn, slot, func(key []byte) error {
+		keys = append(keys, key)
+		return nil
+	}); err != nil {
 		return err
 	}
 	for _, k := range keys {
@@ -168,6 +185,23 @@ func pruneNonces(txn *badger.Txn, slot uint64) error {
 		}
 	}
 	return nil
+}
+
+// pruneNoncesBulk deletes the non-checkpoint nonces before slot in as many
+// transactions as they need. Nothing bounds how many a prune finds: an epoch
+// rollover prunes every nonce written since the last prune that committed,
+// which a set that never pruned, or a heal that wrote one per block of a
+// gap, leaves above what one transaction holds. A crash part way leaves some
+// of them, which the same prune, run again, deletes.
+func (s *Store) pruneNoncesBulk(slot uint64) error {
+	wb := s.newWriteBatch()
+	defer wb.Cancel()
+	if err := s.view(func(txn *badger.Txn) error {
+		return eachPrunableNonce(txn, slot, wb.Delete)
+	}); err != nil {
+		return err
+	}
+	return wb.Flush()
 }
 
 // Nonce returns the nonce of the block at p. ok is false when the store has
