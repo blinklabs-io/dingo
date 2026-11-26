@@ -73,7 +73,7 @@ func requireCaptureDirEmpty(t *testing.T, dir string) {
 	require.Eventually(t, func() bool {
 		entries, err := os.ReadDir(dir)
 		return err == nil && len(entries) == 0
-	}, 5*time.Second, 10*time.Millisecond, "a compared capture leaves no file behind")
+	}, testutil.AsyncWait, 10*time.Millisecond, "a compared capture leaves no file behind")
 }
 
 // The follower captures at the first block of each epoch after the one it
@@ -122,7 +122,7 @@ func TestRunBoundaryFollowerCapturesFirstBlockOfEachEpoch(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(captured) >= 2
-	}, 10*time.Second, 10*time.Millisecond)
+	}, testutil.AsyncWait, 10*time.Millisecond)
 	cancel()
 	<-done
 
@@ -187,7 +187,7 @@ func TestRunBoundaryFollowerRetriesABoundaryItCouldNotPlace(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(captured) >= 2
-	}, 20*time.Second, 10*time.Millisecond)
+	}, testutil.AsyncWait, 10*time.Millisecond)
 	cancel()
 	<-done
 
@@ -236,6 +236,28 @@ func TestCaptureBoundaryRunsChecksWhenUTxOReadFails(t *testing.T) {
 	assert.EqualError(t, c.utxoErr, "point too old")
 }
 
+// receiveWhileRunning waits for a value on ch while the RunFromGenesis that
+// produces it is still running. A run that returns first fails the test with
+// its error at once, rather than at the deadline with no cause.
+func receiveWhileRunning[T any](
+	t *testing.T,
+	ch <-chan T,
+	done <-chan error,
+	msg string,
+) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case err := <-done:
+		t.Fatalf("RunFromGenesis returned before %s: %v", msg, err)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatalf("timeout waiting for channel receive: %s", msg)
+	}
+	var zero T
+	return zero
+}
+
 func withBoundaryFollower(
 	f func(context.Context, *boundaryCaptures),
 ) FromGenesisOption {
@@ -268,10 +290,12 @@ func TestRunFromGenesis_ComparesAgainstBoundaryCapture(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "utxo-epoch-2.gob")
 	ppMarker := errors.New("protocol params read at the boundary capture")
+	started := make(chan struct{})
 	put := make(chan struct{})
 	// The file is written once the run has started, as the real follower
 	// does: the run removes a UTxO file no capture record names.
 	follower := func(_ context.Context, captures *boundaryCaptures) {
+		close(started)
 		require.NoError(t, writeUTxOSetFile(path, UTxOSet{"ff#0": "addr|1"}))
 		_ = captures.put(&boundaryCapture{
 			epoch:    2,
@@ -294,11 +318,15 @@ func TestRunFromGenesis_ComparesAgainstBoundaryCapture(t *testing.T) {
 			WithBoundaryCaptureDir(dir), withBoundaryFollower(follower),
 		)
 	}()
-	testutil.RequireReceive(t, put, 5*time.Second, "capture handed to the main loop")
+	// Wait for the run to start the follower before timing the hand-off: the
+	// run's setup is not the step under test, and is what stalls on a
+	// loaded host.
+	receiveWhileRunning(t, started, done, "boundary follower started")
+	receiveWhileRunning(t, put, done, "capture handed to the main loop")
 
 	server.allowStep(t) // block 0: the UTxO baseline
 	server.allowStep(t) // block 1: the epoch 2 boundary
-	r := testutil.RequireReceive(t, results, 10*time.Second, "epoch 2 result")
+	r := receiveWhileRunning(t, results, done, "epoch 2 result")
 
 	assert.Equal(t, uint64(2), r.Epoch)
 	assert.ErrorIs(t, r.ProtocolParamsErr, ppMarker)
@@ -309,7 +337,7 @@ func TestRunFromGenesis_ComparesAgainstBoundaryCapture(t *testing.T) {
 	requireCaptureDirEmpty(t, dir)
 
 	cancel()
-	err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
+	err = testutil.RequireReceive(t, done, testutil.AsyncWait, "RunFromGenesis exit")
 	assert.True(t, err == nil || errors.Is(err, context.Canceled))
 }
 
@@ -356,8 +384,10 @@ func TestRunFromGenesis_HandsBackACaptureInterruptedAfterItsRead(t *testing.T) {
 			if tc.utxoErr == nil {
 				capture.utxoPath = filepath.Join(dir, "utxo-epoch-2.gob")
 			}
+			started := make(chan struct{})
 			put := make(chan struct{})
 			follower := func(_ context.Context, captures *boundaryCaptures) {
+				close(started)
 				if capture.utxoPath != "" {
 					require.NoError(t, writeUTxOSetFile(
 						capture.utxoPath, UTxOSet{"ff#0": "addr|1"},
@@ -378,7 +408,7 @@ func TestRunFromGenesis_HandsBackACaptureInterruptedAfterItsRead(t *testing.T) {
 				_ = conn.Close()
 				select {
 				case <-sessionCtx.Done():
-				case <-time.After(10 * time.Second):
+				case <-time.After(testutil.AsyncWait):
 					t.Error("closing the chainsync connection did not end the session")
 				}
 			}
@@ -399,14 +429,15 @@ func TestRunFromGenesis_HandsBackACaptureInterruptedAfterItsRead(t *testing.T) {
 					},
 				)
 			}()
-			testutil.RequireReceive(t, put, 5*time.Second, "capture handed to the main loop")
+			receiveWhileRunning(t, started, done, "boundary follower started")
+			receiveWhileRunning(t, put, done, "capture handed to the main loop")
 
 			server.allowStep(t) // block 0: the UTxO baseline
 			server.allowStep(t) // block 1: the epoch 2 boundary, interrupted
 			server.waitForSessions(t, 2)
 			server.allowStep(t) // block 1 again, on the resumed session
 			t.Cleanup(func() { t.Logf("logs: %q", logs.all()) })
-			r := testutil.RequireReceive(t, results, 20*time.Second, "epoch 2 result")
+			r := receiveWhileRunning(t, results, done, "epoch 2 result")
 
 			require.True(t, interrupted.Load())
 			assert.Equal(t, uint64(2), r.Epoch)
@@ -421,7 +452,7 @@ func TestRunFromGenesis_HandsBackACaptureInterruptedAfterItsRead(t *testing.T) {
 			requireCaptureDirEmpty(t, dir)
 
 			cancel()
-			err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
+			err = testutil.RequireReceive(t, done, testutil.AsyncWait, "RunFromGenesis exit")
 			assert.True(t, err == nil || errors.Is(err, context.Canceled))
 		})
 	}
@@ -457,10 +488,12 @@ func TestRunFromGenesis_ResolvesACapturedBoundaryWithoutDingo(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "utxo-epoch-2.gob")
 	ppMarker := errors.New("protocol params read at the boundary capture")
+	started := make(chan struct{})
 	put := make(chan struct{})
 	// The file is written once the run has started, as the real follower
 	// does: the run removes a UTxO file no capture record names.
 	follower := func(_ context.Context, captures *boundaryCaptures) {
+		close(started)
 		require.NoError(t, writeUTxOSetFile(path, UTxOSet{"ff#0": "addr|1"}))
 		_ = captures.put(&boundaryCapture{
 			epoch:    2,
@@ -483,11 +516,12 @@ func TestRunFromGenesis_ResolvesACapturedBoundaryWithoutDingo(t *testing.T) {
 			WithBoundaryCaptureDir(dir), withBoundaryFollower(follower),
 		)
 	}()
-	testutil.RequireReceive(t, put, 5*time.Second, "capture handed to the main loop")
+	receiveWhileRunning(t, started, done, "boundary follower started")
+	receiveWhileRunning(t, put, done, "capture handed to the main loop")
 
 	server.allowStep(t) // block 0: the UTxO baseline
 	server.allowStep(t) // block 1: the epoch 2 boundary
-	r := testutil.RequireReceive(t, results, 10*time.Second, "epoch 2 result")
+	r := receiveWhileRunning(t, results, done, "epoch 2 result")
 
 	assert.Equal(t, uint64(2), r.Epoch)
 	assert.ErrorIs(t, r.ProtocolParamsErr, ppMarker,
@@ -496,7 +530,7 @@ func TestRunFromGenesis_ResolvesACapturedBoundaryWithoutDingo(t *testing.T) {
 	assert.Equal(t, []string{"ff#0"}, r.UTxOExtra)
 
 	cancel()
-	err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
+	err = testutil.RequireReceive(t, done, testutil.AsyncWait, "RunFromGenesis exit")
 	assert.True(t, err == nil || errors.Is(err, context.Canceled))
 }
 
@@ -552,10 +586,12 @@ func TestRunFromGenesis_ComparesACaptureFromAnEarlierProcess(t *testing.T) {
 	}
 
 	ppMarker := "protocol params read at the boundary capture"
+	started := make(chan struct{})
 	put := make(chan struct{})
 	firstCtx, stopFirst := context.WithCancel(context.Background())
 	defer stopFirst()
 	first := run(firstCtx, firstAddr, func(_ context.Context, captures *boundaryCaptures) {
+		close(started)
 		path := filepath.Join(dir, captureUTxOFileName(2, server.chain.Points[1]))
 		require.NoError(t, writeUTxOSetFile(path, UTxOSet{"ff#0": "addr|1"}))
 		require.NoError(t, captures.put(&boundaryCapture{
@@ -566,9 +602,10 @@ func TestRunFromGenesis_ComparesACaptureFromAnEarlierProcess(t *testing.T) {
 		}))
 		close(put)
 	}, make(chan EpochResult, 8))
-	testutil.RequireReceive(t, put, 5*time.Second, "capture handed to the main loop")
+	receiveWhileRunning(t, started, first, "boundary follower started")
+	receiveWhileRunning(t, put, first, "capture handed to the main loop")
 	stopFirst()
-	err = testutil.RequireReceive(t, first, 10*time.Second, "first RunFromGenesis exit")
+	err = testutil.RequireReceive(t, first, testutil.AsyncWait, "first RunFromGenesis exit")
 	require.True(t, err == nil || errors.Is(err, context.Canceled), "%v", err)
 
 	results := make(chan EpochResult, 8)
@@ -579,7 +616,7 @@ func TestRunFromGenesis_ComparesACaptureFromAnEarlierProcess(t *testing.T) {
 
 	second.allowStep(t) // block 0: the UTxO baseline
 	second.allowStep(t) // block 1: the epoch 2 boundary
-	r := testutil.RequireReceive(t, results, 10*time.Second, "epoch 2 result")
+	r := receiveWhileRunning(t, results, done, "epoch 2 result")
 
 	assert.Equal(t, uint64(2), r.Epoch)
 	require.Error(t, r.ProtocolParamsErr)
@@ -590,7 +627,7 @@ func TestRunFromGenesis_ComparesACaptureFromAnEarlierProcess(t *testing.T) {
 	requireCaptureDirEmpty(t, dir)
 
 	cancel()
-	err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
+	err = testutil.RequireReceive(t, done, testutil.AsyncWait, "RunFromGenesis exit")
 	assert.True(t, err == nil || errors.Is(err, context.Canceled))
 }
 
@@ -647,7 +684,7 @@ func TestRunBoundaryFollowerKeepsAHeldCapture(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(captured) >= 1
-	}, 10*time.Second, 10*time.Millisecond)
+	}, testutil.AsyncWait, 10*time.Millisecond)
 	cancel()
 	<-done
 
@@ -789,9 +826,11 @@ func TestRunFromGenesis_WaitsForACaptureStillBeingMade(t *testing.T) {
 
 	dir := t.TempDir()
 	ppMarker := errors.New("protocol params read at the boundary capture")
+	started := make(chan struct{})
 	begun := make(chan struct{})
 	finishCapture := make(chan struct{})
 	follower := func(ctx context.Context, captures *boundaryCaptures) {
+		close(started)
 		captures.begin(2, boundary)
 		close(begun)
 		select {
@@ -821,16 +860,17 @@ func TestRunFromGenesis_WaitsForACaptureStillBeingMade(t *testing.T) {
 			WithBoundaryCaptureDir(dir), withBoundaryFollower(follower),
 		)
 	}()
-	testutil.RequireReceive(t, begun, 5*time.Second, "capture begun")
+	receiveWhileRunning(t, started, done, "boundary follower started")
+	receiveWhileRunning(t, begun, done, "capture begun")
 
 	server.allowStep(t) // block 0: the UTxO baseline
 	server.allowStep(t) // block 1: the epoch 2 boundary, still being captured
 	require.True(t,
-		logs.waitFor("waiting for Dingo's epoch 2 boundary capture", 10*time.Second),
+		logs.waitFor("waiting for Dingo's epoch 2 boundary capture", testutil.AsyncWait),
 		"the main loop did not wait for the capture in progress",
 	)
 	close(finishCapture)
-	r := testutil.RequireReceive(t, results, 10*time.Second, "epoch 2 result")
+	r := receiveWhileRunning(t, results, done, "epoch 2 result")
 
 	assert.Equal(t, uint64(2), r.Epoch)
 	assert.ErrorIs(t, r.ProtocolParamsErr, ppMarker,
@@ -840,7 +880,7 @@ func TestRunFromGenesis_WaitsForACaptureStillBeingMade(t *testing.T) {
 	requireCaptureDirEmpty(t, dir)
 
 	cancel()
-	err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
+	err = testutil.RequireReceive(t, done, testutil.AsyncWait, "RunFromGenesis exit")
 	assert.True(t, err == nil || errors.Is(err, context.Canceled))
 }
 
@@ -952,8 +992,10 @@ func TestRunFromGenesis_RedeliversACapturedBoundaryAfterAFailedFlush(t *testing.
 				ppErr:   ppMarker,
 				utxoErr: errors.New("no UTxO set at the boundary capture"),
 			}
+			started := make(chan struct{})
 			put := make(chan struct{})
 			follower := func(_ context.Context, captures *boundaryCaptures) {
+				close(started)
 				_ = captures.put(capture)
 				close(put)
 			}
@@ -973,7 +1015,8 @@ func TestRunFromGenesis_RedeliversACapturedBoundaryAfterAFailedFlush(t *testing.
 					withBoundaryFollower(follower),
 				)
 			}()
-			testutil.RequireReceive(t, put, 5*time.Second, "capture handed to the main loop")
+			receiveWhileRunning(t, started, done, "boundary follower started")
+			receiveWhileRunning(t, put, done, "capture handed to the main loop")
 
 			for range boundaryIdx + 1 {
 				server.allowStep(t)
@@ -984,7 +1027,7 @@ func TestRunFromGenesis_RedeliversACapturedBoundaryAfterAFailedFlush(t *testing.
 
 			var r EpochResult
 			for r.Epoch != 2 {
-				r = testutil.RequireReceive(t, results, 20*time.Second, "epoch 2 result")
+				r = receiveWhileRunning(t, results, done, "epoch 2 result")
 			}
 			assert.ErrorIs(t, r.ProtocolParamsErr, ppMarker,
 				"the boundary was checked live at a later block, not against its capture")
@@ -994,7 +1037,7 @@ func TestRunFromGenesis_RedeliversACapturedBoundaryAfterAFailedFlush(t *testing.
 			answeredMu.Unlock()
 
 			cancel()
-			err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
+			err = testutil.RequireReceive(t, done, testutil.AsyncWait, "RunFromGenesis exit")
 			assert.True(t, err == nil || errors.Is(err, context.Canceled))
 		})
 	}
