@@ -315,11 +315,11 @@ func TestEventSlowSubscriberDoesNotStallBusOrOthers(t *testing.T) {
 	for i := range 200 {
 		f.publishChurn("p:" + string(rune('a'+i%26)))
 	}
-	require.Less(t, time.Since(start), 2*time.Second)
+	require.Less(t, time.Since(start), eventTestWait)
 
 	// The fast reader still sees events after the burst.
 	f.publishChurn("tail:1")
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(eventTestWait)
 	for {
 		ev := recvEvent(t, func() (*eventv1alpha1.Event, error) {
 			if !fast.Receive() {
@@ -559,7 +559,7 @@ func TestEventAckFilteredStreamIgnoresRejectedEvents(t *testing.T) {
 		f.publishChurn(fmt.Sprintf("r:%d", i))
 		require.Eventually(t, func() bool {
 			return f.hub.position() == uint64(i+1)
-		}, 5*time.Second, 5*time.Millisecond)
+		}, eventTestWait, 5*time.Millisecond)
 	}
 	f.bus.Publish(
 		event.EpochTransitionEventType,
@@ -620,7 +620,7 @@ func TestEventAckWindowCountsDeliveriesNotSequenceGap(t *testing.T) {
 		f.publishChurn(fmt.Sprintf("r:%d", i))
 		require.Eventually(t, func() bool {
 			return f.hub.position() == uint64(i+1)
-		}, 5*time.Second, 5*time.Millisecond)
+		}, eventTestWait, 5*time.Millisecond)
 	}
 	publishEpoch(1)
 	recv()
@@ -714,7 +714,7 @@ func TestEventSubscriberLimitsUnlimitedByDefault(t *testing.T) {
 		f.hub.mu.Lock()
 		defer f.hub.mu.Unlock()
 		return f.hub.active == streams
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 }
 
 func TestEventPublishDisabledByDefault(t *testing.T) {
@@ -980,14 +980,14 @@ func TestEventClientAckRecoversFromDroppedConnection(t *testing.T) {
 	f.publishChurn("a:1")
 	f.publishChurn("b:1")
 	require.Eventually(t, func() bool { return count() == 2 },
-		5*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 
 	f.srv.CloseClientConnections()
 	f.publishChurn("c:1")
 	f.publishChurn("d:1")
 
 	require.Eventually(t, func() bool { return count() == 4 },
-		10*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 	mu.Lock()
 	require.Equal(t, []string{"a:1", "b:1", "c:1", "d:1"}, got)
 	mu.Unlock()
@@ -995,7 +995,7 @@ func TestEventClientAckRecoversFromDroppedConnection(t *testing.T) {
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventTestWait):
 		t.Fatal("SubscribeWithAck did not return after its context was canceled")
 	}
 }
