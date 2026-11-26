@@ -130,6 +130,9 @@ type EpochInput struct {
 	// boundary and sets it with RatificationPlan.SetBoundarySPOState before
 	// Decide.
 	BoundarySPOStateDeferred bool
+	// preBumpDRepExpiry holds DRep expiries from before the boundary's
+	// dormancy bump; ProcessEpoch sets it for RATIFY.
+	preBumpDRepExpiry map[string]uint64
 	// PendingTreasuryDonations is PrevEpoch's treasury donation total, which
 	// the caller moves into the treasury after ProcessEpoch returns. The
 	// RATIFY pass counts it, because Conway's EPOCH rule adds donations to
@@ -477,6 +480,14 @@ func ProcessEpoch(
 		return nil, fmt.Errorf("remove orphaned proposals: %w", err)
 	}
 	out.OrphanedCount = orphanCount
+	// RATIFY reads the DRep expiries from before this boundary's dormancy
+	// bump (Epoch.lagda.md passes the pre-bump state to RATIFIES; the bump
+	// only reaches the output state). Capture them here: a deferred Decide
+	// runs against a snapshot that already holds the bump.
+	preBumpExpiry, err := snapshotDRepExpiries(ctx, in.DB, in.Txn)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot drep expiries: %w", err)
+	}
 	if err := BumpDormantDRepExpiryAtEpochBoundary(
 		ctx, in.DB, in.NewEpoch, in.BoundarySlot, in.Txn,
 	); err != nil {
@@ -514,6 +525,7 @@ func ProcessEpoch(
 		treasuryRemaining: ratificationTreasury,
 	}
 	plan.in.Txn = nil
+	plan.in.preBumpDRepExpiry = preBumpExpiry
 	if in.DeferRatification &&
 		(in.CurrentBoundarySPOState != nil || in.BoundarySPOStateDeferred) {
 		out.Ratification = plan
@@ -661,11 +673,12 @@ func decideRatification(
 	}
 
 	// Active set changes as we ratify; snapshot once.
-	activeDRepCount, err := countActiveDReps(
+	activeDRepCount, err := countActiveDRepsWithExpiries(
 		ctx,
 		in.DB,
 		in.Txn,
 		in.NewEpoch,
+		in.preBumpDRepExpiry,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("count active dreps: %w", err)
@@ -739,10 +752,11 @@ func decideRatification(
 	drepState := &DRepVotingState{}
 	spoState := &SPOVotingState{}
 	if len(stillActive) > 0 {
-		drepState, err = loadDRepVotingState(
+		drepState, err = loadDRepVotingStateWithExpiries(
 			ctx,
 			in.DB, in.Txn, in.NewEpoch, in.PrevEpoch,
 			in.DelegatorInactivityOn,
+			in.preBumpDRepExpiry,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("load drep voting state: %w", err)
@@ -1580,22 +1594,72 @@ func countActiveDReps(
 	txn ledgerdb.Txn,
 	currentEpoch uint64,
 ) (int, error) {
+	return countActiveDRepsWithExpiries(ctx, db, txn, currentEpoch, nil)
+}
+
+// countActiveDRepsWithExpiries is countActiveDReps with stored DRep expiries
+// replaced by expiryOverride where it holds the DRep.
+func countActiveDRepsWithExpiries(
+	ctx context.Context,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
+	currentEpoch uint64,
+	expiryOverride map[string]uint64,
+) (int, error) {
 	dreps, err := db.GetActiveDreps(ctx, txn)
 	if err != nil {
 		return 0, err
 	}
 	active := 0
 	for _, drep := range dreps {
-		if drepActiveAtEpoch(drep, currentEpoch) {
+		if drepActiveAtEpoch(drep, currentEpoch, expiryOverride) {
 			active++
 		}
 	}
 	return active, nil
 }
 
-func drepActiveAtEpoch(drep *models.Drep, currentEpoch uint64) bool {
-	return drep != nil &&
-		(drep.ExpiryEpoch == 0 || drep.ExpiryEpoch >= currentEpoch)
+// drepActiveAtEpoch reports whether drep may vote in currentEpoch.
+// expiryOverride, when it holds the DRep, replaces the stored expiry.
+func drepActiveAtEpoch(
+	drep *models.Drep,
+	currentEpoch uint64,
+	expiryOverride map[string]uint64,
+) bool {
+	if drep == nil {
+		return false
+	}
+	expiry := drep.ExpiryEpoch
+	if override, ok := expiryOverride[drepExpiryKey(drep)]; ok {
+		expiry = override
+	}
+	return expiry == 0 || expiry >= currentEpoch
+}
+
+func drepExpiryKey(drep *models.Drep) string {
+	return models.StakeCredentialRef{
+		Tag: drep.CredentialTag,
+		Key: drep.Credential,
+	}.MapKey()
+}
+
+// snapshotDRepExpiries returns every registered DRep's stored expiry epoch.
+func snapshotDRepExpiries(
+	ctx context.Context,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
+) (map[string]uint64, error) {
+	dreps, err := db.GetActiveDreps(ctx, txn)
+	if err != nil {
+		return nil, err
+	}
+	expiries := make(map[string]uint64, len(dreps))
+	for _, drep := range dreps {
+		if drep != nil {
+			expiries[drepExpiryKey(drep)] = drep.ExpiryEpoch
+		}
+	}
+	return expiries, nil
 }
 
 func committeeNoConfidenceState(

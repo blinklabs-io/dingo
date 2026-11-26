@@ -160,3 +160,56 @@ func TestStopClosesOpenWriterToCompletion(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, uint64(1), tip.Slot)
 }
+
+// TestMithrilCompressionArchivesCompletedChunks configures mithril
+// compression: the chunk the store leaves is archived, still read, and
+// listed, while the open chunk stays plain.
+func TestMithrilCompressionArchivesCompletedChunks(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	host := hostplugin.NewHost()
+	require.NoError(t, chunkfile.RegisterProvider(host))
+	svc, err := hostplugin.Resolve[immplugin.ImmutableDB](
+		context.Background(), host,
+		hostplugin.CapabilityStorageImmutable, chunkfile.ProviderName,
+		map[string]any{"compression": chunkfile.CompressionMithril},
+		immplugin.ProviderDependencies{DataDir: dataDir},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = host.Stop(context.Background()) })
+
+	st, err := svc.Open(testGeometry)
+	require.NoError(t, err)
+	loc, err := st.Append(block(3))
+	require.NoError(t, err)
+	_, err = st.Append(block(103))
+	require.NoError(t, err)
+	require.NoError(t, st.Sync())
+
+	typ, inner, err := svc.ReadBlockAt(loc)
+	require.NoError(t, err)
+	require.Equal(t, uint(6), typ)
+	require.Equal(t, blockBody(3), inner)
+	files, err := svc.ListFiles()
+	require.NoError(t, err)
+	names := make([]string, 0, len(files))
+	for _, f := range files {
+		names = append(names, f.Name)
+	}
+	require.Contains(t, names, immutable.ArchiveName(0))
+	require.NotContains(t, names, "00000.chunk")
+	require.Contains(t, names, "00001.chunk")
+}
+
+func TestInvalidCompressionIsRefused(t *testing.T) {
+	t.Parallel()
+	host := hostplugin.NewHost()
+	require.NoError(t, chunkfile.RegisterProvider(host))
+	_, err := hostplugin.Resolve[immplugin.ImmutableDB](
+		context.Background(), host,
+		hostplugin.CapabilityStorageImmutable, chunkfile.ProviderName,
+		map[string]any{"compression": "gzip"},
+		immplugin.ProviderDependencies{DataDir: t.TempDir()},
+	)
+	require.ErrorContains(t, err, "invalid ImmutableDB compression")
+}

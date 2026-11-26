@@ -282,8 +282,15 @@ var (
 	// rewardRecordsKey is set once the store holds the reward records of the
 	// journal up to its tip.
 	rewardRecordsKey = []byte("mrwrecs")
-	drepsKey         = []byte("mdreps")
-	poolsKey         = []byte("mpools")
+	// addressIndexPrefix keys the output index, a derived row family under
+	// the marker namespace (see address_index.go); addressIndexedKey is set
+	// once every live output has its index rows, and addressIndexAfterKey
+	// holds the last output a build wrote.
+	addressIndexPrefix   = []byte("mai")
+	addressIndexedKey    = []byte("mxaidone")
+	addressIndexAfterKey = []byte("mxaiafter")
+	drepsKey             = []byte("mdreps")
+	poolsKey             = []byte("mpools")
 	// poolHistoryKey is set once the store holds every pool certificate event
 	// with its effective slot. legacyPoolHistoryKey marked events without it,
 	// which are reloaded rather than read.

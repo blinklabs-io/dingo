@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,6 +37,17 @@ func midnightCheckpointSlot(t *testing.T, n *Node) (uint64, bool) {
 	return cp.LastSlot, true
 }
 
+func setMidnightIndexerEnabled(n *Node, enabled bool) {
+	n.config.midnight = MidnightConfig{Enabled: enabled}
+	if enabled {
+		n.config.storageFeatures = []plugin.StorageFeature{
+			plugin.StorageFeatureMidnight,
+		}
+	} else {
+		n.config.storageFeatures = nil
+	}
+}
+
 // TestLiveTruncateReinitializesMidnightIndexerByEnableGate drives a real live
 // truncate and checks that the Midnight indexer is recreated against the
 // rebuilt storage only when the subsystem is enabled.
@@ -51,7 +63,7 @@ func TestLiveTruncateReinitializesMidnightIndexerByEnableGate(t *testing.T) {
 				n, points, _ := newIndexerLifecycleTestNodeAtBlock(
 					t, numBlocks, nil, 0,
 				)
-				n.config.midnight = MidnightConfig{Enabled: enabled}
+				setMidnightIndexerEnabled(n, enabled)
 
 				targetSlot := points[numBlocks/2].Slot
 				_, err := n.Truncate(
@@ -96,7 +108,7 @@ func TestLiveRestoreReinitializesMidnightIndexerByEnableGate(t *testing.T) {
 				snapshotDir := snapshotTestDir(t, "snapshot")
 				_, err := n.Snapshot(context.Background(), snapshotDir, "", "")
 				require.NoError(t, err)
-				n.config.midnight = MidnightConfig{Enabled: enabled}
+				setMidnightIndexerEnabled(n, enabled)
 
 				_, err = n.Restore(context.Background(), snapshotDir)
 				require.NoError(t, err)

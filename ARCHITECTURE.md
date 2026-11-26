@@ -275,6 +275,16 @@ expiry govern stored payload availability independently of ledger validity;
 pruning payloads must preserve live outputs, rollback requirements and the
 trust boundary from which the node can recover.
 
+The operator selects the storage mode; consumers do not promote it. Every
+storage consumer, whether a plugin provider or a built-in service, declares the
+minimum ordered tier (`core` or `api`) and the named storage features it needs.
+Node composition aggregates the enabled declarations and refuses startup before
+opening storage when the selected mode does not include a consumer's tier,
+naming each incompatible consumer. UTxO RPC, MCP and Bark run in core mode:
+UTxO RPC reads live outputs and inline datums from the ledger's UTxO set and
+refuses transaction lookups, which need API storage. The declarations are
+derived again on every startup and add no persisted database contract.
+
 ## Rollback and event consistency
 
 A rollback changes a chain lineage, not just a height. The ledger identifies

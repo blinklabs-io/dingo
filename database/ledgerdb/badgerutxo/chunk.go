@@ -24,14 +24,17 @@ import (
 
 // Estimated cost of one output in a transaction, deliberately above the
 // real one: a plan that is too coarse only makes more transactions, while one
-// that is too fine fails the commit. The entry cost counts the output row
-// and its running-sum update; the byte cost adds the key, the journal
-// operation and the prior value a removed output records.
+// that is too fine fails the commit. The entry cost counts the output row,
+// its running-sum update and its index rows, at most three (payment or
+// address, stake credential, inline datum hash); the byte cost adds the key,
+// the journal operation and the prior value a removed output records.
 const (
-	outputEntries = 2
+	outputEntries = 5
 	keyBytes      = refLen + 1
 	sumBytes      = 64
-	journalBytes  = refLen + 5
+	// indexBytes covers the index rows of one output, which carry no value.
+	indexBytes   = 3 * (refLen + 40)
+	journalBytes = refLen + 5
 	// removedBytes stands for the prior value a removed output keeps in the
 	// journal, which is not known until the removal is applied.
 	removedBytes = 512
@@ -93,13 +96,13 @@ func pointUnits(changes []Change) []pointUnit {
 			for _, o := range c.Added {
 				u.cost.entries += outputEntries
 				u.cost.bytes += int64(
-					keyBytes + len(o.Cbor) + sumBytes + journalBytes,
+					keyBytes + len(o.Cbor) + sumBytes + journalBytes + indexBytes,
 				)
 			}
 			for range c.Removed {
 				u.cost.entries += outputEntries
 				u.cost.bytes += int64(
-					keyBytes + sumBytes + journalBytes + removedBytes,
+					keyBytes + sumBytes + journalBytes + removedBytes + indexBytes,
 				)
 			}
 		}

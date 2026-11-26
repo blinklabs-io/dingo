@@ -757,7 +757,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	//     that port for the hours the bootstrap takes and a refused probe
 	//     has the container replaced mid-download;
 	//   - bark: serving modes only (not storage-gated);
-	//   - UTxORPC, Blockfrost, Kupo, Mesh, Midnight: serving modes under API
+	//   - MCP, UTxORPC: serving modes (not storage-gated);
+	//   - Blockfrost, Kupo, Mesh, Midnight: serving modes under API
 	//     storage. ApplyRunModeOverrides forces API storage for a serving
 	//     dev-mode config before validation; `dingo serve` with runMode "dev"
 	//     still runs dev, so the configured mode is consulted alongside the
@@ -848,7 +849,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"plugins.api.utxorpc.config.port",
 			c.BindAddr,
 			utxorpcPort,
-			apiListeners,
+			serving,
 			false,
 		},
 		{
@@ -1457,27 +1458,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
-	// The Midnight indexer needs the api-mode indexes to function, so
-	// midnight.enabled requires storageMode "api". Reject the contradiction
-	// up front rather than letting it start indexer-less/silently. Dev mode
-	// force-upgrades storage mode to api at startup (node.Run), so it is
-	// exempted here the same way apiListeners above is.
-	if c.Midnight.Enabled && c.StorageMode != storageModeAPI &&
-		effectiveMode != RunModeDev && !c.RunMode.IsDevMode() {
-		errs = append(errs, fmt.Errorf(
-			"midnight.enabled requires storageMode %q, got %q: "+
-				"set storageMode to %q or disable midnight.enabled",
-			storageModeAPI, c.StorageMode, storageModeAPI,
-		))
-	}
-	if c.Midnight.ServerEnabled && c.StorageMode != storageModeAPI &&
-		effectiveMode != RunModeDev && !c.RunMode.IsDevMode() {
-		errs = append(errs, fmt.Errorf(
-			"midnight.serverEnabled requires storageMode %q, got %q: "+
-				"set storageMode to %q or disable midnight.serverEnabled",
-			storageModeAPI, c.StorageMode, storageModeAPI,
-		))
-	}
 	if (c.Midnight.AuthTokenPolicyID == "") !=
 		(c.Midnight.AuthTokenAssetName == "") {
 		errs = append(errs, errors.New(

@@ -144,7 +144,11 @@ plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead of
 a seek on `idx_utxo_tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs a
 bounded `ANALYZE` (`analysis_limit` of 1000 rows per index, the connection's own
 limit restored afterwards) on the write connection, outside any transaction, at startup,
-after each epoch rollover commits, and once a minute in between. `PRAGMA
+after each epoch rollover commits, and once a minute in between, though a
+periodic pass starts no sooner than nine times the last pass's duration after
+it ended, so a pass that outlasts the minute is not followed by another at
+once. A pass excludes bulk-mode transitions but not WAL checkpoints, which keep
+the WAL bounded while it runs. `PRAGMA
 optimize` is not used because it re-analyzes a table only after a large change
 in its row count, leaving a steadily growing table with stale statistics. The
 pass holds one write connection throughout, because `analysis_limit` is per
@@ -2868,7 +2872,23 @@ Validation reads the set alone. Every key
 tag and marker is declared once, in `database/ledgerdb/badgerutxo/keys.go`;
 `TestKeyFamiliesDoNotOverlap` fails when two families share a first byte or a
 key is a prefix of another, and the bytes are persisted in existing stores, so
-they never change. A read inside an open write transaction sees that transaction's staged
+they never change. The set keeps an output index under the marker namespace
+(`mai <body> <txid:32> <index:4 BE>`, no value): a payment credential body
+(`p` + 28 bytes; the whole address `a` + bytes for an address with no payment
+credential), a stake credential body (`s` + 28 bytes) and an inline datum hash
+body (`d` + 32 bytes), each derived from the output's CBOR by
+`ledger.UtxoIndexBodies`. Every write of an output row writes or deletes its
+index rows in the same Badger transaction (apply, remove and rollback replay),
+and a bootstrap writes them in the write batch that writes the outputs, so the
+index follows the journal and a bootstrap drops it with the outputs. A reader loads the output an index row names and never trusts the row
+alone. A set from before the index is indexed when it opens, before the ledger
+follows the chain: transactions of 500 outputs each write their rows and the
+last output indexed (`mxaiafter`), a stopped build resumes after it, and
+`mxaidone` marks the index complete; a resync is never required. Address reads
+use it to find the outputs of one address, stake credential or datum, and the
+UTxO RPC QueryService and MCP serve address reads of a core node from it.
+
+A read inside an open write transaction sees that transaction's staged
 changes over the set's committed state, as a SQLite read sees the
 transaction's own writes, so a multi-block commit can validate a block
 against the blocks before it.
@@ -3003,7 +3023,7 @@ UTxO changes. Their tags and markers are declared in
 | `maccountact` | set once account rows and their retained journal states carry the CIP-0163 activation membership and floor. A set opened over a v0.94.2 database loads the SQL membership; when the database no longer holds it, it reconstructs membership from the journal state immediately before the activation boundary and refuses an inexact reconstruction below the journal floor |
 | `mjfloor` | the lowest slot whose later changes the state journal still holds, as a big-endian `uint64`: a computed row is exact as of slot `s` only when `s + 1` is at least this value. Journal pruning and every row load raise it before they drop journal entries |
 | `mnonce2`, `mepoch2`, `mnet`, `mpparams` | set once the nonces, the epoch and snapshot rows, the network state and donation rows, or the protocol parameter rows are complete |
-| `E` + epoch (8 bytes, big-endian) + kind (1 byte) + pool key hash | kind 0: the blocks the pool minted in the epoch (8 bytes, big-endian). With kind 1 and no pool: the blocks counted in the epoch and the first slot a block may still be counted at (8 bytes each); kind 2: the fees the epoch collected (8 bytes) |
+| `E` + epoch (8 bytes, big-endian) + kind (1 byte) + pool key hash | kind 0: the blocks the pool minted in the epoch (8 bytes, big-endian). With kind 1 and no pool: the blocks counted in the epoch and the first slot a block may still be counted at (8 bytes each); kind 2: the fees the epoch collected (8 bytes). Opening an epoch deletes the rows of every epoch more than two below it, journaled at the opened epoch's first slot, so a rollback below that slot restores the performance epoch the re-crossed boundary's reward round reads |
 | `E` + epoch + kind 3 + pool key hash, `E` + epoch + kind 4 | the same counts as kinds 0 and 1 with the slots TPraos reserves for the overlay schedule counted too, which the epoch-boundary capture's per-pool block counts need |
 | `mblkfee2` | set once the `E` rows of every epoch reward calculation can still read are loaded, with kinds 3 and 4; the earlier `mblkfee` marked rows without them and makes the set reload them |
 | `Y` + epoch (8 bytes, big-endian) + kind 0 + pool key hash | the blocks the pool minted in the epoch as a snapshot import carried them, then the slot the import captured them at (8 bytes each, big-endian) |
@@ -3987,11 +4007,12 @@ Readers outside the ledger's LedgerDB:
 
 | Reader | Behavior |
 |---|---|
-| MCP tools | With a ledger state the governance, DRep and account tools read through its LedgerDB; the pool performance tool reads the IndexerDB when there is one. `get_epoch_summary` reads a SQLite IndexerDB when there is one; otherwise it reads the epoch through the LedgerDB and counts the epoch's blocks from the IndexerDB's `block_nonce` rows, which it keeps for every block it indexes, or, on a node without one, from the ledger's retained window and says so. On a node with an IndexerDB, `get_utxos` pages exact addresses from it. The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
+| MCP tools | With a ledger state the governance, DRep and account tools read through its LedgerDB; the pool performance tool reads the IndexerDB when there is one. `get_epoch_summary` reads a SQLite IndexerDB when there is one; otherwise it reads the epoch through the LedgerDB and counts the epoch's blocks from the IndexerDB's `block_nonce` rows, which it keeps for every block it indexes, or, on a node without one, from the ledger's retained window and says so. On a node with an IndexerDB, `get_utxos` pages exact addresses from it; on a core node it pages them from the live UTxO set (`LedgerState.UtxosByAddressBoundedPage`). The SQL tools (`sqlite_query`, `sqlite_explain`) query the IndexerDB, every table of it, and on a node without one they report that an IndexerDB is needed. |
 | `internal/node` backfill | Runs on the IndexerDB. |
 | `internal/koiosparity` | `DatabaseSource` reads current ledger state through the ledger's LedgerDB, and the reward tables and transaction sample from the IndexerDB when the node has one. `DingoDB` queries the IndexerDB's SQL tables directly (the `koios-parity` commands open `<dataDir>/indexer/metadata.sqlite` for a SQLite backend). |
 | `api/blockfrost` | Reads the IndexerDB, and protocol parameters through `Database.GetPParamRows`. |
-| `api/mesh`, `api/utxorpc` | Read address UTxOs, datums and transaction history from the IndexerDB through `mesh.MeshDatabase` and `utxorpc.QueryDatabase`, which the node builds over it. The ledger forwards none of these reads. |
+| `api/mesh` | Reads blocks, address UTxOs and transaction history from the IndexerDB through `mesh.MeshDatabase`, which the node builds over it. |
+| `api/utxorpc` | Reads through `utxorpc.QueryDatabase`. On an API node that is the IndexerDB. On a core node, `utxorpc.NewLedgerQueryDatabase` reads UTxOs by reference and address and inline datums from the live UTxO set, and refuses a transaction lookup with `ErrQueryNeedsAPIStorage`. |
 
 ### Live UTxO set failure and recovery
 
@@ -4003,7 +4024,8 @@ Badger directory so it needs no metadata-store write and survives a restore of
 the set.
 
 A ledger commit larger than one Badger transaction is applied in several by
-`Store.ApplyLedgerBatch` (`database/ledgerdb/badgerutxo/chunk.go`). A batch
+`Store.ApplyLedgerBatch`, through `applyChunked`
+(`database/ledgerdb/badgerutxo/chunk.go`). A batch
 whose estimated entries or bytes exceed half of `db.MaxBatchCount` or
 `db.MaxBatchSize` is split at point boundaries, never inside a point. Every
 transaction but the last leaves the tip and the nonces alone: the leading ones
@@ -4567,7 +4589,11 @@ of `metadata.FactTables`:
   `drep_expiry_epoch_event`, `account_drep_clear` and the account and DRep
   columns the governance tick and the Plomin HARDFORK rule move;
 - the credits of applied rounds, through the idempotent credit path, so a
-  balance is the credits less the withdrawals block replay debits.
+  balance is the credits less the withdrawals block replay debits. Block replay also
+  credits each Dijkstra body's direct deposits itself, right after that body's
+  certificates and before the next body's withdrawals, the order the ledger
+  applies them in; a certified closure's bodies are credited the same way, at
+  the certifying block's slot, where the ledger journals them.
 
 A rollback removes the fact rows dated after its target together with the block
 rows, in one transaction, and restores the reward pot of every round that stays
@@ -5783,7 +5809,7 @@ updates preserve the previous activity and expiry epochs.
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
-| `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Chain processing writes a row only for a proposal that passes the era's proposal rule: persistence re-applies that rule to a ParameterChange, so values rejected by the active era and protocol-version rule leave no row on replay, backfill or gap-block processing, even where transaction validation is skipped. Ledger-state snapshot import writes the snapshot's proposal rows without running the rule. During a catch-up reconcile, a proposal still present in the local Conway proposal set but absent from the newer snapshot is soft-deleted at the snapshot tip so ratification, parent checks, and deposit refunds cannot consume stale state. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes rows without `enacted_epoch` or a `governance_proposal_drop` row as members of the Conway proposals set -- an expired action stays a member, and may still be named as a parent or refused a vote by its expiry epoch, until the boundary that drops it -- while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. `expired_epoch`/`expired_slot` mark a proposal ineligible; they do not by themselves refund its deposit -- see `governance_proposal_drop`. Historical replay at or below a Mithril anchor stores a proposal the snapshot did not import as expired and dropped at its own epoch and slot, so later boundaries do not select it again for ratification, expiry, or refund. |
+| `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. The ledger writes a row only for a proposal that passes the era's proposal rule: its persistence re-applies that rule to a ParameterChange, so values rejected by the active era and protocol-version rule leave no row on replay or gap-block processing, even where transaction validation is skipped. The IndexerDB's backfill applies no proposal rule: it indexes only blocks the chain accepted and stores every proposal they hold, refusing only a value its columns cannot represent. Ledger-state snapshot import writes the snapshot's proposal rows without running the rule. During a catch-up reconcile, a proposal still present in the local Conway proposal set but absent from the newer snapshot is soft-deleted at the snapshot tip so ratification, parent checks, and deposit refunds cannot consume stale state. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes rows without `enacted_epoch` or a `governance_proposal_drop` row as members of the Conway proposals set -- an expired action stays a member, and may still be named as a parent or refused a vote by its expiry epoch, until the boundary that drops it -- while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. `expired_epoch`/`expired_slot` mark a proposal ineligible; they do not by themselves refund its deposit -- see `governance_proposal_drop`. Historical replay at or below a Mithril anchor stores a proposal the snapshot did not import as expired and dropped at its own epoch and slot, so later boundaries do not select it again for ratification, expiry, or refund. |
 | `governance_proposal_order` | `proposal_id`, `tx_index` | PK `proposal_id` | Companion table recording a proposal's position in Conway submission order within its `added_slot`: the transaction's index in its block, or for a proposal imported from a ledger-state snapshot, its position in the snapshot's proposal sequence (all proposals of one epoch share that epoch's anchor slot). RATIFY and ENACT reads order equal-slot proposals by it, then by `action_index`. A companion table for the same reason as `governance_proposal_drop`. FK `proposal_id` references `governance_proposal.id` with cascade deletion, and `DeleteGovernanceProposalsAfterSlot` also deletes the rows of the proposals it removes explicitly. `SetGovernanceProposal` writes the row only when the caller supplies a position, so rewriting a loaded proposal without one keeps the stored position. The v33 migration backfills rows from each proposal's stored `transaction.block_index`; a proposal without a stored transaction (one imported before v33) has no row and keeps the pre-v33 `tx_hash` order until it leaves the proposal set, or until the database is rebuilt from a fresh import. |
 | `governance_proposal_drop` | `proposal_id`, `dropped_epoch`, `dropped_slot` | PK `proposal_id`; indexes `dropped_epoch`, `dropped_slot` | Companion table recording when an expired proposal's deposit was actually returned and the proposal reached final consideration. cardano-ledger does not refund an expired action's deposit in the same epoch it is marked expired -- that happens one full epoch later, the same one-epoch delay ratification has before enactment. A separate table rather than columns on `governance_proposal` avoids widening a table v16 (`governance-proposal-optional-anchor`) already rebuilds via rename-and-recreate with an unqualified `SELECT *`, which cannot tolerate columns added after it. FK `proposal_id` references `governance_proposal.id` with cascade deletion. A row's absence means the proposal, if expired, is still awaiting its drop. The v17 backfill stamps every proposal an upgraded database had already expired, because the pre-v17 tick refunded at expiry; without it the new drop step would return each of those deposits a second time at the first boundary after the upgrade. |
 | `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
@@ -7866,6 +7892,23 @@ written.
   chunks exist as empty trios. A Byron epoch boundary block takes relative slot
   0 with `BlockOrEbb` set to the epoch. Writing a block appends the chunk bytes,
   then the secondary entry, then the primary offsets.
+- **Compressed chunks.** The local `chunkfile` provider's `compression: mithril`
+  keeps each chunk it completes as `NNNNN.tar.zst`: the chunk's `.chunk`,
+  `.primary` and `.secondary` files, named `immutable/NNNNN.*`, in one
+  zstd-compressed USTAR archive, the layout of a Mithril immutable archive. The
+  open chunk stays in plain files. A chunk is archived when the store moves past
+  it, and a chunk taken in from Mithril once its markers commit: the archive is
+  written under a temporary name, fsynced and renamed into place before the plain
+  files are removed, and startup removes a leftover temporary file and the plain
+  files of a chunk whose archive is in place. A chunk with a file over 1 GiB,
+  the largest entry the reader accepts, stays plain. Truncating into an archived chunk,
+  or reopening with an archived chunk highest, returns it to plain files first.
+  Existing chunks keep their form, and every reader takes either, so a store can
+  hold both. Block reads decompress an archived chunk into a cache of
+  decompressed chunks bounded by `archiveCacheMb` (256 MiB unless set). Database
+  snapshots copy archives as they are, and a Mithril snapshot made from one
+  publishes each stored archive unchanged, with digests taken from its
+  decompressed files. The S3 and GCS providers do not compress.
 - **Durability order.** A promotion step appends and fsyncs the three files and
   the directory, and only then commits one blob transaction that swaps the
   markers in and advances `im_state`. Advancing into a new chunk fsyncs the
@@ -8028,9 +8071,12 @@ older than the ledger stability window:
   IndexerDB tip, so it never expires a body the writer has not read, nor the
   tip block the writer re-reads to resume. The IndexerDB keeps its own
   `DOFF` entries, in its `utxo_offset` table, which the ledger's `PruneBlock`
-  does not see, so the pruner's `BeforeExpire` first rewrites them as raw CBOR
-  (`Database.MaterializeBlockUtxos` on the IndexerDB, in one IndexerDB
-  transaction), spent outputs included.
+  does not see. Before expiry, `Database.MaterializeBlockUtxos` decodes the
+  block's output offsets and checks each output identity against the IndexerDB
+  entries, then rewrites matching `DOFF` values as raw CBOR in one IndexerDB
+  transaction. Deriving identities from the block also covers Dijkstra
+  subtransaction outputs and offsets retained across rollback, which are not
+  always discoverable from the IndexerDB's `utxo` rows.
 - A node with `historyExpiry.enabled` runs no ImmutableDB: block bodies stay
   in the blob store and are never promoted, Mithril chunk adoption is skipped
   so bootstrap copies bodies, and a database written by v0.94.2 with expiry on

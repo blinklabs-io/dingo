@@ -940,8 +940,7 @@ func (e *Engine) CalculateStakeRewardApplication(
 			return nil, false, err
 		}
 	}
-	// The performance epoch ended below this node's Mithril trust anchor and
-	// the snapshot's own block counts for it were not imported, so beta is
+	// The ledger holds no block counts for the performance epoch, so beta is
 	// unknown for every pool. Distributing the zero that an uncounted epoch
 	// yields would credit nothing and report a completed round; decline it
 	// instead, so the shortfall is visible here rather than at the first
@@ -950,8 +949,8 @@ func (e *Engine) CalculateStakeRewardApplication(
 		return nil, false, e.RequiredStakeRewardBasisUnavailable(
 			authoritative,
 			newEpoch,
-			"no block counts for the performance epoch: it ended below the"+
-				" Mithril trust anchor and the snapshot carried none",
+			"no block counts for the performance epoch: the ledger state"+
+				" holds none for it",
 			"performance_epoch",
 			performanceEpoch,
 		)
@@ -3970,18 +3969,15 @@ func applyFullPotConfig(params *rewards.Parameters, cfg Config) {
 // RewardBlockCounts resolves the per-pool and total block counts for a reward
 // round's performance epoch.
 //
-// The bool reports whether the counts are known. It is false only when part of
-// the performance epoch lies at or below the Mithril trust anchor -- where this
-// node applied no block and therefore counted none -- and the snapshot's own
-// BlocksMade for that epoch was not imported. Zero counts and unknown counts
+// The bool reports whether the counts are known. It is false when the host
+// holds no counts for the epoch: on a node bootstrapped from a snapshot, an
+// epoch at or below the trust anchor whose BlocksMade the snapshot did not
+// carry, since the node applied no block there. Zero counts and unknown counts
 // are not the same answer: pool performance is beta/sigma_a with beta the
 // pool's share of the epoch's blocks, so reading an uncountable epoch as zero
 // blocks gives every pool zero performance, credits every delegator nothing,
 // and reports a completed round. The chain then contradicts that state at the
 // first withdrawal of the rewards the reference did credit.
-//
-// A node that never imported a snapshot has no trust anchor and reaches none of
-// this: its counts come from its own block history exactly as before.
 func (e *Engine) RewardBlockCounts(
 	meta ledgerdb.LedgerDB,
 	metaTxn ledgerdb.Txn,

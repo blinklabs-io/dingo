@@ -294,6 +294,13 @@ type Store struct {
 	scheduledWorkMu    sync.Mutex
 	bulkMode           bool
 	bulkRestorePending bool
+	// plannerStatsMu is held for a whole planner-statistics pass, and bulk-mode
+	// transitions take it before scheduledWorkMu, so a pass never crosses a
+	// transition. A pass takes scheduledWorkMu only to read bulkMode: on a
+	// large store a pass runs for minutes, and holding scheduledWorkMu that
+	// long would keep every WAL checkpoint waiting, letting the WAL grow
+	// without bound.
+	plannerStatsMu sync.Mutex
 
 	closeOnce sync.Once
 	closeDone chan struct{}
@@ -1496,9 +1503,11 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 
 // SetBulkLoadPragmas enables backend-specific session tuning.
 func (s *Store) SetBulkLoadPragmas() error {
-	// Take this gate before startMu. CloseContext needs startMu to cancel an
+	// Take these gates before startMu. CloseContext needs startMu to cancel an
 	// in-flight checkpoint, which lets that callback release this gate instead
 	// of deadlocking a concurrent bulk-mode transition.
+	s.plannerStatsMu.Lock()
+	defer s.plannerStatsMu.Unlock()
 	s.scheduledWorkMu.Lock()
 	defer s.scheduledWorkMu.Unlock()
 	s.startMu.Lock()
@@ -1541,6 +1550,8 @@ func (s *Store) SetBulkLoadPragmas() error {
 
 // RestoreNormalPragmas restores safe backend defaults.
 func (s *Store) RestoreNormalPragmas() error {
+	s.plannerStatsMu.Lock()
+	defer s.plannerStatsMu.Unlock()
 	s.scheduledWorkMu.Lock()
 	defer s.scheduledWorkMu.Unlock()
 	s.startMu.Lock()
