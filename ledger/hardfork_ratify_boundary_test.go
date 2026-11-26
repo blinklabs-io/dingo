@@ -293,12 +293,41 @@ func seedLiveDelegatedStake(
 	poolKeyHash string,
 	amount uint64,
 ) {
+	seedLiveDelegatedStakeAtSlotWithRewardAccount(
+		t, db, poolKeyHash, amount, 74_100, false,
+	)
+}
+
+func seedLiveDelegatedStakeAtSlot(
+	t *testing.T,
+	db *database.Database,
+	poolKeyHash string,
+	amount uint64,
+	addedSlot uint64,
+) {
+	seedLiveDelegatedStakeAtSlotWithRewardAccount(
+		t, db, poolKeyHash, amount, addedSlot, true,
+	)
+}
+
+func seedLiveDelegatedStakeAtSlotWithRewardAccount(
+	t *testing.T,
+	db *database.Database,
+	poolKeyHash string,
+	amount uint64,
+	addedSlot uint64,
+	setRewardAccount bool,
+) {
 	t.Helper()
 	stakingKey := append([]byte(nil), []byte(poolKeyHash)...)
 	for len(stakingKey) < 28 {
 		stakingKey = append(stakingKey, 0)
 	}
 	stakingKey = stakingKey[:28]
+	rewardAccount := []byte(nil)
+	if setRewardAccount {
+		rewardAccount = stakingKey
+	}
 
 	require.NoError(t, fxImportPool(t, db, context.Background(), nil, &models.Pool{
 		PoolKeyHash: []byte(poolKeyHash),
@@ -307,17 +336,18 @@ func seedLiveDelegatedStake(
 		Cost:        340_000_000,
 		Margin:      &types.Rat{Rat: big.NewRat(1, 100)},
 	}, &models.PoolRegistration{
-		PoolKeyHash: []byte(poolKeyHash),
-		AddedSlot:   74_100,
-		Pledge:      1_000_000,
-		Cost:        340_000_000,
-		Margin:      &types.Rat{Rat: big.NewRat(1, 100)},
-		VrfKeyHash:  make([]byte, 32),
+		PoolKeyHash:   []byte(poolKeyHash),
+		RewardAccount: rewardAccount,
+		AddedSlot:     addedSlot,
+		Pledge:        1_000_000,
+		Cost:          340_000_000,
+		Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+		VrfKeyHash:    make([]byte, 32),
 	}))
 	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey: stakingKey,
 		Pool:       []byte(poolKeyHash),
-		AddedSlot:  74_100,
+		AddedSlot:  addedSlot,
 		Active:     true,
 	}))
 	txID := repeatByte(32, poolKeyHash[len(poolKeyHash)-1])

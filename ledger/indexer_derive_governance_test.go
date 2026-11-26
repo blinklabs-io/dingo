@@ -31,17 +31,25 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/epochengine"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/require"
 )
 
 const governanceAda = uint64(1_000_000)
+
+var (
+	governanceSPOYesPool = repeatByte(28, 0xb1)
+	governanceSPONoPool  = repeatByte(28, 0xb2)
+)
 
 // governanceChain is the Conway chain both pipelines replay: a treasury with a
 // donation in its first epoch, a motion of no confidence that ratifies at the
@@ -65,6 +73,9 @@ type governanceChain struct {
 	// mir moves lovelace between the pots and distributes from the reserves
 	// to a registered account within the first epoch.
 	mir bool
+	// postEnactmentSPO makes the Dijkstra ratification branch observable: the
+	// no-vote pool retires at the boundary, moving the yes stake over threshold.
+	postEnactmentSPO bool
 }
 
 func newGovernanceChain(epoch models.Epoch, major uint) *governanceChain {
@@ -157,6 +168,11 @@ func (c *governanceChain) pparams() *conway.ConwayProtocolParameters {
 	zero := cbor.Rat{Rat: new(big.Rat)}
 	p.DRepVotingThresholds.MotionNoConfidence = zero
 	p.PoolVotingThresholds.MotionNoConfidence = zero
+	if c.postEnactmentSPO {
+		p.PoolVotingThresholds.MotionNoConfidence = cbor.Rat{
+			Rat: new(big.Rat).SetFrac64(7, 10),
+		}
+	}
 	return p
 }
 
@@ -180,6 +196,18 @@ func (c *governanceChain) seedState(t *testing.T, ldb ledgerdb.LedgerDB) {
 			VoterCredential: d.Credential, Vote: models.VoteYes,
 			AddedSlot: c.epoch.StartSlot + 30,
 		}, nil))
+	}
+	if c.postEnactmentSPO {
+		for _, vote := range []struct {
+			pool []byte
+			vote uint8
+		}{{governanceSPOYesPool, models.VoteYes}, {governanceSPONoPool, models.VoteNo}} {
+			require.NoError(t, ldb.SetGovernanceVote(ctx, &models.GovernanceVote{
+				ProposalID: c.motion.ID, VoterType: models.VoterTypeSPO,
+				VoterCredential: vote.pool, Vote: vote.vote,
+				AddedSlot: c.epoch.StartSlot + 31,
+			}, nil))
+		}
 	}
 }
 
@@ -418,6 +446,18 @@ func requireGovernanceEquality(
 	f.currentPParams = chain.pparams()
 	f.ls.currentPParams = f.currentPParams
 	f.seedGovernance(t, chain)
+	if chain.postEnactmentSPO {
+		mgr := snapshot.NewManager(f.ls.LedgerDB(), newTestEventBus(t, nil), nil)
+		f.ls.SetEpochBoundarySnapshotStakeHook(func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
+			return mgr.ComputeEpochBoundarySnapshot(context.Background(), txn, evt)
+		})
+		f.ls.SetEpochBoundarySnapshotHook(func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
+			return mgr.CaptureEpochBoundarySnapshot(context.Background(), txn, evt)
+		})
+		f.ls.SetCurrentBoundarySPOStakeHook(func(txn ledgerdb.Txn, evt event.EpochTransitionEvent, eraID uint) ([]*models.PoolStakeSnapshot, error) {
+			return mgr.CurrentBoundarySPOStakeRows(context.Background(), txn, evt, eraID)
+		})
+	}
 
 	first := f.rollover(t, f.currentEpoch, f.currentPParams)
 	second := f.rollover(t, first.NewCurrentEpoch, first.NewCurrentPParams)
@@ -445,24 +485,32 @@ func requireGovernanceEquality(
 	require.True(t, ok)
 	// The fixture rewrites the parameter rows it seeds: the parameters the
 	// boundaries derive are what is compared.
-	boundary := f.currentEpoch.StartSlot + uint64(f.currentEpoch.LengthInSlots)
+	boundaries := []uint64{
+		f.currentEpoch.StartSlot + uint64(f.currentEpoch.LengthInSlots),
+		second.NewCurrentEpoch.StartSlot,
+	}
 	set, ok := f.ls.config.UtxoSet.(interface {
 		drepLister
 		accountLister
 	})
 	require.True(t, ok)
-	want := ledgerStateFacts(t, f.ls.LedgerDB(), boundary, set.Dreps, set.Accounts)
 	idxTxn := ldb.Begin(t.Context(), false)
 	defer idxTxn.Release()
-	got := ledgerStateFacts(t, ldb, boundary,
-		func(fn func(*models.Drep) error) error { return ldb.IterateDreps(idxTxn, fn) },
-		func(fn func(*models.Account) error) error { return ldb.IterateAccounts(idxTxn, fn) },
-	)
-	for name := range want {
-		require.Equal(t, want[name], got[name], "state %s", name)
+	var facts map[string][]string
+	for i, boundary := range boundaries {
+		want := ledgerStateFacts(t, f.ls.LedgerDB(), boundary, set.Dreps, set.Accounts)
+		got := ledgerStateFacts(t, ldb, boundary,
+			func(fn func(*models.Drep) error) error { return ldb.IterateDreps(idxTxn, fn) },
+			func(fn func(*models.Account) error) error { return ldb.IterateAccounts(idxTxn, fn) },
+		)
+		for name := range want {
+			require.Equal(t, want[name], got[name], "boundary %d state %s", boundary, name)
+		}
+		require.Equal(t, len(want), len(got), "boundary %d", boundary)
+		if i == 0 || chain.postEnactmentSPO {
+			facts = want
+		}
 	}
-	require.Equal(t, len(want), len(got))
-	facts := want
 	// The DRep history is the IndexerDB's alone.
 	for _, name := range governanceHistoryTables {
 		facts[name] = readFactTable(t, func(
@@ -470,7 +518,7 @@ func requireGovernanceEquality(
 		) (metadata.FactRows, int64, error) {
 			txn := idx.MetadataTxn(t.Context(), false)
 			defer txn.Release()
-			return store.ReadFactRows(t.Context(), table, boundary, math.MaxInt64, cursor, 100, txn.Metadata())
+			return store.ReadFactRows(t.Context(), table, boundaries[0], math.MaxInt64, cursor, 100, txn.Metadata())
 		}, name)
 	}
 	return facts
@@ -521,6 +569,12 @@ func (f *treasuryRolloverFixture) seedGovernance(
 				c.epoch.EpochId+1, c.epoch.StartSlot+5,
 			)
 		}
+	}
+	if c.postEnactmentSPO {
+		seedLiveDelegatedStakeAtSlot(t, f.db, string(governanceSPOYesPool), 6_000, c.epoch.StartSlot)
+		seedLiveDelegatedStakeAtSlot(t, f.db, string(governanceSPONoPool), 4_000, c.epoch.StartSlot)
+		fxRetiringPool(t, f.db, governanceSPONoPool, repeatByte(28, 0xb3),
+			0, 1, c.epoch.EpochId+1, c.epoch.StartSlot+5)
 	}
 	if c.mir {
 		seedMIRPotTransfer(t, f.db, epochengine.MIRPotTreasury, mirTransfer, c.mirSlot())
@@ -574,6 +628,39 @@ func (c *governanceChain) seedIndexerExtras(t *testing.T, idx *database.Database
 		require.NoError(t, err)
 		return id
 	}
+	if c.postEnactmentSPO {
+		for i, poolKey := range [][]byte{governanceSPOYesPool, governanceSPONoPool} {
+			stakingKey := append([]byte(nil), poolKey...)
+			reg := &models.PoolRegistration{PoolKeyHash: poolKey,
+				RewardAccount: stakingKey,
+				AddedSlot:     c.epoch.StartSlot, Pledge: 1_000_000, Cost: 340_000_000,
+				Margin: &types.Rat{Rat: big.NewRat(1, 100)}}
+			require.NoError(t, idx.ImportPool(t.Context(), nil, &models.Pool{
+				PoolKeyHash: poolKey, VrfKeyHash: make([]byte, 32),
+				Pledge: 1_000_000, Cost: 340_000_000,
+				Margin: &types.Rat{Rat: big.NewRat(1, 100)},
+			}, reg))
+			if i == 1 {
+				pool, err := idx.GetPool(t.Context(), lcommon.PoolKeyHash(poolKey), true, nil)
+				require.NoError(t, err)
+				exec(`INSERT INTO pool_retirement (pool_id, pool_key_hash, `+
+					`certificate_id, epoch, added_slot) VALUES (?, ?, 0, ?, ?)`,
+					pool.ID, poolKey, c.epoch.EpochId+1, c.epoch.StartSlot+5)
+			}
+			require.NoError(t, idx.Metadata().ImportAccount(&models.Account{
+				StakingKey: stakingKey, Pool: poolKey, AddedSlot: c.epoch.StartSlot, Active: true,
+			}, nil))
+			addr, err := lcommon.NewAddressFromParts(lcommon.AddressTypeKeyKey,
+				lcommon.AddressNetworkTestnet, repeatByte(28, byte(0xb4+i)), stakingKey)
+			require.NoError(t, err)
+			amount := uint64([]int{6_000, 4_000}[i]) * governanceAda
+			output, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+				OutputAddress: addr, OutputAmount: amount,
+			})
+			require.NoError(t, err)
+			seedIndexerStakedUtxo(t, idx, repeatByte(32, byte(0xb5+i)), stakingKey, 0, amount, addr, output)
+		}
+	}
 	if c.retirements {
 		for _, r := range c.retiringPools() {
 			poolID := exec(`INSERT INTO pool (pool_key_hash) VALUES (?)`, r.keyHash)
@@ -600,6 +687,29 @@ func (c *governanceChain) seedIndexerExtras(t *testing.T, idx *database.Database
 				r.Credential, r.Amount.String(), mirID)
 		}
 	}
+}
+
+func seedIndexerStakedUtxo(
+	t *testing.T,
+	db *database.Database,
+	txID, stakingKey []byte,
+	idx uint32,
+	amount uint64,
+	address lcommon.Address,
+	cborBytes []byte,
+) {
+	t.Helper()
+	require.NoError(t, db.Transaction(t.Context(), true).Do(
+		func(txn *database.Txn) error {
+			if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
+				TxId: txID, OutputIdx: idx, AddedSlot: 1, Amount: types.Uint64(amount),
+				StakingKey: stakingKey, Address: []byte(address.String()), Cbor: cborBytes,
+			}); err != nil {
+				return err
+			}
+			return db.Blob().SetUtxo(txn.Blob(), txID, idx, cborBytes)
+		},
+	))
 }
 
 // seedIndexer writes to the IndexerDB the state the ledger fixture starts from
@@ -665,6 +775,7 @@ func TestDerivedMIREqualsTheLedgers(t *testing.T) {
 func TestDerivedPostEnactmentRatificationEqualsTheLedgers(t *testing.T) {
 	t.Parallel()
 	facts := requireGovernanceEquality(t, 11, func(c *governanceChain) {
+		c.postEnactmentSPO = true
 		c.withHardForkTo(12)
 	})
 	require.Contains(t, strings.Join(facts["governance_proposal"], "\n"),
