@@ -1668,6 +1668,17 @@ func (b *Backfill) processBlockTxsBatched(
 			if stats != nil {
 				stats.SetTransactionBatched += time.Since(setTxStart)
 			}
+			if err := b.creditDirectDeposits(
+				ctx, level, point.Slot, txn,
+			); err != nil {
+				return fmt.Errorf(
+					"direct deposits at slot %d tx %d body %d: %w",
+					point.Slot,
+					txIndex,
+					levelIndex,
+					err,
+				)
+			}
 			if err := b.processBlockGovernanceLevel(
 				ctx,
 				level,
@@ -1706,6 +1717,31 @@ func (b *Backfill) processBlockTxsBatched(
 		}
 	}
 	return nil
+}
+
+// creditDirectDeposits credits the reward accounts a Dijkstra transaction body
+// deposits to, directly after the body's certificates were stored and before
+// the next body's withdrawals, as the ledger orders them. The credit is then in
+// the IndexerDB for an account the same segment registers, which the writer's
+// replay of the ledger's reward credits cannot reach before the blocks are
+// indexed. The journal key makes a credit the replay already applied a no-op.
+//
+// Nothing is credited unless withdrawals debit: a replay that leaves balances
+// to an imported snapshot leaves its credits to the snapshot too. A certified
+// closure's bodies are not credited here; their credits come from the replay
+// alone.
+func (b *Backfill) creditDirectDeposits(
+	ctx context.Context,
+	level lcommon.Transaction,
+	slot uint64,
+	txn *database.Txn,
+) error {
+	if !b.debitWithdrawals {
+		return nil
+	}
+	return dledger.ApplyDijkstraDirectDeposits(
+		ctx, dbadapter.New(b.db), level, slot, dbadapter.Txn(txn),
+	)
 }
 
 // persistCheckpoint writes the current backfill progress.

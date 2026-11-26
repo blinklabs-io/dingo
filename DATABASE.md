@@ -4608,7 +4608,18 @@ never by row id, from `metadata.FactTables`:
 - reward credits, replayed from `account_reward_delta` through the idempotent
   credit path so a balance moves once per journal entry. Block replay debits
   the withdrawals, so a balance is the credits less the withdrawals, as live
-  apply leaves it. The replay up to a Mithril anchor does not debit: no
+  apply leaves it. A credit whose account the segment's blocks register, which
+  in practice is a Dijkstra direct deposit, finds no account while the copy runs
+  ahead of them: the copy applies the credits whose accounts exist and holds
+  the rest, and `PatchFacts` applies them once the blocks are indexed. Block
+  replay also credits each Dijkstra body's direct deposits itself, right after
+  that body's certificates and before the next body's withdrawals, which is
+  the order the ledger applies them in, so a withdrawal of a fresh deposit
+  later in the segment finds its balance. The journal key makes the held credit
+  a no-op once the blocks have credited it, and a held credit whose account is
+  still missing fails the batch. Block replay credits only when it debits
+  withdrawals, and not for the bodies of a certified closure, whose credits
+  come from the copy alone. The replay up to a Mithril anchor does not debit: no
   credit before the anchor is replayed, and the anchor's balances are set
   from the imported state afterwards. The journal is exported from the set's
   reward records, each of which carries
