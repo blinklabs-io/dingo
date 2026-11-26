@@ -24,7 +24,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/gouroboros/ledger"
 )
 
 // HistoryExpiryCursorKey names the block-store chain state holding the slot
@@ -201,10 +200,6 @@ func (d *Database) MaterializeBlockUtxos(
 	if d.metadata == nil || d.liveUtxo {
 		return 0, ctx.Err()
 	}
-	refs, err := d.offsetUtxoRefsAtSlot(ctx, slot)
-	if err != nil {
-		return 0, err
-	}
 	var materialized int
 	// An IndexerDB writes its entries in its metadata transaction.
 	var blobTxn *Txn
@@ -226,33 +221,31 @@ func (d *Database) MaterializeBlockUtxos(
 				err,
 			)
 		}
-		if blockMeta.Type == ledger.BlockTypeDijkstra || len(refs) == 0 {
-			block, err := models.DecodeBlockCbor(blockMeta.Type, blockCbor)
-			if err != nil {
-				return fmt.Errorf(
-					"materialize block UTxOs (slot=%d): decode block: %w",
-					slot,
-					err,
-				)
-			}
-			offsets, err := NewBlockIndexer(slot, hash).ComputeOffsets(
-				blockCbor,
-				block,
+		block, err := models.DecodeBlockCbor(blockMeta.Type, blockCbor)
+		if err != nil {
+			return fmt.Errorf(
+				"materialize block UTxOs (slot=%d): decode block: %w",
+				slot,
+				err,
 			)
-			if err != nil {
-				return fmt.Errorf(
-					"materialize block UTxOs (slot=%d): compute offsets: %w",
-					slot,
-					err,
-				)
-			}
-			refs = make([]models.UtxoId, 0, len(offsets.UtxoOffsets))
-			for ref := range offsets.UtxoOffsets {
-				refs = append(refs, models.UtxoId{
-					Hash: ref.TxId[:],
-					Idx:  ref.OutputIdx,
-				})
-			}
+		}
+		offsets, err := NewBlockIndexer(slot, hash).ComputeOffsets(
+			blockCbor,
+			block,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"materialize block UTxOs (slot=%d): compute offsets: %w",
+				slot,
+				err,
+			)
+		}
+		refs := make([]models.UtxoId, 0, len(offsets.UtxoOffsets))
+		for ref := range offsets.UtxoOffsets {
+			refs = append(refs, models.UtxoId{
+				Hash: ref.TxId[:],
+				Idx:  ref.OutputIdx,
+			})
 		}
 		n, err := d.materializeUtxosTxnBlock(
 			ctx, txn, slot, hash, blockCbor, refs,

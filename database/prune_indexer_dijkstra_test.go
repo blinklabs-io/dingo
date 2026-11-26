@@ -20,11 +20,13 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	mockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,6 +83,110 @@ func TestIndexerMaterializesDijkstraSubtransactionOutput(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, outputCbor, got)
+}
+
+func TestIndexerMaterializesBlockOffsetsBeyondMetadataRows(t *testing.T) {
+	t.Parallel()
+
+	fixture := newIndexerTestDB(t, nil)
+	const slot uint64 = 100
+	block := pruneConwayBlockWithTwoOutputs(t, slot)
+	blockHash := block.Hash().Bytes()
+	blockCbor := block.Cbor()
+	offsets, err := NewBlockIndexer(slot, blockHash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
+	require.NoError(t, err)
+	require.Len(t, offsets.UtxoOffsets, 2)
+
+	refs := make([]UtxoRef, 0, len(offsets.UtxoOffsets))
+	for ref := range offsets.UtxoOffsets {
+		refs = append(refs, ref)
+	}
+	ledgerTxn := fixture.ledger.BlobTxn(true)
+	require.NoError(t, ledgerTxn.Do(func(txn *Txn) error {
+		return fixture.ledger.Blob().SetBlock(
+			txn.Blob(), slot, blockHash, blockCbor, 1,
+			gledger.BlockTypeConway, 1, nil,
+		)
+	}))
+	indexerTxn := fixture.indexer.BlobTxn(true)
+	require.NoError(t, indexerTxn.Do(func(txn *Txn) error {
+		for _, ref := range refs {
+			offset := offsets.UtxoOffsets[ref]
+			if err := fixture.indexer.Blob().SetUtxo(
+				txn.Blob(), ref.TxId[:], ref.OutputIdx,
+				EncodeUtxoOffset(&offset),
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	metadataTxn := fixture.indexer.MetadataTxn(context.Background(), true)
+	require.NoError(t, metadataTxn.Do(func(txn *Txn) error {
+		ref := refs[0]
+		return fixture.indexer.Metadata().CreateUtxo(
+			txn.Metadata(),
+			&models.Utxo{
+				TxId:      ref.TxId[:],
+				OutputIdx: ref.OutputIdx,
+				AddedSlot: slot,
+				Amount:    1,
+				Address:   []byte("indexed-output"),
+			},
+		)
+	}))
+	metadataRead := fixture.indexer.MetadataTxn(context.Background(), false)
+	sqlRefs, err := fixture.indexer.Metadata().GetUtxosBySlot(
+		slot,
+		metadataRead.Metadata(),
+	)
+	metadataRead.Release()
+	require.NoError(t, err)
+	require.Len(t, sqlRefs, 1)
+
+	// The SQL UTxO rows expose one output, while the IndexerDB has a live offset
+	// for the second output as well, modeling an output restored by rollback.
+	n, err := fixture.indexer.MaterializeBlockUtxos(
+		context.Background(), slot, blockHash,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+
+	readTxn := fixture.indexer.BlobTxn(false)
+	defer readTxn.Release()
+	for _, ref := range refs {
+		got, err := fixture.indexer.Blob().GetUtxo(
+			readTxn.Blob(), ref.TxId[:], ref.OutputIdx,
+		)
+		require.NoError(t, err)
+		offset := offsets.UtxoOffsets[ref]
+		want := blockCbor[offset.ByteOffset : offset.ByteOffset+offset.ByteLength]
+		require.Equal(t, want, got)
+	}
+}
+
+func pruneConwayBlockWithTwoOutputs(
+	t *testing.T,
+	slot uint64,
+) gledger.Block {
+	t.Helper()
+
+	generated, err := testfixtures.GenerateConwayChainWithTransactions(2)
+	require.NoError(t, err)
+	transactions := []lcommon.Transaction{
+		generated[0].Transactions()[0],
+		generated[1].Transactions()[0],
+	}
+	block, err := mockfixtures.NewBlockBuilder(gledger.GetEraById(6)).
+		WithBlockNumber(1).
+		WithSlot(slot).
+		WithTransactions(transactions...).
+		Build()
+	require.NoError(t, err)
+	return block
 }
 
 func pruneDijkstraBlock(
