@@ -273,7 +273,9 @@ func (m *Manager) worker(ctx context.Context, tick <-chan time.Time) {
 		case <-ctx.Done():
 			return
 		case <-tick:
-			if m.now().Before(m.periodicAfter) || m.deferred() {
+			// deferred first: it records the tick for Defer's resume even
+			// when backoff then holds the run.
+			if m.deferred() || m.now().Before(m.periodicAfter) {
 				continue
 			}
 			result, _ := m.run(ctx, types.PlannerStatsTriggerPeriodic)

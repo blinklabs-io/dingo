@@ -470,3 +470,32 @@ func TestPeriodicRunsBackOffAfterALongPass(t *testing.T) {
 	tick <- time.Time{}
 	require.Equal(t, "periodic", receive(t, u.entered, "periodic run after backoff"))
 }
+
+// TestDeferredTickInsideBackoffQueuesRunOnResume holds a deferral across a
+// periodic tick that falls inside the backoff of a long pass. The tick is
+// still recorded for Defer, so resuming queues the one run Defer promises.
+func TestDeferredTickInsideBackoffQueuesRunOnResume(t *testing.T) {
+	t.Parallel()
+	u := newFakeUpdater()
+	close(u.release)
+	u.duration = 10 * time.Second
+	m := newTestManager(u, event.NewEventBus(nil, nil))
+	var clock atomic.Int64
+	m.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	tick := make(chan time.Time)
+	m.newTick = func() (<-chan time.Time, func()) { return tick, func() {} }
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	require.NoError(t, m.Start(ctx))
+	defer func() { require.NoError(t, m.Stop()) }()
+
+	tick <- time.Time{}
+	require.Equal(t, "periodic", receive(t, u.entered, "first periodic run"))
+	tick <- time.Time{} // the first pass and its backoff are recorded
+	resume := m.Defer()
+	tick <- time.Time{}
+	tick <- time.Time{}
+	require.Equal(t, int64(1), u.calls.Load())
+	resume()
+	require.Equal(t, "epoch", receive(t, u.entered, "run queued by resume"))
+}
