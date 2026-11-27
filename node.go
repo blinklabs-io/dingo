@@ -2557,6 +2557,13 @@ func (n *Node) buildChainSelectorConfig(
 				ledger.QueryPoint{Slot: point.Slot, Hash: point.Hash},
 			) == nil
 		},
+		LocalPointBlockNumber: func(point ocommon.Point) (uint64, bool) {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return 0, false
+			}
+			return ls.PrimaryChainPointBlockNumber(context.Background(), point)
+		},
 	}
 	// The running node publishes its started ledger before constructing the
 	// selector. Callers that build a standalone selector config without a
