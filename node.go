@@ -326,6 +326,18 @@ type Node struct {
 	chainSelectedNoneWake       chan struct{}
 	chainSelectedNoneWorkerDone chan struct{}
 
+	// Genesis disconnects queued by the chain-selector hooks for the
+	// node-owned worker (node_peer_disconnect.go), in report order.
+	peerDisconnectMu         sync.Mutex
+	peerDisconnectPending    map[string]func() func()
+	peerDisconnectOrder      []string
+	peerDisconnectWake       chan struct{}
+	peerDisconnectWorkerDone chan struct{}
+	// closePeerConnOverride, when set, replaces looking a disconnected peer's
+	// connection up and closing it, so a test can stand in a connection whose
+	// Close waits for one of its callbacks.
+	closePeerConnOverride func(ouroboros.ConnectionId, string)
+
 	// snapshotMu serializes Snapshot calls against each other and against
 	// a concurrent Restore/Truncate (which closes n.db out from under an
 	// in-progress Snapshot if not excluded), and is what enforces bark
@@ -1529,6 +1541,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// deferral worker first so a contended one-shot transition is never lost.
 	n.startChainSelectedNoneWorker(n.ctx)
 	started = append(started, n.waitChainSelectedNoneWorker)
+	n.startPeerDisconnectWorker(n.ctx)
+	started = append(started, n.waitPeerDisconnectWorker)
 	n.subscribeChainSelectorEvents()
 	n.subscribeCaughtUpMarkerEvents()
 	n.subscribeLedgerStateEvents()

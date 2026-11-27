@@ -231,19 +231,29 @@ func (n *Node) recordRollbackRegistration(
 const genesisDensityDenyDuration = 10 * time.Minute
 
 // onGenesisDensityDisconnect acts on a peer the Genesis Density Disconnector
-// reported: it counts the report, denies the peer for
-// genesisDensityDenyDuration when the report is the provable comparison and its
-// connection ID carries a remote address, and closes its connection if it is
-// still open. A Limit on Eagerness standoff loss is not denied: that rule is a
-// heuristic an honest fork can lose, so the peer must stay redialable.
+// reported: it counts the report and queues the disconnect for the node-owned
+// worker, which denies the peer for genesisDensityDenyDuration when the report
+// is the provable comparison and its connection ID carries a remote address,
+// and closes its connection if it is still open. A Limit on Eagerness standoff
+// loss is not denied: that rule is a heuristic an honest fork can lose, so the
+// peer must stay redialable.
 func (n *Node) onGenesisDensityDisconnect(
 	d chainselection.GenesisDensityDisconnect,
 ) {
 	if n.chainSelectionMetrics != nil {
 		n.chainSelectionMetrics.gddDisconnects.Inc()
 	}
-	n.networkingCoreMu.Lock()
-	defer n.networkingCoreMu.Unlock()
+	n.queuePeerDisconnect(
+		"density "+d.ConnectionId.String(),
+		func() func() { return n.genesisDensityDisconnectLocked(d) },
+	)
+}
+
+// genesisDensityDisconnectLocked denies and logs the peer and returns the
+// close of its connection. The caller holds networkingCoreMu.
+func (n *Node) genesisDensityDisconnectLocked(
+	d chainselection.GenesisDensityDisconnect,
+) func() {
 	// A connection ID without a remote address cannot be denied, so the log
 	// reports whether the deny happened rather than implying it.
 	denied := false
@@ -268,21 +278,11 @@ func (n *Node) onGenesisDensityDisconnect(
 		"denied", denied,
 		"deny_duration", genesisDensityDenyDuration,
 	)
-	if n.connManager == nil {
-		return
-	}
-	conn := n.connManager.GetConnectionById(d.ConnectionId)
-	if conn == nil {
-		return
-	}
+	reason := ""
 	if d.EagernessStandoff {
-		_ = n.connManager.CloseConnectionWithReason(
-			conn,
-			peergov.CloseReasonEagernessStandoffLost,
-		)
-		return
+		reason = peergov.CloseReasonEagernessStandoffLost
 	}
-	conn.Close()
+	return n.peerConnCloser(d.ConnectionId, reason)
 }
 
 // denyPeer applies a denial to the current peer governor. Live database
