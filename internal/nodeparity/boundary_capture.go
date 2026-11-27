@@ -899,8 +899,8 @@ func followBoundariesOnce(
 		rawConn.Close() //nolint:errcheck
 		return err
 	}
-	defer conn.Close()                                      //nolint:errcheck
-	stop := context.AfterFunc(ctx, func() { conn.Close() }) //nolint:errcheck
+	defer conn.Close(context.WithoutCancel(ctx))                                      //nolint:errcheck
+	stop := context.AfterFunc(ctx, func() { conn.Close(context.WithoutCancel(ctx)) }) //nolint:errcheck
 	defer stop()
 	cs := conn.ChainSync()
 	if cs == nil || cs.Client == nil {

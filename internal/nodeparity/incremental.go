@@ -834,7 +834,7 @@ func queryEpochAt(
 	if err != nil {
 		return 0, err
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 	lsq := conn.LocalStateQuery()
 	if lsq == nil || lsq.Client == nil {
 		return 0, errors.New("LocalStateQuery client unavailable")
@@ -905,7 +905,7 @@ func incrementalSession(
 	if err != nil {
 		return false, fmt.Errorf("dial dingo: %w", err)
 	}
-	defer dingoConn.Close() //nolint:errcheck
+	defer dingoConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 
 	proto := protoFromAddr(cfg.CardanoAddr)
 	dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
@@ -1009,11 +1009,11 @@ func incrementalSession(
 		rawConn.Close() //nolint:errcheck
 		return false, fmt.Errorf("ouroboros.New: %w", connErr)
 	}
-	defer cardanoConn.Close() //nolint:errcheck
+	defer cardanoConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 
 	stopOnCancel := context.AfterFunc(
 		ctx,
-		func() { cardanoConn.Close() },
+		func() { cardanoConn.Close(context.WithoutCancel(ctx)) },
 	) //nolint:errcheck
 	defer stopOnCancel()
 
@@ -1210,8 +1210,8 @@ func checkBlockDelta(
 	// handleIncrementalBlock) -- both connections need redialing on the next
 	// reconnect regardless of which one was actually slow.
 	stop := context.AfterFunc(ctx, func() {
-		dingoConn.Close()   //nolint:errcheck
-		cardanoConn.Close() //nolint:errcheck
+		dingoConn.Close(context.WithoutCancel(ctx))   //nolint:errcheck
+		cardanoConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 	})
 	defer stop()
 
