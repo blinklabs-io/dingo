@@ -169,6 +169,9 @@ func (c *governanceChain) pparams() *conway.ConwayProtocolParameters {
 	p.DRepVotingThresholds.MotionNoConfidence = zero
 	p.PoolVotingThresholds.MotionNoConfidence = zero
 	if c.postEnactmentSPO {
+		p.DRepVotingThresholds.MotionNoConfidence = cbor.Rat{
+			Rat: new(big.Rat).SetFrac64(1, 2),
+		}
 		p.PoolVotingThresholds.MotionNoConfidence = cbor.Rat{
 			Rat: new(big.Rat).SetFrac64(7, 10),
 		}
@@ -778,6 +781,7 @@ func TestDerivedPostEnactmentRatificationEqualsTheLedgers(t *testing.T) {
 		c.postEnactmentSPO = true
 		c.withHardForkTo(12)
 	})
-	require.Contains(t, strings.Join(facts["governance_proposal"], "\n"),
-		"ratified_epoch=6")
+	proposals := strings.Join(facts["governance_proposal"], "\n")
+	require.Contains(t, proposals, "ratified_epoch=6")
+	require.Contains(t, proposals, "enacted_epoch=7")
 }
