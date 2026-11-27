@@ -637,7 +637,8 @@ func (p *PeerGovernor) demoteExcessWarmPeersLocked(
 	limit int,
 	closes *[]deferredClose,
 ) []pendingEvent {
-	var warm, candidates []*Peer
+	warm := make([]*Peer, 0, len(p.peers))
+	candidates := make([]*Peer, 0, len(p.peers))
 	for _, peer := range p.peers {
 		if peer == nil || peer.State != PeerStateWarm ||
 			peer.Source == PeerSourceInboundConn {
