@@ -21,6 +21,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/prometheus/client_golang/prometheus"
@@ -252,4 +253,40 @@ func TestEnforcePeerLimits_DemotesExcessWarmAndKeepsPeerKnown(t *testing.T) {
 	require.NoError(t, pg.AddPeer(drop.Address, PeerSourceP2PGossip))
 	requireDialStarted(t, pg, drop.NormalizedAddress, false,
 		"a peer demoted for the limit is not redialled by the next round")
+}
+
+// A peer held back by the gate must be dialled once established peers fall
+// below the target, even while the hot set meets MinHotPeers and no
+// emergency redial applies; otherwise the node stays below the target.
+func TestReconcile_DialsKnownColdPeerBelowEstablishedTarget(t *testing.T) {
+	t.Parallel()
+	pg := newBlockedDialGovernor(t, PeerGovernorConfig{
+		TargetNumberOfEstablishedPeers: 3,
+		TargetNumberOfActivePeers:      1,
+		TargetNumberOfKnownPeers:       100,
+		MinHotPeers:                    1,
+	})
+	hot := starvationPeer(0, PeerSourceP2PGossip, PeerStateHot, true)
+	hot.LastActivity = time.Now()
+	warm1 := starvationPeer(1, PeerSourceP2PGossip, PeerStateWarm, true)
+	warm2 := starvationPeer(2, PeerSourceP2PGossip, PeerStateWarm, true)
+	pg.mu.Lock()
+	pg.bootstrapExited = true
+	pg.peers = []*Peer{hot, warm1, warm2}
+	pg.mu.Unlock()
+
+	const held = "44.0.0.1:3001"
+	require.NoError(t, pg.AddPeer(held, PeerSourceP2PGossip))
+	requireDialStarted(t, pg, held, false,
+		"established peers are at the target: the peer is held cold")
+
+	pg.mu.Lock()
+	idx := pg.peerIndexByAddress(held)
+	require.NotEqual(t, -1, idx)
+	pg.peers = []*Peer{hot, pg.peers[idx]}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+	requireDialStarted(t, pg, held, true,
+		"one established peer of three: reconcile dials the held peer")
 }

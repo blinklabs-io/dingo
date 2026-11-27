@@ -194,4 +194,49 @@ func (p *PeerGovernor) redialDisconnectedPeersLocked() {
 		)
 		p.spawnOutboundConnectionLocked(peer)
 	}
+	p.fillEstablishedDeficitLocked()
+}
+
+// fillEstablishedDeficitLocked dials known cold gossip and ledger peers,
+// best ranked first, until established peers plus dials in flight reach
+// TargetNumberOfEstablishedPeers. Discovery and Start dial only below that
+// target, so without this a peer they held back would never be dialled
+// once the established count fell. Peers skipped by redialCandidatesLocked
+// for denial, a chainsync demotion or an observed below-threshold score are
+// skipped here too. Must be called with p.mu held.
+func (p *PeerGovernor) fillEstablishedDeficitLocked() {
+	target := p.config.TargetNumberOfEstablishedPeers
+	if target <= 0 {
+		return
+	}
+	deficit := target - p.establishedOrDialingCountLocked()
+	if deficit <= 0 {
+		return
+	}
+	now := time.Now()
+	candidates := make([]*Peer, 0, len(p.peers))
+	for _, peer := range p.peers {
+		if peer == nil || peer.State != PeerStateCold ||
+			peer.Connection != nil || peer.Reconnecting {
+			continue
+		}
+		if peer.Source != PeerSourceP2PGossip &&
+			peer.Source != PeerSourceP2PLedger {
+			continue
+		}
+		if p.isPeerDeniedLocked(peer) || chainsyncDemoted(peer, now) ||
+			p.observedBelowThreshold(peer) {
+			continue
+		}
+		candidates = append(candidates, peer)
+	}
+	slices.SortStableFunc(candidates, p.redialRankCompare)
+	for _, peer := range candidates[:min(deficit, len(candidates))] {
+		p.config.Logger.Debug(
+			"dialing known peer below established target",
+			"address", peer.Address,
+			"source", peer.Source.String(),
+		)
+		p.spawnOutboundConnectionLocked(peer)
+	}
 }

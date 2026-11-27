@@ -247,7 +247,8 @@ func (p *PeerGovernor) establishedOrDialingCountLocked() int {
 // at start. A topology peer is always dialled. Any other peer is dialled
 // only while established peers and dials in flight are below
 // TargetNumberOfEstablishedPeers (0 means unlimited); otherwise it stays
-// known and cold, and reconcile's redial path decides about it later.
+// known and cold until reconcile finds the established count below the
+// target (fillEstablishedDeficitLocked).
 // Must be called with p.mu held.
 func (p *PeerGovernor) spawnBelowEstablishedTargetLocked(peer *Peer) {
 	if peer == nil {
