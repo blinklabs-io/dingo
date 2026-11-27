@@ -238,8 +238,16 @@ func TestBlockfetchServerRequestRange_PeerDisconnectMidRangeReleases(
 ) {
 	t.Parallel()
 
-	f := newBlockfetchRangeFixture(t)
-	f.requestRange(t, f.point(0), f.point(2))
+	// The protocol queues up to 80 outbound messages before a send blocks, so
+	// the range must hold more blocks than that for the sender to be stuck
+	// mid-range while the peer reads nothing more.
+	const blocks = 100
+	slots := make([]uint64, blocks)
+	for i := range slots {
+		slots[i] = uint64(i+1) * 10
+	}
+	f := newBlockfetchRangeFixtureWithSlots(t, slots)
+	f.requestRange(t, f.point(0), f.point(blocks-1))
 	// StartBatch proves the sender goroutine owns the reservation. The rest
 	// of the batch is left unread, so the sender is blocked mid-range.
 	require.Equal(t,
