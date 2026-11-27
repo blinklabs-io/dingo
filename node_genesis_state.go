@@ -208,7 +208,10 @@ func (n *Node) genesisHistoricityCutoff() time.Duration {
 	return historicityCutoffFor(windowSlots, sg.SlotLength.Rat)
 }
 
-func historicityCutoffFor(windowSlots uint64, slotLength *big.Rat) time.Duration {
+func historicityCutoffFor(
+	windowSlots uint64,
+	slotLength *big.Rat,
+) time.Duration {
 	seconds := new(big.Rat).Mul(
 		new(big.Rat).SetUint64(windowSlots),
 		slotLength,
@@ -225,13 +228,23 @@ func historicityCutoffFor(windowSlots uint64, slotLength *big.Rat) time.Duration
 // historic tip stays on the deny list.
 const historicityDenyDuration = 10 * time.Minute
 
-// onHistoricityDisconnect disconnects a peer that reported itself idle at a
-// tip too old for an honest caught-up peer. It is a separate callback from the
-// density disconnector's because that report describes a dominating peer and
-// densities that do not apply, and its counter would misattribute the cause.
+// onHistoricityDisconnect queues the disconnect of a peer that reported
+// itself idle at a tip too old for an honest caught-up peer. It is a separate
+// callback from the density disconnector's because that report describes a
+// dominating peer and densities that do not apply, and its counter would
+// misattribute the cause.
 func (n *Node) onHistoricityDisconnect(d chainselection.HistoricityDisconnect) {
-	n.networkingCoreMu.Lock()
-	defer n.networkingCoreMu.Unlock()
+	n.queuePeerDisconnect(
+		"historicity "+d.ConnectionId.String(),
+		func() func() { return n.historicityDisconnectLocked(d) },
+	)
+}
+
+// historicityDisconnectLocked denies and logs the peer and returns the close
+// of its connection. The caller holds networkingCoreMu.
+func (n *Node) historicityDisconnectLocked(
+	d chainselection.HistoricityDisconnect,
+) func() {
 	denied := false
 	if d.ConnectionId.RemoteAddr != nil {
 		denied = n.denyPeer(
@@ -247,10 +260,5 @@ func (n *Node) onHistoricityDisconnect(d chainselection.HistoricityDisconnect) {
 		"cutoff", d.Cutoff,
 		"denied", denied,
 	)
-	if n.connManager == nil {
-		return
-	}
-	if conn := n.connManager.GetConnectionById(d.ConnectionId); conn != nil {
-		conn.Close()
-	}
+	return n.peerConnCloser(d.ConnectionId, "")
 }

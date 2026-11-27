@@ -148,12 +148,16 @@ var closeOuroborosForShutdown = func(ouro *ouroborosPkg.Ouroboros) error {
 // n.cancel() could wedge Node.Stop past shutdownTimeout with no error for the
 // caller to act on.
 //
-// The two context-owned waits run first and unconditionally -- both no-op
-// when their worker was never started. The selected-to-none worker must
+// The context-owned waits run first and unconditionally -- each no-ops
+// when its worker was never started. The selected-to-none worker must
 // finish before n.chainSelector is stopped below, since it reads the
-// selector's state. Both workers touch node components only while holding
-// liveLifecycleMu (via TryLock), which shutdown already holds by phase 1, so
-// bounding their wait cannot let teardown race a component they are using.
+// selector's state. The recycler and that worker touch node components only
+// while holding liveLifecycleMu (via TryLock), which shutdown already holds by
+// phase 1, so bounding their wait cannot let teardown race a component they
+// are using. The peer disconnect worker uses n.peerGov and n.connManager under
+// networkingCoreMu, which only a Restore or Truncate holds for long, and
+// shutdown's liveLifecycleMu excludes those; it finishes before the
+// connection manager below is stopped.
 //
 // The rest is quiesceComponentStops (node_lifecycle.go), reused rather than
 // copied: every component live restore/truncate must stop before closing
@@ -172,6 +176,10 @@ func (n *Node) shutdownPhase1ComponentStops() []namedStop {
 		{
 			name: "chain-selected-to-none worker",
 			stop: func() error { n.waitChainSelectedNoneWorker(); return nil },
+		},
+		{
+			name: "peer disconnect worker",
+			stop: func() error { n.waitPeerDisconnectWorker(); return nil },
 		},
 	}, n.quiesceComponentStops()...)
 }
