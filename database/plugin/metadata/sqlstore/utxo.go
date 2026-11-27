@@ -2822,10 +2822,11 @@ SELECT amount FROM utxo
 WHERE payment_script = TRUE AND deleted_slot = 0`))
 }
 
-const liveUtxosByAssetPolicyQuery = `-- name: GetLiveUtxosByAssetPolicy :many
+func liveUtxosByAssetPolicyQuery(dialect string) string {
+	return `-- name: GetLiveUtxosByAssetPolicy :many
 SELECT ` + utxoRowColumns + `
 FROM utxo
-WHERE utxo.deleted_slot = 0
+WHERE ` + liveAssetUtxoPredicate(dialect, "utxo") + `
   AND utxo.id IN (
       SELECT h.utxo_id
       FROM asset_identity i
@@ -2833,11 +2834,13 @@ WHERE utxo.deleted_slot = 0
       WHERE i.policy_id = ?
   )
 ORDER BY utxo.id`
+}
 
-const liveUtxosByAssetQuery = `-- name: GetLiveUtxosByAsset :many
+func liveUtxosByAssetQuery(dialect string) string {
+	return `-- name: GetLiveUtxosByAsset :many
 SELECT ` + utxoRowColumns + `
 FROM utxo
-WHERE utxo.deleted_slot = 0
+WHERE ` + liveAssetUtxoPredicate(dialect, "utxo") + `
   AND utxo.id IN (
       SELECT h.utxo_id
       FROM asset_identity i
@@ -2845,6 +2848,7 @@ WHERE utxo.deleted_slot = 0
       WHERE i.policy_id = ? AND i.name = ?
   )
 ORDER BY utxo.id`
+}
 
 func (s *Store) GetUtxosByAssets(
 	policyID []byte,
@@ -2858,11 +2862,11 @@ func (s *Store) GetUtxosByAssets(
 	var ret []models.Utxo
 	if assetName == nil {
 		ret, err = s.queryUtxoModels(
-			ctx, db, liveUtxosByAssetPolicyQuery, policyID,
+			ctx, db, liveUtxosByAssetPolicyQuery(s.dialect.Name()), policyID,
 		)
 	} else {
 		ret, err = s.queryUtxoModels(
-			ctx, db, liveUtxosByAssetQuery, policyID, assetName,
+			ctx, db, liveUtxosByAssetQuery(s.dialect.Name()), policyID, assetName,
 		)
 	}
 	if err != nil {

@@ -27,13 +27,39 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-const assetHolderGroups = `
+// liveAssetUtxoPredicate selects the live outputs among an asset's holdings.
+// On SQLite the unary plus keeps the liveness index out of the plan: it
+// matches nearly every row, yet statistics can rank it above the asset's
+// holdings, and driving from it probes the holdings once per live output.
+func liveAssetUtxoPredicate(dialect, utxoAlias string) string {
+	if dialect == "sqlite" {
+		return "+" + utxoAlias + ".deleted_slot = 0"
+	}
+	return utxoAlias + ".deleted_slot = 0"
+}
+
+func assetHolderGroups(dialect string) string {
+	return `
 FROM asset_identity AS i
 INNER JOIN asset_holding AS a ON a.asset_id = i.id
 INNER JOIN utxo AS u ON u.id = a.utxo_id
 INNER JOIN utxo_address AS ua ON ua.utxo_id = u.id
-WHERE i.policy_id = ? AND i.name = ? AND u.deleted_slot = 0
+WHERE i.policy_id = ? AND i.name = ? AND ` +
+		liveAssetUtxoPredicate(dialect, "u") + `
 GROUP BY ua.address`
+}
+
+func assetHolderAddressCheckQuery(dialect string) string {
+	return `
+SELECT 1 FROM asset_identity AS i
+INNER JOIN asset_holding AS a ON a.asset_id = i.id
+INNER JOIN utxo AS u ON u.id = a.utxo_id
+LEFT JOIN utxo_address AS ua ON ua.utxo_id = u.id
+WHERE i.policy_id = ? AND i.name = ? AND ` +
+		liveAssetUtxoPredicate(dialect, "u") + `
+  AND ua.utxo_id IS NULL
+LIMIT 1`
+}
 
 func (s *Store) GetAssetHolders(
 	query models.AssetHolderQuery,
@@ -48,14 +74,11 @@ func (s *Store) GetAssetHolders(
 	}
 	args := []any{query.PolicyID, nonNilName(query.AssetName)}
 	var missing int
-	err = db.QueryRowContext(ctx, s.dialect.Rebind(`
-SELECT 1 FROM asset_identity AS i
-INNER JOIN asset_holding AS a ON a.asset_id = i.id
-INNER JOIN utxo AS u ON u.id = a.utxo_id
-LEFT JOIN utxo_address AS ua ON ua.utxo_id = u.id
-WHERE i.policy_id = ? AND i.name = ? AND u.deleted_slot = 0
-  AND ua.utxo_id IS NULL
-LIMIT 1`), args...).Scan(&missing)
+	dialect := s.dialect.Name()
+	holderGroups := assetHolderGroups(dialect)
+	err = db.QueryRowContext(ctx, s.dialect.Rebind(
+		assetHolderAddressCheckQuery(dialect),
+	), args...).Scan(&missing)
 	if err == nil {
 		return nil, 0, errors.New("live UTxO address is unavailable")
 	}
@@ -64,7 +87,7 @@ LIMIT 1`), args...).Scan(&missing)
 	}
 	var total int
 	if err := db.QueryRowContext(ctx, s.dialect.Rebind(
-		`SELECT COUNT(*) FROM (SELECT 1`+assetHolderGroups+`) AS holders`,
+		`SELECT COUNT(*) FROM (SELECT 1`+holderGroups+`) AS holders`,
 	), args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count asset holders: %w", err)
 	}
@@ -79,7 +102,7 @@ LIMIT 1`), args...).Scan(&missing)
 	if s.dialect.Name() == "sqlite" {
 		sumExpression = "dingo_uint64_sum(a.amount)"
 	} else {
-		overflowSQL := `SELECT 1` + assetHolderGroups +
+		overflowSQL := `SELECT 1` + holderGroups +
 			` HAVING ` + sumExpression +
 			` > CAST('18446744073709551615' AS DECIMAL(20, 0)) LIMIT 1`
 		var overflow int
@@ -96,7 +119,7 @@ LIMIT 1`), args...).Scan(&missing)
 		}
 	}
 	pageSQL := `SELECT ua.address, ` + sumExpression + ` AS quantity` +
-		assetHolderGroups + ` ORDER BY quantity ` + direction +
+		holderGroups + ` ORDER BY quantity ` + direction +
 		`, ua.address ` + direction + ` LIMIT ? OFFSET ?`
 	rows, err := db.QueryContext(
 		ctx,
@@ -153,13 +176,14 @@ func (s *Store) AssetHeld(
 
 // assetQuantityQuery totals the live holdings of one asset with
 // sumExpression, which reads h.amount.
-func assetQuantityQuery(sumExpression string) string {
+func assetQuantityQuery(dialect, sumExpression string) string {
 	return `
 SELECT ` + sumExpression + `
 FROM asset_identity AS i
 INNER JOIN asset_holding AS h ON h.asset_id = i.id
 INNER JOIN utxo ON h.utxo_id = utxo.id
-WHERE i.policy_id = ? AND i.name = ? AND utxo.deleted_slot = 0
+WHERE i.policy_id = ? AND i.name = ? AND ` +
+		liveAssetUtxoPredicate(dialect, "utxo") + `
   AND h.amount IS NOT NULL`
 }
 
@@ -182,7 +206,7 @@ func (s *Store) GetAssetQuantityByPolicyAndName(
 	}
 	var raw sql.NullString
 	err = db.QueryRowContext(ctx, s.dialect.Rebind(
-		assetQuantityQuery(sumExpression)),
+		assetQuantityQuery(s.dialect.Name(), sumExpression)),
 		policyID[:], nonNilName(assetName),
 	).Scan(&raw)
 	if err != nil {
