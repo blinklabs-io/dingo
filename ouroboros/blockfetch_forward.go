@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"time"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -253,7 +254,7 @@ func (o *Ouroboros) blockfetchForwardCloseLive(connId ouroboros.ConnectionId) {
 		return
 	}
 	o.closeBlockfetchConnection(
-		conn,
+		connmanager.OuroborosCloser{Conn: conn},
 		connId.String(),
 		"blockfetch forward queue limit reached",
 	)

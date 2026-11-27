@@ -3800,12 +3800,11 @@ func TestFetchLeiosEbTxsBatchedBatchesWindowsPerRequest(t *testing.T) {
 
 // muxerServer is the subset of a gouroboros protocol server
 // (*blockfetch.Server, *leiosfetch.Server, ...) that muxerServerPeer needs to
-// start and stop. Every protocol package's Server embeds *protocol.Protocol,
-// which defines both methods and is promoted onto the Server, so any of them
-// satisfies this interface unchanged.
+// start and stop. Every protocol package's Server defines both methods, so any
+// of them satisfies this interface unchanged.
 type muxerServer interface {
 	Start()
-	Stop()
+	Stop(context.Context) error
 }
 
 // muxerServerPeer drives a real Dingo server-side protocol implementation
@@ -3850,7 +3849,7 @@ func newMuxerServerPeer(
 	}
 	peer = &muxerServerPeer{peerConn: peerConn, errChan: errChan, muxer: m}
 	t.Cleanup(func() {
-		m.Stop()
+		m.Stop(context.Background())
 		_ = serverConn.Close()
 		_ = peerConn.Close()
 	})
@@ -3868,7 +3867,7 @@ func (p *muxerServerPeer) start(t *testing.T, server muxerServer) {
 	t.Helper()
 	server.Start()
 	p.muxer.Start()
-	t.Cleanup(server.Stop)
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
 }
 
 // send writes msg to the server as a request segment for the given protocol.

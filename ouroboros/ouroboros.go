@@ -1754,6 +1754,7 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 // replacement, and closing that would tear down a good peer for a failure that
 // belonged to its predecessor.
 func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
+	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	startedConn *ouroboros.Connection,
 ) {
@@ -1772,7 +1773,10 @@ func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
 		)
 		return
 	}
-	if closeErr := startedConn.Close(); closeErr != nil {
+	if closeErr := connmanager.CloseOuroborosConn(
+		context.WithoutCancel(ctx),
+		startedConn,
+	); closeErr != nil {
 		o.config.Logger.Debug(
 			"failed to close outbound connection after chainsync start failure",
 			"component", "network",
@@ -1871,7 +1875,7 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 					"connection_id",
 					connId.String(),
 				)
-				conn.Close()
+				_ = connmanager.CloseOuroborosConn(context.Background(), conn)
 				return
 			} else {
 				o.config.Logger.Debug(

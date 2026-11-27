@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -234,7 +235,7 @@ func TestHandleConnClosedEventCountsRealKeepaliveTimeout(t *testing.T) {
 		ouroboros.WithKeepAliveConfig(kaCfg),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = oConn.Close() })
+	t.Cleanup(func() { _ = oConn.Close(context.Background()) })
 
 	var closeErr error
 	select {

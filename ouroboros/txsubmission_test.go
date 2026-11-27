@@ -1534,8 +1534,8 @@ func newTxSubmissionRelayHarnessWithOpts(
 // so callers can reliably observe goroutine counts settling afterward.
 func (h *txSubmissionRelayHarness) close(t *testing.T) {
 	t.Helper()
-	_ = h.connA.Close()
-	_ = h.connB.Close()
+	_ = h.connA.Close(context.Background())
+	_ = h.connB.Close(context.Background())
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = h.cmA.Stop(stopCtx)

@@ -442,7 +442,7 @@ func TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsabl
 		ouroboros.WithNodeToNode(false),
 	)
 	require.NoError(t, err)
-	defer cliConn.Close() //nolint:errcheck
+	defer cliConn.Close(context.Background()) //nolint:errcheck
 
 	var srvRes serverResult
 	select {
@@ -451,7 +451,7 @@ func TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsabl
 		t.Fatal("server side of ouroboros.New never completed the handshake")
 	}
 	require.NoError(t, srvRes.err)
-	defer srvRes.conn.Close() //nolint:errcheck
+	defer srvRes.conn.Close(context.Background()) //nolint:errcheck
 
 	client := cliConn.LocalStateQuery().Client
 	require.NotNil(t, client)
@@ -835,7 +835,7 @@ func TestLocalstatequeryAcquireRejectsClosedConnection(t *testing.T) {
 
 	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
 	owner := olocalstatequery.NewServer(protocol.ProtocolOptions{}, nil)
-	owner.Stop()
+	owner.Stop(context.Background())
 	ctx := olocalstatequery.CallbackContext{
 		ConnectionId: ouroboros.ConnectionId{},
 		Server:       owner,
@@ -1255,12 +1255,12 @@ func newNtCTestClientConn(
 		ouroboros.WithNodeToNode(false),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = cliConn.Close() })
+	t.Cleanup(func() { _ = cliConn.Close(context.Background()) })
 	srv := testutil.RequireReceive(
 		t, serverDone, testutil.AsyncWait, "server handshake",
 	)
 	require.NoError(t, srv.err)
-	t.Cleanup(func() { _ = srv.conn.Close() })
+	t.Cleanup(func() { _ = srv.conn.Close(context.Background()) })
 	return cliConn
 }
 

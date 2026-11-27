@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -320,8 +321,8 @@ func TestLeiosDependencySlowLookupCannotSendAfterOwnerReplacement(
 	t.Cleanup(func() { unblock(); _, drain := db.SetBlobStore(base); drain() })
 	first := oleiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
 	second := oleiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
-	t.Cleanup(first.Stop)
-	t.Cleanup(second.Stop)
+	t.Cleanup(func() { _ = first.Stop(context.Background()) })
+	t.Cleanup(func() { _ = second.Stop(context.Background()) })
 	conn := gouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
 		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},

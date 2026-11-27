@@ -19,7 +19,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"net"
@@ -27,6 +26,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -740,7 +741,7 @@ func newBlockfetchRangeFixtureWithSlotsConfigAndTypes(
 		)),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	require.True(t, connManager.AddConnection(conn, false, "127.0.0.1:3001"))
 
 	o := newOuroboros(OuroborosConfig{

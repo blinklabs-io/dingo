@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
@@ -156,7 +157,12 @@ type connWithDone struct {
 
 func (c connWithDone) Done() <-chan struct{} { return c.done }
 
-func (c connWithDone) Close() error { return c.conn.Close() }
+// Close waits, for a bounded time, until no callback of the connection is
+// still running. It is only used from goroutines the callbacks start, never
+// from a callback of the connection itself.
+func (c connWithDone) Close() error {
+	return connmanager.CloseOuroborosConn(context.Background(), c.conn)
+}
 
 func (c connWithDone) CloseError() error {
 	if c.closeErr == nil {
@@ -976,7 +982,13 @@ func (o *Ouroboros) blockfetchRecordNoBlocksAndMaybeClose(
 	if conn == nil {
 		return
 	}
-	o.closeBlockfetchConnection(conn, connId.String(), closeReason)
+	// This runs inside the connection's blockfetch callback, so only begin
+	// the shutdown: waiting for the callback here would wait for ourselves.
+	o.closeBlockfetchConnection(
+		connmanager.OuroborosCloser{Conn: conn, Begin: true},
+		connId.String(),
+		closeReason,
+	)
 }
 
 // blockfetchRecordNoBlocks increments the failed-lookup counter for connId and
