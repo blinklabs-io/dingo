@@ -2461,14 +2461,15 @@ func TestTxSizeForFee_ShelleyProtocolUpdateUsesWireBytes(t *testing.T) {
 	assert.Nil(t, reencodedTx)
 
 	// An indefinite transaction array is a distinct, valid wire encoding of
-	// the same classic update. Fee sizing must keep its received envelope byte.
+	// the same classic update. Fee sizing drops the outer framing, so it
+	// measures the same size as the one-byte-header encoding.
 	indefiniteCbor := append([]byte(nil), txCbor...)
 	require.Equal(t, byte(0x83), indefiniteCbor[0])
 	indefiniteCbor[0] = 0x9f
 	indefiniteCbor = append(indefiniteCbor, 0xff)
 	indefiniteTx, err := shelley.NewShelleyTransactionFromCbor(indefiniteCbor)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(len(indefiniteCbor)), TxSizeForFee(indefiniteTx))
+	assert.Equal(t, uint64(len(txCbor)), TxSizeForFee(indefiniteTx))
 }
 
 // TestTxSizeForFee_MaryBlockTransactionNeedsNoCorrection pins the reason Mary
@@ -2539,6 +2540,46 @@ func TestPreAlonzoRebuiltWireSize(t *testing.T) {
 		_, ok := preAlonzoRebuiltWireSize(&conway.ConwayTransaction{})
 		assert.False(t, ok)
 	})
+}
+
+// A Shelley or Allegra transaction decoded from any outer array framing and
+// the same transaction rebuilt from its block components are one transaction
+// to the ledger, so both paths of TxSizeForFee report the same size.
+func TestTxSizeForFee_PreAlonzoFramingMatchesRebuiltSize(t *testing.T) {
+	t.Parallel()
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x83), txCbor[0])
+	inner := txCbor[1:]
+	framings := map[string][]byte{
+		"definite":   txCbor,
+		"wide8":      append([]byte{0x98, 0x03}, inner...),
+		"indefinite": append(append([]byte{0x9f}, inner...), 0xff),
+	}
+	for name, data := range framings {
+		t.Run("shelley/"+name, func(t *testing.T) {
+			t.Parallel()
+			wireTx, err := shelley.NewShelleyTransactionFromCbor(data)
+			require.NoError(t, err)
+			rebuilt, ok := preAlonzoRebuiltWireSize(&shelley.ShelleyTransaction{
+				Body:       wireTx.Body,
+				WitnessSet: wireTx.WitnessSet,
+			})
+			require.True(t, ok)
+			assert.Equal(t, rebuilt, TxSizeForFee(wireTx))
+		})
+		t.Run("allegra/"+name, func(t *testing.T) {
+			t.Parallel()
+			wireTx, err := allegra.NewAllegraTransactionFromCbor(data)
+			require.NoError(t, err)
+			rebuilt, ok := preAlonzoRebuiltWireSize(&allegra.AllegraTransaction{
+				Body:       wireTx.Body,
+				WitnessSet: wireTx.WitnessSet,
+			})
+			require.True(t, ok)
+			assert.Equal(t, rebuilt, TxSizeForFee(wireTx))
+		})
+	}
 }
 
 // TestValidateTxPreAlonzoRebuiltUpdateTxSizes drives ValidateTxShelley and

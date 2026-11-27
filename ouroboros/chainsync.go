@@ -2406,6 +2406,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ocommon.NewPoint(blockSlot, blockHash),
 			)
 		}
+		defer o.csjObserveHeaderSent(ctx.ConnectionId)()
 		_, span := tracing.StartHeader(
 			context.Background(),
 			tracing.StageHeaderReceived,
