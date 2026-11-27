@@ -19,8 +19,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -30,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -192,8 +195,8 @@ func seedServerMigration(
 	)
 	require.NoError(t, err)
 	_, err = raw.Exec(
-		`INSERT INTO datum(hash,raw_datum,added_slot) VALUES(?,x'01',1)`,
-		bytes.Repeat([]byte{8}, 32),
+		`INSERT INTO datum(hash,raw_datum,added_slot) VALUES(?,x'01',?)`,
+		bytes.Repeat([]byte{8}, 32), blocks[0].SlotNumber(),
 	)
 	require.NoError(t, err)
 	require.NoError(t, raw.Close())
@@ -250,6 +253,17 @@ func TestServerMigrationResumesAndKeepsLedgerStateInPlace(t *testing.T) {
 					require.Equal(t, 1, oldCount)
 					require.Equal(t, copied, newCount, table)
 				}
+				// The adopted IndexerDB holds the datum as an offset into the
+				// block it was seeded at, not a copy of its bytes.
+				var datumColumn []byte
+				require.NoError(
+					t,
+					source.QueryRow("SELECT raw_datum FROM datum").
+						Scan(&datumColumn),
+				)
+				datumOffset, err := types.DecodeCborOffset(datumColumn)
+				require.NoError(t, err, "the datum column holds an offset")
+				require.Equal(t, last.Slot >= datumOffset.BlockSlot, true)
 				var mode string
 				require.NoError(
 					t,
@@ -460,7 +474,7 @@ func TestAdoptionRefusesAReleasedInterruptedBackfillUntouched(t *testing.T) {
 		{name: "staged sqlite", adopt: func(t *testing.T, dir string) error {
 			cfg := releasedServerMigration(t, "sqlite", t.TempDir()).cfg
 			return AdoptStagedAPI(
-				t.Context(), *cfg, migrateTestLogger(), nil, dir,
+				t.Context(), *cfg, migrateTestLogger(), nil, dir, nil,
 			)
 		}},
 	} {
@@ -516,4 +530,34 @@ func releasedServerMigration(
 		logger:      migrateTestLogger(),
 		hostFactory: serverMigrationHost(t, provider),
 	}
+}
+
+// With an archive configured, the migration reads the IndexerDB's blocks
+// through the archive store the configuration builds, so a block that expired
+// locally can be fetched to compute its offsets.
+func TestMigrationReadsBlocksThroughTheConfiguredArchive(t *testing.T) {
+	t.Parallel()
+	var wrapped atomic.Int32
+	m, _ := seedServerMigration(t, "postgres")
+	m.cfg.BarkBaseUrl = "https://archive.example"
+	m.archive = func(
+		cfg *config.Config,
+		upstream blob.BlobStore,
+	) (blob.BlobStore, error) {
+		require.Equal(t, "https://archive.example", cfg.BarkBaseUrl)
+		wrapped.Add(1)
+		return upstream, nil
+	}
+	require.NoError(t, m.run(t.Context()))
+	require.NotZero(t, wrapped.Load(), "the archive store was not used")
+}
+
+// A migration whose configuration names an archive and that is given no
+// constructor stops, instead of converting rows without the archive.
+func TestMigrationWithAnArchiveAndNoConstructorFails(t *testing.T) {
+	t.Parallel()
+	m, _ := seedServerMigration(t, "postgres")
+	m.cfg.BarkBaseUrl = "https://archive.example"
+	err := m.run(t.Context())
+	require.ErrorContains(t, err, "no archive store")
 }

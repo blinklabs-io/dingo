@@ -260,9 +260,10 @@ func testRunEnactsPendingUpdateBeforeHardFork(
 					))
 				} else {
 					for _, key := range ppupGenesisKeys() {
-						require.NoError(t, db.SetPParamUpdate(
-							key.Bytes(), ppupUpdateCbor(t), 5, ppupSourceEpoch, nil,
-						))
+						setTestPParamUpdate(
+							t, db, key.Bytes(), ppupUpdateCbor(t), 5,
+							ppupSourceEpoch,
+						)
 					}
 				}
 				targetBlocks, err := boundary.targetBlock(10)
@@ -363,9 +364,9 @@ func testRunRederivesPParamsBelowTheAnchor(
 		))
 	}
 	for _, key := range ppupGenesisKeys() {
-		require.NoError(t, db.SetPParamUpdate(
-			key.Bytes(), ppupUpdateCbor(t), 5, ppupSourceEpoch, nil,
-		))
+		setTestPParamUpdate(
+			t, db, key.Bytes(), ppupUpdateCbor(t), 5, ppupSourceEpoch,
+		)
 	}
 	bootstrap := NewBackfill(db, nodeCfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, bootstrap.bootstrapEraChain(eras.MaryEraDesc.Id))

@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"strconv"
 	"testing"
 
@@ -72,8 +73,13 @@ func TestTruncateMidnightJournalsRemovesStateAfterTarget(t *testing.T) {
 	idx, err := dbtest.NewIndexerDatabase(t, f.db, dbtest.IndexerOptions{})
 	require.NoError(t, err)
 	store := idx.Metadata()
+	archive := testutil.NewPayloadArchive()
+	store.(types.PayloadResolverSetter).SetPayloadResolver(archive)
+	txn := store.Transaction(t.Context())
+	defer txn.Rollback() //nolint:errcheck
+	txn.(types.PayloadLocatorSetter).SetPayloadLocator(archive)
 	for _, block := range f.blocks[1:] {
-		require.NoError(t, store.CreateMidnightAriadneRollback(nil,
+		require.NoError(t, store.CreateMidnightAriadneRollback(txn,
 			&models.MidnightAriadneRollback{
 				BlockNumber:    block.Number,
 				Epoch:          block.Number,
@@ -81,7 +87,7 @@ func TestTruncateMidnightJournalsRemovesStateAfterTarget(t *testing.T) {
 				PreviousDatum:  []byte{byte(block.Number)},
 			},
 		))
-		require.NoError(t, store.CreateMidnightCandidateRemoval(nil,
+		require.NoError(t, store.CreateMidnightCandidateRemoval(txn,
 			&models.MidnightCandidateRemoval{
 				BlockNumber: block.Number,
 				TxHash:      []byte{byte(block.Number)},
@@ -89,7 +95,7 @@ func TestTruncateMidnightJournalsRemovesStateAfterTarget(t *testing.T) {
 				Datum:       []byte{byte(block.Number)},
 			},
 		))
-		require.NoError(t, store.UpsertMidnightEpochTransition(nil,
+		require.NoError(t, store.UpsertMidnightEpochTransition(txn,
 			&models.MidnightEpochTransition{
 				BlockNumber:    block.Number,
 				PreviousEpoch:  block.Number - 1,
@@ -97,6 +103,7 @@ func TestTruncateMidnightJournalsRemovesStateAfterTarget(t *testing.T) {
 			},
 		))
 	}
+	require.NoError(t, txn.Commit())
 	require.NoError(t, store.SetBackfillCheckpoint(&models.BackfillCheckpoint{
 		Phase:     "midnight",
 		LastSlot:  f.blocks[2].Slot,

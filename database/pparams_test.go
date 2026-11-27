@@ -72,6 +72,8 @@ func TestGetPParams_PicksRowMatchingRequestedEra(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 
+	bindTestPayloads(t, db, txn)
+
 	// Step 1: simulate the old era's epoch-rollover write. At the
 	// boundary between Allegra (epoch 1) and Mary (epoch 2), the
 	// rollover code writes pparams with the Allegra (old) era id. The
@@ -166,6 +168,8 @@ func TestGetPParams_MaryToAlonzo_PicksMaryRow(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 
+	bindTestPayloads(t, db, txn)
+
 	// Mary epoch-rollover write at boundary epoch 2.
 	maryPP := &mary.MaryProtocolParameters{
 		MinFeeA:          44,
@@ -245,6 +249,8 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 	defer db.Close()
 
 	txn := db.Transaction(context.Background(), true)
+
+	bindTestPayloads(t, db, txn)
 	defer txn.Commit() //nolint:errcheck
 
 	// Store 3 pparam updates from 3 different genesis keys submitted in
@@ -327,6 +333,8 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 	defer db.Close()
 
 	txn := db.Transaction(context.Background(), true)
+
+	bindTestPayloads(t, db, txn)
 	defer txn.Commit() //nolint:errcheck
 
 	// Store 5 pparam updates from 5 different genesis keys submitted in
@@ -432,6 +440,8 @@ func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
 	defer db.Close()
 
 	txn := db.Transaction(context.Background(), true)
+
+	bindTestPayloads(t, db, txn)
 	defer txn.Commit() //nolint:errcheck
 
 	updateCbor, err := cbor.Encode(map[uint64]any{
@@ -503,6 +513,8 @@ func TestComputeAndApplyPParamUpdates_FalseWhenUpdateDoesNotWritePlutusV2CostMod
 	defer db.Close()
 
 	txn := db.Transaction(context.Background(), true)
+
+	bindTestPayloads(t, db, txn)
 	defer txn.Commit() //nolint:errcheck
 
 	minFeeA := uint(100)
@@ -566,8 +578,8 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 	for i := range 5 {
-		require.NoError(t, db.SetPParamUpdate(
-			[]byte{byte(i)}, updateCbor, uint64(300+i), 3, nil,
+		require.NoError(t, setTestPParamUpdate(
+			t, db, []byte{byte(i)}, updateCbor, uint64(300+i), 3,
 		))
 	}
 
@@ -637,8 +649,8 @@ func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
 	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 	for i := range 5 {
-		require.NoError(t, db.SetPParamUpdate(
-			[]byte{byte(i)}, updateCbor, uint64(300+i), 3, nil,
+		require.NoError(t, setTestPParamUpdate(
+			t, db, []byte{byte(i)}, updateCbor, uint64(300+i), 3,
 		))
 	}
 
@@ -706,6 +718,8 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	defer db.Close()
 
 	txn := db.Transaction(context.Background(), true)
+
+	bindTestPayloads(t, db, txn)
 	defer txn.Commit() //nolint:errcheck
 
 	// Enacting for epoch 4 uses proposals submitted in epoch 3. Store 5
@@ -796,6 +810,8 @@ func TestComputeAndApplyPParamUpdates_NoUpdates(
 	defer db.Close()
 
 	txn := db.Transaction(context.Background(), true)
+
+	bindTestPayloads(t, db, txn)
 	defer txn.Commit() //nolint:errcheck
 
 	currentPParams := &shelley.ShelleyProtocolParameters{
@@ -840,6 +856,8 @@ func TestComputeAndApplyPParamUpdates_DuplicateGenesis(
 	defer db.Close()
 
 	txn := db.Transaction(context.Background(), true)
+
+	bindTestPayloads(t, db, txn)
 	defer txn.Commit() //nolint:errcheck
 
 	// Store 5 updates but from only 2 unique genesis keys
@@ -965,7 +983,7 @@ func TestForecastPParamUpdates_QuorumMetNoPersist(t *testing.T) {
 	for _, gk := range [][]byte{{0x01}, {0x02}} {
 		require.NoError(
 			t,
-			db.SetPParamUpdate(gk, updateCbor, 300, 3, nil),
+			setTestPParamUpdate(t, db, gk, updateCbor, 300, 3),
 		)
 	}
 
@@ -1034,7 +1052,7 @@ func TestForecastPParamUpdates_QuorumNotMet(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.SetPParamUpdate([]byte{0x01}, updateCbor, 300, 3, nil),
+		setTestPParamUpdate(t, db, []byte{0x01}, updateCbor, 300, 3),
 	)
 
 	currentPParams := &shelley.ShelleyProtocolParameters{MinFeeA: 44}
@@ -1085,6 +1103,8 @@ func TestPParamEnactmentPendingShortCircuitsTheWriter(t *testing.T) {
 	require.False(t, pending)
 
 	txn := db.Transaction(context.Background(), true)
+
+	bindTestPayloads(t, db, txn)
 	for i, gk := range [][]byte{
 		{0x01, 0x02, 0x03},
 		{0x04, 0x05, 0x06},
@@ -1102,6 +1122,8 @@ func TestPParamEnactmentPendingShortCircuitsTheWriter(t *testing.T) {
 	require.False(t, pending)
 
 	txn = db.Transaction(context.Background(), true)
+
+	bindTestPayloads(t, db, txn)
 	require.NoError(t, db.SetPParamUpdate(
 		[]byte{0x07, 0x08, 0x09}, updateCbor, 302, 3, txn,
 	))

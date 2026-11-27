@@ -244,6 +244,9 @@ func (d *Database) rollbackAfterSlot(
 	if err := d.lowerHistoryExpiryCursor(point.Slot, txn); err != nil {
 		return ochainsync.Tip{}, nil, err
 	}
+	if err := d.lowerHistoryExpiryHeld(point.Slot, txn); err != nil {
+		return ochainsync.Tip{}, nil, err
+	}
 
 	if scope != rollbackChain {
 		if err := d.revertLedgerRowsAfterSlot(ctx, point, txn); err != nil {

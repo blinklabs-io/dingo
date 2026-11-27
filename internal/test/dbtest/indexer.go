@@ -100,8 +100,9 @@ func NewIndexerDatabase(
 				AlonzoLovelacePerUtxoWord,
 		},
 		database.Stores{
-			Blob:     blocks,
-			Metadata: store,
+			Blob:      blocks,
+			Metadata:  store,
+			LeiosPeer: consensus,
 		},
 	)
 	if db == nil {

@@ -312,7 +312,10 @@ type Utxo struct {
 	Cbor          []byte // This is here for convenience but not represented in the metadata DB
 	DatumHash     []byte // Optional datum hash (32 bytes)
 	Datum         []byte // Inline datum CBOR, not stored in metadata DB
-	ScriptRef     []byte // Reference script bytes, not stored in metadata DB
+	// DatumOffset is the stored CBOR offset of Datum. Only
+	// GetMidnightCandidates sets it.
+	DatumOffset []byte
+	ScriptRef   []byte // Reference script bytes, not stored in metadata DB
 	// ReferenceScriptHash is the hash of the script the output carries as a
 	// reference script. It is not a utxo column; API storage mode indexes it
 	// in utxo_reference_script.

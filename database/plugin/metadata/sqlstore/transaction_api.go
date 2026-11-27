@@ -102,6 +102,7 @@ func (s *Store) applyTransactionAPIDetails(
 	produced []models.Utxo,
 	rows *rowBatch,
 	transactionIsNew bool,
+	locate locateFunc,
 ) error {
 	if s.storageMode != types.StorageModeAPI {
 		return nil
@@ -146,6 +147,7 @@ func (s *Store) applyTransactionAPIDetails(
 		transaction,
 		slot,
 		transactionIsNew,
+		locate,
 	); err != nil {
 		return err
 	}
@@ -166,10 +168,11 @@ func (s *Store) applyTransactionAPIDetails(
 		db,
 		transaction,
 		slot,
+		locate,
 	); err != nil {
 		return err
 	}
-	if err := storeTransactionDatumIndex(rows, transaction, slot); err != nil {
+	if err := storeTransactionDatumIndex(rows, transaction, slot, locate); err != nil {
 		return err
 	}
 	return nil
@@ -468,6 +471,7 @@ func (s *Store) storeTransactionWitnesses(
 	transaction lcommon.Transaction,
 	slot uint64,
 	transactionIsNew bool,
+	locate locateFunc,
 ) error {
 	if !transactionIsNew {
 		for _, table := range transactionWitnessTables {
@@ -515,6 +519,7 @@ func (s *Store) storeTransactionWitnesses(
 			witnessSet.NativeScripts(),
 			slot,
 			seenScripts,
+			locate,
 		); err != nil {
 			return err
 		}
@@ -527,6 +532,7 @@ func (s *Store) storeTransactionWitnesses(
 			lcommon.PlutusV4ScriptsFromWitnessSet(witnessSet),
 			slot,
 			seenScripts,
+			locate,
 		); err != nil {
 			return err
 		}
@@ -539,6 +545,7 @@ func (s *Store) storeTransactionWitnesses(
 			witnessSet.PlutusV1Scripts(),
 			slot,
 			seenScripts,
+			locate,
 		); err != nil {
 			return err
 		}
@@ -551,6 +558,7 @@ func (s *Store) storeTransactionWitnesses(
 			witnessSet.PlutusV2Scripts(),
 			slot,
 			seenScripts,
+			locate,
 		); err != nil {
 			return err
 		}
@@ -563,6 +571,7 @@ func (s *Store) storeTransactionWitnesses(
 			witnessSet.PlutusV3Scripts(),
 			slot,
 			seenScripts,
+			locate,
 		); err != nil {
 			return err
 		}
@@ -633,6 +642,7 @@ func storeWitnessScripts[T lcommon.Script](
 	scripts []T,
 	slot uint64,
 	seen map[witnessScriptKey]struct{},
+	locate locateFunc,
 ) error {
 	for _, script := range scripts {
 		hash := script.Hash()
@@ -646,7 +656,7 @@ func storeWitnessScripts[T lcommon.Script](
 			transactionID,
 			scriptType,
 		)
-		if err := storeScriptContent(ctx, db, script, scriptType, slot); err != nil {
+		if err := storeScriptContent(ctx, db, script, scriptType, slot, locate); err != nil {
 			return err
 		}
 	}
@@ -659,15 +669,26 @@ func storeScriptContent[T lcommon.Script](
 	script T,
 	scriptType uint8,
 	slot uint64,
+	locate locateFunc,
+	container ...[]byte,
 ) error {
+	content, err := locate(script.RawScriptBytes(), container...)
+	if err != nil {
+		return fmt.Errorf("locate script %s: %w", script.Hash(), err)
+	}
+	conflict, conflictArgs := expiredContentConflict(
+		queryerDialect(db), "script", "content", "created_slot",
+	)
 	if _, err := db.ExecContext(ctx, `-- name: InsertScriptIfAbsent :exec
 INSERT INTO script (hash, content, created_slot, type)
 VALUES (?, ?, ?, ?)
-ON CONFLICT (hash) DO NOTHING`,
-		script.Hash().Bytes(),
-		script.RawScriptBytes(),
-		slot,
-		scriptType,
+`+conflict,
+		append([]any{
+			script.Hash().Bytes(),
+			content,
+			slot,
+			scriptType,
+		}, conflictArgs...)...,
 	); err != nil {
 		return fmt.Errorf("create script content: %w", err)
 	}
@@ -679,6 +700,7 @@ func storeTransactionIndexedScripts(
 	db queryer,
 	transaction lcommon.Transaction,
 	slot uint64,
+	locate locateFunc,
 ) error {
 	outputs := make([]lcommon.TransactionOutput, 0)
 	for _, produced := range transaction.Produced() {
@@ -702,7 +724,9 @@ func storeTransactionIndexedScripts(
 		if err != nil {
 			return err
 		}
-		if err := storeScriptContent(ctx, db, script, scriptType, slot); err != nil {
+		if err := storeScriptContent(
+			ctx, db, script, scriptType, slot, locate, output.Cbor(),
+		); err != nil {
 			return fmt.Errorf("store reference script: %w", err)
 		}
 	}
@@ -763,6 +787,7 @@ func storeTransactionIndexedScripts(
 				script,
 				group.scriptType,
 				slot,
+				locate,
 			); err != nil {
 				return fmt.Errorf("store auxiliary script: %w", err)
 			}
@@ -800,6 +825,7 @@ func storeTransactionDatumIndex(
 	rows *rowBatch,
 	transaction lcommon.Transaction,
 	slot uint64,
+	locate locateFunc,
 ) error {
 	seen := make(map[lcommon.Blake2b256]struct{})
 	for _, output := range transaction.Produced() {
@@ -811,6 +837,8 @@ func storeTransactionDatumIndex(
 			output.Output.Datum(),
 			slot,
 			seen,
+			locate,
+			output.Output.Cbor(),
 		); err != nil {
 			return err
 		}
@@ -819,14 +847,14 @@ func storeTransactionDatumIndex(
 		if output == nil {
 			continue
 		}
-		if err := storeDatumIndexRow(rows, output.Datum(), slot, seen); err != nil {
+		if err := storeDatumIndexRow(rows, output.Datum(), slot, seen, locate, output.Cbor()); err != nil {
 			return err
 		}
 	}
 	for _, witnesses := range allTransactionWitnessSets(transaction) {
 		for _, datum := range witnesses.PlutusData() {
 			copy := datum
-			if err := storeDatumIndexRow(rows, &copy, slot, seen); err != nil {
+			if err := storeDatumIndexRow(rows, &copy, slot, seen, locate, nil); err != nil {
 				return err
 			}
 		}
@@ -839,6 +867,8 @@ func storeDatumIndexRow(
 	datum *lcommon.Datum,
 	slot uint64,
 	seen map[lcommon.Blake2b256]struct{},
+	locate locateFunc,
+	container []byte,
 ) error {
 	if datum == nil {
 		return nil
@@ -859,6 +889,10 @@ func storeDatumIndexRow(
 		return nil
 	}
 	seen[hash] = struct{}{}
-	rows.add(datumShape, hash.Bytes(), raw, slot)
+	offset, err := locate(raw, container)
+	if err != nil {
+		return fmt.Errorf("locate datum %s: %w", hash, err)
+	}
+	rows.add(datumShape, hash.Bytes(), offset, slot)
 	return nil
 }

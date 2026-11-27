@@ -20,6 +20,7 @@ import (
 	"log/slog"
 
 	"github.com/blinklabs-io/dingo"
+	"github.com/blinklabs-io/dingo/bark"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/storageadopt"
 )
@@ -48,5 +49,5 @@ func MigrateToIndexerDB(
 	if err := dingo.ReconcileInterruptedRestore(ctx, nodeCfg); err != nil {
 		return fmt.Errorf("recover interrupted restore before storage migration: %w", err)
 	}
-	return storageadopt.MigrateToIndexerDB(ctx, cfg, logger)
+	return storageadopt.MigrateToIndexerDB(ctx, cfg, logger, bark.ArchiveStore)
 }

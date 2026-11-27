@@ -184,6 +184,9 @@ type Store struct {
 	// liveUtxo, when set, holds the live UTxO set: the store writes no utxo
 	// rows and resolves inputs through it. Set before the first write.
 	liveUtxo types.LiveUtxoSource
+	// payloads resolves the CBOR offsets the payload columns hold. Set
+	// before the first read.
+	payloads types.PayloadResolver
 
 	// committeeAuthRetentionSlots is the configured rollback window for
 	// auth_committee_hot pruning. Read it through committeeAuthRetention(),
@@ -1383,6 +1386,9 @@ type sqlTxn struct {
 	// spends holds the spend-cache entries of outputs this transaction
 	// inserted; Commit publishes them once the commit succeeds.
 	spends map[string]spendCacheEntry
+	// locator names payloads by their position in the block being written;
+	// see SetPayloadLocator.
+	locator types.PayloadLocator
 }
 
 func (t *sqlTxn) Commit() error {

@@ -274,6 +274,16 @@ expiry govern stored payload availability independently of ledger validity;
 pruning payloads must preserve live outputs, rollback requirements and the
 trust boundary from which the node can recover.
 
+The IndexerDB keeps no copy of the payloads its blocks carry: datum, script,
+metadata and similar columns hold offsets that readers resolve through the
+block stores. Block retention therefore follows the indexer. No block expires
+before the indexer has indexed it, a block stays while an active payload
+(one a live output, a pending parameter update or current Midnight state
+uses) names its bytes, and the ledger keeps the bodies a rollback abandoned
+until the indexer has rolled back past them. An active output whose block has
+expired still resolves through the ledger's live UTxO set; inactive history
+reports that it has expired.
+
 The operator selects the storage mode; consumers do not promote it. Every
 storage consumer, whether a plugin provider or a built-in service, declares the
 minimum ordered tier (`core` or `api`) and the named storage features it needs.

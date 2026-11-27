@@ -147,14 +147,15 @@ func (n *Node) newHistoryExpiryPrunerConfig() historyexpiry.PrunerConfig {
 		Logger:       n.config.logger,
 		Frequency:    prunerFreq,
 		Ceiling:      n.historyExpiryCeiling,
-		BeforeExpire: n.materializeIndexerBlockUtxos,
+		Held:         n.historyExpiryHeld,
+		BeforeExpire: n.prepareIndexerBlockExpiry,
 	}
 }
 
-// materializeIndexerBlockUtxos rewrites the IndexerDB's UTxO entries that are
-// offsets into a block about to expire as raw CBOR. The ledger's own expiry
-// materializes nothing: the live UTxO set holds its outputs.
-func (n *Node) materializeIndexerBlockUtxos(
+// prepareIndexerBlockExpiry moves the IndexerDB's datum and script rows that
+// name a block about to expire to another block that carries their bytes, or
+// marks them expired so that a later carrier replaces them.
+func (n *Node) prepareIndexerBlockExpiry(
 	ctx context.Context,
 	slot uint64,
 	hash []byte,
@@ -162,8 +163,24 @@ func (n *Node) materializeIndexerBlockUtxos(
 	if n.indexerDB == nil {
 		return nil
 	}
-	_, err := n.indexerDB.MaterializeBlockUtxos(ctx, slot, hash)
-	return err
+	return n.indexerDB.PrepareBlockExpiry(ctx, slot, hash)
+}
+
+// historyExpiryHeld keeps a block while a payload column of the IndexerDB that
+// is still in use names its bytes, or that a Midnight rollback could still
+// read; see Database.BlockHoldsActivePayloads. Without an IndexerDB no column
+// names a block.
+func (n *Node) historyExpiryHeld(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+) (bool, error) {
+	if n.indexerDB == nil || n.ledgerState == nil {
+		return false, nil
+	}
+	return n.indexerDB.BlockHoldsActivePayloads(
+		ctx, slot, hash, n.ledgerState.CurrentEpoch(),
+	)
 }
 
 // historyExpiryCeiling keeps history expiry behind the IndexerDB writer,

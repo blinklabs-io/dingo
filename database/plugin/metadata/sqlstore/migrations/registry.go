@@ -117,6 +117,7 @@ const (
 	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
 	utxoAddressPrefixIndexDropSchemaRelease             = "utxo-address-prefix-index-drop"
 	indexerOffsetsSchemaRelease                         = "indexer-cbor-offsets"
+	activePayloadIndexSchemaRelease                     = "active-payload-indexes"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -128,9 +129,8 @@ const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
 const alonzoEraID = 4
 
 // schemaVersions keeps the released sequential identifiers 1 through 75
-// unchanged. Each later migration declares its name, stable version, and
-// predecessor in its own manifest, so parallel additions do not edit a shared
-// registry list.
+// unchanged and registers active-payload-indexes. Later migrations declare
+// their name, stable version, and predecessor in a manifest.
 type schemaVersion struct {
 	Version int64
 	Name    string
@@ -318,6 +318,12 @@ var schemaVersions = []schemaVersion{
 	{Version: 73, Name: assetIdentityHoldingsSchemaRelease, Dir: "v73"},
 	{Version: 74, Name: utxoAddressPrefixIndexDropSchemaRelease, Dir: "v74"},
 	{Version: 75, Name: indexerOffsetsSchemaRelease, Dir: "v75"},
+	{
+		Version: StableVersion(activePayloadIndexSchemaRelease),
+		Name:    activePayloadIndexSchemaRelease,
+		Dir:     "v76",
+		After:   75,
+	},
 }
 
 func orderedSchemaVersions(versions []schemaVersion) ([]schemaVersion, error) {

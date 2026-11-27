@@ -114,15 +114,16 @@ func TestRewardStakeUpgradeStartCertifiesBeforeMigrations(t *testing.T) {
 	store, db := rewardUpgradeStartFixture(t, true)
 	require.NoError(t, store.Start(t.Context()))
 	require.True(t, store.Ready())
-	var version int
+	var schemaVersion int64
 	require.NoError(
 		t,
 		db.QueryRowContext(t.Context(), `SELECT MAX(version) FROM schema_migrations`).
-			Scan(&version),
+			Scan(&schemaVersion),
 	)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Equal(t, len(registry), version)
+	require.Equal(t, newestMigrationVersion(registry), schemaVersion)
+	var version int
 	for _, table := range []string{"pool_stake_snapshot", "reward_snapshot"} {
 		require.NoError(
 			t,
@@ -151,13 +152,14 @@ func TestRewardStakeUpgradeStartCertifiesCurrentSchema(t *testing.T) {
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	require.NoError(t, runner.Run(t.Context()))
-	var version int
+	var schemaVersion int64
 	require.NoError(
 		t,
 		db.QueryRowContext(t.Context(), `SELECT MAX(version) FROM schema_migrations`).
-			Scan(&version),
+			Scan(&schemaVersion),
 	)
-	require.Equal(t, len(registry), version)
+	require.Equal(t, newestMigrationVersion(registry), schemaVersion)
+	var version int
 	require.NoError(t, store.Start(t.Context()))
 	for _, table := range []string{"pool_stake_snapshot", "reward_snapshot"} {
 		require.NoError(
@@ -196,4 +198,15 @@ func TestRewardStakeUpgradeStartRefusalPreservesSchema(t *testing.T) {
 			},
 		)
 	}
+}
+
+// newestMigrationVersion is the highest identifier in registry. Released
+// migrations number sequentially and later ones carry a name-derived
+// identifier, so the registry's length is not its newest version.
+func newestMigrationVersion(registry []migrations.Migration) int64 {
+	var newest int64
+	for _, migration := range registry {
+		newest = max(newest, migration.Version)
+	}
+	return newest
 }

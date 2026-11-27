@@ -15,6 +15,7 @@
 package database
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/types"
@@ -456,4 +457,33 @@ func TestMovedChainStateIsFlushed(t *testing.T) {
 			t, counting.syncs.Load(), before, "%s copy was not flushed", name,
 		)
 	}
+}
+
+// A rollback drops the held blocks above its point, in the rollback's own
+// transaction, and keeps the ones at or below it.
+func TestHistoryExpiryHeldLowersWithTheRollback(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	hash := func(b byte) []byte { return bytes.Repeat([]byte{b}, 32) }
+	require.NoError(t, db.SetHistoryExpiryHeld([]HeldBlock{
+		{Slot: 10, Hash: hash(1)}, {Slot: 20, Hash: hash(2)},
+		{Slot: 30, Hash: hash(3)},
+	}))
+
+	txn := db.Transaction(t.Context(), true)
+	require.NoError(t, db.lowerHistoryExpiryHeld(20, txn))
+	require.NoError(t, txn.Rollback())
+	held, err := db.HistoryExpiryHeld()
+	require.NoError(t, err)
+	require.Len(t, held, 3, "an abandoned rollback leaves the held blocks")
+
+	txn = db.Transaction(t.Context(), true)
+	require.NoError(t, db.lowerHistoryExpiryHeld(20, txn))
+	require.NoError(t, txn.Commit())
+	held, err = db.HistoryExpiryHeld()
+	require.NoError(t, err)
+	require.Equal(t, []HeldBlock{
+		{Slot: 10, Hash: hash(1)}, {Slot: 20, Hash: hash(2)},
+	}, held)
 }

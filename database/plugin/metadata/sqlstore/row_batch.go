@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // These conservative accounting weights include row/value descriptors and
@@ -42,6 +43,11 @@ type rowShape struct {
 	table   string
 	columns []string
 	suffix  string
+	// conflict, when set, replaces suffix with a clause that differs by
+	// dialect and takes arguments after the rows'. Rows of the shape are
+	// written first-wins on their first column within a statement, as
+	// PostgreSQL refuses to update one row twice in one INSERT.
+	conflict func(dialect string) (string, []any)
 	// resolveAssets marks queued asset holdings, whose rows name an asset by
 	// (policy_id, name) and are written through flushAssetHoldings.
 	resolveAssets bool
@@ -107,12 +113,15 @@ var (
     json_value = excluded.json_value`,
 	}
 	// datum rows are content-addressed and shared between transactions, so
-	// they carry no transaction_id and are never replaced.
+	// they carry no transaction_id. A row keeps the block that first carried
+	// it unless that block expired with no other carrier holding the bytes.
 	datumShape = rowShape{
 		name:    "InsertDatumBatch",
 		table:   "datum",
 		columns: []string{"hash", "raw_datum", "added_slot"},
-		suffix:  "ON CONFLICT (hash) DO NOTHING",
+		conflict: func(dialect string) (string, []any) {
+			return expiredContentConflict(dialect, "datum", "raw_datum", "added_slot")
+		},
 	}
 	utxoAddressShape = rowShape{
 		name:    "UpsertUtxoAddressBatch",
@@ -396,17 +405,25 @@ func (b *rowBatch) flush(
 		for start := 0; start < len(entry.rows); start += perStatement {
 			end := min(start+perStatement, len(entry.rows))
 			args := make([]any, 0, (end-start)*width)
-			for _, row := range entry.rows[start:end] {
+			statementRows := entry.rows[start:end]
+			var conflictArgs []any
+			suffix := entry.shape.suffix
+			if entry.shape.conflict != nil {
+				statementRows = firstByKey(statementRows)
+				suffix, conflictArgs = entry.shape.conflict(queryerDialect(db))
+			}
+			for _, row := range statementRows {
 				args = append(args, row...)
 			}
+			args = append(args, conflictArgs...)
 			query := "-- name: " + entry.shape.name + " :exec\n" +
 				"INSERT INTO " + entry.shape.table + " (" +
 				strings.Join(entry.shape.columns, ", ") + ") VALUES " +
 				strings.TrimSuffix(
-					strings.Repeat(placeholder+", ", end-start), ", ",
+					strings.Repeat(placeholder+", ", len(statementRows)), ", ",
 				)
-			if entry.shape.suffix != "" {
-				query += "\n" + entry.shape.suffix
+			if suffix != "" {
+				query += "\n" + suffix
 			}
 			if err := s.execBatch(ctx, db, query, args...); err != nil {
 				return fmt.Errorf(
@@ -492,4 +509,55 @@ func queueUtxoAddress(
 		int64(utxo.AddedSlot), //nolint:gosec // SQL INTEGER slot
 		int64(*utxo.BlockIndex),
 	)
+}
+
+// queryerDialect returns the dialect db translates statements for; an
+// untranslated handle is SQLite's.
+func queryerDialect(db queryer) string {
+	if wrapped, ok := unwrapDialectQueryer(db); ok {
+		return wrapped.dialect
+	}
+	return "sqlite"
+}
+
+// firstByKey returns rows without those whose first column repeats an earlier
+// row's.
+func firstByKey(rows [][]any) [][]any {
+	seen := make(map[string]struct{}, len(rows))
+	kept := make([][]any, 0, len(rows))
+	for _, row := range rows {
+		key, _ := row[0].([]byte)
+		if _, ok := seen[string(key)]; ok {
+			continue
+		}
+		seen[string(key)] = struct{}{}
+		kept = append(kept, row)
+	}
+	return kept
+}
+
+// expiredContentConflict is the conflict clause of a content-addressed
+// insert: the existing row is replaced only when it holds an expired-payload
+// marker, so the row moves to a carrier whose block still holds the bytes and
+// otherwise keeps the block that first carried them.
+func expiredContentConflict(
+	dialect, table, content, slot string,
+) (string, []any) {
+	magic := types.ExpiredPayloadMagic[:]
+	if dialect == "mysql" {
+		// MySQL applies the assignments in order, each seeing those before
+		// it, so the content column the condition reads is assigned last.
+		return fmt.Sprintf(
+			"ON DUPLICATE KEY UPDATE "+
+				"%[2]s = IF(SUBSTR(%[1]s, 1, 4) = ?, VALUES(%[2]s), %[2]s), "+
+				"%[1]s = IF(SUBSTR(%[1]s, 1, 4) = ?, VALUES(%[1]s), %[1]s)",
+			content, slot,
+		), []any{magic, magic}
+	}
+	return fmt.Sprintf(
+		"ON CONFLICT (hash) DO UPDATE SET "+
+			"%[2]s = excluded.%[2]s, %[3]s = excluded.%[3]s "+
+			"WHERE SUBSTR(%[1]s.%[2]s, 1, 4) = ?",
+		table, content, slot,
+	), []any{magic}
 }

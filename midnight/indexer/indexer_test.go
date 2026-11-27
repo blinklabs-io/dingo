@@ -32,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -87,8 +86,19 @@ func pad32(prefix string) string {
 }
 
 type testStore struct {
-	*sqlstore.Store
+	*dbtest.PayloadStore
 	raw *sql.DB
+}
+
+// resolve returns the bytes a payload column's offset names.
+func (s *testStore) resolve(t *testing.T, column []byte) []byte {
+	t.Helper()
+	if len(column) == 0 {
+		return column
+	}
+	payload, err := s.Archive.ResolvePayload(column)
+	require.NoError(t, err)
+	return payload
 }
 
 // setupTestStore creates a file-backed SQLite store so tests can use the
@@ -122,7 +132,7 @@ func setupTestStore(t *testing.T) *testStore {
 		require.NoError(t, raw.Close())
 		require.NoError(t, store.Close())
 	})
-	return &testStore{Store: store, raw: raw}
+	return &testStore{PayloadStore: dbtest.NewPayloadStore(store), raw: raw}
 }
 
 // setupIndexer creates a test Indexer backed by the given store.
@@ -214,6 +224,7 @@ FROM midnight_governance_datums`
 			&item.Datum,
 			&item.BlockNumber,
 		))
+		item.Datum = store.resolve(t, item.Datum)
 		ret = append(ret, item)
 	}
 	require.NoError(t, rows.Err())
@@ -235,6 +246,7 @@ ORDER BY epoch`)
 	for rows.Next() {
 		var item models.MidnightAriadneParams
 		require.NoError(t, rows.Scan(&item.ID, &item.Epoch, &item.Datum))
+		item.Datum = store.resolve(t, item.Datum)
 		ret = append(ret, item)
 	}
 	require.NoError(t, rows.Err())
@@ -987,7 +999,20 @@ func TestDeregistration_Rollback(t *testing.T) {
 		restored,
 		"registration UTxO must be restored to memory after dereg rollback",
 	)
-	assert.NotEmpty(t, reg.FullDatum)
+	assert.Equal(
+		t, datumCbor, reg.FullDatum,
+		"the restored registration holds the datum, not its stored offset",
+	)
+	assert.NotEmpty(t, reg.FullDatumOffset)
+	assert.NotEqual(t, datumCbor, reg.FullDatumOffset)
+
+	// Re-applying the block must still be able to write the deregistration.
+	require.NoError(t, idx.processBlock(block2,
+		[]lcommon.Transaction{buildTx(t, deregTxHash,
+			[]lcommon.TransactionInput{buildInput(t, regTxHash, 0)},
+			[]lcommon.TransactionOutput{anyOutput(t)})},
+		2_000))
+	require.Len(t, allDeregistrations(t, store), 1)
 }
 
 // TestRollback_NoRecordedEvents verifies that rolling back a block that

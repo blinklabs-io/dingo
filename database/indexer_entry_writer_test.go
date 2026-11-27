@@ -16,14 +16,10 @@ package database
 
 import (
 	"context"
-	"errors"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -132,72 +128,5 @@ func TestIndexerDBRepairsAnOffsetThroughItsMetadataWriteTransaction(
 			require.True(t, ok, "the repair commits with the transaction")
 			require.Equal(t, data, repaired)
 		})
-	}
-}
-
-// failingOffsets fails every SetUtxoOffset call after performing it, so the
-// write has happened when the caller sees the error.
-type failingOffsets struct {
-	metadata.IndexerOffsetStore
-	sets atomic.Int32
-}
-
-var errInjectedOffsetWrite = errors.New("injected offset write failure")
-
-func (f *failingOffsets) SetUtxoOffset(
-	txn types.Txn, txId []byte, outputIdx uint32, data []byte,
-) error {
-	f.sets.Add(1)
-	if err := f.IndexerOffsetStore.SetUtxoOffset(
-		txn, txId, outputIdx, data,
-	); err != nil {
-		return err
-	}
-	return errInjectedOffsetWrite
-}
-
-// MaterializeBlockUtxos rewrites the entries of an IndexerDB in one
-// transaction: a failure after a rewrite leaves every entry an offset, and a
-// clean run leaves none.
-func TestIndexerDBMaterializesBlockUtxosInOneTransaction(t *testing.T) {
-	t.Parallel()
-	fixture, _, candidate := indexedConsumer(t)
-	txHash := candidate.consumerTx.Hash().Bytes()
-	produced := candidate.consumerTx.Produced()
-	require.NotEmpty(t, produced)
-	real := fixture.indexer.Blob().(*indexerBlobStore)
-	offsets := indexerOffsets(t, fixture.indexer)
-	slot := candidate.consumerPoint.Slot
-	hash := candidate.consumerBlock.Hash
-
-	failing := &failingOffsets{IndexerOffsetStore: real.offsets}
-	_, drain := fixture.indexer.SetBlobStore(
-		&indexerBlobStore{blocks: real.blocks, offsets: failing},
-	)
-	drain()
-	ctx, cancel := context.WithTimeout(context.Background(), entryWriterBound)
-	defer cancel()
-	_, err := fixture.indexer.MaterializeBlockUtxos(ctx, slot, hash)
-	require.ErrorIs(t, err, errInjectedOffsetWrite)
-	require.Positive(t, failing.sets.Load(),
-		"the failure came after a rewrite")
-	for idx := range produced {
-		data, ok, err := offsets.GetUtxoOffset(nil, txHash, uint32(idx)) // #nosec G115
-		require.NoError(t, err)
-		require.True(t, ok)
-		require.True(t, IsUtxoOffsetStorage(data),
-			"output %d was rewritten outside the failed transaction", idx)
-	}
-
-	_, drain = fixture.indexer.SetBlobStore(real)
-	drain()
-	n, err := fixture.indexer.MaterializeBlockUtxos(ctx, slot, hash)
-	require.NoError(t, err)
-	require.Equal(t, len(produced), n)
-	for idx := range produced {
-		data, ok, err := offsets.GetUtxoOffset(nil, txHash, uint32(idx)) // #nosec G115
-		require.NoError(t, err)
-		require.True(t, ok)
-		require.False(t, IsUtxoOffsetStorage(data))
 	}
 }

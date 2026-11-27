@@ -180,6 +180,7 @@ func TestLeiosRetainedMultiPaymentRejectsMalformedReferences(t *testing.T) {
 			txn := s.Transaction(t.Context())
 			defer func() { _ = txn.Rollback() }()
 			acc := s.NewLeiosClosureBatchAccumulator()
+			bindTestPayloads(t, s, acc)
 			defer acc.Reset()
 			enabled, err := s.EnableLeiosClosureUtxoOverlay(
 				acc,
@@ -203,6 +204,7 @@ func BenchmarkLeiosRetainedMultiPayment(b *testing.B) {
 			for range b.N {
 				txn := s.Transaction(context.Background())
 				acc := s.NewLeiosClosureBatchAccumulator()
+				bindTestPayloads(b, s, acc)
 				if enabled {
 					ok, err := s.EnableLeiosClosureUtxoOverlay(acc, txn, txs)
 					require.NoError(b, err)
@@ -262,6 +264,7 @@ func TestLeiosMultiPaymentInteriorWindowMatchesImmediate(t *testing.T) {
 						txn := s.Transaction(t.Context())
 						defer func() { _ = txn.Rollback() }()
 						acc := s.NewLeiosClosureBatchAccumulator()
+						bindTestPayloads(t, s, acc)
 						defer acc.Reset()
 						for offset := 0; offset < len(txs); {
 							n := len(txs) - offset
@@ -385,6 +388,7 @@ func TestLeiosMultiPaymentAggregateBoundsBeforePreflight(t *testing.T) {
 			txn := s.Transaction(t.Context())
 			defer func() { _ = txn.Rollback() }()
 			acc := s.NewLeiosClosureBatchAccumulator()
+			bindTestPayloads(t, s, acc)
 			defer acc.Reset()
 			before := counterValue(t, reg, "select")
 			enabled, err := s.EnableLeiosClosureUtxoOverlay(acc, txn, txs)
@@ -413,6 +417,7 @@ func TestLeiosMultiPaymentSelectsPrefixAtReferenceBound(t *testing.T) {
 	txn := s.Transaction(t.Context())
 	defer func() { _ = txn.Rollback() }()
 	acc := s.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, s, acc)
 	defer acc.Reset()
 	n, err := s.PrepareLeiosClosureBatch(acc, txn, txs)
 	require.NoError(t, err)

@@ -25,6 +25,7 @@ import (
 	"math"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -500,10 +501,47 @@ func (d *Database) RolledBackBlock(
 	return bytes.Clone(value), true, nil
 }
 
-// ReleaseRolledBackBlocks deletes every rolled-back body, returning how many
-// it deleted. The caller has established that no rollback intent names them.
-// It is safe to repeat and to interrupt: a body it did not reach is deleted
-// by the next call.
+// retainedRolledBackBody reads only the rolled-back body of the block at slot
+// and hash, with ErrBlobKeyNotFound when none is kept.
+func (d *Database) retainedRolledBackBody(
+	store blob.BlobStore,
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, error) {
+	key, err := rolledBackBlockKey(slot, hash)
+	if err != nil {
+		return nil, types.ErrBlobKeyNotFound
+	}
+	value, err := store.Get(txn, key)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.Clone(value), nil
+}
+
+// RolledBackBlockHold reports the block the IndexerDB's rows end at, and false
+// when it holds none. The IndexerDB reads its rows' payloads from the blocks
+// they were indexed in, so until its writer has rolled back past a block that
+// a rollback removed from the chain, the block's retained body is the only
+// copy a row can be read from.
+type RolledBackBlockHold func() (tip ocommon.Point, ok bool, err error)
+
+// SetRolledBackBlockHold makes ReleaseRolledBackBlocks keep the rolled-back
+// bodies up to the block hold reports for as long as that block is itself a
+// rolled-back body: the IndexerDB's rows then end on the abandoned branch.
+// Once the writer has rolled back, the tip is a chain block, and every body
+// is released. A nil hold keeps none.
+func (d *Database) SetRolledBackBlockHold(hold RolledBackBlockHold) {
+	d.rolledBackBlockHold.Store(&hold)
+	d.rolledBackBlocksReleased.Store(false)
+}
+
+// ReleaseRolledBackBlocks deletes the rolled-back bodies, returning how many
+// it deleted, except those a RolledBackBlockHold keeps. The caller has
+// established that no rollback intent names them. It is safe to repeat and to
+// interrupt: a body it did not reach is deleted by the next call, and so is a
+// body that was held.
 func (d *Database) ReleaseRolledBackBlocks(ctx context.Context) (int, error) {
 	if d.isIndexer() {
 		return 0, nil
@@ -513,13 +551,29 @@ func (d *Database) ReleaseRolledBackBlocks(ctx context.Context) (int, error) {
 	if d.rolledBackBlocksReleased.Swap(true) {
 		return 0, nil
 	}
+	hold, holding, err := d.rolledBackBlockHoldSlot()
+	if err != nil {
+		d.rolledBackBlocksReleased.Store(false)
+		return 0, fmt.Errorf("release rolled-back blocks: %w", err)
+	}
 	deleted := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			d.rolledBackBlocksReleased.Store(false)
 			return deleted, err
 		}
-		keys, err := d.rolledBackBlockKeys(rolledBackBlockReleaseBatch)
+		var (
+			keys [][]byte
+			held bool
+			err  error
+		)
+		if holding {
+			keys, held, err = d.releasableRolledBackBlockKeys(
+				rolledBackBlockReleaseBatch, hold,
+			)
+		} else {
+			keys, err = d.rolledBackBlockKeys(rolledBackBlockReleaseBatch)
+		}
 		if err == nil && len(keys) > 0 {
 			err = d.deleteBlobKeys(keys)
 		}
@@ -528,36 +582,98 @@ func (d *Database) ReleaseRolledBackBlocks(ctx context.Context) (int, error) {
 			return deleted, fmt.Errorf("release rolled-back blocks: %w", err)
 		}
 		deleted += len(keys)
+		if held {
+			// A held body is released by a later call, once the hold moves.
+			d.rolledBackBlocksReleased.Store(false)
+		}
 		if len(keys) < rolledBackBlockReleaseBatch {
 			return deleted, nil
 		}
 	}
 }
 
-func (d *Database) rolledBackBlockKeys(limit int) ([][]byte, error) {
+// rolledBackBlockHoldSlot returns the highest slot whose rolled-back bodies
+// are held, and whether any are.
+func (d *Database) rolledBackBlockHoldSlot() (uint64, bool, error) {
+	fn := d.rolledBackBlockHold.Load()
+	if fn == nil || *fn == nil {
+		return 0, false, nil
+	}
+	tip, ok, err := (*fn)()
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	key, err := rolledBackBlockKey(tip.Slot, tip.Hash)
+	if err != nil {
+		return 0, false, nil //nolint:nilerr // no block has such a hash
+	}
 	txn := d.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
 	store := txn.BlobStore()
 	if store == nil {
-		return nil, types.ErrBlobStoreUnavailable
+		return 0, false, types.ErrBlobStoreUnavailable
+	}
+	if _, err := store.Get(txn.Blob(), key); err != nil {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("read rolled-back block: %w", err)
+	}
+	return tip.Slot, true, nil
+}
+
+// rolledBackBlockKeys returns up to limit rolled-back body keys.
+func (d *Database) rolledBackBlockKeys(limit int) ([][]byte, error) {
+	keys, _, err := d.scanRolledBackBlockKeys(limit, 0, false)
+	return keys, err
+}
+
+// releasableRolledBackBlockKeys is rolledBackBlockKeys without the bodies at
+// or below hold, and reports whether it passed over any.
+func (d *Database) releasableRolledBackBlockKeys(
+	limit int,
+	hold uint64,
+) ([][]byte, bool, error) {
+	return d.scanRolledBackBlockKeys(limit, hold, true)
+}
+
+func (d *Database) scanRolledBackBlockKeys(
+	limit int,
+	hold uint64,
+	holding bool,
+) ([][]byte, bool, error) {
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	store := txn.BlobStore()
+	if store == nil {
+		return nil, false, types.ErrBlobStoreUnavailable
 	}
 	prefix := []byte(types.RolledBackBlockKeyPrefix)
 	it := store.NewIterator(
 		txn.Blob(), types.BlobIteratorOptions{Prefix: prefix},
 	)
 	if it == nil {
-		return nil, types.ErrBlobStoreUnavailable
+		return nil, false, types.ErrBlobStoreUnavailable
 	}
 	defer it.Close()
-	var keys [][]byte
+	var (
+		keys [][]byte
+		held bool
+	)
 	for it.Seek(prefix); it.ValidForPrefix(prefix) && len(keys) < limit; it.Next() {
 		item := it.Item()
 		if item == nil {
 			continue
 		}
-		keys = append(keys, bytes.Clone(item.Key()))
+		key := item.Key()
+		if holding && len(key) >= len(prefix)+8 &&
+			binary.BigEndian.Uint64(key[len(prefix):]) <= hold {
+			held = true
+			continue
+		}
+		keys = append(keys, bytes.Clone(key))
 	}
-	return keys, it.Err()
+	return keys, held, it.Err()
 }
 
 // deleteBlobKeys deletes keys in one transaction that reads nothing, so it

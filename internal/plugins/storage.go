@@ -339,8 +339,9 @@ func OpenIndexerDatabase(
 		return nil, err
 	}
 	db, err := database.New(ctx, &cfg, database.Stores{
-		Blob:     blocks,
-		Metadata: store,
+		Blob:      blocks,
+		Metadata:  store,
+		LeiosPeer: consensus,
 	})
 	if err != nil {
 		if db != nil {

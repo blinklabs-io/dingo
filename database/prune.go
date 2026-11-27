@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -32,6 +33,96 @@ import (
 // than every tombstone left by earlier rounds. A rollback or truncate lowers
 // it to the rollback point, the slot above which replay stores new blocks.
 const HistoryExpiryCursorKey = "history_expiry_cursor"
+
+// HistoryExpiryHeldKey names the block-store chain state holding the blocks
+// the history-expiry pruner passed over because a payload column in use still
+// names their bytes. The cursor moves past them, so they are kept here and
+// checked again each round until they can expire.
+const HistoryExpiryHeldKey = "history_expiry_held"
+
+// HeldBlock identifies a block that history expiry has not expired because an
+// active payload names its bytes.
+type HeldBlock struct {
+	Hash []byte
+	Slot uint64
+}
+
+// HistoryExpiryHeld returns the blocks the pruner is holding, in the order
+// stored. An unreadable entry is an error: dropping it would leave the block
+// unexpired forever.
+func (d *Database) HistoryExpiryHeld() ([]HeldBlock, error) {
+	raw, err := d.GetChainState(HistoryExpiryHeldKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("read history expiry held blocks: %w", err)
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	entries := strings.Split(raw, ";")
+	held := make([]HeldBlock, 0, len(entries))
+	for _, entry := range entries {
+		slotText, hashText, ok := strings.Cut(entry, ":")
+		if !ok {
+			return nil, fmt.Errorf("malformed held block entry %q", entry)
+		}
+		slot, err := strconv.ParseUint(slotText, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("malformed held block slot %q: %w", entry, err)
+		}
+		hash, err := hex.DecodeString(hashText)
+		if err != nil {
+			return nil, fmt.Errorf("malformed held block hash %q: %w", entry, err)
+		}
+		held = append(held, HeldBlock{Slot: slot, Hash: hash})
+	}
+	return held, nil
+}
+
+// SetHistoryExpiryHeld replaces the held blocks.
+func (d *Database) SetHistoryExpiryHeld(held []HeldBlock) error {
+	return d.writeHistoryExpiryHeld(held, nil)
+}
+
+func (d *Database) writeHistoryExpiryHeld(
+	held []HeldBlock,
+	txn *Txn,
+) error {
+	entries := make([]string, 0, len(held))
+	for _, block := range held {
+		entries = append(entries, fmt.Sprintf(
+			"%d:%s", block.Slot, hex.EncodeToString(block.Hash),
+		))
+	}
+	if err := d.SetChainState(
+		HistoryExpiryHeldKey, strings.Join(entries, ";"), txn,
+	); err != nil {
+		return fmt.Errorf("write history expiry held blocks: %w", err)
+	}
+	return nil
+}
+
+// lowerHistoryExpiryHeld drops the held blocks above slot, which a rollback
+// abandons: they would otherwise be checked and expired by a hash the chain no
+// longer stores. The transaction handling is that of lowerHistoryExpiryCursor.
+func (d *Database) lowerHistoryExpiryHeld(slot uint64, txn *Txn) error {
+	if txn != nil && txn.Blob() == nil {
+		txn = nil
+	}
+	held, err := d.HistoryExpiryHeld()
+	if err != nil {
+		return err
+	}
+	kept := held[:0:0]
+	for _, block := range held {
+		if block.Slot <= slot {
+			kept = append(kept, block)
+		}
+	}
+	if len(kept) == len(held) {
+		return nil
+	}
+	return d.writeHistoryExpiryHeld(kept, txn)
+}
 
 // oldestRetainedScanLimit bounds how many consecutive expired blocks
 // RefreshOldestRetainedSlot walks past the history-expiry cursor before giving
@@ -180,78 +271,6 @@ func (d *Database) PruneBlock(
 		}
 		d.retainedBlockRemoved(txn, slot)
 		return nil
-	}); err != nil {
-		return 0, err
-	}
-	return materialized, nil
-}
-
-// MaterializeBlockUtxos rewrites, as raw CBOR, every UTxO entry of d that is
-// an offset into the block at (slot, hash), as PruneBlock does before it
-// expires the block, without expiring it. An IndexerDB keeps its UTxO entries
-// in its own metadata store, which the ledger's PruneBlock does not see, so
-// they are materialized through it before the ledger expires the block. It
-// returns the number of entries rewritten.
-func (d *Database) MaterializeBlockUtxos(
-	ctx context.Context,
-	slot uint64,
-	hash []byte,
-) (int, error) {
-	if d.metadata == nil || d.liveUtxo {
-		return 0, ctx.Err()
-	}
-	var materialized int
-	// An IndexerDB writes its entries in its metadata transaction.
-	var blobTxn *Txn
-	if d.isIndexer() {
-		blobTxn = d.Transaction(ctx, true)
-	} else {
-		blobTxn = d.BlockBlobTxn()
-	}
-	if err := blobTxn.Do(func(txn *Txn) error {
-		blobStore := txn.BlobStore()
-		if blobStore == nil {
-			return types.ErrBlobStoreUnavailable
-		}
-		blockCbor, blockMeta, err := blobStore.GetBlock(txn.Blob(), slot, hash)
-		if err != nil {
-			return fmt.Errorf(
-				"materialize block UTxOs (slot=%d): get block: %w",
-				slot,
-				err,
-			)
-		}
-		block, err := models.DecodeBlockCbor(blockMeta.Type, blockCbor)
-		if err != nil {
-			return fmt.Errorf(
-				"materialize block UTxOs (slot=%d): decode block: %w",
-				slot,
-				err,
-			)
-		}
-		offsets, err := NewBlockIndexer(slot, hash).ComputeOffsets(
-			blockCbor,
-			block,
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"materialize block UTxOs (slot=%d): compute offsets: %w",
-				slot,
-				err,
-			)
-		}
-		refs := make([]models.UtxoId, 0, len(offsets.UtxoOffsets))
-		for ref := range offsets.UtxoOffsets {
-			refs = append(refs, models.UtxoId{
-				Hash: ref.TxId[:],
-				Idx:  ref.OutputIdx,
-			})
-		}
-		n, err := d.materializeUtxosTxnBlock(
-			ctx, txn, slot, hash, blockCbor, refs,
-		)
-		materialized = n
-		return err
 	}); err != nil {
 		return 0, err
 	}
