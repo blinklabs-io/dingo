@@ -975,6 +975,7 @@ func mustBlockOffsets(
 	return &BlockIngestionResult{
 		TxOffsets:   offsets.TxOffsets,
 		UtxoOffsets: offsets.UtxoOffsets,
+		Payloads:    offsets.Payloads,
 	}
 }
 
@@ -1675,7 +1676,7 @@ func TestSetTransactionStoresEpochZeroProposals(t *testing.T) {
 			0,
 			updates,
 			nil,
-			mustBlockOffsets(t, candidate.consumerBlock),
+			testPayloadOffsets(t, db, mustBlockOffsets(t, candidate.consumerBlock)),
 			nil, 0,
 		))
 		requireStored(t, db)
@@ -1701,7 +1702,7 @@ func TestSetTransactionStoresEpochZeroProposals(t *testing.T) {
 				0,
 				updates,
 				nil,
-				mustBlockOffsets(t, candidate.producerBlock),
+				testPayloadOffsets(t, db, mustBlockOffsets(t, candidate.producerBlock)),
 				acc,
 				txn,
 				BatchedTxIngestOpts{},

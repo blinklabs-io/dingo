@@ -19,87 +19,24 @@ import (
 	"errors"
 	"fmt"
 	"math"
+
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// offsetMagic is a 4-byte prefix that identifies offset-based storage.
-// This prevents misidentifying legacy CBOR that happens to be the same size.
-// Using a fixed-size array makes it immutable (unlike a slice).
-var offsetMagic = [4]byte{'D', 'O', 'F', 'F'} // "DOFF" = Dingo OFFset
+// offsetMagic is the "DOFF" prefix of an encoded CborOffset.
+var offsetMagic = types.CborOffsetMagic
 
 // CborOffsetSize is the size in bytes of an encoded CborOffset.
-// Layout: Magic (4) + BlockSlot (8) + BlockHash (32) + ByteOffset (4) + ByteLength (4) = 52
-const CborOffsetSize = 52
+const CborOffsetSize = types.CborOffsetSize
 
 // CborOffset represents a reference to CBOR data within a block.
-// Instead of storing duplicate CBOR data, we store an offset reference
-// that points to the CBOR within the block's raw data.
-type CborOffset struct {
-	BlockSlot  uint64   // Slot number of the block containing the CBOR
-	BlockHash  [32]byte // Hash of the block containing the CBOR
-	ByteOffset uint32   // Byte offset within the block's CBOR data
-	ByteLength uint32   // Length of the CBOR data in bytes
-}
+type CborOffset = types.CborOffset
 
-// Encode serializes the CborOffset to a 52-byte big-endian encoded slice.
-// Layout:
-//   - bytes 0-3:   Magic "DOFF" (identifies offset storage)
-//   - bytes 4-11:  BlockSlot (big-endian uint64)
-//   - bytes 12-43: BlockHash (32 bytes)
-//   - bytes 44-47: ByteOffset (big-endian uint32)
-//   - bytes 48-51: ByteLength (big-endian uint32)
-func (c *CborOffset) Encode() []byte {
-	buf := make([]byte, CborOffsetSize)
-
-	// Magic prefix (bytes 0-3)
-	copy(buf[0:4], offsetMagic[:])
-
-	// Encode BlockSlot (bytes 4-11)
-	binary.BigEndian.PutUint64(buf[4:12], c.BlockSlot)
-
-	// Copy BlockHash (bytes 12-43)
-	copy(buf[12:44], c.BlockHash[:])
-
-	// Encode ByteOffset (bytes 44-47)
-	binary.BigEndian.PutUint32(buf[44:48], c.ByteOffset)
-
-	// Encode ByteLength (bytes 48-51)
-	binary.BigEndian.PutUint32(buf[48:52], c.ByteLength)
-
-	return buf
-}
-
-// DecodeCborOffset deserializes a 52-byte big-endian encoded slice into a CborOffset.
-// Returns an error if the input data is not exactly 52 bytes or has wrong magic.
+// DecodeCborOffset deserializes a 52-byte big-endian encoded slice into a
+// CborOffset. It fails when the input is not exactly 52 bytes or has the
+// wrong magic.
 func DecodeCborOffset(data []byte) (*CborOffset, error) {
-	if len(data) != CborOffsetSize {
-		return nil, fmt.Errorf(
-			"invalid CborOffset data size: expected %d bytes, got %d",
-			CborOffsetSize,
-			len(data),
-		)
-	}
-
-	// Verify magic prefix
-	if data[0] != offsetMagic[0] || data[1] != offsetMagic[1] ||
-		data[2] != offsetMagic[2] || data[3] != offsetMagic[3] {
-		return nil, errors.New("invalid CborOffset magic: expected DOFF")
-	}
-
-	offset := &CborOffset{}
-
-	// Decode BlockSlot (bytes 4-11)
-	offset.BlockSlot = binary.BigEndian.Uint64(data[4:12])
-
-	// Copy BlockHash (bytes 12-43)
-	copy(offset.BlockHash[:], data[12:44])
-
-	// Decode ByteOffset (bytes 44-47)
-	offset.ByteOffset = binary.BigEndian.Uint32(data[44:48])
-
-	// Decode ByteLength (bytes 48-51)
-	offset.ByteLength = binary.BigEndian.Uint32(data[48:52])
-
-	return offset, nil
+	return types.DecodeCborOffset(data)
 }
 
 // EncodeUtxoOffset encodes a CborOffset for UTxO storage.

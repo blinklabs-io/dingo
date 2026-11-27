@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 	"time"
 
@@ -157,8 +159,15 @@ func TestReadData_DuplicateKeysAgainstRealDatabase(t *testing.T) {
 	t.Parallel()
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 2})
 	rawA, rawB := []byte{0x01}, []byte{0x02}
-	require.NoError(t, h.IndexerDB.SetDatum(rawA, 1, nil))
-	require.NoError(t, h.IndexerDB.SetDatum(rawB, 1, nil))
+	// The datums are not in the harness's blocks: they name an archive.
+	archive := testutil.NewPayloadArchive()
+	h.IndexerDB.Metadata().(types.PayloadResolverSetter).SetPayloadResolver(archive)
+	txn := h.IndexerDB.Transaction(t.Context(), true)
+	defer txn.Rollback() //nolint:errcheck
+	txn.Metadata().(types.PayloadLocatorSetter).SetPayloadLocator(archive)
+	require.NoError(t, h.IndexerDB.SetDatum(rawA, 1, txn))
+	require.NoError(t, h.IndexerDB.SetDatum(rawB, 1, txn))
+	require.NoError(t, txn.Commit())
 	hashA := lcommon.Blake2b256Hash(rawA).Bytes()
 	hashB := lcommon.Blake2b256Hash(rawB).Bytes()
 

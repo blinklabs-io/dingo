@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -436,6 +438,160 @@ func TestPruneBlockOfTheLedgerReadsNoSQL(t *testing.T) {
 	_, err = db.PruneBlock(context.Background(), 9, hash)
 	require.NoError(t, err)
 	require.True(t, blockIsExpired(t, db, 9, hash))
+}
+
+// A block a payload in use names is skipped however old, later blocks still
+// expire, and the held block expires in a later round once nothing uses it.
+func TestPrunerKeepsBlockHeldByActivePayload(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	heldHash := insertTestBlock(t, db, 8, 0x08)
+	freeHash := insertTestBlock(t, db, 9, 0x09)
+	var inUse atomic.Bool
+	inUse.Store(true)
+	var checked atomic.Int32
+	pruner := NewPruner(PrunerConfig{
+		LedgerState: testLedgerWindow{currentSlot: 15, stabilityWindow: 5},
+		DB:          db,
+		Frequency:   time.Hour,
+		Held: func(_ context.Context, slot uint64, _ []byte) (bool, error) {
+			checked.Add(1)
+			return slot == 8 && inUse.Load(), nil
+		},
+	})
+	expired := func(slot uint64, hash []byte) bool {
+		txn := db.BlobTxn(false)
+		defer txn.Release()
+		//nolint:nilaway // database.New requires a non-nil blob store
+		_, _, err := db.Blob().GetBlock(txn.Blob(), slot, hash)
+		return errors.Is(err, types.ErrHistoryExpired)
+	}
+
+	pruner.prune(context.Background())
+	assert.False(t, expired(8, heldHash), "the held block is kept")
+	assert.True(t, expired(9, freeHash), "later blocks still expire")
+
+	inUse.Store(false)
+	pruner.prune(context.Background())
+	assert.True(t, expired(8, heldHash), "the block expires once nothing uses it")
+}
+
+// A block that stays held costs a check each round, not a re-scan of the chain
+// after it: the cursor moves past it, and a restarted pruner still finds the
+// block held and expires it once nothing uses it.
+func TestPrunerCursorAdvancesPastHeldBlocks(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	heldHash := insertTestBlock(t, db, 8, 0x08)
+	for slot := uint64(9); slot <= 12; slot++ {
+		insertTestBlock(t, db, slot, byte(slot))
+	}
+	var inUse atomic.Bool
+	inUse.Store(true)
+	var checked []uint64
+	var mu sync.Mutex
+	newHeldPruner := func() *Pruner {
+		return NewPruner(PrunerConfig{
+			LedgerState: testLedgerWindow{currentSlot: 20, stabilityWindow: 5},
+			DB:          db,
+			Frequency:   time.Hour,
+			Held: func(_ context.Context, slot uint64, _ []byte) (bool, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				checked = append(checked, slot)
+				return slot == 8 && inUse.Load(), nil
+			},
+		})
+	}
+
+	newHeldPruner().prune(context.Background())
+	pruner := newHeldPruner()
+	require.EqualValues(t, 12, pruner.loadCursor(),
+		"the cursor stops at the held block instead of passing it")
+	assert.False(t, blockIsExpired(t, db, 8, heldHash))
+
+	mu.Lock()
+	checked = nil
+	mu.Unlock()
+	pruner.prune(context.Background())
+	mu.Lock()
+	assert.Equal(t, []uint64{8}, checked,
+		"the second round checks the held block and nothing after it")
+	mu.Unlock()
+
+	// A pruner built after a restart reads the held block from the store.
+	inUse.Store(false)
+	newHeldPruner().prune(context.Background())
+	assert.True(t, blockIsExpired(t, db, 8, heldHash))
+	held, err := db.HistoryExpiryHeld()
+	require.NoError(t, err)
+	assert.Empty(t, held, "an expired block is no longer held")
+}
+
+// A held block that a rollback removed, or that expired another way, is
+// dropped instead of failing every later round.
+func TestPrunerDropsHeldBlockThatIsGone(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	freeHash := insertTestBlock(t, db, 9, 0x09)
+	require.NoError(t, db.SetHistoryExpiryHeld([]database.HeldBlock{
+		{Slot: 8, Hash: bytes.Repeat([]byte{0x08}, 32)},
+	}))
+	pruner := NewPruner(PrunerConfig{
+		LedgerState: testLedgerWindow{currentSlot: 20, stabilityWindow: 5},
+		DB:          db,
+		Frequency:   time.Hour,
+		Held: func(context.Context, uint64, []byte) (bool, error) {
+			return false, nil
+		},
+	})
+
+	pruner.prune(context.Background())
+
+	held, err := db.HistoryExpiryHeld()
+	require.NoError(t, err)
+	assert.Empty(t, held)
+	assert.True(t, blockIsExpired(t, db, 9, freeHash),
+		"blocks after the missing one still expire")
+}
+
+// A failed write of the held blocks leaves the cursor where it was, so the
+// blocks that were not recorded stay inside the next round's scan instead of
+// being passed and never rechecked.
+func TestPrunerKeepsCursorWhenHeldBlocksAreNotSaved(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	heldHash := insertTestBlock(t, db, 8, 0x08)
+	insertTestBlock(t, db, 9, 0x09)
+	var failWrites atomic.Bool
+	failWrites.Store(true)
+	pruner := NewPruner(PrunerConfig{
+		LedgerState: testLedgerWindow{currentSlot: 20, stabilityWindow: 5},
+		DB:          db,
+		Frequency:   time.Hour,
+		Held: func(_ context.Context, slot uint64, _ []byte) (bool, error) {
+			return slot == 8, nil
+		},
+	})
+	realPersist := pruner.persistHeld
+	pruner.persistHeld = func(held []database.HeldBlock) error {
+		if failWrites.Load() {
+			return errors.New("injected")
+		}
+		return realPersist(held)
+	}
+
+	pruner.prune(context.Background())
+	assert.Zero(t, pruner.loadCursor(),
+		"the cursor passed a block that was never recorded as held")
+
+	failWrites.Store(false)
+	pruner.prune(context.Background())
+	held, err := db.HistoryExpiryHeld()
+	require.NoError(t, err)
+	require.Len(t, held, 1, "the block is recorded once the write succeeds")
+	assert.False(t, blockIsExpired(t, db, 8, heldHash))
+	assert.GreaterOrEqual(t, pruner.loadCursor(), uint64(8))
 }
 
 // BeforeExpire runs before its block expires, with the block still readable,

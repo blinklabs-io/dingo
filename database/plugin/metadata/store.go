@@ -1979,7 +1979,8 @@ type MetadataStore interface {
 
 	// DeleteMidnightRegistrationsByBlock removes all registration rows for
 	// the given block number and returns them so the caller can update the
-	// in-memory tracked-UTxO set. Used during chain rollback.
+	// in-memory tracked-UTxO set. Each row's FullDatum is the resolved datum
+	// and FullDatumOffset the stored offset. Used during chain rollback.
 	DeleteMidnightRegistrationsByBlock(
 		types.Txn,
 		uint64,
@@ -1987,7 +1988,8 @@ type MetadataStore interface {
 
 	// DeleteMidnightDeregistrationsByBlock removes all deregistration rows
 	// for the given block number and returns them so the caller can restore
-	// the in-memory tracked-UTxO set. Used during chain rollback.
+	// the in-memory tracked-UTxO set. Each row's FullDatum is the resolved
+	// datum and FullDatumOffset the stored offset. Used during chain rollback.
 	DeleteMidnightDeregistrationsByBlock(
 		types.Txn,
 		uint64,
@@ -3588,6 +3590,18 @@ type AddressTransactionIndexRebuilder interface {
 		context.Context,
 		func(context.Context, models.Transaction) ([]models.AddressTransaction, error),
 	) error
+}
+
+// ActivePayloadChecker is implemented by stores whose payload columns name
+// block bytes. History expiry asks it whether a block still holds a payload in
+// use before expiring the block.
+type ActivePayloadChecker interface {
+	BlockHoldsActivePayloads(
+		ctx context.Context,
+		slot uint64,
+		hash []byte,
+		currentEpoch uint64,
+	) (bool, error)
 }
 
 // UtxoSpendStateReader optionally narrows consumed-input recovery reads. A nil

@@ -2782,6 +2782,9 @@ type IndexerWriterDeps struct {
 	// Fatal stops the node when the writer stops on an error no retry can
 	// clear. Nil leaves the writer stopped.
 	Fatal func(error)
+	// Moved, when set, is called after each pass in which the writer moved
+	// its tip, forward or back. It must not block.
+	Moved func()
 }
 
 // IndexerWriterFactory builds the writer of an IndexerDB layout. It is a seam

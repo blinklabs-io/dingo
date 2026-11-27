@@ -39,7 +39,7 @@ const (
 
 // UpgradeError identifies the exact migration phase that blocked readiness.
 type UpgradeError struct {
-	Version int
+	Version int64
 	Name    string
 	Phase   Phase
 	Err     error

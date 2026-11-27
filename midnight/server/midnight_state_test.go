@@ -40,7 +40,7 @@ import (
 // setupTestStore creates a SQLite metadata store in a temporary directory,
 // seeded from the already-migrated schema template so each test skips the
 // full migration.
-func setupTestStore(t *testing.T) *sqlstore.Store {
+func setupTestStore(t *testing.T) *dbtest.PayloadStore {
 	t.Helper()
 	// Seed the already-migrated metadata template: running the full schema
 	// migration per test dominates these tests' cost.
@@ -59,10 +59,10 @@ func setupTestStore(t *testing.T) *sqlstore.Store {
 	t.Cleanup(func() {
 		require.NoError(t, store.Close())
 	})
-	return store
+	return dbtest.NewPayloadStore(store)
 }
 
-func startTestServerWithMetadata(t *testing.T, md *sqlstore.Store) string {
+func startTestServerWithMetadata(t *testing.T, md *dbtest.PayloadStore) string {
 	t.Helper()
 	return startTestServerConfig(t, server.Config{Metadata: md})
 }
@@ -739,7 +739,7 @@ func (s *spyEventStore) FindMidnightDeregistrationsFrom(
 func TestGetUtxoEvents_SharesOneReadTransactionAcrossTables(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-	spy := &spyEventStore{Store: store}
+	spy := &spyEventStore{Store: store.Store}
 
 	client := midnight.NewMidnightStateClient(
 		dial(t, startTestServerConfig(t, server.Config{Metadata: spy})),

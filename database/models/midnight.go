@@ -58,8 +58,12 @@ func (r MidnightAssetSpend) BlockTxPosition() (blockNumber uint64, txIndex uint3
 
 // MidnightRegistration stores mapping validator registration events.
 type MidnightRegistration struct {
-	ID               uint
-	FullDatum        []byte
+	ID        uint
+	FullDatum []byte
+	// FullDatumOffset is the stored CBOR offset of FullDatum in its block. A
+	// write that has it records it; one that does not locates FullDatum in the
+	// block being written. A read sets both.
+	FullDatumOffset  []byte
 	TxHash           []byte
 	OutputIndex      uint32
 	BlockNumber      uint64
@@ -75,8 +79,11 @@ func (r MidnightRegistration) BlockTxPosition() (blockNumber uint64, txIndex uin
 
 // MidnightDeregistration stores mapping validator deregistration events.
 type MidnightDeregistration struct {
-	ID               uint
-	FullDatum        []byte
+	ID        uint
+	FullDatum []byte
+	// FullDatumOffset is the stored CBOR offset of FullDatum; see
+	// MidnightRegistration.FullDatumOffset.
+	FullDatumOffset  []byte
 	TxHash           []byte
 	UtxoTxHash       []byte
 	UtxoIndex        uint32
@@ -98,6 +105,9 @@ type MidnightGovernanceDatum struct {
 	TxHash      []byte
 	OutputIndex uint32
 	Datum       []byte
+	// DatumOffset is the stored CBOR offset of Datum; see
+	// MidnightRegistration.FullDatumOffset.
+	DatumOffset []byte
 	BlockNumber uint64
 }
 
@@ -106,6 +116,9 @@ type MidnightAriadneParams struct {
 	ID    uint
 	Epoch uint64
 	Datum []byte
+	// DatumOffset is the stored CBOR offset of Datum; see
+	// MidnightRegistration.FullDatumOffset.
+	DatumOffset []byte
 }
 
 // MidnightAriadneRollback stores the previous Ariadne row for a block upsert,
@@ -116,6 +129,10 @@ type MidnightAriadneRollback struct {
 	Epoch          uint64
 	PreviousExists bool
 	PreviousDatum  []byte
+	// PreviousDatumOffset is the stored CBOR offset of PreviousDatum, which
+	// lies in an earlier block than the one being written; see
+	// MidnightRegistration.FullDatumOffset.
+	PreviousDatumOffset []byte
 }
 
 // MidnightCandidateRemoval records a committee-candidate UTxO spent by a
@@ -125,6 +142,9 @@ type MidnightCandidateRemoval struct {
 	TxHash      []byte
 	OutputIndex uint32
 	Datum       []byte
+	// DatumOffset is the stored CBOR offset of Datum, which lies in the block
+	// that created the candidate; see MidnightRegistration.FullDatumOffset.
+	DatumOffset []byte
 }
 
 // MidnightEpochTransition records the epoch that was current before a block

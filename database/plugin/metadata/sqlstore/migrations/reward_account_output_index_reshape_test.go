@@ -164,7 +164,7 @@ func TestRewardAccountOutputIndexReshapeTranslatesForProviders(t *testing.T) {
 
 	postgres, err := migrations.PostgresRegistry()
 	require.NoError(t, err)
-	require.Equal(t, rewardOutputReshapeVersion, postgres[rewardOutputReshapeVersion-1].Version)
+	require.Equal(t, int64(rewardOutputReshapeVersion), postgres[rewardOutputReshapeVersion-1].Version)
 	postgresSQL := strings.Join(postgres[rewardOutputReshapeVersion-1].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL, `CREATE INDEX IF NOT EXISTS "idx_reward_account_output_credential_epoch"`)
 	require.Contains(t, postgresSQL, `CREATE UNIQUE INDEX IF NOT EXISTS "idx_reward_account_output_epoch_pool_cred_type"`)

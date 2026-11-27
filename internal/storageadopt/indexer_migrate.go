@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -54,10 +55,25 @@ const (
 	migrateStepLatched = "latched"
 )
 
+// ArchiveStoreFunc wraps a blob store with the archive fallback cfg
+// configures. The node's composition supplies it, because this package cannot
+// import the archive client.
+type ArchiveStoreFunc func(
+	cfg *config.Config,
+	upstream blob.BlobStore,
+) (blob.BlobStore, error)
+
 // MigrateToIndexerDB adopts an API database in place. The caller must recover
-// interrupted restores before adopting active storage.
-func MigrateToIndexerDB(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
-	m := &indexerMigration{cfg: cfg, logger: logger}
+// interrupted restores before adopting active storage. archive builds the
+// blob store that fetches blocks expired locally; it is required only when
+// cfg names an archive.
+func MigrateToIndexerDB(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	archive ArchiveStoreFunc,
+) error {
+	m := &indexerMigration{cfg: cfg, logger: logger, archive: archive}
 	return m.run(ctx)
 }
 
@@ -74,16 +90,19 @@ func SupportsAPIAdoption(provider string) bool {
 
 // AdoptStagedAPI migrates restored API storage before node activation. For
 // server providers the caller must prepare an empty derived core database
-// and retain its rollback backup.
+// and retain its rollback backup. archive is as for MigrateToIndexerDB.
 func AdoptStagedAPI(
 	ctx context.Context,
 	cfg config.Config,
 	logger *slog.Logger,
 	genesis *cardano.CardanoNodeConfig,
 	stagingDir string,
+	archive ArchiveStoreFunc,
 ) error {
 	cfg.DatabasePath = stagingDir
-	m := &indexerMigration{cfg: &cfg, logger: logger, genesis: genesis}
+	m := &indexerMigration{
+		cfg: &cfg, logger: logger, genesis: genesis, archive: archive,
+	}
 	switch cfg.Plugins.Storage.Metadata.Provider {
 	case "sqlite":
 		return m.migrate(ctx)
@@ -99,6 +118,7 @@ type indexerMigration struct {
 	cfg         *config.Config
 	logger      *slog.Logger
 	genesis     *cardano.CardanoNodeConfig
+	archive     ArchiveStoreFunc
 	// afterStep, when set, runs after each step and fails the migration
 	// there. Tests use it to stop at the boundary a crash can fall on.
 	afterStep func(step string) error
@@ -531,6 +551,27 @@ func (m *indexerMigration) prepareCopy(
 	}
 	if err := m.copyOffsetEntries(ctx, source, idx); err != nil {
 		return err
+	}
+	// The released store holds copies of the payloads it indexed; the
+	// IndexerDB reads them from the blocks instead.
+	if m.cfg.BarkBaseUrl != "" {
+		// A block that expired locally is fetched from the archive to
+		// compute its offsets, and reads of those rows proxy the same fetch.
+		if m.archive == nil {
+			return errors.New("an archive is configured but the migration was given no archive store")
+		}
+		archived, err := m.archive(m.cfg, idx.Blob())
+		if err != nil {
+			return fmt.Errorf("create archive blob store: %w", err)
+		}
+		idx.SetBlobStore(archived)
+	}
+	m.logger.Info(
+		"converting the copied payload columns to block offsets",
+		"component", "indexer",
+	)
+	if err := idx.MigratePayloadOffsets(ctx); err != nil {
+		return fmt.Errorf("convert payload columns to block offsets: %w", err)
 	}
 	checkpoints, err := m.checkpointsBelow(ctx, source, tip)
 	if err != nil {

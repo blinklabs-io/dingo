@@ -82,6 +82,8 @@ VALUES (?, ?, 1, 1) ON CONFLICT (hash) DO NOTHING`, []byte{0, 9, 9}, []byte{7})
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM script`).Scan(&after))
 	require.Equal(t, before, after)
 
+	_, err = db.Exec(`DELETE FROM schema_migrations WHERE version > 65`)
+	require.NoError(t, err)
 	_, err = db.Exec(`UPDATE schema_migrations
 SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = 65`)
 	require.NoError(t, err)

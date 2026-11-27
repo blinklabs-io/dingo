@@ -42,7 +42,7 @@ backfill all historical transaction metadata. Pruning also limits history.
 | Transactions | tx | "transaction": id, hash (every known transaction); applied_transaction: tx_id, block_hash, slot, block_index, fee (applied transactions) |
 | Outputs | tx_out, tx_in | utxo: tx_id (producer row id), output_idx, amount, deleted_slot, spent_at_tx_id |
 | Stake accounts | stake_address and delegation/reward tables | account: staking_key, credential_tag, pool, drep, reward, active |
-| Datums | datum | datum: hash, raw_datum (CBOR bytes) |
+| Datums | datum | datum: hash, raw_datum (52-byte block offset of the CBOR, not the CBOR) |
 | Native assets | multi_asset and output/mint relations | asset_identity: id, policy_id, name; asset_holding: utxo_id, asset_id, amount (output holdings) |
 | Governance | gov_action_proposal, voting_procedure | governance_proposal, governance_vote, drep, committee_member |
 
@@ -117,14 +117,20 @@ type from the hash bytes.
 ### Stored datums
 
 ~~~sql
-SELECT hex(hash) AS datum_hash, hex(raw_datum) AS datum_cbor_hex
+SELECT hex(hash) AS datum_hash, hex(raw_datum) AS datum_offset_hex
 FROM datum
 ORDER BY id DESC
 LIMIT 5;
 ~~~
 
-raw_datum contains serialized CBOR, not JSON. Use resolve_datum_or_script with
-the datum hash for decoded content. Core storage mode does not populate the
+raw_datum holds a 52-byte offset (magic "DOFF", then block slot, block hash,
+byte offset and byte length) of the datum's CBOR in the block that carried it,
+not the CBOR itself. The same holds for script.content,
+applied_transaction.metadata, transaction_metadata_label.cbor_value,
+pparam_update.cbor and the Midnight datum columns. A payload whose block
+expired reads as a "DEXP" marker or fails with a history-expired error. SQL
+cannot read the block: use resolve_datum_or_script with the datum or script
+hash for the bytes and decoded content. Core storage mode does not populate the
 API-mode datum, script, or redeemer detail indexes. Empty results from those
 tables in core mode do not mean the chain has no such data. API mode indexes
 details for transactions it processes, subject to available and retained
@@ -167,7 +173,7 @@ ORDER BY m.name, p.cid`)
 		"account":             "Stake accounts identified by credential_tag and staking_key",
 		"asset_identity":      "Distinct native assets by policy_id and name",
 		"asset_holding":       "Native asset quantity per utxo_id and asset_id",
-		"datum":               "Datum hashes and serialized CBOR",
+		"datum":               "Datum hashes and the block offset of each datum CBOR",
 		"block_nonce":         "Block hashes and nonces by slot",
 		"drep":                "DRep registration state",
 		"committee_member":    "Committee cold credentials and membership terms",

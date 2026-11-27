@@ -18,7 +18,12 @@
 #   RELEASE_TAG           required, for example v0.71.0
 #   DIST_DIR              optional, defaults to dist
 #   CONFORMANCE_DIR       optional, defaults to .conformance; holds the
-#                         node-diversity-conformance checkout
+#                         Amaru checkout
+#   AMARU_LEDGER_DIR      optional, defaults to $CONFORMANCE_DIR/amaru; the
+#                         checked out pragma-org/amaru repository
+#   AMARU_LEDGER_REVISION required, the pinned Amaru commit that last changed
+#                         the ledger-rules scenario corpus; the report names it
+#                         as its dataset_commit
 #   CBOR_DATASET_DIR      required, the checked out cardano-cbor-dataset
 #   CBOR_DATASET_REVISION required, the pinned dataset commit
 #   UPLC_CORPUS_SHA256     required, digest of the NDC UPLC corpus archive
@@ -31,11 +36,13 @@ set -euo pipefail
 : "${RELEASE_TAG:?RELEASE_TAG must be set}"
 : "${CBOR_DATASET_DIR:?CBOR_DATASET_DIR must be set}"
 : "${CBOR_DATASET_REVISION:?CBOR_DATASET_REVISION must be set}"
+: "${AMARU_LEDGER_REVISION:?AMARU_LEDGER_REVISION must be set}"
 : "${UPLC_CORPUS_SHA256:?UPLC_CORPUS_SHA256 must be set}"
 : "${TURBO_CORPUS_SHA256:?TURBO_CORPUS_SHA256 must be set}"
 
 DIST_DIR="${DIST_DIR:-dist}"
 CONFORMANCE_DIR="${CONFORMANCE_DIR:-.conformance}"
+AMARU_LEDGER_DIR="${AMARU_LEDGER_DIR:-${CONFORMANCE_DIR}/amaru}"
 TURBO_SAMPLES="${TURBO_SAMPLES:-50}"
 TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-0}"
 
@@ -50,6 +57,7 @@ absolute_path() {
 DIST_DIR="$(absolute_path "$DIST_DIR")"
 CONFORMANCE_DIR="$(absolute_path "$CONFORMANCE_DIR")"
 CBOR_DATASET_DIR="$(absolute_path "$CBOR_DATASET_DIR")"
+AMARU_LEDGER_DIR="$(absolute_path "$AMARU_LEDGER_DIR")"
 
 # The report step has a 60-minute limit. Generator budgets total 43 minutes;
 # corpus preparation is capped at six minutes, leaving 11 minutes for gzip.
@@ -124,6 +132,7 @@ valid_report() {
           (.failures | type == "array")
         elif $scenario == "ledger-rules" then
           (.implementation.name | type == "string" and length > 0) and
+          (.dataset_commit | type == "string" and length > 0) and
           (.scenarios | type == "array") and
           all(.scenarios[]; (.id | type == "string") and (.result | type == "string"))
         elif $scenario == "uplc-conformance" then
@@ -232,10 +241,21 @@ else
 fi
 rm -f "$dataset_log"
 
-run_generator "${prefix}-ledger-rules.json" ledger-rules "$LEDGER_GENERATOR_TIMEOUT_SECONDS" \
-  env DINGO_CONFORMANCE_INPUT="${CONFORMANCE_DIR}/node-diversity-conformance/scenarios/ledger-rules/fixtures" \
-  DINGO_CONFORMANCE_OUTPUT="${prefix}-ledger-rules.json" \
-  go test -count=1 -run '^TestWriteConformanceReport$' ./internal/ledgerrulesconformance
+ledger_log="$(mktemp)"
+if ! ledger_revision="$(git -C "$AMARU_LEDGER_DIR" rev-parse HEAD 2>"$ledger_log")"; then
+  write_error_report "${prefix}-ledger-rules.json" ledger-rules \
+    "cannot read the Amaru checkout revision: $(log_excerpt "$ledger_log")"
+elif [ "$ledger_revision" = "$AMARU_LEDGER_REVISION" ]; then
+  run_generator "${prefix}-ledger-rules.json" ledger-rules "$LEDGER_GENERATOR_TIMEOUT_SECONDS" \
+    env DINGO_CONFORMANCE_INPUT="${AMARU_LEDGER_DIR}/crates/amaru-ledger/tests/data/transaction" \
+    DINGO_CONFORMANCE_REVISION="$ledger_revision" \
+    DINGO_CONFORMANCE_OUTPUT="${prefix}-ledger-rules.json" \
+    go test -count=1 -run '^TestWriteConformanceReport$' ./internal/ledgerrulesconformance
+else
+  write_error_report "${prefix}-ledger-rules.json" ledger-rules \
+    "Amaru checkout does not match the pinned revision ${AMARU_LEDGER_REVISION}"
+fi
+rm -f "$ledger_log"
 
 uplc_dir="$(mktemp -d)"
 turbo_dir="$(mktemp -d)"

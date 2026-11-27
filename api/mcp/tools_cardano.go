@@ -1108,6 +1108,15 @@ func registerCardanoTools(
 		err = db.QueryRowContext(qCtx, "SELECT raw_datum, added_slot FROM datum WHERE hash = ? LIMIT 1", hashBytes).
 			Scan(&rawDatum, &addedSlot)
 		if err == nil {
+			rawDatum, err = limits.payloadColumn(rawDatum)
+			if err != nil {
+				return &mcp.CallToolResult{
+					IsError: true,
+					Content: []mcp.Content{&mcp.TextContent{
+						Text: fmt.Sprintf("Error: cannot read the datum: %v", err),
+					}},
+				}, nil, nil
+			}
 			slotStr := "unknown"
 			if addedSlot.Valid {
 				slotStr = strconv.FormatInt(addedSlot.Int64, 10)
@@ -1154,6 +1163,15 @@ func registerCardanoTools(
 		err = db.QueryRowContext(qCtx, "SELECT content, created_slot, type FROM script WHERE hash = ? LIMIT 1", hashBytes).
 			Scan(&content, &createdSlot, &scriptType)
 		if err == nil {
+			content, err = limits.payloadColumn(content)
+			if err != nil {
+				return &mcp.CallToolResult{
+					IsError: true,
+					Content: []mcp.Content{&mcp.TextContent{
+						Text: fmt.Sprintf("Error: cannot read the script: %v", err),
+					}},
+				}, nil, nil
+			}
 			slotStr := "unknown"
 			if createdSlot.Valid {
 				slotStr = strconv.FormatInt(createdSlot.Int64, 10)

@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,8 @@ import (
 )
 
 const DefaultBatchSize = 1000
+
+const lastSequentialVersion = 75
 
 // SQL contains idempotent DDL statements for one migration phase.
 type SQL struct {
@@ -68,7 +71,11 @@ type Backfill func(context.Context, Batch) (BatchResult, error)
 // Migration is immutable after release. BackfillRevision must change whenever
 // the Go backfill behavior changes.
 type Migration struct {
-	Version          int
+	Version int64
+	// After identifies the migration that must finish before this one starts.
+	// Independent migrations may share a predecessor; the registry orders those
+	// siblings by stable version.
+	After            int64
 	Name             string
 	BackfillRevision string
 	SQL              map[string]SQL
@@ -83,7 +90,10 @@ func (m Migration) checksum() string {
 		_, _ = hash.Write([]byte{':'})
 		_, _ = hash.Write([]byte(value))
 	}
-	write(strconv.Itoa(m.Version))
+	write(strconv.FormatInt(m.Version, 10))
+	if m.Version > lastSequentialVersion {
+		write(strconv.FormatInt(m.After, 10))
+	}
 	write(m.Name)
 	write(m.BackfillRevision)
 	dialects := make([]string, 0, len(m.SQL))
@@ -112,21 +122,62 @@ func (m Migration) checksum() string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
+// StableVersion gives new migrations an immutable, deterministic identifier
+// derived from their release name. Its range fits positive int64 values while
+// leaving the released sequential versions untouched, and remains intact on
+// 32-bit builds. Registry validation detects hash collisions.
+func StableVersion(name string) int64 {
+	digest := sha256.Sum256([]byte(name))
+	const stableVersionPrefix int64 = 1 << 62
+	const stableVersionMask uint64 = (1 << 62) - 1
+	return stableVersionPrefix | int64(binary.BigEndian.Uint64(digest[:8])&stableVersionMask)
+}
+
 func validateRegistry(registry []Migration, dialect string) error {
 	if len(registry) == 0 {
 		return ErrEmptyRegistry
 	}
 	seenNames := make(map[string]struct{}, len(registry))
-	for idx, migration := range registry {
-		expected := idx + 1
-		if migration.Version != expected {
+	seenVersions := make(map[int64]struct{}, len(registry))
+	versions := make([]schemaVersion, 0, len(registry))
+	for _, migration := range registry {
+		if migration.Version < 1 {
 			return fmt.Errorf(
-				"%w: expected version %d, found %d",
+				"%w: invalid version %d",
 				ErrInvalidRegistry,
-				expected,
 				migration.Version,
 			)
 		}
+		if migration.Version > lastSequentialVersion &&
+			migration.Version != StableVersion(migration.Name) {
+			return fmt.Errorf(
+				"%w: version %d must be derived from its migration name",
+				ErrInvalidRegistry,
+				migration.Version,
+			)
+		}
+		if migration.Version <= lastSequentialVersion &&
+			migration.After != migration.Version-1 {
+			return fmt.Errorf(
+				"%w: version %d must follow version %d",
+				ErrInvalidRegistry,
+				migration.Version,
+				migration.Version-1,
+			)
+		}
+		versions = append(versions, schemaVersion{
+			Version: migration.Version,
+			Name:    migration.Name,
+			After:   migration.After,
+		})
+		if _, exists := seenVersions[migration.Version]; exists {
+			return fmt.Errorf(
+				"%w: duplicate version %d",
+				ErrInvalidRegistry,
+				migration.Version,
+			)
+		}
+		seenVersions[migration.Version] = struct{}{}
 		if migration.Name == "" {
 			return fmt.Errorf(
 				"%w: version %d has an empty name",
@@ -162,6 +213,19 @@ func validateRegistry(registry []Migration, dialect string) error {
 				"%w: version %d has a negative batch size",
 				ErrInvalidRegistry,
 				migration.Version,
+			)
+		}
+	}
+	ordered, err := orderedSchemaVersions(versions)
+	if err != nil {
+		return err
+	}
+	for i := range ordered {
+		if ordered[i].Version != registry[i].Version {
+			return fmt.Errorf(
+				"%w: registry is not in deterministic predecessor order at version %d",
+				ErrInvalidRegistry,
+				registry[i].Version,
 			)
 		}
 	}

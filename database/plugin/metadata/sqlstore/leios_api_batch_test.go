@@ -34,6 +34,7 @@ func TestLeiosAPIBatchKeepsDatumAndAssetsImmediate(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	require.NotNil(t, acc)
 	defer acc.Reset()
 	tx, point := apiDetailTx(t, 31)
@@ -57,6 +58,7 @@ func TestLeiosAPIBatchReplayReplacesQueuedAndFlushedWitnesses(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	for _, witnesses := range []int{2, 1} {
 		tx, point := witnessTx(t, 33, witnesses)
@@ -84,6 +86,7 @@ func TestLeiosAPIBatchPreservesConsumedInputTolerance(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	require.NoError(t, store.SetTransactionLeiosClosureBatched(fx.tx, fx.point, 0, fx.certDeposits, false, nil, acc, txn, 0))
 	stored, err := store.GetUtxoIncludingSpent(fx.consumedTxID, 0, txn)
@@ -101,6 +104,7 @@ func TestLeiosAPIBatchStakeChangesAreImmediate(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	require.NoError(t, store.SetTransactionLeiosClosureBatched(fx.tx, fx.point, 0, fx.certDeposits, false, nil, acc, txn, 0))
 	db, ctx, err := store.dbFromTxn(txn)
@@ -118,6 +122,7 @@ func TestLeiosAPIBatchDefersOutputAddresses(t *testing.T) {
 	txn := store.Transaction(t.Context())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	var previous lcommon.Transaction
 	for i := range 3 {
@@ -167,6 +172,7 @@ func TestLeiosAPIBatchRollbackDropsOutputAddresses(t *testing.T) {
 	store := newAPIModeSQLiteStore(t, nil)
 	txn := store.Transaction(t.Context())
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	tx, point, _, _ := assetOutputTx(t, 74)
 	require.NoError(t, store.SetTransactionLeiosClosureBatched(tx, point, 0, nil, true, nil, acc, txn, 0))
 	require.NoError(t, store.FlushBatch(acc, txn))
@@ -205,6 +211,7 @@ func BenchmarkLeiosClosureAddressBatch(b *testing.B) {
 	for b.Loop() {
 		txn := store.Transaction(b.Context())
 		acc := store.NewLeiosClosureBatchAccumulator()
+		bindTestPayloads(b, store, acc)
 		for i, tx := range txs {
 			if err := store.SetTransactionLeiosClosureBatched(tx, ocommon.Point{Slot: 100, Hash: []byte("ranking-block")}, uint32(i), nil, true, nil, acc, txn, 0); err != nil {
 				b.Fatal(err)
@@ -233,6 +240,7 @@ func TestLeiosAPIBatchDefersRepairedOutputAddresses(t *testing.T) {
 			txn := store.Transaction(t.Context())
 			t.Cleanup(func() { _ = txn.Rollback() })
 			acc := store.NewLeiosClosureBatchAccumulator()
+			bindTestPayloads(t, store, acc)
 			defer acc.Reset()
 			tx, point, _, _ := assetOutputTx(t, 85)
 			require.NoError(t, store.SetTransactionLeiosClosureBatched(tx, point, 0, nil, true, nil, acc, txn, 0))

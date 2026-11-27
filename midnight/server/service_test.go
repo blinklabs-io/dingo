@@ -86,6 +86,9 @@ func newTestDatabase(t *testing.T) *database.Database {
 // database beside it, which owns the blocks the IndexerDB reads.
 var consensusDBs sync.Map
 
+// archives maps each IndexerDB to the payload archive its store reads from.
+var archives sync.Map
+
 // createBlock stores blk in the ledger's database beside the IndexerDB db.
 func createBlock(t *testing.T, db *database.Database, blk models.Block) {
 	t.Helper()
@@ -163,8 +166,7 @@ func TestGetTechnicalCommitteeDatum_AtOrBefore(t *testing.T) {
 	for i, blockNumber := range []uint64{10, 20, 30} {
 		require.NoError(
 			t,
-			db.InsertMidnightGovernanceDatum(
-				context.Background(),
+			midnightWriter(t, db).InsertGovernanceDatum(
 				&models.MidnightGovernanceDatum{
 					DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
 					TxHash:      []byte{byte(i), 1, 2, 3},
@@ -219,8 +221,7 @@ func TestGetCouncilDatum_DistinctFromTechnicalCommittee(t *testing.T) {
 	db := newTestDatabase(t)
 	require.NoError(
 		t,
-		db.InsertMidnightGovernanceDatum(
-			context.Background(),
+		midnightWriter(t, db).InsertGovernanceDatum(
 			&models.MidnightGovernanceDatum{
 				DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
 				TxHash:      []byte{1, 2, 3, 4},
@@ -232,8 +233,7 @@ func TestGetCouncilDatum_DistinctFromTechnicalCommittee(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.InsertMidnightGovernanceDatum(
-			context.Background(),
+		midnightWriter(t, db).InsertGovernanceDatum(
 			&models.MidnightGovernanceDatum{
 				DatumType:   models.MidnightGovernanceDatumTypeCouncil,
 				TxHash:      []byte{5, 6, 7, 8},
@@ -268,8 +268,7 @@ func TestGetAriadneParameters_AtOrBefore(t *testing.T) {
 	for i, epoch := range []uint64{1, 2, 3} {
 		require.NoError(
 			t,
-			db.UpsertMidnightAriadneParams(
-				context.Background(),
+			midnightWriter(t, db).UpsertAriadneParams(
 				&models.MidnightAriadneParams{
 					Epoch: epoch,
 					Datum: []byte{byte('a' + i)},
@@ -376,8 +375,7 @@ func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.UpsertMidnightEpochCandidates(
-			context.Background(),
+		midnightWriter(t, db).UpsertEpochCandidates(
 			&models.MidnightEpochCandidates{
 				Epoch:          7,
 				BlockNumber:    700,
@@ -508,8 +506,7 @@ func TestGetEpochCandidates_MissingRegistrationLeavesProvenanceZero(
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.UpsertMidnightEpochCandidates(
-			context.Background(),
+		midnightWriter(t, db).UpsertEpochCandidates(
 			&models.MidnightEpochCandidates{
 				Epoch:          9,
 				BlockNumber:    900,
