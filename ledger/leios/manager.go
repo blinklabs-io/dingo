@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"slices"
 	"sort"
@@ -344,9 +345,25 @@ type VoteManagerConfig struct {
 	CertifyByDeadlineSlots uint64
 }
 
-// storedVote is one retained vote with its serving metadata.
+// resolvedVote is a vote resolved to the election it counts in: the
+// election slot and the endorser block voted for. A CIP-0164 vote names only
+// its announcing ranking block, so both come from that block's announcement;
+// a legacy vote carries them itself. Votes are deduplicated and tallied by
+// these fields.
+type resolvedVote struct {
+	slotNo    uint64
+	ebHash    lcommon.Blake2b256
+	voterId   uint64
+	signature []byte
+}
+
+// storedVote is one retained vote with its serving metadata. wire and raw
+// hold the CIP-0164 form served over leios-votes and leios-fetch; raw is nil
+// for a legacy vote, which has no announcing ranking block to name and whose
+// signature does not cover one, so it is tallied but never served.
 type storedVote struct {
-	vote             lcommon.LeiosVote
+	vote             resolvedVote
+	wire             lcommon.LeiosVote
 	raw              cbor.RawMessage
 	originConn       string // empty for locally emitted votes
 	announcingRbHash lcommon.Blake2b256
@@ -1979,7 +1996,7 @@ func (m *VoteManager) slotWindowCheck(slot, pastBound uint64) error {
 // rejectVote logs and counts a dropped vote.
 func (m *VoteManager) rejectVote(
 	reason string,
-	vote lcommon.LeiosVote,
+	vote resolvedVote,
 	err error,
 ) {
 	if m.metrics != nil {
@@ -1988,24 +2005,24 @@ func (m *VoteManager) rejectVote(
 	m.logger.Debug(
 		"dropping leios vote",
 		"reason", reason,
-		"slot", vote.SlotNo,
-		"voter_id", vote.VoterId,
-		"endorser_block_hash", vote.EndorserBlockHash.String(),
+		"slot", vote.slotNo,
+		"voter_id", vote.voterId,
+		"endorser_block_hash", vote.ebHash.String(),
 		"error", err,
 	)
 }
 
 func (m *VoteManager) reserveIncomingVoteVerification(
 	connKey string,
-	vote lcommon.LeiosVote,
+	vote resolvedVote,
 ) (bool, error) {
-	id := lcommon.LeiosVoteId{SlotNo: vote.SlotNo, VoterId: vote.VoterId}
+	id := lcommon.LeiosVoteId{SlotNo: vote.slotNo, VoterId: vote.voterId}
 	m.mu.Lock()
 	now := m.now()
 	if record, ok := m.voteRecords[id]; ok &&
 		now.Sub(record.insertedAt) < m.voteTTL {
 		m.mu.Unlock()
-		if record.ebHash != vote.EndorserBlockHash {
+		if record.ebHash != vote.ebHash {
 			return false, fmt.Errorf(
 				"%w for an existing voter and slot",
 				errVoteEquivocation,
@@ -2023,7 +2040,7 @@ func (m *VoteManager) reserveIncomingVoteVerification(
 	}
 	if inFlightHash, ok := m.voteVerificationsInFlight[id]; ok {
 		m.mu.Unlock()
-		if inFlightHash != vote.EndorserBlockHash {
+		if inFlightHash != vote.ebHash {
 			return false, fmt.Errorf(
 				"%w during verification",
 				errVoteEquivocation,
@@ -2043,7 +2060,7 @@ func (m *VoteManager) reserveIncomingVoteVerification(
 		m.mu.Unlock()
 		return false, errVoteVerificationPeerTrackingBudget
 	}
-	m.voteVerificationsInFlight[id] = vote.EndorserBlockHash
+	m.voteVerificationsInFlight[id] = vote.ebHash
 	m.mu.Unlock()
 	return true, nil
 }
@@ -2052,9 +2069,9 @@ func (m *VoteManager) reserveIncomingVoteVerification(
 // remembers the (slot, voter) id so repeats are dropped before admission.
 func (m *VoteManager) rejectKeylessSeatVote(
 	connKey string,
-	vote lcommon.LeiosVote,
+	vote resolvedVote,
 ) error {
-	id := lcommon.LeiosVoteId{SlotNo: vote.SlotNo, VoterId: vote.VoterId}
+	id := lcommon.LeiosVoteId{SlotNo: vote.slotNo, VoterId: vote.voterId}
 	m.mu.Lock()
 	if _, ok := m.keylessSeatDrops[id]; ok ||
 		len(m.keylessSeatDrops) < m.maxRecords {
@@ -2067,7 +2084,7 @@ func (m *VoteManager) rejectKeylessSeatVote(
 func (m *VoteManager) rejectIncomingVote(
 	connKey string,
 	reason string,
-	vote lcommon.LeiosVote,
+	vote resolvedVote,
 	err error,
 ) error {
 	m.rejectVote(reason, vote, err)
@@ -2091,25 +2108,51 @@ func (m *VoteManager) rejectIncomingVote(
 }
 
 func (m *VoteManager) releaseIncomingVoteVerification(
-	vote lcommon.LeiosVote,
+	vote resolvedVote,
 ) {
-	id := lcommon.LeiosVoteId{SlotNo: vote.SlotNo, VoterId: vote.VoterId}
+	id := lcommon.LeiosVoteId{SlotNo: vote.slotNo, VoterId: vote.voterId}
 	m.mu.Lock()
 	delete(m.voteVerificationsInFlight, id)
 	m.mu.Unlock()
 }
 
-// HandleVote validates and stores a vote received from a peer connection.
-// Isolated invalid votes are logged and dropped; repeated invalid votes can
-// identify a misbehaving connection.
+// HandleVote validates and stores a CIP-0164 vote received from a peer
+// connection over leios-votes or leios-fetch. The vote names its announcing
+// ranking block and signs that block's hash, exactly as a prototype vote
+// does, so it takes the same path: its election slot and endorser block are
+// resolved from the announcement, and it waits for an announcement not yet
+// seen. Isolated invalid votes are logged and dropped; repeated invalid
+// votes can identify a misbehaving connection.
 func (m *VoteManager) HandleVote(
 	connKey string,
 	vote lcommon.LeiosVote,
 ) error {
+	return m.HandlePrototypeVote(connKey, lcommon.LeiosPrototypeVote{
+		AnnouncingRbHash: vote.AnnouncingRbHash,
+		VoterId:          uint64(vote.VoterId),
+		VoteSignature:    vote.VoteSignature,
+	})
+}
+
+// HandleLegacyVote validates and stores a vote in the earlier CIP-0164
+// draft shape, which LeiosNotify offers may still carry. It names its slot
+// and endorser block itself and signs VoteMessageBytes of them. Such a vote
+// is tallied but never served, since the current wire shape cannot carry
+// it.
+func (m *VoteManager) HandleLegacyVote(
+	connKey string,
+	legacy lcommon.LeiosLegacyVote,
+) error {
 	if m.metrics != nil {
 		m.metrics.votesReceivedTotal.Inc()
 	}
-	if err := vote.Validate(); err != nil {
+	vote := resolvedVote{
+		slotNo:    legacy.SlotNo,
+		ebHash:    legacy.EndorserBlockHash,
+		voterId:   legacy.VoterId,
+		signature: legacy.VoteSignature,
+	}
+	if err := legacy.Validate(); err != nil {
 		return m.rejectIncomingVote(connKey, "structural", vote, err)
 	}
 	// Window the vote slot before any epoch or committee work:
@@ -2117,7 +2160,7 @@ func (m *VoteManager) HandleVote(
 	// computation reaches the stake snapshot in the database, so
 	// out-of-window slots must not get that far.
 	if err := m.slotWindowCheck(
-		vote.SlotNo,
+		vote.slotNo,
 		m.certifyByDeadlineSlots,
 	); err != nil {
 		return m.rejectIncomingVote(connKey, "slot_window", vote, err)
@@ -2130,7 +2173,7 @@ func (m *VoteManager) HandleVote(
 		return nil
 	}
 	defer m.releaseIncomingVoteVerification(vote)
-	epoch, err := m.epochProvider.EpochForSlot(vote.SlotNo)
+	epoch, err := m.epochProvider.EpochForSlot(vote.slotNo)
 	if err != nil {
 		m.rejectVote("epoch", vote, err)
 		return nil
@@ -2141,14 +2184,14 @@ func (m *VoteManager) HandleVote(
 		return nil
 	}
 	committee := entry.committee
-	member, ok := committee.Member(vote.VoterId)
+	member, ok := committee.Member(vote.voterId)
 	if !ok {
 		return m.rejectIncomingVote(connKey,
 			"membership",
 			vote,
 			fmt.Errorf(
 				"voter id %d out of range for committee size %d",
-				vote.VoterId,
+				vote.voterId,
 				committee.Size(),
 			),
 		)
@@ -2162,8 +2205,8 @@ func (m *VoteManager) HandleVote(
 	}
 	if err := m.verifyVoteSignature(
 		pub,
-		VoteMessageBytes(vote.SlotNo, vote.EndorserBlockHash),
-		vote.VoteSignature,
+		VoteMessageBytes(vote.slotNo, vote.ebHash),
+		vote.signature,
 	); err != nil {
 		return m.rejectIncomingVote(connKey, "signature", vote, err)
 	}
@@ -2195,7 +2238,7 @@ func (m *VoteManager) HandlePrototypeVote(
 		return m.rejectIncomingVote(
 			connKey,
 			"structural",
-			lcommon.LeiosVote{VoterId: vote.VoterId},
+			resolvedVote{voterId: vote.VoterId},
 			err,
 		)
 	}
@@ -2221,11 +2264,11 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	vote lcommon.LeiosPrototypeVote,
 	record announcementRecord,
 ) error {
-	resolved := lcommon.LeiosVote{
-		SlotNo:            record.slot,
-		EndorserBlockHash: record.ebHash,
-		VoterId:           vote.VoterId,
-		VoteSignature:     vote.VoteSignature,
+	resolved := resolvedVote{
+		slotNo:    record.slot,
+		ebHash:    record.ebHash,
+		voterId:   vote.VoterId,
+		signature: vote.VoteSignature,
 	}
 	if err := m.slotWindowCheck(
 		record.slot,
@@ -2250,7 +2293,7 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	if err != nil {
 		m.rejectVote(
 			"committee",
-			lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
+			resolved,
 			err,
 		)
 		return nil
@@ -2508,7 +2551,7 @@ func (m *VoteManager) cancelLocalVoteTimerLocked(
 // and publishes a quorum event when verified stake crosses the threshold.
 func (m *VoteManager) insertVote(
 	originConn string,
-	vote lcommon.LeiosVote,
+	vote resolvedVote,
 	epoch uint64,
 	committee *Committee,
 	member CommitteeMember,
@@ -2517,14 +2560,21 @@ func (m *VoteManager) insertVote(
 	announcingRbHash lcommon.Blake2b256,
 	expectedVoting *votingConfigurationSnapshot,
 ) bool {
-	raw, err := vote.MarshalCBOR()
-	if err != nil {
-		m.rejectVote("encoding", vote, err)
-		return false
+	var (
+		wire lcommon.LeiosVote
+		raw  cbor.RawMessage
+	)
+	if announcingRbHash != (lcommon.Blake2b256{}) {
+		var err error
+		wire, raw, err = encodeServedVote(announcingRbHash, vote)
+		if err != nil {
+			m.rejectVote("encoding", vote, err)
+			return false
+		}
 	}
 	voteId := lcommon.LeiosVoteId{
-		SlotNo:  vote.SlotNo,
-		VoterId: vote.VoterId,
+		SlotNo:  vote.slotNo,
+		VoterId: vote.voterId,
 	}
 
 	m.mu.Lock()
@@ -2558,8 +2608,8 @@ func (m *VoteManager) insertVote(
 	}
 	if announcingRbHash != (lcommon.Blake2b256{}) {
 		current, ok := m.announcements[announcingRbHash]
-		if !ok || current.slot != vote.SlotNo || current.epoch != epoch ||
-			current.ebHash != vote.EndorserBlockHash {
+		if !ok || current.slot != vote.slotNo || current.epoch != epoch ||
+			current.ebHash != vote.ebHash {
 			if expectedVoting != nil {
 				expectedVoting.rejection = voteNotEmittedSuperseded
 			}
@@ -2607,7 +2657,7 @@ func (m *VoteManager) insertVote(
 	// voter id.
 	if record, ok := m.voteRecords[voteId]; ok {
 		m.mu.Unlock()
-		if record.ebHash == vote.EndorserBlockHash {
+		if record.ebHash == vote.ebHash {
 			// Identical resubmission. Deliberately not re-stored for
 			// serving: a size-evicted vote stays unservable until its
 			// record dies, which avoids serving-store churn under
@@ -2622,10 +2672,10 @@ func (m *VoteManager) insertVote(
 		}
 		m.logger.Warn(
 			"dropping equivocating leios vote",
-			"slot", vote.SlotNo,
-			"voter_id", vote.VoterId,
+			"slot", vote.slotNo,
+			"voter_id", vote.voterId,
 			"kept_endorser_block_hash", record.ebHash.String(),
-			"dropped_endorser_block_hash", vote.EndorserBlockHash.String(),
+			"dropped_endorser_block_hash", vote.ebHash.String(),
 		)
 		return false
 	}
@@ -2654,7 +2704,7 @@ func (m *VoteManager) insertVote(
 		m.votedAnnouncements[announcingRbHash] = struct{}{}
 	}
 	m.voteRecords[voteId] = voteRecord{
-		ebHash:           vote.EndorserBlockHash,
+		ebHash:           vote.ebHash,
 		announcingRbHash: announcingRbHash,
 		epoch:            epoch,
 		insertedAt:       now,
@@ -2662,6 +2712,7 @@ func (m *VoteManager) insertVote(
 	m.updateRecordsGaugeLocked()
 	stored := &storedVote{
 		vote:             vote,
+		wire:             wire,
 		raw:              raw,
 		originConn:       originConn,
 		announcingRbHash: announcingRbHash,
@@ -2676,7 +2727,7 @@ func (m *VoteManager) insertVote(
 	m.enforceSizeLocked()
 
 	key := tallyKey{
-		slotNo: vote.SlotNo, ebHash: vote.EndorserBlockHash,
+		slotNo: vote.slotNo, ebHash: vote.ebHash,
 		announcingRbHash: announcingRbHash,
 	}
 	tally, ok := m.tallies[key]
@@ -2688,8 +2739,8 @@ func (m *VoteManager) insertVote(
 	if verified {
 		tally.verifiedStake += member.Stake
 		tally.verifiedVotes = append(tally.verifiedVotes, VerifiedVote{
-			VoterId:   vote.VoterId,
-			Signature: vote.VoteSignature,
+			VoterId:   vote.voterId,
+			Signature: vote.signature,
 		})
 	}
 	tally.lastUpdated = now
@@ -2721,6 +2772,34 @@ func (m *VoteManager) insertVote(
 		)
 	}
 	return true
+}
+
+// encodeServedVote returns the CIP-0164 form of a vote announced by
+// announcingRbHash, as leios-votes and leios-fetch carry it, with its
+// encoding attached so serving re-encodes nothing.
+func encodeServedVote(
+	announcingRbHash lcommon.Blake2b256,
+	vote resolvedVote,
+) (lcommon.LeiosVote, cbor.RawMessage, error) {
+	// The wire voter id is a 16-bit seat index; the committee size is a
+	// 16-bit protocol parameter, so a larger id names no seat.
+	if vote.voterId > math.MaxUint16 {
+		return lcommon.LeiosVote{}, nil, fmt.Errorf(
+			"voter id %d exceeds the 16-bit seat index",
+			vote.voterId,
+		)
+	}
+	wire := lcommon.LeiosVote{
+		AnnouncingRbHash: announcingRbHash,
+		VoterId:          uint16(vote.voterId),
+		VoteSignature:    vote.signature,
+	}
+	raw, err := wire.MarshalCBOR()
+	if err != nil {
+		return lcommon.LeiosVote{}, nil, err
+	}
+	wire.SetCbor(raw)
+	return wire, raw, nil
 }
 
 // evaluateQuorumLocked checks the tally against the quorum threshold and
@@ -2860,8 +2939,8 @@ func (m *VoteManager) enforceSizeLocked() {
 	// voteLog is in ascending seq (and so insertion) order
 	for _, sv := range m.voteLog[:excess] {
 		delete(m.votesById, lcommon.LeiosVoteId{
-			SlotNo:  sv.vote.SlotNo,
-			VoterId: sv.vote.VoterId,
+			SlotNo:  sv.vote.slotNo,
+			VoterId: sv.vote.voterId,
 		})
 	}
 	m.voteLog = slices.Delete(m.voteLog, 0, excess)
@@ -2879,8 +2958,8 @@ func (m *VoteManager) filterVotesLocked(keep func(*storedVote) bool) {
 			continue
 		}
 		delete(m.votesById, lcommon.LeiosVoteId{
-			SlotNo:  sv.vote.SlotNo,
-			VoterId: sv.vote.VoterId,
+			SlotNo:  sv.vote.slotNo,
+			VoterId: sv.vote.voterId,
 		})
 	}
 	clear(m.voteLog[len(kept):])
@@ -2934,14 +3013,12 @@ func (m *VoteManager) NextVotes(
 			if sv.originConn == connKey {
 				continue
 			}
-			// Prototype votes sign the announcing ranking-block hash and are
-			// diffused inline over leios-notify. Protocol 20 carries the legacy
-			// slot-plus-EB-hash domain, so serving a prototype signature there
-			// guarantees that an honest peer rejects it.
-			if sv.announcingRbHash != (lcommon.Blake2b256{}) {
+			// leios-votes carries the CIP-0164 shape, which names the
+			// announcing ranking block; a legacy vote has none to name.
+			if sv.raw == nil {
 				continue
 			}
-			collected = append(collected, sv.vote)
+			collected = append(collected, sv.wire)
 			if uint64(len(collected)) == count {
 				break
 			}
@@ -2970,7 +3047,7 @@ func (m *VoteManager) VotesByIds(
 	defer m.mu.Unlock()
 	ret := make([]cbor.RawMessage, 0, len(ids))
 	for _, id := range ids {
-		if sv, ok := m.votesById[id]; ok {
+		if sv, ok := m.votesById[id]; ok && sv.raw != nil {
 			ret = append(ret, slices.Clone(sv.raw))
 		}
 	}
@@ -3380,11 +3457,11 @@ func (m *VoteManager) signAndInsertLocalVote(
 		)
 		return
 	}
-	vote := lcommon.LeiosVote{
-		SlotNo:            record.slot,
-		EndorserBlockHash: record.ebHash,
-		VoterId:           voterId,
-		VoteSignature:     sig,
+	vote := resolvedVote{
+		slotNo:    record.slot,
+		ebHash:    record.ebHash,
+		voterId:   voterId,
+		signature: sig,
 	}
 	m.prototypeEmissionMu.Lock()
 	snapshot := &votingConfigurationSnapshot{
@@ -3837,8 +3914,8 @@ func (m *VoteManager) dropAnnouncementDerivedStateLocked(
 	if len(droppedIds) > 0 {
 		m.filterVotesLocked(func(sv *storedVote) bool {
 			_, dropped := droppedIds[lcommon.LeiosVoteId{
-				SlotNo:  sv.vote.SlotNo,
-				VoterId: sv.vote.VoterId,
+				SlotNo:  sv.vote.slotNo,
+				VoterId: sv.vote.voterId,
 			}]
 			return !dropped
 		})
@@ -4198,12 +4275,12 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 		evt.Seq,
 	)
 	m.filterVotesLocked(func(sv *storedVote) bool {
-		if sv.vote.SlotNo <= evt.Point.Slot {
+		if sv.vote.slotNo <= evt.Point.Slot {
 			return true
 		}
 		_, protected := protectedIds[lcommon.LeiosVoteId{
-			SlotNo:  sv.vote.SlotNo,
-			VoterId: sv.vote.VoterId,
+			SlotNo:  sv.vote.slotNo,
+			VoterId: sv.vote.voterId,
 		}]
 		return protected
 	})
