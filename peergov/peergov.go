@@ -539,12 +539,20 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 
 	// Setup connmanager event listeners
 	if p.config.EventBus != nil {
-		inboundConnSubId := p.config.EventBus.SubscribeFunc(
+		// Both streams are one-shot transitions with no replay: a
+		// detached subscriber would never learn of a later close, and its
+		// peer would stay hot on a dead connection. They block instead of
+		// detaching when a governor pass holds p.mu through a burst.
+		inboundConnSubId := p.config.EventBus.SubscribeFuncWithBufferPolicy(
 			connmanager.InboundConnectionEventType,
+			event.DefaultSubscriberBuffer,
+			event.SubscriberBackpressureBlock,
 			p.handleInboundConnectionEvent,
 		)
-		connClosedSubId := p.config.EventBus.SubscribeFunc(
+		connClosedSubId := p.config.EventBus.SubscribeFuncWithBufferPolicy(
 			connmanager.ConnectionClosedEventType,
+			event.DefaultSubscriberBuffer,
+			event.SubscriberBackpressureBlock,
 			p.handleConnectionClosedEvent,
 		)
 		p.mu.Lock()
