@@ -6468,9 +6468,9 @@ never captured, and an account whose history predates the oldest retained
 row and has no retained row at all each answer `404` with "The requested
 history is not retained by this node". A history that is only partly retained
 lists the retained epochs. A snapshot whose deferred `reward_stake_input` write
-has not finished (`LedgerState.RewardStakeInputsIncomplete`) answers the same
-`404` until the writer or the next reward round completes it, because its rows
-are a partial distribution.
+is still marked pending in the IndexerDB sync state answers the same `404` until
+the writer or next reward round completes it, because its rows are a partial
+distribution.
 
 Pruned at `epoch < current-3`:
 
