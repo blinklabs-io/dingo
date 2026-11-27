@@ -9333,7 +9333,9 @@ transaction context and stops when that context ends.
 `GetAssetQuantitiesByPolicyAndName` (the Blockfrost `/assets` and
 `/assets/policy/{policy_id}` page quantities) totals a whole page of assets
 with the same join, filtered by an `OR` of `(i.policy_id = ? AND i.name = ?)`
-pairs and grouped by `i.policy_id, i.name`. Each pair binds two parameters, so
+pairs and grouped by `h.asset_id, i.policy_id, i.name`; leading with the
+holding's `asset_id` keeps SQLite searching `asset_identity` once per pair
+rather than scanning its unique index for the grouping order. Each pair binds two parameters, so
 a page wider than half the dialect's parameter limit is split into chunks. The
 result is aligned with the requested assets; an asset with no live holding
 totals zero, and the overflow rule above applies per asset.

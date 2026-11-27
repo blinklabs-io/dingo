@@ -249,17 +249,9 @@ func (s *Store) GetAssetQuantitiesByPolicyAndName(
 	sum := s.assetQuantitySum()
 	for start := 0; start < len(unique); start += chunkSize {
 		chunk := unique[start:min(start+chunkSize, len(unique))]
-		var where strings.Builder
-		args := make([]any, 0, 2*len(chunk))
-		for i, asset := range chunk {
-			if i > 0 {
-				where.WriteString(" OR ")
-			}
-			where.WriteString("(i.policy_id = ? AND i.name = ?)")
-			args = append(args, asset.PolicyId, nonNilName(asset.Name))
-		}
+		query, args := assetQuantitiesQuery(sum, chunk)
 		if err := s.sumAssetQuantityChunk(
-			ctx, db, sum, where.String(), args, totals, key,
+			ctx, db, query, args, totals, key,
 		); err != nil {
 			return nil, err
 		}
@@ -270,24 +262,44 @@ func (s *Store) GetAssetQuantitiesByPolicyAndName(
 	return ret, nil
 }
 
-// sumAssetQuantityChunk runs one grouped quantity statement for the assets
-// matched by where and records each total in totals under key.
-func (s *Store) sumAssetQuantityChunk(
-	ctx context.Context,
-	db queryer,
-	sum, where string,
-	args []any,
-	totals map[string]uint64,
-	key func(policyID, name []byte) string,
-) error {
-	query := `
-SELECT i.policy_id, i.name, ` + sum + `
+// assetQuantitiesQuery is the grouped quantity statement for assets, with
+// its arguments, totalling each asset's live holdings with sumExpression.
+// Grouping leads with h.asset_id: grouping by (policy_id, name) alone lets
+// SQLite scan the asset_identity unique index for its order instead of
+// searching it once per requested key.
+func assetQuantitiesQuery(
+	sumExpression string,
+	assets []models.MintedAsset,
+) (string, []any) {
+	var where strings.Builder
+	args := make([]any, 0, 2*len(assets))
+	for i, asset := range assets {
+		if i > 0 {
+			where.WriteString(" OR ")
+		}
+		where.WriteString("(i.policy_id = ? AND i.name = ?)")
+		args = append(args, asset.PolicyId, nonNilName(asset.Name))
+	}
+	return `
+SELECT i.policy_id, i.name, ` + sumExpression + `
 FROM asset_identity AS i
 INNER JOIN asset_holding AS h ON h.asset_id = i.id
 INNER JOIN utxo ON h.utxo_id = utxo.id
 WHERE utxo.deleted_slot = 0 AND h.amount IS NOT NULL
-  AND (` + where + `)
-GROUP BY i.policy_id, i.name`
+  AND (` + where.String() + `)
+GROUP BY h.asset_id, i.policy_id, i.name`, args
+}
+
+// sumAssetQuantityChunk runs one grouped quantity statement and records each
+// total in totals under key.
+func (s *Store) sumAssetQuantityChunk(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args []any,
+	totals map[string]uint64,
+	key func(policyID, name []byte) string,
+) error {
 	rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
 	if err != nil {
 		return err
