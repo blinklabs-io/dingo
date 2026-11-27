@@ -17,6 +17,7 @@ package dingo
 import (
 	"context"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -139,8 +140,13 @@ func (n *Node) peerConnCloser(id ouroboros.ConnectionId, reason string) func() {
 	if conn == nil {
 		return nil
 	}
+	// The close runs on the worker after networkingCoreMu is released, and the
+	// worker is no connection's callback, so it may wait (bounded) for the
+	// target's callbacks to return.
 	if reason != "" {
-		return func() { _ = cm.CloseConnectionWithReason(conn, reason) }
+		return func() {
+			_ = cm.CloseConnectionWithReason(context.Background(), conn, reason)
+		}
 	}
-	return func() { _ = conn.Close() }
+	return func() { _ = connmanager.CloseOuroborosConn(context.Background(), conn) }
 }
