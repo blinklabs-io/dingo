@@ -15,6 +15,7 @@
 package dmq
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -125,15 +126,16 @@ func (c *keepAliveClient) handle(msg protocol.Message) error {
 	return nil
 }
 
-// Stop cancels the next ping and stops the protocol.
-func (c *keepAliveClient) Stop() {
+// Stop cancels the next ping and stops the protocol, waiting for its
+// goroutines as protocol.Protocol.Stop does.
+func (c *keepAliveClient) Stop(ctx context.Context) error {
 	c.mu.Lock()
 	c.stopped = true
 	if c.timer != nil {
 		c.timer.Stop()
 	}
 	c.mu.Unlock()
-	c.Protocol.Stop()
+	return c.Protocol.Stop(ctx)
 }
 
 // keepAliveServer answers the peer's pings.

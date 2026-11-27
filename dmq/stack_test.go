@@ -121,7 +121,7 @@ func dialClient(
 	)
 	require.NoError(t, err)
 	require.NoError(t, conn.Dial("unix", s.cfg.SocketPath))
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	return conn
 }
 
@@ -531,7 +531,7 @@ func TestStackReleasesClosedConnection(t *testing.T) {
 		return len(s.feeders) == 1
 	}, 10*time.Second, 10*time.Millisecond)
 
-	require.NoError(t, c.conn.Close())
+	require.NoError(t, c.conn.Close(context.Background()))
 	require.Eventually(t, func() bool {
 		s.mu.Lock()
 		feeders := len(s.feeders)
@@ -706,8 +706,8 @@ func TestStackHandlesClientDone(t *testing.T) {
 	}, 10*time.Second, 10*time.Millisecond)
 	server := s.connMgr.GetConnectionById(id)
 	require.NotNil(t, server)
-	require.NoError(t, done.conn.LocalMessageSubmission().Client.Stop())
-	require.NoError(t, done.client().Stop())
+	require.NoError(t, done.conn.LocalMessageSubmission().Client.Stop(context.Background()))
+	require.NoError(t, done.client().Stop(context.Background()))
 	require.Eventually(t, func() bool {
 		return server.LocalMessageSubmission().Server.IsDone() &&
 			server.LocalMessageNotification().Server.IsDone()
@@ -758,7 +758,7 @@ func TestStackStopsFeederOnClientDone(t *testing.T) {
 		return false
 	}, 10*time.Second, 10*time.Millisecond)
 
-	require.NoError(t, c.client().Stop())
+	require.NoError(t, c.client().Stop(context.Background()))
 	require.Nil(t, submit(newTestMessage([]byte("after"), soonExpiry())))
 	require.Eventually(t, func() bool {
 		return !hasCursor(consumerID)
@@ -799,7 +799,7 @@ func TestStackReleasesCursorOnIdleClientDone(t *testing.T) {
 		s.mu.Unlock()
 		return hasCursor()
 	}, 10*time.Second, 10*time.Millisecond)
-	require.NoError(t, c.client().Stop())
+	require.NoError(t, c.client().Stop(context.Background()))
 	require.Eventually(t, func() bool {
 		return !hasCursor()
 	}, 10*time.Second, 10*time.Millisecond)
