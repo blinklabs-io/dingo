@@ -109,8 +109,8 @@ make permanent edits, modify the JSON files directly.
 2. Go to **Dashboards → New → Import**
 3. Upload each JSON file
 
-Dashboards other than Traces and Logs use your default Prometheus datasource
-automatically — see [Datasource](#datasource) below.
+Dashboards other than Traces and Logs open on your default Prometheus
+datasource — see [Datasource](#datasource) below.
 
 ### 4. Alert rules (optional)
 
@@ -150,19 +150,19 @@ sudo systemctl reload prometheus
 
 ## Datasource
 
-All dashboards except Traces and Logs reference their Prometheus datasource with
-UID `default`, Grafana's built-in alias for whichever datasource is currently
-marked as default. As long as you have a Prometheus datasource configured (and
-it's your only one, or you've marked it default under **Connections → Data
-sources**), the dashboards resolve it automatically — no UID renaming needed.
+All dashboards except Traces and Logs select their Prometheus datasource through
+the `$datasource` variable. It starts on whichever Prometheus datasource is
+marked default under **Connections → Data sources**; with more than one, pick
+another from the **Prometheus** dropdown. Links between the dashboards keep the
+selection.
 
 ## Template variables
 
-All dashboards include two template variables that auto-discover dingo
-instances:
+All dashboards except Traces and Logs include these template variables:
 
 | Variable | Query | Purpose |
 |----------|-------|---------|
+| `$datasource` | Prometheus datasources | Selects the Prometheus datasource every panel and variable queries. |
 | `$network` | `label_values(dingo_build_info, network)` | Selects the Cardano network (`preview`, `preprod`, `mainnet`). |
 | `$instance` | `label_values(dingo_build_info{network="$network"}, instance)` | Selects specific dingo instance(s). Multi-select with "All" default. |
 
@@ -260,13 +260,10 @@ open Prometheus in the browser, go to **Status → Targets**, and confirm the
 `dingo` job is up. Also verify the `$network` and `$instance` template variables
 at the top of the dashboard are set to the correct values.
 
-**Datasource UID mismatch ("datasource not found")** All JSON files except
-`traces-and-logs.json` (which selects Tempo and Loki through its own datasource
-variables) reference the datasource UID `default`, which Grafana resolves to
-whichever datasource is marked default. If you have multiple Prometheus
-datasources and the wrong one is default, mark the correct one as default in
-**Connections → Data sources**, or do a find-and-replace of `"default"` with
-your actual datasource UID in the JSON files before importing.
+**Panels query the wrong Prometheus** With more than one Prometheus
+datasource, the dashboards start on the one marked default. Pick the right one
+from the **Prometheus** dropdown at the top of the dashboard, or mark it default
+under **Connections → Data sources**.
 
 **Dashboards not appearing after provisioning** Confirm
 `/etc/grafana/provisioning/dashboards/dingo.yaml` references the correct path.
