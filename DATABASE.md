@@ -9330,6 +9330,14 @@ sum `DECIMAL(20, 0)` and the store rejects a total past 64 bits). The holdings
 are all read, with no holding cap. The scan runs under the caller's
 transaction context and stops when that context ends.
 
+`GetAssetQuantitiesByPolicyAndName` (the Blockfrost `/assets` and
+`/assets/policy/{policy_id}` page quantities) totals a whole page of assets
+with the same join, filtered by an `OR` of `(i.policy_id = ? AND i.name = ?)`
+pairs and grouped by `i.policy_id, i.name`. Each pair binds two parameters, so
+a page wider than half the dialect's parameter limit is split into chunks. The
+result is aligned with the requested assets; an asset with no live holding
+totals zero, and the overflow rule above applies per asset.
+
 `GetAssetMintBurnInfo` (Blockfrost `/assets/{asset}` `initial_mint_tx_hash` and
 `mint_or_burn_count`) reads the mint/burn history rather than live holdings:
 

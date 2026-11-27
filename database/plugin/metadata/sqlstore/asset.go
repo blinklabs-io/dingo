@@ -16,10 +16,12 @@
 package sqlstore
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
@@ -163,6 +165,30 @@ WHERE i.policy_id = ? AND i.name = ? AND utxo.deleted_slot = 0
   AND h.amount IS NOT NULL`
 }
 
+// assetQuantitySum is the dialect's aggregate over h.amount. The sqlite
+// aggregate refuses a total past 64 bits itself; the others sum DECIMAL(20, 0)
+// and parseAssetQuantity rejects a total past 64 bits.
+func (s *Store) assetQuantitySum() string {
+	if s.dialect.Name() == "sqlite" {
+		return "dingo_uint64_sum(h.amount)"
+	}
+	return "SUM(CAST(h.amount AS DECIMAL(20, 0)))"
+}
+
+func parseAssetQuantity(raw sql.NullString) (uint64, error) {
+	if !raw.Valid {
+		return 0, nil
+	}
+	total, err := strconv.ParseUint(raw.String, 10, 64)
+	if err != nil {
+		if errors.Is(err, strconv.ErrRange) {
+			return 0, errors.New("asset quantity overflow")
+		}
+		return 0, fmt.Errorf("decode asset quantity: %w", err)
+	}
+	return total, nil
+}
+
 // GetAssetQuantityByPolicyAndName sums the live holdings of an asset in the
 // database, so one row crosses the driver however many UTxOs hold it. The scan
 // runs under the transaction's context, so it stops when the caller's request
@@ -176,30 +202,110 @@ func (s *Store) GetAssetQuantityByPolicyAndName(
 	if err != nil {
 		return 0, err
 	}
-	sumExpression := "SUM(CAST(h.amount AS DECIMAL(20, 0)))"
-	if s.dialect.Name() == "sqlite" {
-		sumExpression = "dingo_uint64_sum(h.amount)"
-	}
 	var raw sql.NullString
 	err = db.QueryRowContext(ctx, s.dialect.Rebind(
-		assetQuantityQuery(sumExpression)),
+		assetQuantityQuery(s.assetQuantitySum())),
 		policyID[:], nonNilName(assetName),
 	).Scan(&raw)
 	if err != nil {
-		// The sqlite aggregate refuses a sum beyond 64 bits itself.
 		return 0, err
 	}
-	if !raw.Valid {
-		return 0, nil
+	return parseAssetQuantity(raw)
+}
+
+// GetAssetQuantitiesByPolicyAndName sums the live holdings of every asset in
+// assets with one grouped statement per bind-parameter chunk, rather than one
+// statement per asset. The result is aligned with assets; an asset with no
+// live holding totals zero.
+func (s *Store) GetAssetQuantitiesByPolicyAndName(
+	assets []models.MintedAsset,
+	txn types.Txn,
+) ([]uint64, error) {
+	ret := make([]uint64, len(assets))
+	if len(assets) == 0 {
+		return ret, nil
 	}
-	total, err := strconv.ParseUint(raw.String, 10, 64)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
-		if errors.Is(err, strconv.ErrRange) {
-			return 0, errors.New("asset quantity overflow")
-		}
-		return 0, fmt.Errorf("decode asset quantity: %w", err)
+		return nil, err
 	}
-	return total, nil
+	// policy_id is a fixed 28 bytes, so policy || name is an unambiguous key.
+	key := func(policyID, name []byte) string {
+		return string(policyID) + string(name)
+	}
+	unique := make([]models.MintedAsset, 0, len(assets))
+	seen := make(map[string]struct{}, len(assets))
+	for _, asset := range assets {
+		k := key(asset.PolicyId, asset.Name)
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		unique = append(unique, asset)
+	}
+	// Each asset binds its policy ID and name.
+	chunkSize := max(s.dialect.ParameterLimit()/2, 1)
+	totals := make(map[string]uint64, len(unique))
+	sum := s.assetQuantitySum()
+	for start := 0; start < len(unique); start += chunkSize {
+		chunk := unique[start:min(start+chunkSize, len(unique))]
+		var where strings.Builder
+		args := make([]any, 0, 2*len(chunk))
+		for i, asset := range chunk {
+			if i > 0 {
+				where.WriteString(" OR ")
+			}
+			where.WriteString("(i.policy_id = ? AND i.name = ?)")
+			args = append(args, asset.PolicyId, nonNilName(asset.Name))
+		}
+		if err := s.sumAssetQuantityChunk(
+			ctx, db, sum, where.String(), args, totals, key,
+		); err != nil {
+			return nil, err
+		}
+	}
+	for i, asset := range assets {
+		ret[i] = totals[key(asset.PolicyId, asset.Name)]
+	}
+	return ret, nil
+}
+
+// sumAssetQuantityChunk runs one grouped quantity statement for the assets
+// matched by where and records each total in totals under key.
+func (s *Store) sumAssetQuantityChunk(
+	ctx context.Context,
+	db queryer,
+	sum, where string,
+	args []any,
+	totals map[string]uint64,
+	key func(policyID, name []byte) string,
+) error {
+	query := `
+SELECT i.policy_id, i.name, ` + sum + `
+FROM asset_identity AS i
+INNER JOIN asset_holding AS h ON h.asset_id = i.id
+INNER JOIN utxo ON h.utxo_id = utxo.id
+WHERE utxo.deleted_slot = 0 AND h.amount IS NOT NULL
+  AND (` + where + `)
+GROUP BY i.policy_id, i.name`
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var policyID, name []byte
+		var raw sql.NullString
+		if err := rows.Scan(&policyID, &name, &raw); err != nil {
+			return err
+		}
+		total, err := parseAssetQuantity(raw)
+		if err != nil {
+			return err
+		}
+		totals[key(policyID, name)] = total
+	}
+	return rows.Err()
 }
 
 func (s *Store) GetAssetMintBurnInfo(
