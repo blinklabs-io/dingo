@@ -4331,15 +4331,14 @@ func (cs *ChainSelector) catchingUpLocked(bestKnownBlock *uint64) bool {
 // localTipStalledLocked up to date for one selection pass. SetLocalTip runs
 // only on the chain-sync recycler's tick, which by default is longer than
 // catchUpPinStallTimeout, so a block applied since its last call would
-// otherwise count as no progress until the next tick. And a node with no
-// trusted frontier past its applied tip has nothing to apply, so it is not
-// stalled however long the chain has been quiet: without restarting the
-// clock then, the first header after a quiet spell of catchUpPinStallTimeout
+// otherwise count as no progress until the next tick. And while no live peer
+// has delivered a header past the applied tip, the node has nothing to apply,
+// so it is not stalled however long the chain has been quiet: without
+// restarting the clock then, the first header after a quiet spell of catchUpPinStallTimeout
 // would release the pin to whichever peer delivered it first, away from an
-// incumbent that delivers the same block moments later. bestKnownBlock is the
-// pass's frontier; nil computes it. Must be called with cs.mutex held for
-// writing.
-func (cs *ChainSelector) observeLocalProgressLocked(bestKnownBlock *uint64) {
+// incumbent that delivers the same block moments later. Must be called with
+// cs.mutex held for writing.
+func (cs *ChainSelector) observeLocalProgressLocked() {
 	applied := cs.localTip.BlockNumber
 	if cs.config.AppliedTip != nil {
 		if tip, ok := cs.config.AppliedTip(); ok {
@@ -4355,15 +4354,25 @@ func (cs *ChainSelector) observeLocalProgressLocked(bestKnownBlock *uint64) {
 	if cs.localTipProgressAt.IsZero() {
 		return
 	}
-	var frontier uint64
-	if bestKnownBlock != nil {
-		frontier = *bestKnownBlock
-	} else {
-		frontier = cs.bestKnownBlockNumber()
-	}
-	if frontier <= applied {
+	if !cs.deliveredFrontierPastLocked(applied) {
 		cs.localTipProgressAt = cs.now()
 	}
+}
+
+// deliveredFrontierPastLocked reports whether any live, eligible, non-stale
+// peer has delivered a header past block. It deliberately ignores Genesis
+// corroboration: a challenger leading with headers no other peer has
+// delivered yet is uncorroborated, and it is exactly what a node with a
+// silent incumbent is waiting to apply, so the stall clock must keep running
+// for it. Must be called with cs.mutex held.
+func (cs *ChainSelector) deliveredFrontierPastLocked(block uint64) bool {
+	for connId, pt := range cs.peerTips {
+		if pt.SelectionTip().BlockNumber > block &&
+			cs.peerLiveEligibleNonStaleLocked(connId, pt) {
+			return true
+		}
+	}
+	return false
 }
 
 // localTipStalledLocked reports whether the applied local tip has stopped
@@ -4598,7 +4607,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	// One frontier serves the whole pass: the mode check, every candidate,
 	// the incumbent re-check and the anti-flap pin.
 	bestKnownBlock := cs.prepareSelectionLocked()
-	cs.observeLocalProgressLocked(bestKnownBlock)
+	cs.observeLocalProgressLocked()
 	// Compute Genesis corroboration status once per evaluation, independent of
 	// which peer (if any) is ultimately selected, so a stalled selection still
 	// reports why the densest fast source was denied.

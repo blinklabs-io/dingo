@@ -142,3 +142,43 @@ func TestPinStallEscapeAfterQuietChainStillReleasesSilentIncumbent(
 	assert.Equal(t, challenger, *cs.GetBestPeer(),
 		"a silent incumbent must still be left once nothing is applied for the timeout")
 }
+
+// In Genesis mode a challenger serving headers nobody else has delivered is
+// not a trusted frontier, yet it is all the node can apply next. The stall
+// clock must keep running while it waits, or an incumbent that stopped
+// delivering stays pinned for as long as it keeps its connection.
+func TestPinStallEscapeReleasesForUncorroboratedGenesisChallenger(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:       true,
+		SecurityParam:     2160,
+		StaleTipThreshold: time.Hour,
+	})
+	installFakeClock(cs, clk)
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	cs.SetLocalTip(tip(5000, 5000, "b5000"))
+	cs.UpdatePeerTip(incumbent, tip(5000, 5000, "b5000"), nil)
+	cs.UpdatePeerTip(challenger, tip(5000, 5000, "b5000"), nil)
+	require.NotNil(t, cs.GetBestPeer())
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	// The incumbent never delivers 5001.
+	clk.Advance(time.Second)
+	cs.UpdatePeerTip(challenger, tip(5001, 5001, "b5001"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	for range 5 {
+		clk.Advance(5 * time.Second)
+		cs.EvaluateAndSwitch()
+	}
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, challenger, *cs.GetBestPeer(),
+		"an uncorroborated frontier past the applied tip is still pending work")
+}
