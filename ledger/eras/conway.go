@@ -157,14 +157,14 @@ func CalculateEtaVConway(
 	// Praos (Babbage+) uses domain separation + double hash,
 	// unlike TPraos which uses the raw VRF output directly.
 	vrfNonce := praosVRFNonceValue(h.Body.VrfResult.Output)
-	tmpNonce, err := lcommon.CalculateRollingNonce(
+	tmpNonce, err := CombineNonceBytes(
 		prevBlockNonce,
 		vrfNonce,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return tmpNonce.Bytes(), nil
+	return tmpNonce, nil
 }
 
 func CertDepositConway(

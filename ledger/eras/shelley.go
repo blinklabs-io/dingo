@@ -150,14 +150,14 @@ func CalculateEtaVShelley(
 	// epoch nonce from peers and breaks header VRF verification at the
 	// next epoch boundary.
 	contribution := lcommon.Blake2b256Hash(h.Body.NonceVrf.Output).Bytes()
-	tmpNonce, err := lcommon.CalculateRollingNonce(
+	tmpNonce, err := CombineNonceBytes(
 		prevBlockNonce,
 		contribution,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return tmpNonce.Bytes(), nil
+	return tmpNonce, nil
 }
 
 func CertDepositShelley(
