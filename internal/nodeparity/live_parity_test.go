@@ -583,20 +583,17 @@ func requireMatchingKoiosSource(
 	cachePath string,
 ) error {
 	resolved := koios.ResolvedBaseURL()
-	mismatch, recorded, err := cache.PendingKoiosSourceChange(network, resolved)
+	pinned, recorded, err := cache.PinKoiosSource(network, resolved)
 	if err != nil {
-		return fmt.Errorf("check koios cache source: %w", err)
+		return fmt.Errorf("pin koios cache source: %w", err)
 	}
-	if mismatch {
+	if !pinned {
 		return fmt.Errorf(
 			"koios cache %q holds %s answers from %q but this run queries %q; "+
 				"point %s at the recorded host, or give %s a cache of its own",
 			cachePath, network, recorded, resolved,
 			liveEnvKoiosBaseURL, liveEnvKoiosCachePath,
 		)
-	}
-	if err := cache.PinRecordedSource(network); err != nil {
-		return fmt.Errorf("pin koios cache source: %w", err)
 	}
 	return nil
 }

@@ -1794,6 +1794,50 @@ func TestPinnedSourceRefusesCheckWrites(t *testing.T) {
 	assert.Empty(t, rows)
 }
 
+// TestPinKoiosSourcePinsTheSourceItCompared covers a run that queries one root
+// against a cache it must not re-record. The pin has to be the root the
+// comparison accepted: a cache re-pointed before the pin is refused, not
+// adopted, and one re-pointed after it fails the run's writes.
+func TestPinKoiosSourcePinsTheSourceItCompared(t *testing.T) {
+	const (
+		first  = "https://first.example/api/v1"
+		second = "https://second.example/api/v1"
+	)
+	path := filepath.Join(t.TempDir(), "cache.db")
+	owner, err := openTestCache(path, nil)
+	require.NoError(t, err)
+	defer owner.Close() //nolint:errcheck
+	_, err = owner.RecordKoiosSource("preview", first, time.Now().UTC())
+	require.NoError(t, err)
+	status := CheckEpochStatus{
+		Network: "preview", Epoch: 7,
+		LastCheckedAt: time.Now().UTC(), Status: StatusPass,
+	}
+
+	run, err := openTestCache(path, nil)
+	require.NoError(t, err)
+	defer run.Close() //nolint:errcheck
+	pinned, recorded, err := run.PinKoiosSource("preview", first)
+	require.NoError(t, err)
+	require.True(t, pinned)
+	assert.Equal(t, first, recorded)
+	require.NoError(t, run.UpsertCheckEpochStatus(status))
+
+	_, err = owner.RecordKoiosSource("preview", second, time.Now().UTC())
+	require.NoError(t, err)
+	assert.Error(t, run.UpsertCheckEpochStatus(status),
+		"a re-point after the pin must fail the run's writes")
+
+	late, err := openTestCache(path, nil)
+	require.NoError(t, err)
+	defer late.Close() //nolint:errcheck
+	pinned, recorded, err = late.PinKoiosSource("preview", first)
+	require.NoError(t, err)
+	assert.False(t, pinned,
+		"a cache re-pointed before the pin must be refused, not adopted")
+	assert.Equal(t, second, recorded)
+}
+
 // TestPinnedUnstampedCacheWritesUntilItIsStamped covers the legacy cache. It
 // has to hold both halves at once: a check against a cache nothing has ever
 // stamped must keep working exactly as before, and must still stop if another
