@@ -3768,12 +3768,9 @@ with none of them does nothing.
 - IndexerDB. `NewIndexerService` runs the same repair on the IndexerDB, which
   has its own `sync_state` key, before the writer reads it. That covers an
   IndexerDB seeded from genesis by a release and an API store copied by the
-  move to the IndexerDB layout; both would otherwise disagree with a Mithril-imported
-  state when the replay reaches its anchor. The seed of a replay toward a
-  Mithril anchor counted the genesis transactions it wrote into
-  `indexer_replay_txs`, which the anchor check compares with the
-  `applied_transaction` rows, so the same transaction takes the removed
-  application rows out of that count (`indexerdb.Store.RemoveReplayTransactions`).
+  move to the IndexerDB layout. The writer derives IndexerDB rows by replaying
+  the complete block history from genesis; a ledger database whose retained
+  history starts after genesis cannot seed an empty IndexerDB.
 - Live UTxO set. After `utxoset.Set.Reconcile`, `Run` calls
   `Set.RemoveZeroCoinOutputs` (`badgerutxo.Store.RemoveOutputs`) on every
   start. It deletes the listed outputs the set holds whose coin is zero, as the
@@ -3793,8 +3790,7 @@ the amount is zero, so no `reward_live_stake` row or stake sum includes them.
 `TestReconcileRemovesGenesisFromAStoreWithoutUtxoRows` pin the store shapes,
 `TestReconcileRemovesLegacyZeroValueByronGenesis` and
 `TestReconcileResumesInterruptedGenesisRepair` the live set and the resume,
-`TestIndexerServiceRepairLetsALegacyReplayPassTheAnchor` the anchor check of a
-repaired IndexerDB, `TestReconcileKeepsOutputAtSharedZeroByronReference` and
+`TestReconcileKeepsOutputAtSharedZeroByronReference` and
 `TestIndexerServiceKeepsOutputAtSharedZeroByronReference` a shared reference,
 and `TestRemoveOutputsLeavesNoJournalRecord` the journal. The PostgreSQL and MySQL
 statements are the dialect-neutral SQL of `genesis_remove.go`; the tests above
@@ -4711,13 +4707,9 @@ tip is a chain block and every body is released.
 `indexer_tip` (`slot:blockNumber:hash`). It is written with the writer's own
 SQL transaction so a crash cannot leave rows the tip does not cover. The tip
 decoder rejects slots and block numbers outside the signed 64-bit range used by
-SQL position columns and Mesh block indexes. Readiness
-is per endpoint kind: history endpoints need the tip at or past the Mithril
-anchor, current-state endpoints also need it within
-`indexer.maxReadyLagBlocks` of the ledger tip. The anchor is recorded under
-`indexer_anchor` (same encoding) and the phase of the replay to it under
-`indexer_bootstrap` (`replay`, `index`, `done`); nothing is ready while the
-phase is `replay` or `index`.
+SQL position columns and Mesh block indexes. History endpoints read only through the IndexerDB tip. Current-state endpoints
+also require that tip to be within `indexer.maxReadyLagBlocks` of the ledger
+tip.
 
 ### IndexerDB stores
 
@@ -4804,8 +4796,8 @@ derived facts after its target in the same transaction that moves the tip.
 replay and not copied. An empty IndexerDB on a chain that starts at genesis is
 seeded in its first transaction with the genesis transactions, UTxOs, pools,
 delegations, governance, constitution and committee. A chain imported from a
-Mithril snapshot is seeded the same way, because its replay starts at the
-chain's origin (see "Mithril bootstrap").
+Mithril snapshot can be seeded this way only when its complete block history
+from the chain origin is available (see "Mithril bootstrap").
 
 Rollback removes the rows of blocks above the target and the facts dated after
 it, in the same transaction as the tip move. The target is the exact canonical
@@ -4906,79 +4898,14 @@ from the potentially lagging IndexerDB again. A database of another network or m
 
 ### Mithril bootstrap
 
-`mithril sync` runs with an IndexerDB. The ledger's own store opens in core mode,
-latches the `indexer_layout` gate on the empty database and imports the
-snapshot's ledger state, so the node can follow the tip as soon as it starts.
-The IndexerDB is built when the node runs, from the blocks already in the
-shared blob store. A database that is already complete is not advanced by a
-later `mithril sync`: the IndexerDB's rows belong to the anchor it was built
-at.
-
-When the writer finds a Mithril anchor in the ledger database
-(`mithril_ledger_slot` and `mithril_ledger_hash`) and an empty IndexerDB, it
-records the anchor, the op-cert counters the snapshot certified (dated at the
-anchor slot) and phase `replay` in one transaction, before any reader can ask.
-It refuses with `indexer.ErrAnchorUnserved` when the live UTxO set cannot
-serve the imported accounts (no set). Then:
-
-1. `replay` drops the deferred-index manifest and indexes blocks from the
-   chain's origin to the anchor block, seeding genesis state in the first
-   transaction and counting the transactions it applies in
-   `indexer_replay_txs`. It indexes nothing past the anchor. The canonical
-   chain must start at the origin; a first block with a stored parent stops
-   the replay. Each batch commits its rows, facts and tip as usual, so a stop
-   resumes from the tip.
-2. `index` builds the dropped indexes (a build resumed after a stop builds what
-   is missing), then verifies the rows at the anchor: the `applied_transaction`
-   count equals the replay's count, and a SHA-256 over the live UTxO set at the
-   anchor, read in (transaction hash, output index) order, equals
-   the digest of the ledger database's set (outputs added at or before the
-   anchor and not spent at or before it). Each output's stored CBOR (assets,
-   inline datum, reference script) is part of the digest, hashed as a snapshot
-   import stores it so that block bytes and imported bytes of one output agree:
-   a legacy array output (including a Byron output's inline address) in map
-   form, the value in the MemPack form (zero quantities and then empty
-   policies dropped, a bare coin when no assets remain, policies and asset
-   names in bytewise order, shortest integer heads), and the address, datum
-   and reference script with shortest length heads around an inline datum's
-   and a native script's own bytes. A SQL store reads the set in one
-   unordered statement and sorts it itself, as an external merge sort of
-   16 MiB runs, into one file in the metadata store's scratch directory:
-   the SQLite database's directory, or the node's data directory for
-   PostgreSQL and MySQL. The file is roughly the size of the live set's
-   keys, amounts and credentials, is unlinked once open where the platform
-   allows, and the database runs no sort, so nothing spills into the
-   operating system's temporary directory. The store closes that cursor
-   before resolving any output, so resolvers can take their own read
-   connections; outputs are then resolved
-   and canonicalized in chunks on several goroutines and hashed in order. The
-   ledger's digest
-   is taken when the anchor is recorded and kept as `indexer_anchor_digest`.
-   With the live UTxO set the only copy of the UTxO set, the digest is taken
-   from the set's journal as of the anchor, the outputs decoded the way a row
-   is derived from one; a journal that no longer reaches the anchor leaves the
-   anchor without a digest. An anchor recorded without a digest is compared
-   against the ledger's current rows, or skipped with a warning when the set
-   is the only copy, and the transaction count
-   stands alone. The deferred-index manifest holds no unique
-   index, so uniqueness is enforced throughout the replay. A mismatch stops the
-   writer with `ErrAnchorMismatch`, leaves the phase at `index` and is returned
-   again by every pass until the node restarts.
-3. In one transaction with the `done` marker, the account state the snapshot
-   imported is applied: the import baselines of the accounts imported at the
-   anchor are copied from the ledger database, each such account's reward
-   balance at the anchor is set (the ledger's balance now, less the credits
-   and plus the withdrawals journaled in `account_reward_delta` after the
-   anchor), and `RestoreImportedAccountStates` and the DRep reconcile put the
-   delegations that rules other than certificates moved back to the snapshot's,
-   as the history backfill does at its anchor. The same
-   transaction records `mithril_ledger_slot` in the IndexerDB: while the replay
-   runs the genesis seed reads that key as a snapshot import, so it is written
-   last.
-
-After `done` the writer follows the ledger tip as before; facts dated after the
-anchor reach rows the ledger changed since in the order the ledger changed
-them.
+`mithril sync` imports ledger state and may retain block history that starts
+after the chain origin. An empty IndexerDB derives its rows by replaying the
+complete canonical block history from genesis; imported ledger state is not a
+source of IndexerDB facts. If its first retained block has a parent or a
+nonzero block number, the writer returns `indexer.ErrChainNotFromGenesis` and
+stops rather than serving incomplete history. Complete block history must be
+available before an empty IndexerDB can be built. An IndexerDB that already
+contains indexed history continues from its own tip.
 
 ### Serving from the IndexerDB
 
@@ -4989,8 +4916,7 @@ IndexerDB tip, and health is `200` only once it has reached the ledger tip.
 Current-state routes (accounts, addresses, assets, pools, governance, latest
 epoch, Kupo matches) answer 503 with `Retry-After` while the IndexerDB is more
 than `indexer.maxReadyLagBlocks` behind the ledger tip; history routes answer
-once the Mithril bootstrap is done and it has passed the anchor (a chain from
-genesis has no anchor).
+from the indexed history and never beyond the IndexerDB tip.
 Latest-block and epoch answers use the IndexerDB tip, and no history route
 answers beyond it. Midnight hides blocks above that tip.
 The Blockfrost network and network eras routes read the IndexerDB and are gated
