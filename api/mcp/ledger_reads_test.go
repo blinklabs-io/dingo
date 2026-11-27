@@ -492,3 +492,37 @@ func TestEpochSummaryCountsIndexerBlocksOnAnAPINode(t *testing.T) {
 	)
 	require.Contains(t, core, "- **Recorded Blocks**: 1"+retainedWindowNote+"\n")
 }
+
+// A ledger-state import seeds an enacted root at added_slot 0 whose
+// enacted_epoch is the snapshot anchor. Both read paths must list it as
+// enacted, match it with the enacted filter, and leave out the anchor epoch.
+func TestSeededRootProposalReadsEnactedWithoutEpoch(t *testing.T) {
+	t.Parallel()
+	nodeDB, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	raw, err := dbtest.RawSQLiteMetadata(t, nodeDB)
+	require.NoError(t, err)
+	txHash := bytes.Repeat([]byte{0x06}, 32)
+	_, err = raw.Exec(`INSERT INTO governance_proposal
+ (id,tx_hash,action_index,action_type,proposed_epoch,expires_epoch,enacted_epoch,anchor_url,anchor_hash,deposit,return_address,added_slot)
+ VALUES (1,?,0,2,0,0,1458,'',?,0,?,0)`,
+		txHash, make([]byte, 32), make([]byte, 29))
+	require.NoError(t, err)
+	viaLedger := ledgerToolSession(t, dbadapter.New(nodeDB))
+	viaSQL := newToolSession(t, raw, 100)
+	hash := hex.EncodeToString(txHash)
+	for _, args := range []map[string]any{
+		{"tx_hash": hash, "status": "enacted"},
+		{"status": "enacted"},
+		{"status": "all"},
+	} {
+		got := callTool(t, viaLedger, "get_governance_proposal", args, false)
+		require.Equal(
+			t, callTool(t, viaSQL, "get_governance_proposal", args, false),
+			got, "%v", args,
+		)
+		require.Contains(t, got, "Enacted", "%v", args)
+		require.NotContains(t, got, "1458", "%v", args)
+		require.NotContains(t, got, "Active", "%v", args)
+	}
+}
