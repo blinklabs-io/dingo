@@ -4327,6 +4327,45 @@ func (cs *ChainSelector) catchingUpLocked(bestKnownBlock *uint64) bool {
 	return best-local > catchUpPinBlockThreshold
 }
 
+// observeLocalProgressLocked brings the stall clock read by
+// localTipStalledLocked up to date for one selection pass. SetLocalTip runs
+// only on the chain-sync recycler's tick, which by default is longer than
+// catchUpPinStallTimeout, so a block applied since its last call would
+// otherwise count as no progress until the next tick. And a node with no
+// trusted frontier past its applied tip has nothing to apply, so it is not
+// stalled however long the chain has been quiet: without restarting the
+// clock then, the first header after a quiet spell of catchUpPinStallTimeout
+// would release the pin to whichever peer delivered it first, away from an
+// incumbent that delivers the same block moments later. bestKnownBlock is the
+// pass's frontier; nil computes it. Must be called with cs.mutex held for
+// writing.
+func (cs *ChainSelector) observeLocalProgressLocked(bestKnownBlock *uint64) {
+	applied := cs.localTip.BlockNumber
+	if cs.config.AppliedTip != nil {
+		if tip, ok := cs.config.AppliedTip(); ok {
+			applied = tip.BlockNumber
+			if applied > cs.localTipProgressBlock {
+				cs.localTipProgressAt = cs.now()
+			}
+			cs.localTipProgressBlock = applied
+		}
+	}
+	// A clock that never started stays unstarted, as localTipStalledLocked
+	// documents for a freshly started node.
+	if cs.localTipProgressAt.IsZero() {
+		return
+	}
+	var frontier uint64
+	if bestKnownBlock != nil {
+		frontier = *bestKnownBlock
+	} else {
+		frontier = cs.bestKnownBlockNumber()
+	}
+	if frontier <= applied {
+		cs.localTipProgressAt = cs.now()
+	}
+}
+
 // localTipStalledLocked reports whether the applied local tip has stopped
 // advancing for at least catchUpPinStallTimeout. This is the progress-aware
 // escape: when true, the pin releases so the node can switch away from a
@@ -4559,6 +4598,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	// One frontier serves the whole pass: the mode check, every candidate,
 	// the incumbent re-check and the anti-flap pin.
 	bestKnownBlock := cs.prepareSelectionLocked()
+	cs.observeLocalProgressLocked(bestKnownBlock)
 	// Compute Genesis corroboration status once per evaluation, independent of
 	// which peer (if any) is ultimately selected, so a stalled selection still
 	// reports why the densest fast source was denied.
