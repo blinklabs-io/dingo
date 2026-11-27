@@ -367,8 +367,9 @@ func (p *PeerGovernor) createOutboundConnection(
 			return
 		}
 		currentPeer = p.peers[peerIdx]
-		// The entry was removed and the address added again: the new
-		// entry has a worker of its own, and two would dial it at once.
+		// The entry was removed and the address added again. This worker
+		// belongs to the removed entry; the new one is dialled by its own
+		// worker or by reconcile, and two workers would dial it at once.
 		if currentPeer != reconnectPeer {
 			p.mu.Unlock()
 			p.config.Logger.Debug(
@@ -580,7 +581,7 @@ func (p *PeerGovernor) createOutboundConnection(
 			}
 			p.mu.Lock()
 			peerIdx = p.peerIndexByAddress(peer.NormalizedAddress)
-			if peerIdx == -1 {
+			if peerIdx == -1 || p.peers[peerIdx] != reconnectPeer {
 				p.mu.Unlock()
 				p.config.Logger.Debug(
 					"outbound: peer removed during canceled connection attempt",
@@ -652,7 +653,10 @@ func (p *PeerGovernor) createOutboundConnection(
 		p.mu.Lock()
 		// Re-lookup peer to avoid stale pointer if slice was rebuilt
 		peerIdx = p.peerIndexByAddress(peer.NormalizedAddress)
-		if peerIdx == -1 {
+		// A replacement entry is not charged for this worker's failure:
+		// it would back off, or deny and remove, an address whose own
+		// worker may already be connected.
+		if peerIdx == -1 || p.peers[peerIdx] != reconnectPeer {
 			p.mu.Unlock()
 			p.config.Logger.Debug(
 				"outbound: peer removed during connection attempt, stopping",

@@ -284,3 +284,157 @@ func TestCreateOutboundConnection_StaleWorkerDoesNotReplaceNewEntry(
 		waitDone(t, done, "the stale worker's connection to close")
 	}
 }
+
+// A dial failure of a worker whose entry was replaced belongs to the removed
+// entry. Charging it to the replacement would back off, deny or remove an
+// address whose own worker has just connected.
+func TestCreateOutboundConnection_StaleWorkerFailureLeavesNewEntry(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	firstDialing := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var dials atomic.Int32
+	connMgr := newAttachTestConnManager(
+		t,
+		func(context.Context, string) (net.Conn, error) {
+			switch dials.Add(1) {
+			case 1:
+				close(firstDialing)
+				<-releaseFirst
+				return nil, io.ErrUnexpectedEOF
+			case 2:
+				return newAddrConn(), nil
+			default:
+				return nil, io.ErrUnexpectedEOF
+			}
+		},
+		nil,
+	)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	attached := make(chan struct{}, 1)
+	bus.SubscribeFunc(OutboundConnectionEventType, func(event.Event) {
+		attached <- struct{}{}
+	})
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:    bus,
+		ConnManager: connMgr,
+	})
+	first := &Peer{
+		Address:           "44.0.0.1:3001",
+		NormalizedAddress: "44.0.0.1:3001",
+		Source:            PeerSourceP2PGossip,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.ctx = t.Context()
+	pg.stopCh = make(chan struct{})
+	pg.peers = []*Peer{first}
+	pg.mu.Unlock()
+
+	pg.spawnOutboundConnection(first)
+	waitDone(t, firstDialing, "the first dial")
+	pg.mu.Lock()
+	removed := 0
+	pg.enforceStateLimit(PeerStateCold, 0, false, &removed)
+	pg.mu.Unlock()
+	require.Equal(t, 1, removed)
+	require.NoError(t, pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip))
+	select {
+	case <-attached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for the new entry's connection")
+	}
+
+	close(releaseFirst)
+	workersDone := make(chan struct{})
+	go func() {
+		pg.wg.Wait()
+		close(workersDone)
+	}()
+	waitDone(t, workersDone, "the dial workers")
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	idx := pg.peerIndexByAddress("44.0.0.1:3001")
+	require.NotEqual(t, -1, idx, "the new entry must not be removed")
+	require.Zero(t, pg.peers[idx].ReconnectCount)
+	require.Zero(t, pg.peers[idx].ReconnectDelay)
+	require.False(t, pg.isPeerDeniedLocked(pg.peers[idx]))
+}
+
+// A duplex inbound connection recorded while the worker dials already serves
+// the peer. The dialled connection is closed rather than recorded over it,
+// which would leave the inbound connection open with no peer holding it.
+func TestCreateOutboundConnection_KeepsClientConnectionRecordedDuringDial(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	dialing := make(chan struct{})
+	release := make(chan struct{})
+	dialed := make(chan *addrConn, 1)
+	var dials atomic.Int32
+	connMgr := newAttachTestConnManager(
+		t,
+		func(context.Context, string) (net.Conn, error) {
+			if dials.Add(1) > 1 {
+				return nil, io.ErrUnexpectedEOF
+			}
+			close(dialing)
+			<-release
+			c := newAddrConn()
+			dialed <- c
+			return c, nil
+		},
+		nil,
+	)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		ConnManager: connMgr,
+	})
+	target := &Peer{
+		Address:           "44.0.0.1:3001",
+		NormalizedAddress: "44.0.0.1:3001",
+		Source:            PeerSourceP2PGossip,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.ctx = t.Context()
+	pg.stopCh = make(chan struct{})
+	pg.peers = []*Peer{target}
+	pg.mu.Unlock()
+
+	pg.spawnOutboundConnection(target)
+	waitDone(t, dialing, "the dial")
+	inboundId := closeLaneConnId(1)
+	pg.mu.Lock()
+	target.Connection = &PeerConnection{Id: inboundId, IsClient: true}
+	target.State = PeerStateWarm
+	pg.mu.Unlock()
+	close(release)
+	c := <-dialed
+
+	workersDone := make(chan struct{})
+	go func() {
+		pg.wg.Wait()
+		close(workersDone)
+	}()
+	waitDone(t, workersDone, "the dial worker")
+
+	pg.mu.Lock()
+	held := target.Connection
+	pg.mu.Unlock()
+	require.NotNil(t, held)
+	require.True(
+		t,
+		sameConnectionId(held.Id, inboundId),
+		"the inbound connection must stay recorded",
+	)
+	if conn, done := connMgr.GetConnectionWithDone(c.id()); conn != nil {
+		waitDone(t, done, "the dialled connection to close")
+	}
+}
