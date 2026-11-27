@@ -321,7 +321,7 @@ func (d *DingoDB) GetLatestEpoch(ctx context.Context) (uint64, error) {
 const mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
 
 // GetEarliestAvailableEpoch implements RewardParitySource by resolving the
-// standalone connection's own Mithril bootstrap boundary from its
+// connection's own Mithril bootstrap boundary from its
 // sync_state/epoch tables into the first Koios reporting epoch this Dingo
 // database could plausibly have genuinely computed local reward state for
 // — see DatabaseSource.GetEarliestAvailableEpoch's doc comment for the
@@ -635,7 +635,7 @@ func (d *DingoDB) GetPoolStakeSnapshotMembers(
 }
 
 // GetPoolsRetiredByEpoch implements RewardParitySource against the pool
-// certificate tables. It is the standalone-CLI twin of
+// certificate tables. It is the SQL twin of
 // MetadataStore.GetPoolKeyHashesRetiredByEpoch and must resolve departure
 // identically: latest registration and latest retirement as of boundarySlot,
 // ordered by (added_slot, synthetic_ret, block_index, cert_index), with a
@@ -1076,7 +1076,7 @@ func rebind(query, dialect string) string {
 // GetRewardAccountOutputs returns every per-account reward calculation
 // output row Dingo committed for epoch, straight from reward_account_output.
 // Not yet consumed by any comparison — the per-account exact-parity comparison
-// is what wires this up; it exists on DingoDB now so the standalone-CLI and
+// is what wires this up; it exists on DingoDB now so the SQL (DingoDB) and
 // in-process (DatabaseSource) implementations of RewardParitySource stay
 // symmetric. ctx is forwarded to the DB driver so a cancelled context aborts
 // the query.

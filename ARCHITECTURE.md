@@ -477,7 +477,10 @@ to the request, rather than redirecting validation through an API database.
 
 Bark exposes node management, database lifecycle and event services. Its
 remote event stream is a separate delivery boundary; slow remote clients
-must not hold the internal ledger's event consumers. MCP, Midnight and DMQ
+must not hold the internal ledger's event consumers. A node can also follow
+other nodes' event streams: Bark republishes their events on the local
+EventBus under a distinct type that its own event stream does not serve, so
+a followed event is never sent back out. MCP, Midnight and DMQ
 have dedicated adapters and lifecycle ownership. Off-chain metadata enriches
 API results without becoming consensus input.
 

@@ -285,6 +285,15 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.remoteEvents != nil {
+		if stopErr := n.remoteEvents.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("remote event subscriber shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	if n.bark != nil {
 		if stopErr := n.bark.Stop(ctx); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("bark shutdown: %w", stopErr))

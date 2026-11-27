@@ -355,6 +355,23 @@ func (h *csjHarness) awaitRound() {
 	}, 5*time.Second, time.Millisecond)
 }
 
+// awaitJumps waits for every targeted jumper request to finish. A targeted
+// first jump does not set roundInFlight, and its agreement callback runs
+// before the request clears the jumper's jumping flag.
+func (h *csjHarness) awaitJumps() {
+	h.t.Helper()
+	require.Eventually(h.t, func() bool {
+		h.o.csj.mu.Lock()
+		defer h.o.csj.mu.Unlock()
+		for _, jumper := range h.o.csj.jumpers {
+			if jumper.jumping {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, time.Millisecond)
+}
+
 // awaitRoundStarted waits until a round started reading the candidate fragment
 // after reads was captured, then waits for that round to finish.
 func (h *csjHarness) awaitRoundStarted(reads int64) {
@@ -547,6 +564,7 @@ func TestChainsyncJumpingObjectorStreamsFromLastAgreedPoint(t *testing.T) {
 	t.Parallel()
 	h := newCsjHarness(t, true)
 	dynamo, jumpers := h.startDynamoAndJumpers(100, 100)
+	h.awaitJumps()
 	behind, forked := jumpers[0], jumpers[1]
 	behind.tipBlock.Store(17)
 	forked.forkBlock.Store(16)

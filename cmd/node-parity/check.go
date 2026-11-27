@@ -74,7 +74,7 @@ func checkRun(cmd *cobra.Command, _ []string) error {
 // reportResult prints a check cycle's outcome and returns a non-nil error
 // for a skipped cycle or a real divergence, so 'check' and the default
 // action signal anything other than a clean match through the process exit
-// code, matching cmd/koios-parity's checkResultErr convention.
+// code.
 func reportResult(result *nodeparity.CheckResult) error {
 	if result.Skipped {
 		fmt.Printf("check skipped: %s\n", result.SkipDetail)

@@ -51,6 +51,7 @@ type Report struct {
 	SchemaVersion  string            `json:"version"`
 	Scenario       string            `json:"scenario"`
 	GeneratedAt    string            `json:"generated_at"`
+	DatasetCommit  string            `json:"dataset_commit,omitempty"`
 	Implementation map[string]string `json:"implementation"`
 	Totals         Totals            `json:"-"`
 	Scenarios      []CaseOutcome     `json:"scenarios"`
@@ -238,6 +239,20 @@ type protocolParametersDoc struct {
 	} `json:"min_fee_reference_scripts"`
 }
 
+// record adds a fixture's outcome and counts it. An outcome with no result is
+// left out of the report, which scores a missing fixture as a failure.
+func (r *Report) record(outcome CaseOutcome, failure *Failure) {
+	if outcome.Result != unmappedLedgerResult {
+		r.Scenarios = append(r.Scenarios, outcome)
+	}
+	r.Totals.Total++
+	if failure == nil {
+		r.Totals.Passed++
+	} else {
+		r.Totals.Failed++
+	}
+}
+
 // GenerateReport evaluates every versioned ledger-rule fixture against
 // Dingo's Conway transaction validator and returns schema-compatible results.
 func GenerateReport(
@@ -316,12 +331,8 @@ func GenerateReport(
 		if result.err != nil {
 			return Report{}, failures, result.err
 		}
-		report.Scenarios = append(report.Scenarios, result.outcome)
-		report.Totals.Total++
-		if result.failure == nil {
-			report.Totals.Passed++
-		} else {
-			report.Totals.Failed++
+		report.record(result.outcome, result.failure)
+		if result.failure != nil {
 			failures = append(failures, *result.failure)
 		}
 	}
@@ -598,9 +609,11 @@ func transactionFailsToDecode(transactionCBOR []byte) bool {
 	return err != nil
 }
 
-// unmappedLedgerResult is reported for observations that map to no NDC
-// predicate, so the scenario fails without discarding the rest of the report.
-const unmappedLedgerResult = "Unknown"
+// unmappedLedgerResult is the result of an observation that maps to no
+// predicate the scenario lists. The scenario's schema admits no such value, so
+// the report omits the fixture: a missing result counts as a failure and the
+// rest of the report stays valid.
+const unmappedLedgerResult = ""
 
 func mismatch(
 	id string,
@@ -609,8 +622,8 @@ func mismatch(
 ) (CaseOutcome, *Failure, error) {
 	result, ok := observedLedgerResult(observed)
 	if !ok {
-		// An unrecognised rejection must not abort the whole report; emit a
-		// result that no NDC expectation can equal and keep the Failure.
+		// An unrecognised rejection must not abort the whole report; keep
+		// the Failure and leave the fixture out of the report.
 		result = unmappedLedgerResult
 	}
 	expectedText := "Pass"

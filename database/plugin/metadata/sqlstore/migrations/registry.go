@@ -129,9 +129,8 @@ const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
 const alonzoEraID = 4
 
 // schemaVersions keeps the released sequential identifiers 1 through 75
-// unchanged, plus active-payload-indexes. Every migration added after that
-// declares its name, stable version, and predecessor in its own manifest, so
-// parallel additions do not edit this list.
+// unchanged and registers active-payload-indexes. Later migrations declare
+// their name, stable version, and predecessor in a manifest.
 type schemaVersion struct {
 	Version int64
 	Name    string

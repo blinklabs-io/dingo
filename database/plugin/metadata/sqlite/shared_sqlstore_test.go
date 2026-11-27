@@ -251,13 +251,6 @@ func TestSharedStoreDeferredIndexLifecycle(t *testing.T) {
 	require.False(t, sqliteIndexExists(t, writeDB, "idx_utxo_payment_key"))
 	require.False(t, sqliteIndexExists(t, writeDB, "idx_datum_added_slot"))
 
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
-	require.True(t, sqliteIndexExists(t, writeDB, "idx_utxo_payment_key"))
-	require.False(t, sqliteIndexExists(t, writeDB, "idx_datum_added_slot"))
-	pending, err = store.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.True(t, pending)
-
 	require.NoError(t, store.BuildDeferredIndexes())
 	require.True(t, sqliteIndexExists(t, writeDB, "idx_datum_added_slot"))
 	pending, err = store.HasDeferredIndexesPending()
@@ -819,13 +812,13 @@ func requireCascadeChildColumnsIndexed(
 	}
 }
 
-// TestCascadeChildColumnsIndexedAfterCriticalRebuild is the manifest
+// TestCascadeChildColumnsIndexedByCriticalEntries is the manifest
 // classification this file exists for.
 //
-// A rebuild stopped after the critical subset of the deferred-index manifest
-// leaves only that subset, and the rollback sweep deletes "transaction" rows
-// whose children cascade. A cascading child column left without an index at that
-// point turns each deleted parent row into a full scan of the child table:
+// The rollback sweep deletes "transaction" rows whose children cascade, so the
+// index on every cascading child column is one the rollback path needs and
+// must be marked Critical. A cascading child column without an index turns
+// each deleted parent row into a full scan of the child table:
 // measured on a preview relay, one 1,001-transaction rollback against a 3.2M
 // row utxo table took 556s with its transaction-id index absent and 0.095s
 // with it present.
@@ -833,7 +826,7 @@ func requireCascadeChildColumnsIndexed(
 // The invariant is asserted over the schema's own foreign keys rather than
 // over the one index that motivated it, so a new cascading foreign key whose
 // child index is classified lazy fails here instead of in production.
-func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
+func TestCascadeChildColumnsIndexedByCriticalEntries(t *testing.T) {
 	t.Parallel()
 	store, db := newCoreModeSQLStore(t)
 	fks := cascadeForeignKeys(t, db)
@@ -851,16 +844,16 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 	)
 	requireCascadeChildColumnsIndexed(t, db, fks, "before deferring indexes")
 
-	// Drop the manifest for a bulk load, then rebuild only the critical
-	// subset: whatever the rollback path needs has to be in it.
+	// Drop the manifest for a bulk load and create only the Critical
+	// entries: whatever the rollback path needs has to be among them.
 	require.NoError(t, store.DropDeferredIndexes())
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
+	createCriticalManifestIndexes(t, db)
 
 	requireCascadeChildColumnsIndexed(
 		t,
 		db,
 		fks,
-		"after BuildCriticalDeferredIndexes",
+		"with only the critical entries",
 	)
 }
 
@@ -869,7 +862,7 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 // checking one parent row never scans a child table: the foreign keys the
 // schema declares to "transaction"(id), and the columns that name one without
 // declaring it. The check holds again after the deferred-index drop and the
-// critical rebuild a bulk load performs.
+// rebuild a bulk load performs.
 func TestTransactionForeignKeyChildColumnsAreIndexed(t *testing.T) {
 	t.Parallel()
 	store, db := newCoreModeSQLStore(t)
@@ -930,8 +923,30 @@ ORDER BY m.name, fk."from"`)
 	}, "the schema must declare the utxo foreign keys to transaction(id)")
 	check("before deferring indexes")
 	require.NoError(t, store.DropDeferredIndexes())
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
-	check("after BuildCriticalDeferredIndexes")
+	createCriticalManifestIndexes(t, db)
+	check("with only the critical entries")
+}
+
+// createCriticalManifestIndexes creates the deferred-index manifest entries
+// marked Critical, so a test can check what that classification covers.
+func createCriticalManifestIndexes(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, index := range deferred.Manifest {
+		if !index.Critical {
+			continue
+		}
+		columns := make([]string, len(index.Columns))
+		for i, column := range index.Columns {
+			columns[i] = `"` + column + `"`
+		}
+		stmt := `CREATE INDEX IF NOT EXISTS "` + index.Name + `" ON "` +
+			index.Table + `" (` + strings.Join(columns, ", ") + `)`
+		if index.Where != "" {
+			stmt += " WHERE " + index.Where
+		}
+		_, err := db.Exec(stmt)
+		require.NoError(t, err, index.Name)
+	}
 }
 
 // consumeTx builds a transaction with the given hash byte that consumes the one
@@ -1939,15 +1954,6 @@ func TestBuildDeferredIndexesKeepsMarkerUntilRetainedIndexesExist(
 	pending, err := store.HasDeferredIndexesPending()
 	require.NoError(t, err)
 	require.True(t, pending, "the seeded cycle must look interrupted")
-
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
-	pending, err = store.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.True(
-		t,
-		pending,
-		"the critical rebuild must leave the marker for the full rebuild",
-	)
 
 	require.NoError(t, store.BuildDeferredIndexes())
 	for _, index := range preChangeDeferredWitnessIndexes {

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/bark"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
@@ -70,4 +71,33 @@ func (n *Node) eventEraNameForEpoch(epoch uint64) (string, error) {
 		return "", fmt.Errorf("unknown era id %d", id)
 	}
 	return desc.Name, nil
+}
+
+// startRemoteEvents follows the EventService of the configured sources and
+// republishes what they send on this node's EventBus. It does nothing when no
+// source is configured, and does not depend on this node serving its own
+// EventService.
+func (n *Node) startRemoteEvents() error {
+	cfgSources := n.config.cfg.BarkEventSources
+	if len(cfgSources) == 0 {
+		return nil
+	}
+	sources := make([]bark.RemoteEventSource, 0, len(cfgSources))
+	for _, src := range cfgSources {
+		sources = append(sources, bark.RemoteEventSource(src))
+	}
+	remote, err := bark.NewRemoteEvents(bark.RemoteEventsConfig{
+		Logger:   n.config.logger,
+		EventBus: n.eventBus,
+		NodeID:   n.eventNodeID(),
+		Sources:  sources,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create remote event subscriber: %w", err)
+	}
+	if err := remote.Start(n.ctx); err != nil {
+		return fmt.Errorf("failed to start remote event subscriber: %w", err)
+	}
+	n.remoteEvents = remote
+	return nil
 }
