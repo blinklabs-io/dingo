@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/topology"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -184,6 +185,9 @@ type PeerGovernor struct {
 	// afterFunc, when set, replaces time.AfterFunc for scheduled peer
 	// state changes and returns the timer's Stop. Tests set it.
 	afterFunc func(d time.Duration, f func()) func() bool
+	// connCloser, when set, replaces the connection manager lookup in
+	// connCloserLocked. Tests set it.
+	connCloser func(id ouroboros.ConnectionId) io.Closer
 	// demotionReleases holds each peer's pending demotion release.
 	demotionReleases        map[*Peer]*demotionRelease
 	metrics                 *peerGovernorMetrics

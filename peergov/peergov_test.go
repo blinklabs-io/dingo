@@ -2514,7 +2514,7 @@ func TestPeerGovernor_QuotaSumExceedsTarget(t *testing.T) {
 
 	// enforcePeerLimits should demote excess beyond target
 	var removedCount int
-	pg.enforcePeerLimits(&removedCount)
+	pg.enforcePeerLimits(&removedCount, new([]deferredClose))
 
 	hotCount := 0
 	for _, p := range pg.peers {

@@ -225,7 +225,7 @@ func TestEnforcePeerLimitsNeverPrunesInbound(t *testing.T) {
 		idx++
 	}
 	removed := 0
-	pg.enforcePeerLimits(&removed)
+	pg.enforcePeerLimits(&removed, new([]deferredClose))
 	remainingInbound := 0
 	for _, p := range pg.peers {
 		if p != nil && p.Source == PeerSourceInboundConn {
@@ -274,7 +274,7 @@ func TestEnforcePeerLimitsBoundsWarmInboundByTarget(t *testing.T) {
 		pg.peers = append(pg.peers, peer)
 	}
 	removed := 0
-	pg.enforcePeerLimits(&removed)
+	pg.enforcePeerLimits(&removed, new([]deferredClose))
 	var warm []string
 	hot := 0
 	for _, p := range pg.peers {
@@ -324,7 +324,7 @@ func TestEnforcePeerLimitsRemovesOutboundOnlyWhenOverTarget(t *testing.T) {
 		)
 	}
 	removed := 0
-	pg.enforcePeerLimits(&removed)
+	pg.enforcePeerLimits(&removed, new([]deferredClose))
 	hotOut, inbound := 0, 0
 	for _, p := range pg.peers {
 		switch {

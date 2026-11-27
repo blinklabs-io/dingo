@@ -139,6 +139,7 @@ func (p *PeerGovernor) LoadTopologyConfig(
 	}
 
 	var events []pendingEvent
+	var closes []deferredClose
 	p.mu.Lock()
 	isTopologySource := func(source PeerSource) bool {
 		return source == PeerSourceTopologyBootstrapPeer ||
@@ -317,21 +318,19 @@ func (p *PeerGovernor) LoadTopologyConfig(
 				Reason:  "topology removed",
 			},
 		})
-		if orphanPeer.Connection != nil && p.config.ConnManager != nil {
-			if conn := p.config.ConnManager.GetConnectionById(
+		if orphanPeer.Connection != nil {
+			closes = p.deferCloseLocked(
+				closes,
 				orphanPeer.Connection.Id,
-			); conn != nil {
-				closeConnAndLog(
-					p.config.Logger,
-					conn,
-					"error closing connection for peer removed by topology",
-					"address", orphanPeer.Address,
-				)
-			}
+				"error closing connection for peer removed by topology",
+				orphanPeer.Address,
+			)
 		}
 	}
 	p.updatePeerMetrics()
 	p.mu.Unlock()
+
+	p.closeDeferred(closes)
 
 	p.publishPendingEvents(events)
 }
