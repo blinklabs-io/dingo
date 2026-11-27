@@ -51,151 +51,60 @@ func setupTestDBWithStorageMode(
 	return db
 }
 
-// TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput pins that CORE
-// storage mode's retention behavior is unchanged: both
-// reward_stake_input and reward_account_output are pruned to the same
-// rotation/reward-replay window. Also pins pool_stake_snapshot's own
-// CORE-mode window (/: no test previously exercised the
-// apiStorageMode branch cleanupOldSnapshots gained for this table) -- CORE
-// mode's pool-snapshot pruning is unchanged from before that commit.
-func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
+// TestCleanupOldSnapshotsPrunesTheSameInEveryMode pins that reward_stake_input,
+// reward_account_output and pool_stake_snapshot are pruned to the same
+// rotation and reward-replay window whatever the storage mode: history older
+// than it is the IndexerDB's.
+func TestCleanupOldSnapshotsPrunesTheSameInEveryMode(t *testing.T) {
 	t.Parallel()
 
-	db := setupTestDBWithStorageMode(t, types.StorageModeCore)
-	require.Equal(t, types.StorageModeCore, db.StorageMode())
-	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
-	meta := db.Metadata()
+	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			db := setupTestDBWithStorageMode(t, mode)
+			require.Equal(t, mode, db.StorageMode())
+			mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
+			meta := db.Metadata()
 
-	const currentEpoch = uint64(10)
-	const firstRetainedEpoch = currentEpoch - 3
-	poolKeyHash := bytes.Repeat([]byte{0x11}, 28)
+			const currentEpoch = uint64(10)
+			const firstRetainedEpoch = currentEpoch - 3
+			poolKeyHash := bytes.Repeat([]byte{0x11}, 28)
 
-	seedRetentionRows(t, db, poolKeyHash, currentEpoch)
-	require.NoError(
-		t,
-		mgr.cleanupOldSnapshots(context.Background(), currentEpoch),
-	)
+			seedRetentionRows(t, db, poolKeyHash, currentEpoch)
+			require.NoError(
+				t,
+				mgr.cleanupOldSnapshots(context.Background(), currentEpoch),
+			)
 
-	for epoch := range firstRetainedEpoch {
-		accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
-		require.NoError(t, err, "get reward account outputs %d", epoch)
-		require.Empty(
-			t,
-			accountOutputs,
-			"core mode must prune reward_account_output for epoch %d",
-			epoch,
-		)
-		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
-		require.NoError(t, err, "get reward stake inputs %d", epoch)
-		require.Empty(
-			t,
-			stakeInputs,
-			"core mode must prune reward_stake_input for epoch %d",
-			epoch,
-		)
-		poolSnapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
-			epoch, models.PoolStakeSnapshotTypeMark, nil,
-		)
-		require.NoError(t, err, "get pool stake snapshots %d", epoch)
-		require.Empty(
-			t,
-			poolSnapshots,
-			"core mode must prune pool_stake_snapshot for epoch %d",
-			epoch,
-		)
-	}
-	for epoch := firstRetainedEpoch; epoch <= currentEpoch; epoch++ {
-		accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
-		require.NoError(t, err, "get reward account outputs %d", epoch)
-		require.Len(
-			t,
-			accountOutputs,
-			1,
-			"core mode retains reward_account_output inside the window for epoch %d",
-			epoch,
-		)
-		poolSnapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
-			epoch, models.PoolStakeSnapshotTypeMark, nil,
-		)
-		require.NoError(t, err, "get pool stake snapshots %d", epoch)
-		require.Len(
-			t,
-			poolSnapshots,
-			1,
-			"core mode retains pool_stake_snapshot inside the window for epoch %d",
-			epoch,
-		)
-	}
-}
-
-// TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput is the
-// regression test: in API storage mode, reward_account_output must be
-// retained WITHOUT BOUND (so the Blockfrost account reward-history endpoint
-// can serve an account's full history), and so must reward_stake_input (so
-// the epoch stake and account stake-history endpoints can serve past the
-// rotation/reward-replay window). Also the / regression test:
-// pool_stake_snapshot must likewise be retained WITHOUT BOUND in API mode,
-// so a from-genesis historical Acquire pinned well outside the ordinary
-// 3-epoch window can still be validated
-// (VerifyPointQueryable's stake-retention check) and answered
-// (GetStakeDistribution/GetPoolDistr2) -- confirmed live before this test
-// existed, but never previously pinned by an automated test.
-func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
-	t.Parallel()
-
-	db := setupTestDBWithStorageMode(t, types.StorageModeAPI)
-	require.Equal(t, types.StorageModeAPI, db.StorageMode())
-	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
-	meta := db.Metadata()
-
-	const currentEpoch = uint64(10)
-	poolKeyHash := bytes.Repeat([]byte{0x22}, 28)
-
-	seedRetentionRows(t, db, poolKeyHash, currentEpoch)
-	require.NoError(
-		t,
-		mgr.cleanupOldSnapshots(context.Background(), currentEpoch),
-	)
-
-	// reward_account_output and pool_stake_snapshot both survive for every
-	// epoch, including those outside the rotation/reward-replay window.
-	for epoch := uint64(0); epoch <= currentEpoch; epoch++ {
-		accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
-		require.NoError(t, err, "get reward account outputs %d", epoch)
-		require.Len(
-			t,
-			accountOutputs,
-			1,
-			"API mode must retain reward_account_output for epoch %d",
-			epoch,
-		)
-		poolSnapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
-			epoch, models.PoolStakeSnapshotTypeMark, nil,
-		)
-		require.NoError(t, err, "get pool stake snapshots %d", epoch)
-		require.Len(
-			t,
-			poolSnapshots,
-			1,
-			"API mode must retain pool_stake_snapshot for epoch %d",
-			epoch,
-		)
-	}
-
-	// reward_stake_input is retained without bound too, so the Blockfrost
-	// epoch stake and account history endpoints can answer for any epoch the
-	// node has run in this mode. Core mode and the koios-parity observer keep
-	// pruning it to the window (see the two sibling tests).
-	for epoch := uint64(0); epoch <= currentEpoch; epoch++ {
-		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
-		require.NoError(t, err, "get reward stake inputs %d", epoch)
-		require.Len(
-			t,
-			stakeInputs,
-			1,
-			"API mode must retain reward_stake_input for epoch %d",
-			epoch,
-		)
+			for epoch := range firstRetainedEpoch {
+				accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
+				require.NoError(t, err, "get reward account outputs %d", epoch)
+				require.Empty(t, accountOutputs,
+					"%s mode must prune reward_account_output for epoch %d", mode, epoch)
+				stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
+				require.NoError(t, err, "get reward stake inputs %d", epoch)
+				require.Empty(t, stakeInputs,
+					"%s mode must prune reward_stake_input for epoch %d", mode, epoch)
+				poolSnapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+					epoch, models.PoolStakeSnapshotTypeMark, nil,
+				)
+				require.NoError(t, err, "get pool stake snapshots %d", epoch)
+				require.Empty(t, poolSnapshots,
+					"%s mode must prune pool_stake_snapshot for epoch %d", mode, epoch)
+			}
+			for epoch := firstRetainedEpoch; epoch <= currentEpoch; epoch++ {
+				accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
+				require.NoError(t, err, "get reward account outputs %d", epoch)
+				require.Len(t, accountOutputs, 1,
+					"%s mode retains reward_account_output inside the window for epoch %d", mode, epoch)
+				poolSnapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+					epoch, models.PoolStakeSnapshotTypeMark, nil,
+				)
+				require.NoError(t, err, "get pool stake snapshots %d", epoch)
+				require.Len(t, poolSnapshots, 1,
+					"%s mode retains pool_stake_snapshot inside the window for epoch %d", mode, epoch)
+			}
+		})
 	}
 }
 

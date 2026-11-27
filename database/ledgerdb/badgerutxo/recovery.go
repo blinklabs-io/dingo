@@ -323,7 +323,6 @@ func (s *Store) Restore(ctx context.Context, r io.Reader) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	defer s.rewriteRows()()
 	if err := s.db.Load(r, 256); err != nil {
 		return err
 	}
@@ -499,6 +498,5 @@ func (s *Store) Reset() error {
 	if s.snap != nil {
 		return ErrSnapshotReadOnly
 	}
-	defer s.rewriteRows()()
 	return s.db.DropAll()
 }

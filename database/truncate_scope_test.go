@@ -112,7 +112,7 @@ func TestRevertStoredLedgerAfterSlotRevertsTheRows(t *testing.T) {
 	require.NoError(t, blobOnly.Rollback())
 	require.ErrorIs(
 		t,
-		db.RollbackMetadataAfterSlot(t.Context(), point, 0, db.BlobTxn(true)),
+		db.RollbackMetadataAfterSlot(t.Context(), point, db.BlobTxn(true)),
 		types.ErrNilTxn,
 	)
 

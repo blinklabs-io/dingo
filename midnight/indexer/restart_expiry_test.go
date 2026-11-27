@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,7 +15,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -65,15 +65,21 @@ func TestRestartRestoresRegistrationWhoseBlockIsOld(t *testing.T) {
 	// The pruner runs on its ticker, as in the node. Every Held call is a
 	// signal: a round checks the held block once, so the second call means the
 	// first round ran to completion.
-	checks := make(chan struct{}, 1024)
+	type check struct {
+		phase uint64
+		held  bool
+	}
+	var phase atomic.Uint64
+	checks := make(chan check, 1024)
 	pruner := historyexpiry.NewPruner(historyexpiry.PrunerConfig{
 		LedgerState: fixedLedgerWindow{current: 300, window: 5},
 		DB:          consensus,
 		Frequency:   5 * time.Millisecond,
 		Held: func(ctx context.Context, slot uint64, hash []byte) (bool, error) {
+			checkedPhase := phase.Load()
 			held, err := indexerDB.BlockHoldsActivePayloads(ctx, slot, hash, 0)
 			select {
-			case checks <- struct{}{}:
+			case checks <- check{phase: checkedPhase, held: held}:
 			default:
 			}
 			return held, err
@@ -92,8 +98,24 @@ func TestRestartRestoresRegistrationWhoseBlockIsOld(t *testing.T) {
 		_, _, err := consensus.Blob().GetBlock(txn.Blob(), block.Slot, block.Hash)
 		return errors.Is(err, types.ErrHistoryExpired)
 	}
-	testutil.RequireReceive(t, checks, 5*time.Second, "first round")
-	testutil.RequireReceive(t, checks, 5*time.Second, "second round")
+	requireCheck := func(want uint64, name string) {
+		t.Helper()
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		for {
+			select {
+			case got := <-checks:
+				if got.phase >= want {
+					require.True(t, got.held, "%s observed the block as unheld", name)
+					return
+				}
+			case <-deadline.C:
+				t.Fatalf("timeout waiting for %s", name)
+			}
+		}
+	}
+	requireCheck(0, "first round")
+	requireCheck(0, "second round")
 	require.False(t, expired(), "an unspent registration keeps its block")
 
 	restarted, err := New(cfg)
@@ -105,6 +127,7 @@ func TestRestartRestoresRegistrationWhoseBlockIsOld(t *testing.T) {
 	require.Equal(t, datum, reg.FullDatum)
 
 	spendBlock := models.Block{Number: 2, Slot: 400, Hash: bytes.Repeat([]byte{0x0e}, 32)}
+	spendPhase := phase.Add(1)
 	require.NoError(t, restarted.processBlock(spendBlock, []lcommon.Transaction{
 		buildTx(t, pad32("dd200001"),
 			[]lcommon.TransactionInput{buildInput(t, regTx, 0)},
@@ -113,9 +136,12 @@ func TestRestartRestoresRegistrationWhoseBlockIsOld(t *testing.T) {
 	// The spend can still be rolled back, which restores the registration's
 	// datum from its block, so the block stays while the spend is inside the
 	// rollback window.
-	testutil.RequireReceive(t, checks, 5*time.Second, "round after the spend")
-	testutil.RequireReceive(t, checks, 5*time.Second, "second round after the spend")
+	requireCheck(spendPhase, "round after the spend")
+	requireCheck(spendPhase, "second round after the spend")
 	require.False(t, expired(), "the block stays while the spend can be rolled back")
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+	require.NoError(t, pruner.Stop(stopCtx))
+	cancelStop()
 	require.NoError(t, restarted.rollbackBlock(spendBlock),
 		"rolling back the spend reads the registration's block")
 	restarted.mu.RLock()

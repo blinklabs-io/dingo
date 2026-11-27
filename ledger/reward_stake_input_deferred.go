@@ -39,53 +39,11 @@ func (ls *LedgerState) takeDeferredRewardStakeInputs(
 	return ls.ledgerDB().SaveRewardStakeInputs(inputs, txn)
 }
 
-// RewardStakeInputsIncomplete reports whether any snapshot labelled in
-// [from, through) still has incomplete reward_stake_input rows: no reward
-// round has rebuilt it yet.
-// A read-only reader cannot complete them, so it must not present the
-// snapshot's rows as the whole distribution.
-func (ls *LedgerState) RewardStakeInputsIncomplete(
-	txn ledgerdb.Txn,
-	from uint64,
-	through uint64,
-) (bool, error) {
-	return ls.rewardStakeInputsIncomplete(txn, from, through)
-}
-
 // RewardStakeInputsPendingState returns the pending record in the encoding
 // ParseRewardStakeInputsPending reads, or the empty string when no snapshot
 // is pending.
 func (ls *LedgerState) RewardStakeInputsPendingState() (string, error) {
 	return ls.ledgerDB().GetSyncState(epochengine.RewardStakeInputsPendingKey, nil)
-}
-
-// RewardStakeInputsIncompleteCommitted is RewardStakeInputsIncomplete read
-// from the ledger store's committed state, for a reader whose own
-// transaction belongs to another store: the ledger store records which
-// snapshots are still being written, and an IndexerDB copies their rows
-// from it.
-func (ls *LedgerState) RewardStakeInputsIncompleteCommitted(
-	from uint64,
-	through uint64,
-) (bool, error) {
-	return ls.rewardStakeInputsIncomplete(nil, from, through)
-}
-
-func (ls *LedgerState) rewardStakeInputsIncomplete(
-	txn ledgerdb.Txn,
-	from uint64,
-	through uint64,
-) (bool, error) {
-	pending, err := epochengine.LoadRewardStakeInputsPending(ls.ledgerDB(), txn)
-	if err != nil {
-		return false, err
-	}
-	for _, entry := range pending.Entries {
-		if entry.Epoch >= from && entry.Epoch < through {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 // completePendingRewardStakeInputs runs EnsureRewardStakeInputsReady for the

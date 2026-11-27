@@ -81,7 +81,7 @@ func requireLoadedStorage(t *testing.T, dir string, tip ocommon.Point) {
 	require.Equal(t, tip.Hash, ledgerTip.Point.Hash)
 
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(dir), Logger: logger, RetainRewardRecords: cfg.HasIndexerDB(),
+		Dir: utxoset.DirFor(dir), Logger: logger,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, set.Close()) }()

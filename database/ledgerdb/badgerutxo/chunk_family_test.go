@@ -106,7 +106,7 @@ func TestSnapshotDeleteBeyondOneTransactionCommits(t *testing.T) {
 				Row: badgerutxo.SnapshotRow{
 					Epoch: 1, Type: "mark",
 					Pool:  []byte{byte(i >> 16), byte(i >> 8), byte(i)},
-					Value: []byte{1}, CapturedSlot: slot,
+					Value: []byte{1},
 				},
 			})
 		}
@@ -215,7 +215,7 @@ func TestTiplessSnapshotDeleteStoppedLeavesRecoverableMark(t *testing.T) {
 				Row: badgerutxo.SnapshotRow{
 					Epoch: 1, Type: "mark",
 					Pool:  []byte{byte(i >> 16), byte(i >> 8), byte(i)},
-					Value: []byte{1}, CapturedSlot: slot,
+					Value: []byte{1},
 				},
 			})
 		}
@@ -264,7 +264,7 @@ func snapshotPuts(epoch, slot uint64, n int) []badgerutxo.SnapshotOp {
 			Row: badgerutxo.SnapshotRow{
 				Epoch: epoch, Type: "mark",
 				Pool:  []byte{byte(i >> 16), byte(i >> 8), byte(i)},
-				Value: []byte{1}, CapturedSlot: slot,
+				Value: []byte{1},
 			},
 		})
 	}

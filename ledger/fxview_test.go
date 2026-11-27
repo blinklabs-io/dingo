@@ -157,9 +157,6 @@ func fxImportAccount(
 		Ref:       ref,
 		Active:    account.Active,
 		AddedSlot: account.AddedSlot,
-		Pool:      account.Pool,
-		Drep:      account.Drep,
-		DrepType:  account.DrepType,
 	}
 	if account.ImportDeposit != nil {
 		deposit := uint64(*account.ImportDeposit)

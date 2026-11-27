@@ -85,3 +85,8 @@ type LedgerDB interface {
 	TxHistory
 	LeiosStore
 }
+
+// PoolSnapshotRetentionBackstopEpochs bounds how many epochs of pool stake
+// snapshot rows a retention hold may keep below the current epoch: the
+// deferred-header hold never lowers pruning past it.
+const PoolSnapshotRetentionBackstopEpochs uint64 = 24

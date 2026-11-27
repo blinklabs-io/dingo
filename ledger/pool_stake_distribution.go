@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -64,21 +63,14 @@ var ErrPoolStakeDistributionLimitExceeded = errors.New(
 // to snapshot epoch 2, which the floor (6-3=3) has already pruned, but
 // 6-3=3 is not > 3 so the un-shifted comparison wrongly accepted it.
 //
-// apiStorageMode skips the retention-window check entirely (matching
-// cleanupOldSnapshots' own API-mode carve-out, added alongside this
-// parameter): pool-stake snapshots are never pruned in that mode, so
-// there is no floor to reject against. The ahead-of-live-epoch check
-// above still applies regardless of storage mode -- that is a real
-// ordering violation, not a pruning question.
-func checkAsOfEpochRecency(
-	targetEpoch, liveEpoch uint64,
-	apiStorageMode bool,
-) error {
+// The window applies in every storage mode: the LedgerDB prunes the same way
+// in each, and a point older than the rows it holds is refused, as the
+// reference node refuses it.
+func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
 	return checkAsOfSnapshotRecency(
 		targetEpoch,
 		praos.StakeSnapshotEpoch(targetEpoch),
 		liveEpoch,
-		apiStorageMode,
 	)
 }
 
@@ -88,7 +80,6 @@ func checkAsOfEpochRecency(
 // job has pruned however far the live epoch has advanced.
 func checkAsOfSnapshotRecency(
 	targetEpoch, snapshotEpoch, liveEpoch uint64,
-	apiStorageMode bool,
 ) error {
 	if targetEpoch > liveEpoch {
 		return fmt.Errorf(
@@ -97,9 +88,6 @@ func checkAsOfSnapshotRecency(
 			targetEpoch,
 			liveEpoch,
 		)
-	}
-	if apiStorageMode {
-		return nil
 	}
 	if liveEpoch < stakeSnapshotRetentionEpochs {
 		// cleanupOldSnapshots itself does nothing below this floor (its own
@@ -175,7 +163,6 @@ func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
 		targetEpoch,
 		ls.LeaderStakeSnapshotEpoch(targetEpoch),
 		liveEpoch,
-		ls.ledgerDB().StorageMode() == types.StorageModeAPI,
 	); err != nil {
 		return err
 	}
@@ -359,7 +346,6 @@ func (ls *LedgerState) poolStakeDistribution(
 			epoch,
 			ls.LeaderStakeSnapshotEpoch(epoch),
 			liveEpoch,
-			ls.ledgerDB().StorageMode() == types.StorageModeAPI,
 		); err != nil {
 			return nil, err
 		}

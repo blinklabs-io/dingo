@@ -114,11 +114,11 @@ func TestMigratedPartialRewardStakeInputsStayIncomplete(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1, "the set holds the rows the store had")
 
-	incomplete, err := ls.RewardStakeInputsIncompleteCommitted(epoch, epoch+1)
+	incomplete, err := ls.rewardStakeInputsIncompleteCommitted(epoch, epoch+1)
 	require.NoError(t, err)
 	require.True(t, incomplete,
 		"a part of a snapshot's stake rows must not read as the whole")
-	other, err := ls.RewardStakeInputsIncompleteCommitted(epoch+1, epoch+2)
+	other, err := ls.rewardStakeInputsIncompleteCommitted(epoch+1, epoch+2)
 	require.NoError(t, err)
 	require.False(t, other)
 
@@ -237,7 +237,7 @@ func TestMigratedPartialRewardStakeInputsAreRebuilt(t *testing.T) {
 	part, err := ls.ledgerDB().GetRewardStakeInputs(epoch, nil)
 	require.NoError(t, err)
 	require.Len(t, part, 1)
-	incomplete, err := ls.RewardStakeInputsIncompleteCommitted(epoch, epoch+1)
+	incomplete, err := ls.rewardStakeInputsIncompleteCommitted(epoch, epoch+1)
 	require.NoError(t, err)
 	require.True(t, incomplete)
 
@@ -256,7 +256,7 @@ func TestMigratedPartialRewardStakeInputsAreRebuilt(t *testing.T) {
 		return out
 	}
 	require.Equal(t, stakes(whole), stakes(rebuilt))
-	incomplete, err = ls.RewardStakeInputsIncompleteCommitted(epoch, epoch+1)
+	incomplete, err = ls.rewardStakeInputsIncompleteCommitted(epoch, epoch+1)
 	require.NoError(t, err)
 	require.False(t, incomplete, "the rebuild must clear the mark")
 }
@@ -313,7 +313,25 @@ func TestResolveReleasedRewardStakeInputsRebuildsFromMetadataHistory(
 	loaded, err := ls.ledgerDB().GetRewardStakeInputs(epoch, nil)
 	require.NoError(t, err)
 	require.Len(t, loaded, len(whole))
-	incomplete, err := ls.RewardStakeInputsIncompleteCommitted(epoch, epoch+1)
+	incomplete, err := ls.rewardStakeInputsIncompleteCommitted(epoch, epoch+1)
 	require.NoError(t, err)
 	require.False(t, incomplete)
+}
+
+// rewardStakeInputsIncompleteCommitted reports whether any snapshot labelled
+// in [from, through) still has incomplete reward_stake_input rows, from the
+// ledger store's committed state.
+func (ls *LedgerState) rewardStakeInputsIncompleteCommitted(
+	from, through uint64,
+) (bool, error) {
+	pending, err := epochengine.LoadRewardStakeInputsPending(ls.ledgerDB(), nil)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range pending.Entries {
+		if entry.Epoch >= from && entry.Epoch < through {
+			return true, nil
+		}
+	}
+	return false, nil
 }

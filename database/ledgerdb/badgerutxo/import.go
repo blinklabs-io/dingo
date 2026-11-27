@@ -229,7 +229,6 @@ func (s *Store) loadNoRows(missingOnly bool) error {
 				return put(DormancyKey, make([]byte, 8))
 			})
 		}},
-		{drepHistoryLoadedKey, func() error { return s.LoadDRepHistory(none) }},
 		{poolsKey, func() error { return s.LoadPools(none) }},
 		{poolHistoryKey, func() error { return s.LoadPoolHistory(none) }},
 		{registrationHistoryKey, func() error { return s.LoadRegistrationHistory(none) }},

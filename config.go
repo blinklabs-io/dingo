@@ -33,7 +33,6 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/version"
@@ -2765,16 +2764,24 @@ type IndexerWriterDeps struct {
 	// Consensus is the ledger's database, read for blocks and the tip.
 	// Indexer is the IndexerDB's own database.
 	Consensus, Indexer *database.Database
-	// FactRows supplies the ledger facts the writer copies. A writer that
-	// only rolls the IndexerDB back needs none.
-	FactRows     metadata.LedgerFacts
-	NodeConfig   *cardano.CardanoNodeConfig
-	Logger       *slog.Logger
-	PromRegistry prometheus.Registerer
+	NodeConfig         *cardano.CardanoNodeConfig
+	Logger             *slog.Logger
+	PromRegistry       prometheus.Registerer
 	// SlotTime converts a slot to wall-clock time, for the lag in seconds.
 	SlotTime                   func(uint64) (time.Time, error)
 	MaxReadyLagBlocks          uint64
 	DelegatorInactivityEnabled bool
+	// The settings the epoch-boundary computation reads, which the ledger
+	// runs with too.
+	MinPoolMargin         uint
+	PledgeLeverageEnabled bool
+	PledgeLeverage        uint
+	FullPotRewardsEnabled bool
+	DelegatorInactivity   uint64
+	WarmGenesisStake      bool
+	// Fatal stops the node when the writer stops on an error no retry can
+	// clear. Nil leaves the writer stopped.
+	Fatal func(error)
 	// Moved, when set, is called after each pass in which the writer moved
 	// its tip, forward or back. It must not block.
 	Moved func()

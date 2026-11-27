@@ -41,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/tracing"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -9036,7 +9037,7 @@ func (ls *LedgerState) ensureGenesisNetworkState() error {
 	if err != nil {
 		return fmt.Errorf("generate Shelley genesis UTxOs: %w", err)
 	}
-	reserves, err := genesisReserveBalance(
+	reserves, err := epochengine.GenesisReserveBalance(
 		shelleyGenesis.MaxLovelaceSupply,
 		slices.Concat(byronUtxos, shelleyUtxos),
 	)
@@ -10584,13 +10585,12 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 
 // cleanupBlockNoncesBefore prunes non-checkpoint block nonces older than
 // startSlot. Nonce computation needs only the recent window and the
-// checkpoints, but the Blockfrost epoch and pool block lists read every
-// block's row, so API storage mode keeps them all.
+// checkpoints.
 func (ls *LedgerState) cleanupBlockNoncesBefore(
 	ctx context.Context,
 	startSlot uint64,
 ) {
-	if startSlot == 0 || ls.ledgerDB().StorageMode() == types.StorageModeAPI {
+	if startSlot == 0 {
 		return
 	}
 	ls.config.Logger.Debug(

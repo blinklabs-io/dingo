@@ -71,8 +71,9 @@ func (n *Node) warnMainnetIndexerCapacity(
 	if provider != "" && provider != "sqlite" {
 		return
 	}
-	phase, err := store.Bootstrap(nil)
-	if err != nil || (phase != indexerdb.PhaseReplay && phase != indexerdb.PhaseIndex) {
+	// Only an IndexerDB with no tip is about to replay the chain from genesis.
+	tip, err := store.Tip(nil)
+	if err != nil || !tip.IsZero() {
 		return
 	}
 	current, available, err := probe(n.config.dataDir)

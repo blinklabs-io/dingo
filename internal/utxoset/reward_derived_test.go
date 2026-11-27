@@ -139,9 +139,6 @@ func TestDerivedRewardRowsAreChunkedRolledBackWipedAndPruned(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, cursor, raw)
-	epochs, err := set.RewardDerivedEpochs()
-	require.NoError(t, err)
-	require.Equal(t, []uint64{4, 6}, epochs)
 
 	// A rollback to the captured slot or above keeps the epoch.
 	_, err = set.Rollback(ocommon.NewPoint(20, bytes.Repeat([]byte{20}, 32)))

@@ -3370,9 +3370,9 @@ type MetadataStore interface {
 	DeleteRewardStateAfterSlot(uint64, types.Txn) error
 
 	// DeleteRewardStateBeforeEpoch deletes reward-state rows older than the
-	// retained snapshot window. This is the CORE storage-mode pruning path:
-	// it deletes both reward_stake_input and reward_account_output, except a
-	// credited round's unfolded account outputs. See snapshot.Manager's
+	// retained snapshot window, in every storage mode: it deletes both
+	// reward_stake_input and reward_account_output, except a credited
+	// round's unfolded account outputs. See snapshot.Manager's
 	// cleanupOldSnapshots for the window.
 	DeleteRewardStateBeforeEpoch(context.Context, uint64, types.Txn) error
 

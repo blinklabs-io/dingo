@@ -37,11 +37,6 @@ const (
 	EpochTag = 'e'
 	// SnapshotTag keys pool stake snapshot rows: s <epoch:8 BE> ...
 	SnapshotTag = 's'
-	// SnapshotSlotTag keys the pool stake snapshot capture index:
-	// $ <captured slot:8 BE> <epoch:8 BE> <len:1> <type> <pool>, with no
-	// value. The key after the slot is the row's key under SnapshotTag, so a
-	// range of capture slots reads exactly the rows captured in it.
-	SnapshotSlotTag = '$'
 	// SummaryTag keys epoch summary rows: f <epoch:8 BE>.
 	SummaryTag = 'f'
 	// NetworkStateTag keys treasury and reserves rows: t <slot:8 BE>.
@@ -182,11 +177,6 @@ const (
 	// the epochs below its anchor, kept as imported rather than merged into
 	// the windowed RewardBlocksTag rows: Y <epoch:8 BE> <kind:1> ...
 	ImportedBlocksTag = 'Y'
-	// DRepHistoryTag keys the DRep expiry history, the dormancy counter
-	// history, the dormant expiry epoch events and the DRep delegation
-	// clears, each by the slot it was recorded at:
-	// T <slot:8 BE> <kind:1> ...
-	DRepHistoryTag = 'T'
 	// GovernanceBoundaryTag keys the governance state of each Conway epoch
 	// boundary: # <epoch:8 BE>, valued with the boundary slot (8 bytes BE)
 	// and the encoded snapshot. Each row is journaled at its boundary slot.
@@ -208,6 +198,12 @@ const (
 	// (1 byte) and the block's hash. A Leios closure transaction records the
 	// ranking block that certified its endorser block.
 	TxIndexTag = '3'
+
+	// retiredSnapshotSlotTag and retiredDRepHistoryTag keyed families no
+	// release reads. The layout migration deletes their rows, and no family
+	// may take either byte while a store can still hold them.
+	retiredSnapshotSlotTag = '$'
+	retiredDRepHistoryTag  = 'T'
 )
 
 // MarkerPrefix starts every marker key. No row family tag may equal it.
@@ -253,11 +249,6 @@ var (
 	epochStateKey       = []byte("mepoch2")
 	legacyEpochStateKey = []byte("mepoch")
 	eraSwitchKey        = []byte("mera")
-	// snapshotSlotsKey is set once every pool stake snapshot row carries its
-	// capture slot and has its SnapshotSlotTag entry. Rows written before
-	// the index existed have neither; a store without the marker reads the
-	// rows by their values and indexes them at the next epoch state load.
-	snapshotSlotsKey = []byte("msnapslot")
 	// pparamsKey is set once the store holds every protocol parameter row
 	// up to its tip. pparamsSeqKey holds the next protocol parameter
 	// sequence number.
@@ -288,24 +279,9 @@ var (
 	// governanceSeqKey holds the next proposal and vote row IDs, which only
 	// grow: a rollback removes rows but never lowers them.
 	governanceSeqKey = []byte("mgvseq")
-	// rewardSeqKey holds the next reward record sequence number.
-	rewardSeqKey = []byte("mrwseq")
 	// rewardRecordsKey is set once the store holds the reward records of the
 	// journal up to its tip.
 	rewardRecordsKey = []byte("mrwrecs")
-	// rewardConsumerKey is present while a reader that copies the reward
-	// records needs them; rewardConsumedKey holds the sequence number below
-	// which it has copied every record.
-	rewardConsumerKey = []byte("mrwconsumer")
-	rewardConsumedKey = []byte("mrwconsumed")
-	// rewardConsumedSlotKey holds the slot through which the consumer has
-	// copied the reward rows.
-	rewardConsumedSlotKey = []byte("mrwthrough")
-	// rewardSeqIndexPrefix keys the reward sequence index, a derived row
-	// family under the marker namespace (see reward_seq_index.go);
-	// rewardIndexedKey is set once every record has a number and an entry.
-	rewardSeqIndexPrefix = []byte("mrwq")
-	rewardIndexedKey     = []byte("mrwindexed")
 	// addressIndexPrefix keys the output index, a derived row family under
 	// the marker namespace (see address_index.go); addressIndexedKey is set
 	// once every live output has its index rows, and addressIndexAfterKey
@@ -333,9 +309,6 @@ var (
 	// importBaselinesKey is set once the store holds every import baseline
 	// up to its tip, and witnessSlotsKey once it holds every witness slot.
 	importBaselinesKey = []byte("mbaseline")
-	// importBaselineDelegationsKey is set once the import baselines carry the
-	// delegations the import recorded.
-	importBaselineDelegationsKey = []byte("mbasedelegs")
 	// witnessSlotsKey is set once the witness rows carry the effective slot
 	// of a closure's witness. legacyWitnessSlotsKey marked rows without it,
 	// which are reloaded rather than read.
@@ -365,12 +338,6 @@ var (
 	// entries before it. A rollback below it, other than to the tip, would
 	// leave the loaded rows the undone blocks wrote.
 	loadFloorKey = []byte("mloadfloor")
-	// exportFloorKey holds the lowest slot, as a big-endian uint64, from
-	// which the state journal names every account and DRep row by the slot
-	// its AddedSlot says: an entry sits at the slot of the change that set
-	// it. Rows a load wrote carry older slots than their entries, so a store
-	// that opens without the key takes the tip plus one.
-	exportFloorKey = []byte("mexportfloor")
 	// rewardBlocksKey is set once the store holds the block counts and fees
 	// of every epoch reward calculation can still read, up to its tip, with
 	// the overlay-inclusive counts. legacyRewardBlocksKey marked rows without
@@ -380,9 +347,6 @@ var (
 	// importedBlocksKey is set once the store holds the imported block counts
 	// of every epoch a snapshot import carried them for.
 	importedBlocksKey = []byte("mimpblocks")
-	// drepHistoryKey is set once the store holds the DRep history rows up to
-	// its tip.
-	drepHistoryLoadedKey = []byte("mdrephist")
 	// delegationsKey is set once the store holds every pool delegation
 	// certificate up to its tip.
 	delegationsKey = []byte("mdelegations")
@@ -404,3 +368,22 @@ var (
 	// its tip.
 	rewardDerivedKey = []byte("mroutputs")
 )
+
+// layoutKey is set once the store holds the current layout; see migrate.go.
+var layoutKey = []byte("mlayout")
+
+// retiredMarkers are the markers the layout migration deletes, and
+// retiredPrefixes the key ranges it drops. Nothing reads or writes them.
+var (
+	retiredMarkers = [][]byte{
+		[]byte("mrwseq"), []byte("mrwindexed"), []byte("mrwconsumer"),
+		[]byte("mrwconsumed"), []byte("mrwthrough"), []byte("mexportfloor"),
+		[]byte("mdrephist"), []byte("msnapslot"), []byte("mbasedelegs"),
+	}
+	retiredPrefixes = [][]byte{
+		{retiredSnapshotSlotTag}, {retiredDRepHistoryTag}, []byte("mrwq"),
+	}
+)
+
+// loadedMarker is the value of a family's load marker.
+var loadedMarker = []byte{1}

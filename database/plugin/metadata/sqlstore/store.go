@@ -111,10 +111,6 @@ type Config struct {
 	// otherwise leave its whole write set in the WAL.
 	BulkCheckpoint     func(context.Context) error
 	CheckpointInterval time.Duration
-	// SyncCommits is an optional provider-owned hook that makes every commit
-	// that returned before it began durable. A provider whose commits are
-	// durable on return leaves it unset.
-	SyncCommits func(context.Context) error
 	// BackupTo and RestoreFrom are optional provider-owned lifecycle hooks.
 	// SQLite supplies them for its file-backed store; other dialects may leave
 	// them unset until a native snapshot mechanism is available.
@@ -197,11 +193,6 @@ type Store struct {
 	// non-zero. Only tests set it, to drive the rebuild across many batch
 	// boundaries without a production-sized fixture.
 	rewardLiveStakeBatchSize int
-
-	// utxoDigestRunBytes overrides utxoDigestRunBytes, the size of one sorted
-	// run of the digest spool, when non-zero. Only tests set it, to make the
-	// spool merge many runs.
-	utxoDigestRunBytes int
 
 	// rewardStateDeleteBatchSize fixes the prune batch at that many rows
 	// when non-zero, in place of the adaptive sizing;
@@ -287,7 +278,6 @@ type Store struct {
 	checkpoint       func(context.Context) error
 	bulkCheckpoint   func(context.Context) error
 	checkpointEvery  time.Duration
-	syncCommits      func(context.Context) error
 	checkpointCancel context.CancelFunc
 	checkpointDone   chan struct{}
 	checkpointState  atomic.Uint32
@@ -436,7 +426,6 @@ func New(config Config) (*Store, error) {
 		checkpoint:                  config.Checkpoint,
 		bulkCheckpoint:              config.BulkCheckpoint,
 		checkpointEvery:             config.CheckpointInterval,
-		syncCommits:                 config.SyncCommits,
 		backupTo:                    config.BackupTo,
 		restoreFrom:                 config.RestoreFrom,
 		prepare:                     config.Prepare,
@@ -1055,15 +1044,6 @@ func (s *Store) startMigrationCheckpoint(ctx context.Context) func() {
 		cancel()
 		<-done
 	}
-}
-
-// SyncCommits implements metadata.CommitSyncer. It is a no-op for a store
-// whose provider commits durably.
-func (s *Store) SyncCommits(ctx context.Context) error {
-	if s.syncCommits == nil {
-		return nil
-	}
-	return s.syncCommits(ctx)
 }
 
 func (s *Store) runCheckpoint(ctx context.Context) error {

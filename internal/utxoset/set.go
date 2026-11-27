@@ -53,11 +53,6 @@ type Config struct {
 	// when below one.
 	CheckpointDir  string
 	CheckpointKeep int
-	// RetainRewardRecords keeps the reward records an IndexerDB writer has
-	// not copied past the rollback window, so a writer that lags, or a
-	// database moved to the IndexerDB layout, still finds the credits it has not
-	// applied.
-	RetainRewardRecords bool
 	// MemTableSize is Badger's memtable size in bytes; zero uses
 	// DefaultMemTableSize.
 	MemTableSize int64
@@ -78,12 +73,9 @@ const pruneEvery = 1000
 
 // Set is the live UTxO set in Badger. It implements ledger.UtxoSetWriter.
 type Set struct {
-	// retainRewards loads the reward stake and derived rows of every epoch
-	// rather than the window's, for a reader that copies them.
-	retainRewards bool
-	store         *badgerutxo.Store
-	logger        *slog.Logger
-	m             *metrics
+	store  *badgerutxo.Store
+	logger *slog.Logger
+	m      *metrics
 	// unregister releases the metrics Open registered. A snapshot view
 	// shares them and has none.
 	unregister func()
@@ -261,24 +253,23 @@ func Open(cfg Config) (*Set, error) {
 		badgerutxo.WithIndexer(ledger.UtxoIndexBodies),
 		badgerutxo.WithMemTableSize(memTable),
 		badgerutxo.WithBlockCacheSize(DefaultBlockCacheSize),
+		badgerutxo.WithRetention(badgerutxo.Retention{
+			RewardEpochs:   uint64(ledger.RewardInputEpochWindow),
+			SnapshotEpochs: ledgerdb.PoolSnapshotRetentionBackstopEpochs,
+		}),
 	)
 	if err != nil {
 		return nil, err
 	}
 	m, unregister := newMetrics(cfg.Registerer)
 	set := &Set{
-		store:         store,
-		dir:           cfg.Dir,
-		logger:        logger.With("component", "utxoset"),
-		m:             m,
-		unregister:    unregister,
-		history:       cfg.HistorySlots,
-		retainRewards: cfg.RetainRewardRecords,
-		pruneJournal:  store.PruneJournal,
-	}
-	if err := store.SetRewardConsumer(cfg.RetainRewardRecords); err != nil {
-		_ = store.Close()
-		return nil, fmt.Errorf("utxoset: set the reward record consumer: %w", err)
+		store:        store,
+		dir:          cfg.Dir,
+		logger:       logger.With("component", "utxoset"),
+		m:            m,
+		unregister:   unregister,
+		history:      cfg.HistorySlots,
+		pruneJournal: store.PruneJournal,
 	}
 	set.SetCheckpointDir(cfg.CheckpointDir, cfg.CheckpointKeep)
 	return set, nil
@@ -868,9 +859,6 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return err
 	}
 	if err := s.ensureDrepState(ctx, ldb); err != nil {
-		return err
-	}
-	if err := s.ensureDRepHistory(ctx, ldb); err != nil {
 		return err
 	}
 	if err := s.ensurePools(ctx, ldb); err != nil {

@@ -2588,3 +2588,35 @@ func setRemoteKESAgent(c *Config) {
 	c.ShelleyKESAgentClientKeyFile = "/keys/kes-client.key"
 	c.ShelleyKESAgentServerSPKISHA256 = strings.Repeat("ab", 32)
 }
+
+// An API-mode node builds its IndexerDB from every block since genesis, which
+// a Mithril snapshot restore with history expiry never keeps, so the
+// combination is refused before any restore begins.
+func TestValidateRefusesMithrilSnapshotRestoreInAPIMode(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mode    string
+		mithril bool
+		expiry  bool
+		wantErr bool
+	}{
+		{"api, mithril and expiry", storageModeAPI, true, true, true},
+		{"api, mithril only", storageModeAPI, true, false, false},
+		{"api, expiry only", storageModeAPI, false, true, false},
+		{"core, mithril and expiry", storageModeCore, true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.StorageMode = tc.mode
+			cfg.Mithril.Enabled = tc.mithril
+			cfg.HistoryExpiry.Enabled = tc.expiry
+			err := cfg.validate(RunModeServe, minUnprivilegedPort)
+			if !tc.wantErr {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "historyExpiry")
+		})
+	}
+}

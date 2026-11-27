@@ -976,7 +976,7 @@ func registerCardanoTools(
 		var epochNum, blockCount int
 		var rawNonce []byte
 		var blocksNote string
-		if stateDB != nil {
+		if db == nil {
 			read, err := epochSummaryFromLedger(qCtx, stateDB, input.Epoch)
 			if err != nil {
 				return nil, nil, err

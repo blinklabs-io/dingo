@@ -84,9 +84,6 @@ type LedgerChanges struct {
 	DReps     []DRepChange
 	DRepLinks []DRepLinkChange
 	Dormancy  []DormancyChange
-	// DRepHistory are the history rows the commit's DRep changes recorded, in
-	// order.
-	DRepHistory []DRepHistoryChange
 	// Pools are the commit's pool state changes, in order.
 	Pools []PoolChange
 	// PoolEvents are the pool registration and retirement certificates the
@@ -183,33 +180,6 @@ type DRepLinkChange struct {
 	Live  bool
 }
 
-// DRepHistoryKind is what a DRepHistoryChange records.
-type DRepHistoryKind uint8
-
-// The DRep history kinds, the rows of the metadata store's
-// drep_expiry_history, drep_dormancy_history, drep_expiry_epoch_event and
-// account_drep_clear tables.
-const (
-	DRepHistoryExpiry DRepHistoryKind = iota
-	DRepHistoryDormancy
-	DRepHistoryEvent
-	DRepHistoryClear
-)
-
-// DRepHistoryChange is a DRep history row recorded at Slot. Tag and Key name
-// the DRep of an expiry row and the account of a clear; Activity and Expiry
-// are an expiry row's epochs; Previous is the dormancy counter a dormancy
-// row records.
-type DRepHistoryChange struct {
-	Kind     DRepHistoryKind
-	Slot     uint64
-	Tag      uint8
-	Key      []byte
-	Activity uint64
-	Expiry   uint64
-	Previous uint64
-}
-
 // DormancyChange sets the DRep dormancy counter at Slot.
 type DormancyChange struct {
 	Slot   uint64
@@ -227,9 +197,6 @@ type RewardRecord struct {
 	Amount uint64
 	// PostSnapshot marks a credit a boundary applied after its SNAP point.
 	PostSnapshot bool
-	// Seq orders the records the set holds by when it wrote them. The set
-	// assigns it; it is zero on a record being staged.
-	Seq uint64
 }
 
 // AccountChange is an account as the change at Slot leaves it.
@@ -344,7 +311,6 @@ type utxoSetBatch struct {
 	dreps         []DRepChange
 	drepLinks     []DRepLinkChange
 	dormancy      []DormancyChange
-	drepHistory   []DRepHistoryChange
 	pools         []PoolChange
 	poolEvents    []PoolEventChange
 	stakeEvents   []StakeEventChange
@@ -391,7 +357,7 @@ func (b *utxoSetBatch) hasWrites() bool {
 		len(b.pparams) > 0 || len(b.accounts) > 0 ||
 		len(b.rewardRecords) > 0 || len(b.dreps) > 0 ||
 		len(b.drepLinks) > 0 || len(b.dormancy) > 0 ||
-		len(b.drepHistory) > 0 || len(b.pools) > 0 || len(b.poolEvents) > 0 ||
+		len(b.pools) > 0 || len(b.poolEvents) > 0 ||
 		len(b.stakeEvents) > 0 || len(b.delegations) > 0 ||
 		len(b.drepDeposits) > 0 ||
 		len(b.genesisDelegs) > 0 || len(b.mirCerts) > 0 ||
@@ -750,7 +716,6 @@ func (ls *LedgerState) applyUtxoSetLocked(batch *utxoSetBatch) *UtxoEvent {
 			DReps:               batch.dreps,
 			DRepLinks:           batch.drepLinks,
 			Dormancy:            batch.dormancy,
-			DRepHistory:         batch.drepHistory,
 			Pools:               batch.pools,
 			PoolEvents:          batch.poolEvents,
 			StakeEvents:         batch.stakeEvents,
@@ -1481,30 +1446,6 @@ func (ls *LedgerState) iterateLiveUtxos(
 		}
 	}
 	return nil
-}
-
-// liveUtxoLovelace is the lovelace in every live output as txn sees the UTxO
-// set.
-func (ls *LedgerState) liveUtxoLovelace(
-	txn ledgerdb.Txn,
-) (uint64, error) {
-	var total uint64
-	err := ls.iterateLiveUtxos(txn, func(u *models.Utxo) error {
-		out, err := u.Decode()
-		if err != nil {
-			return fmt.Errorf("decode utxo %x#%d: %w", u.TxId, u.OutputIdx, err)
-		}
-		amount, err := models.CheckedUint64FromBigInt(out.Amount())
-		if err != nil {
-			return err
-		}
-		if total > ^uint64(0)-amount {
-			return errors.New("live UTxO lovelace overflows uint64")
-		}
-		total += amount
-		return nil
-	})
-	return total, err
 }
 
 // utxoIncludingSpent resolves txID#index whether or not it is still live,

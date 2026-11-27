@@ -13801,10 +13801,9 @@ func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
 		"the canonical apply snapshot must observe state published during the wait")
 }
 
-// Non-checkpoint block nonces older than the nonce window are read only by
-// the API's epoch and pool block lists, so API storage mode retains them
-// while core mode prunes them.
-func TestCleanupBlockNoncesRetainsHistoryInAPIMode(t *testing.T) {
+// Non-checkpoint block nonces older than the nonce window are pruned in every
+// storage mode; the IndexerDB holds the block history.
+func TestCleanupBlockNoncesPrunesInEveryStorageMode(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
 		t.Run(mode, func(t *testing.T) {
@@ -13830,13 +13829,8 @@ func TestCleanupBlockNoncesRetainsHistoryInAPIMode(t *testing.T) {
 			for _, row := range rows {
 				slots = append(slots, row.Slot)
 			}
-			if mode == types.StorageModeAPI {
-				require.Equal(t, []uint64{10, 20, 2000}, slots,
-					"API mode keeps the old block")
-			} else {
-				require.Equal(t, []uint64{10, 2000}, slots,
-					"core mode prunes the old block but not its checkpoint")
-			}
+			require.Equal(t, []uint64{10, 2000}, slots,
+				"%s mode prunes the old block but not its checkpoint", mode)
 		})
 	}
 }

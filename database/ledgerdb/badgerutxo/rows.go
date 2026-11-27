@@ -92,12 +92,6 @@ func setRow(txn *badger.Txn, pk, value []byte, present bool) error {
 		}
 		return setAccount(txn, cred[0], cred[1:], &r)
 	}
-	if len(pk) > 0 && pk[0] == SnapshotTag {
-		if !present {
-			return deleteSnapshotRows(txn, [][]byte{pk})
-		}
-		return setSnapshotRow(txn, pk, value)
-	}
 	if !present {
 		return txn.Delete(pk)
 	}
@@ -188,9 +182,6 @@ func deletePrefixKeys(txn *badger.Txn, prefix []byte) error {
 		keys = append(keys, it.Item().KeyCopy(nil))
 	}
 	it.Close()
-	if len(prefix) > 0 && prefix[0] == SnapshotTag {
-		return deleteSnapshotRows(txn, keys)
-	}
 	return deleteKeys(txn, keys)
 }
 
@@ -237,36 +228,6 @@ func (s *Store) deletePrefixes(prefixes [][]byte) error {
 // deletePrefixRows deletes every row under prefix in as many transactions as
 // it takes.
 func (s *Store) deletePrefixRows(prefix []byte) error {
-	if len(prefix) > 0 && prefix[0] == SnapshotTag {
-		var keys [][]byte
-		if err := s.view(func(txn *badger.Txn) error {
-			var err error
-			keys, err = snapshotKeysUnder(txn, prefix, func([]byte) bool { return true })
-			return err
-		}); err != nil {
-			return err
-		}
-		for len(keys) > 0 {
-			n := min(256, len(keys))
-			for {
-				// A row and its index entry must disappear in one commit,
-				// including when a prefix spans several transactions.
-				err := s.update(func(txn *badger.Txn) error {
-					return deleteSnapshotRows(txn, keys[:n])
-				})
-				if errors.Is(err, badger.ErrTxnTooBig) && n > 1 {
-					n /= 2
-					continue
-				}
-				if err != nil {
-					return err
-				}
-				break
-			}
-			keys = keys[n:]
-		}
-		return nil
-	}
 	wb := s.newWriteBatch()
 	defer wb.Cancel()
 	err := s.view(func(txn *badger.Txn) error {
@@ -679,71 +640,6 @@ func (s *Store) Rows(prefix []byte, fn func(k, v []byte) error) error {
 	})
 }
 
-// EdgeRows returns the first and the last row under prefix, in key order,
-// and false when there is none. It copies the values of those two rows only.
-func (s *Store) EdgeRows(
-	prefix []byte,
-) (firstK, firstV, lastK, lastV []byte, found bool, err error) {
-	end := KeyAfter(prefix)
-	if end == nil {
-		return nil, nil, nil, nil, false, errors.New(
-			"badgerutxo: no key follows the prefix",
-		)
-	}
-	err = s.view(func(txn *badger.Txn) error {
-		edge := func(reverse bool) (k, v []byte, ok bool, err error) {
-			opts := badger.DefaultIteratorOptions
-			opts.Prefix = prefix
-			opts.PrefetchValues = false
-			opts.Reverse = reverse
-			if reverse {
-				// A reverse seek lands on end itself when that key exists,
-				// and an iterator bounded by prefix reports it invalid
-				// without a way to step past it. Bound this one by the
-				// bytes end shares with prefix, which every key between the
-				// range and end carries, and step over end explicitly.
-				opts.Prefix = end[:len(end)-1]
-			}
-			it := txn.NewIterator(opts)
-			defer it.Close()
-			if reverse {
-				it.Seek(end)
-				if it.Valid() && bytes.Equal(it.Item().Key(), end) {
-					it.Next()
-				}
-			} else {
-				it.Rewind()
-			}
-			s.rangeRowsVisited.Add(1)
-			if !it.ValidForPrefix(prefix) {
-				return nil, nil, false, nil
-			}
-			v, err = it.Item().ValueCopy(nil)
-			if err != nil {
-				return nil, nil, false, err
-			}
-			return it.Item().KeyCopy(nil), v, true, nil
-		}
-		var ok bool
-		firstK, firstV, ok, err = edge(false)
-		if err != nil || !ok {
-			return err
-		}
-		lastK, lastV, ok, err = edge(true)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return errors.New(
-				"badgerutxo: no last row under a prefix with a first row",
-			)
-		}
-		found = true
-		return nil
-	})
-	return firstK, firstV, lastK, lastV, found, err
-}
-
 // EachDistinctEpoch calls fn with each distinct epoch among the keys under
 // tag, whose keys lead with the epoch as eight big-endian bytes, in order. It
 // reads keys only and seeks past each epoch's rows, so it steps once per
@@ -777,89 +673,8 @@ func (s *Store) EachDistinctEpoch(tag byte, fn func(epoch uint64) error) error {
 	})
 }
 
-// RowsInRange calls fn with the key and value of every row under prefix whose
-// key is at least from and below to, in key order, seeking to from and
-// stopping at to. A nil to is open.
-func (s *Store) RowsInRange(
-	prefix, from, to []byte,
-	fn func(k, v []byte) error,
-) error {
-	return s.view(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = prefix
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Seek(from); it.Valid(); it.Next() {
-			s.rangeRowsVisited.Add(1)
-			k := it.Item().Key()
-			if to != nil && bytes.Compare(k, to) >= 0 {
-				return nil
-			}
-			v, err := it.Item().ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-			if err := fn(k, v); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-// ErrStopRows is returned by the callback of EachRowAfter to end the walk
-// without an error.
-var ErrStopRows = errors.New("badgerutxo: stop rows")
-
-// EachRowAfter calls fn with the key and value of each row under prefix whose
-// key is strictly after after (the whole prefix when after is nil) and below
-// end (open when nil), in key order, seeking to the first. The walk ends when
-// fn returns ErrStopRows. It is how a reader resumes a large family after the
-// last row it served without stepping over the rows before it.
-func (s *Store) EachRowAfter(
-	prefix, after, end []byte,
-	fn func(k, v []byte) error,
-) error {
-	start := prefix
-	if after != nil {
-		start = append(bytes.Clone(after), 0)
-	}
-	return s.EachRowFrom(prefix, start, end, fn)
-}
-
-// EachRowFrom is EachRowAfter for the rows whose key is at least start.
-func (s *Store) EachRowFrom(
-	prefix, start, end []byte,
-	fn func(k, v []byte) error,
-) error {
-	return s.view(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = prefix
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Seek(start); it.Valid(); it.Next() {
-			s.rangeRowsVisited.Add(1)
-			k := it.Item().Key()
-			if end != nil && bytes.Compare(k, end) >= 0 {
-				return nil
-			}
-			v, err := it.Item().ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-			if err := fn(k, v); err != nil {
-				if errors.Is(err, ErrStopRows) {
-					return nil
-				}
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-// RangeRowsVisited returns how many rows Rows, RowsInRange and EachRowAfter
-// have stepped over, and how many epochs EachDistinctEpoch has listed, since
+// RangeRowsVisited returns how many rows the ranged readers have stepped over,
+// and how many epochs EachDistinctEpoch has listed, since
 // the store opened, including the row that ended a range. It exists to show
 // that a ranged read does not touch the rows outside its range.
 func (s *Store) RangeRowsVisited() uint64 {
@@ -1405,66 +1220,23 @@ func (s *Store) hasMarker(marker []byte) (bool, error) {
 }
 
 // LoadImportBaselines replaces the store's import baselines with the rows
-// feed supplies, and marks them and their delegations loaded: the rows feed
-// supplies carry both.
+// feed supplies, and marks them loaded.
 func (s *Store) LoadImportBaselines(
 	feed func(put func(k, v []byte) error) error,
 ) error {
-	if err := s.loadFamily(
+	return s.loadFamily(
 		ImportBaselineTag,
 		importBaselinesKey,
 		"import baselines",
 		feed,
-		importBaselinesKey, importBaselineDelegationsKey,
-	); err != nil {
-		return err
-	}
-	return s.update(func(txn *badger.Txn) error {
-		return txn.Set(importBaselineDelegationsKey, loadedMarker)
-	})
+		importBaselinesKey,
+	)
 }
 
 // ImportBaselinesLoaded reports whether the store holds every import baseline
 // up to its tip.
 func (s *Store) ImportBaselinesLoaded() (bool, error) {
 	return s.hasMarker(importBaselinesKey)
-}
-
-// ImportBaselineDelegationsLoaded reports whether the store's import
-// baselines hold the delegations the import recorded.
-func (s *Store) ImportBaselineDelegationsLoaded() (bool, error) {
-	return s.hasMarker(importBaselineDelegationsKey)
-}
-
-// RowsAfter calls fn with the key and value of at most limit rows under
-// prefix whose key is greater than after, in key order; a nil after starts at
-// the first row.
-func (s *Store) RowsAfter(
-	prefix, after []byte,
-	limit int,
-	fn func(k, v []byte) error,
-) error {
-	return s.view(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = prefix
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		it.Seek(prefix)
-		if after != nil {
-			it.Seek(append(bytes.Clone(after), 0))
-		}
-		for n := 0; it.Valid() && n < limit; it.Next() {
-			v, err := it.Item().ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-			if err := fn(it.Item().KeyCopy(nil), v); err != nil {
-				return err
-			}
-			n++
-		}
-		return nil
-	})
 }
 
 // LoadWitnessSlots replaces the store's witness slots with the rows feed
@@ -1506,37 +1278,4 @@ func (s *Store) LastKeyAtOrBelow(prefix, limit []byte) ([]byte, bool, error) {
 		return nil
 	})
 	return out, out != nil, err
-}
-
-// DistinctUint64Keys returns, in order, the distinct big-endian uint64 values
-// that immediately follow prefix in its keys. It reads one key per distinct
-// value and seeks past the rest, so its cost follows the number of distinct
-// values rather than the number of rows under prefix, and it reads no values.
-func (s *Store) DistinctUint64Keys(prefix []byte) ([]uint64, error) {
-	var out []uint64
-	err := s.view(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = prefix
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		seek := bytes.Clone(prefix)
-		for it.Seek(seek); it.Valid(); it.Seek(seek) {
-			k := it.Item().Key()
-			s.rangeRowsVisited.Add(1)
-			if len(k) < len(prefix)+8 {
-				return fmt.Errorf(
-					"badgerutxo: key %x under prefix %x has no uint64", k, prefix,
-				)
-			}
-			v := binary.BigEndian.Uint64(k[len(prefix) : len(prefix)+8])
-			out = append(out, v)
-			if v == math.MaxUint64 {
-				break
-			}
-			seek = binary.BigEndian.AppendUint64(bytes.Clone(prefix), v+1)
-		}
-		return nil
-	})
-	return out, err
 }

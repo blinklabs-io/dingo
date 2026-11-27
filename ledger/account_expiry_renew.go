@@ -105,6 +105,15 @@ func witnessedRewardCredentials(
 	return refs
 }
 
+// WitnessedRewardCredentials is the reward-account credentials tx witnesses
+// under CIP-0163, for a host that renews account expirations itself. The
+// caller skips phase-2-invalid transactions.
+func WitnessedRewardCredentials(
+	tx lcommon.Transaction,
+) []models.StakeCredentialRef {
+	return witnessedRewardCredentials(tx)
+}
+
 // renewWitnessedAccountExpirations bumps the CIP-0163 expiration_epoch of every
 // reward account witnessed by the given block's transactions to
 // currentEpoch + DelegatorInactivity. It is a no-op when the

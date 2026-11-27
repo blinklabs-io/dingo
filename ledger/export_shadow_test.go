@@ -296,16 +296,6 @@ type BoundaryEpochStateScenario struct {
 	CurrentPoint  func() ocommon.Point
 	// LedgerDB is the LedgerDB the ledger reads through.
 	LedgerDB func() ledgerdb.LedgerDB
-	// ReadFactRows reads a fact table through the ledger, from the live UTxO
-	// set. UnservedFactTables names the tables it cannot read.
-	ReadFactRows func(
-		table metadata.FactTable, from, through uint64, cursor int64,
-		limit int,
-	) (metadata.FactRows, int64, error)
-	UnservedFactTables func() []string
-	// AnchorState is the ledger's source of the state a snapshot import
-	// established.
-	AnchorState metadata.AnchorStateSource
 	// CertifyLeios moves the ledger to the Dijkstra era with a Leios
 	// certificate validator, as a node that certifies endorser blocks is.
 	CertifyLeios func()
@@ -422,9 +412,6 @@ type BoundaryEpochStateScenario struct {
 	// block of pool, on a ledger whose state was delivered at loadedTip
 	// (zero when it was built block by block).
 	CheckOpCertCounter func(pool []byte, loadedTip, counter uint64) error
-	// AnchorOpCertCounters is the ledger's export of the counters observed
-	// at exactly slot.
-	AnchorOpCertCounters func(slot uint64) ([]metadata.OpCertCounter, error)
 	// OpCertsInsideTxn writes a counter in an abandoned write transaction
 	// and reads the pool's counter through the LedgerDB inside it.
 	OpCertsInsideTxn func(pool []byte, sequence, slot uint64)
@@ -1005,16 +992,6 @@ func NewSeededBoundaryEpochStateScenarioForTest(
 	proposalWrites := 0
 	return BoundaryEpochStateScenario{
 		DB:                 db,
-		UnservedFactTables: h.ls.UnservedFactTables,
-		AnchorState:        h.ls,
-		ReadFactRows: func(
-			table metadata.FactTable, from, through uint64, cursor int64,
-			limit int,
-		) (metadata.FactRows, int64, error) {
-			return h.ls.ReadFactRows(
-				t.Context(), table, from, through, cursor, limit, nil,
-			)
-		},
 		OnProposalWrite:    func(f func(int)) { onProposalWrite = f },
 		ApplyBoundaryQuiet: func() { h.applyBoundaryQuiet() },
 		WriteNonces: func(rows []models.BlockNonce) {
@@ -1913,9 +1890,6 @@ func NewSeededBoundaryEpochStateScenarioForTest(
 				return err
 			}
 			return validateOpCertCounter(stored, found, counter, true)
-		},
-		AnchorOpCertCounters: func(slot uint64) ([]metadata.OpCertCounter, error) {
-			return h.ls.AnchorOpCertCounters(t.Context(), slot)
 		},
 		OpCerts: func() OpCertSlots {
 			ldb := h.ls.LedgerDB()

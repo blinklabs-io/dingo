@@ -29,9 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/internal/config"
-	"github.com/blinklabs-io/dingo/internal/indexer"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -123,9 +121,8 @@ func TestIndexerDBFollowsLedgerAndRollsBack(t *testing.T) {
 		cardano.EmbeddedConfigFS,
 	)
 	require.NoError(t, err)
-	factLedger, _ := openFactLedger(t, consensus)
 	writer, err := NewIndexerService(dingo.IndexerWriterDeps{
-		Consensus: consensus, FactRows: factLedger, Indexer: indexerDB,
+		Consensus: consensus, Indexer: indexerDB,
 		NodeConfig: nodeCfg, Logger: logger, MaxReadyLagBlocks: 10,
 	})
 	require.NoError(t, err)
@@ -190,25 +187,4 @@ func TestIndexerDBFollowsLedgerAndRollsBack(t *testing.T) {
 	closeIndexer()
 	indexerClosed = true
 	closeRuntime()
-}
-
-// A service built without the ledger's facts exists to roll the IndexerDB
-// back. Following the ledger would fail every pass, so it does not start.
-func TestIndexerServiceWithoutALedgerDoesNotStart(t *testing.T) {
-	t.Parallel()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	consensus, err := dbtest.NewDatabase(
-		t, &database.Config{DataDir: t.TempDir()},
-	)
-	require.NoError(t, err)
-	indexerDB, err := dbtest.NewIndexerDatabase(
-		t, consensus, dbtest.IndexerOptions{},
-	)
-	require.NoError(t, err)
-
-	svc, err := NewIndexerService(dingo.IndexerWriterDeps{
-		Consensus: consensus, Indexer: indexerDB, Logger: logger,
-	})
-	require.NoError(t, err)
-	require.ErrorIs(t, svc.Start(t.Context()), indexer.ErrNoLedger)
 }

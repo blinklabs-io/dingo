@@ -155,10 +155,9 @@ func TestAdoptedServerStoreRollsBackBelowItsAdoptedTip(t *testing.T) {
 			)
 			require.NoError(t, err)
 			set, _, err := nodestorage.OpenUtxoSet(nodestorage.UtxoSetConfig{
-				DataDir:             dir,
-				Logger:              logger,
-				CardanoNodeConfig:   nodeCfg,
-				RetainRewardRecords: true,
+				DataDir:           dir,
+				Logger:            logger,
+				CardanoNodeConfig: nodeCfg,
 			})
 			require.NoError(t, err)
 			bus := event.NewEventBus(nil, logger)

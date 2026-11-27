@@ -1678,9 +1678,6 @@ type LedgerState struct {
 	// to config.UtxoSet and dropped from the maps, and for reading while a
 	// reader merges committed batches over the set.
 	utxoSetApplyMu sync.RWMutex
-	// factCursors holds the position of each fact export in progress; see
-	// pageSetFactRows.
-	factCursors factCursorState
 	// utxoSetByMeta finds an open transaction's batch from the metadata
 	// transaction the metadata store writes in, for LiveUtxoCbor.
 	utxoSetByMeta map[types.Txn]*utxoSetBatch

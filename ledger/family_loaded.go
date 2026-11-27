@@ -17,14 +17,8 @@ package ledger
 import (
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
-
-// networkStateLister lists every network state row a set holds.
-type networkStateLister interface {
-	NetworkStates() ([]models.NetworkState, error)
-}
 
 // FamilyLoaded reports whether set holds every marker of family's records.
 func FamilyLoaded(
@@ -109,15 +103,7 @@ func FamilyLoaded(
 		if !ok {
 			return false, nil
 		}
-		ok, err := r.DrepStateLoaded()
-		if err != nil || !ok {
-			return false, err
-		}
-		h, ok := set.(DRepHistoryReader)
-		if !ok {
-			return false, nil
-		}
-		return h.DRepHistoryLoaded()
+		return r.DrepStateLoaded()
 	case nodesettings.FamilyAccounts:
 		return accountsLoaded(set)
 	case nodesettings.FamilyPoolsHistory:
@@ -207,11 +193,6 @@ func accountsLoaded(set UtxoSetWriter) (bool, error) {
 		}
 	}
 	return true, nil
-}
-
-// accountLister walks every account a set holds.
-type accountLister interface {
-	Accounts(fn func(*models.Account) error) error
 }
 
 // liveStakeLoaded reports whether set holds the accounts and the reward rows

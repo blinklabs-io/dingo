@@ -154,9 +154,8 @@ func openConsensusRewound(
 					Immutable:    stores.Immutable,
 					OpenMetadata: openMetadata,
 					UtxoSet: nodestorage.UtxoSetConfig{
-						DataDir:             dir,
-						CardanoNodeConfig:   previewNodeConfig(t),
-						RetainRewardRecords: true,
+						DataDir:           dir,
+						CardanoNodeConfig: previewNodeConfig(t),
 					},
 					RewindBlocks: rewind,
 				}.Run(ctx)
@@ -230,10 +229,9 @@ func TestMigratedNodeRollsBackBelowItsMigrationPoint(t *testing.T) {
 
 	consensus, closeDB := openConsensus(t, dir)
 	set, _, err := nodestorage.OpenUtxoSet(nodestorage.UtxoSetConfig{
-		DataDir:             dir,
-		Logger:              logger,
-		CardanoNodeConfig:   nodeCfg,
-		RetainRewardRecords: true,
+		DataDir:           dir,
+		Logger:            logger,
+		CardanoNodeConfig: nodeCfg,
 	})
 	require.NoError(t, err)
 	bus := event.NewEventBus(nil, logger)

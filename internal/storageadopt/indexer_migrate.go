@@ -36,7 +36,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
-	"github.com/blinklabs-io/dingo/internal/indexer"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/settingsresolve"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
@@ -574,14 +573,6 @@ func (m *indexerMigration) prepareCopy(
 	if err := idx.MigratePayloadOffsets(ctx); err != nil {
 		return fmt.Errorf("convert payload columns to block offsets: %w", err)
 	}
-	// Snapshots whose stake inputs the ledger is still writing are the
-	// writer's to copy once they finish; the copy holds them only in part.
-	pending, err := source.GetSyncState(
-		models.RewardStakeInputsPendingKey, nil,
-	)
-	if err != nil {
-		return fmt.Errorf("read pending stake inputs: %w", err)
-	}
 	checkpoints, err := m.checkpointsBelow(ctx, source, tip)
 	if err != nil {
 		return err
@@ -590,13 +581,6 @@ func (m *indexerMigration) prepareCopy(
 	if err := txn.Do(func(txn *database.Txn) error {
 		for _, cp := range checkpoints {
 			if err := store.AddCheckpoint(cp, txn); err != nil {
-				return err
-			}
-		}
-		if pending != "" {
-			if err := idx.Metadata().SetSyncState(
-				indexer.DeferredStakeInputsKey, pending, txn.Metadata(),
-			); err != nil {
 				return err
 			}
 		}

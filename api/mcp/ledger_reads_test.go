@@ -460,6 +460,44 @@ func TestLedgerStateToolsReportAbsentRows(t *testing.T) {
 	}
 }
 
+// With an IndexerDB beside the ledger state, get_epoch_summary reads the
+// IndexerDB alone: the ledger prunes the block nonces it counts, and the
+// IndexerDB holds every epoch. The answer is the one a session with no ledger
+// state gives.
+func TestEpochSummaryReadsTheIndexerDBBesideTheLedgerState(t *testing.T) {
+	t.Parallel()
+	nodeDB, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	raw, err := dbtest.RawSQLiteMetadata(t, nodeDB)
+	require.NoError(t, err)
+	seedLedgerStateRows(t, raw)
+	rec := &recordingLedgerDB{LedgerDB: dbadapter.New(nodeDB)}
+
+	server := mcp.NewServer(
+		&mcp.Implementation{Name: "test", Version: "1"}, nil,
+	)
+	registerCardanoTools(
+		server, raw, recordedLedgerState{ldb: rec}, nil, "preview",
+		5*time.Second, newReadLimits(), indexerReads{},
+	)
+	ct, st := mcp.NewInMemoryTransports()
+	ss, err := server.Connect(t.Context(), st, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ss.Close() })
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil).
+		Connect(t.Context(), ct, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cs.Close() })
+	viaSQL := newToolSession(t, raw, 100)
+
+	for _, args := range []map[string]any{{}, {"epoch": 5}} {
+		rec.taken()
+		got := callTool(t, cs, "get_epoch_summary", args, false)
+		require.Empty(t, rec.taken(), "no read of the LedgerDB")
+		require.Equal(t, callTool(t, viaSQL, "get_epoch_summary", args, false), got)
+	}
+}
+
 // TestEpochSummaryCountsIndexerBlocksOnAnAPINode gives the ledger one retained
 // block nonce of epoch 5, as pruning leaves an older epoch, and the IndexerDB
 // all four of its blocks. An API node reports the IndexerDB's count; a core

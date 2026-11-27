@@ -200,7 +200,7 @@ func TestIndexerDBWritesNothingToTheLedgerBlockStore(t *testing.T) {
 	require.NoError(t, fixture.indexer.RollbackMetadataAfterSlot(
 		context.Background(),
 		ocommon.NewPoint(candidate.consumerPoint.Slot-1, nil),
-		0, nil,
+		nil,
 	))
 	require.Empty(t, guard.recorded(),
 		"the IndexerDB indexes and rolls back without writing the ledger's store")
@@ -224,7 +224,7 @@ func TestIndexerDBRollbackRemovesItsOffsets(t *testing.T) {
 	require.NoError(t, fixture.indexer.RollbackMetadataAfterSlot(
 		context.Background(),
 		ocommon.NewPoint(candidate.consumerPoint.Slot-1, nil),
-		0, nil,
+		nil,
 	))
 	for idx := range candidate.consumerTx.Produced() {
 		_, ok, err := offsets.GetUtxoOffset(nil, txHash, uint32(idx)) // #nosec G115

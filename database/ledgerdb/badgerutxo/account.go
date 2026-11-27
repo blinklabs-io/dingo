@@ -16,12 +16,10 @@ package badgerutxo
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -163,14 +161,6 @@ func encodeAccount(r AccountRow) []byte {
 		b = append(b, 0)
 	}
 	return binary.BigEndian.AppendUint64(b, r.InactivityActivationEpoch)
-}
-
-// accountAddedSlot reads the AddedSlot out of an account's value.
-func accountAddedSlot(v []byte) (uint64, error) {
-	if len(v) < 34 {
-		return 0, errMalformedAccount
-	}
-	return binary.BigEndian.Uint64(v[10:]), nil
 }
 
 var errMalformedAccount = errors.New("badgerutxo: malformed account entry")
@@ -386,22 +376,6 @@ func (s *Store) Accounts(fn func(AccountRow) error) error {
 	})
 }
 
-// AccountsAfter calls fn with each account whose key is strictly after the
-// account key after (every account when nil), in key order, with that key,
-// until fn returns ErrStopRows.
-func (s *Store) AccountsAfter(
-	after []byte,
-	fn func(r AccountRow, key []byte) error,
-) error {
-	return s.EachRowAfter([]byte{AccountTag}, after, nil, func(k, v []byte) error {
-		r, err := decodeAccount(k[1:], v)
-		if err != nil {
-			return err
-		}
-		return fn(r, bytes.Clone(k))
-	})
-}
-
 // LoadAccounts replaces the store's accounts with the ones feed supplies and
 // marks them loaded, for a store from before it kept them.
 func (s *Store) LoadAccounts(feed func(put func(AccountRow) error) error) error {
@@ -412,9 +386,6 @@ func (s *Store) LoadAccounts(feed func(put func(AccountRow) error) error) error 
 		return fmt.Errorf("badgerutxo: drop accounts: %w", err)
 	}
 	if err := s.dropAccountJournal(); err != nil {
-		return fmt.Errorf("badgerutxo: drop accounts: %w", err)
-	}
-	if err := s.dropRewardSeqIndex(); err != nil {
 		return fmt.Errorf("badgerutxo: drop accounts: %w", err)
 	}
 	wb := s.newLoadSink()
@@ -574,38 +545,14 @@ type RewardRecord struct {
 	Amount uint64
 	// PostSnapshot marks a credit a boundary applied after its SNAP point.
 	PostSnapshot bool
-	// Seq orders records by when the store wrote them, whatever their slot:
-	// a credit journaled lazily under an old boundary slot is newer than
-	// every record written before it. The store assigns it; it is zero for a
-	// record written before sequences were kept, and is ignored on write.
-	Seq uint64
 }
 
-// rewardRecordValue is a record's value: its amount, then a flag byte, then
-// its sequence number, 8 bytes big-endian each. A record from before flags
-// and sequences hold only the amount.
+// A record's value is its amount, 8 bytes big-endian, then a flag byte that
+// is set for a credit applied after its SNAP point.
 const (
 	rewardRecordAmountLen = 8
-	rewardRecordLen       = 17
+	rewardRecordLen       = rewardRecordAmountLen + 1
 )
-
-func readRewardSeq(txn *badger.Txn) (uint64, error) {
-	item, err := txn.Get(rewardSeqKey)
-	if errors.Is(err, badger.ErrKeyNotFound) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	v, err := item.ValueCopy(nil)
-	if err != nil {
-		return 0, err
-	}
-	if len(v) != 8 {
-		return 0, errors.New("badgerutxo: malformed reward record sequence")
-	}
-	return binary.BigEndian.Uint64(v), nil
-}
 
 func rewardRecordKey(r RewardRecord) ([]byte, error) {
 	n, err := keyPartLen(r.Source)
@@ -641,121 +588,21 @@ func (s *Store) HasRewardRecord(r RewardRecord) (bool, error) {
 }
 
 func putRewardRecords(txn *badger.Txn, records []RewardRecord) error {
-	if len(records) == 0 {
-		return nil
-	}
-	next, err := readRewardSeq(txn)
-	if err != nil {
-		return err
-	}
 	for _, r := range records {
 		k, err := rewardRecordKey(r)
 		if err != nil {
 			return err
-		}
-		seq := next
-		item, err := txn.Get(k)
-		switch {
-		case errors.Is(err, badger.ErrKeyNotFound):
-			next++
-		case err != nil:
-			return err
-		default:
-			// The same record written again keeps its place in the order.
-			v, err := item.ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-			if len(v) == rewardRecordLen {
-				seq = binary.BigEndian.Uint64(v[9:])
-			} else {
-				next++
-			}
 		}
 		v := binary.BigEndian.AppendUint64(nil, r.Amount)
 		flag := byte(0)
 		if r.PostSnapshot {
 			flag = 1
 		}
-		v = append(v, flag)
-		if err := txn.Set(
-			k, binary.BigEndian.AppendUint64(v, seq),
-		); err != nil {
-			return err
-		}
-		if err := setRewardSeqIndex(txn, k, seq); err != nil {
+		if err := txn.Set(k, append(v, flag)); err != nil {
 			return err
 		}
 	}
-	return txn.Set(rewardSeqKey, binary.BigEndian.AppendUint64(nil, next))
-}
-
-// RewardRecordsIn returns the records dated in [from, through], each with
-// its sequence number, oldest write first.
-func (s *Store) RewardRecordsIn(from, through uint64) ([]RewardRecord, error) {
-	var out []RewardRecord
-	err := s.EachRewardRecordIn(from, through, func(r RewardRecord) error {
-		out = append(out, r)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	slices.SortStableFunc(out, func(a, b RewardRecord) int {
-		return cmp.Compare(a.Seq, b.Seq)
-	})
-	return out, nil
-}
-
-// EachRewardRecordIn calls fn with each record dated in [from, through], in
-// slot order, without holding them all.
-func (s *Store) EachRewardRecordIn(
-	from, through uint64,
-	fn func(RewardRecord) error,
-) error {
-	return s.view(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = []byte{RewardRecordTag}
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Seek(slotKey(RewardRecordTag, from)); it.Valid(); it.Next() {
-			k := it.Item().Key()
-			if len(k) < 11 {
-				continue
-			}
-			slot := binary.BigEndian.Uint64(k[1:9])
-			if slot > through {
-				return nil
-			}
-			srcLen := int(k[10])
-			if len(k) < 11+srcLen+1 {
-				return fmt.Errorf("badgerutxo: malformed reward record key %x", k)
-			}
-			v, err := it.Item().ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-			if len(v) < rewardRecordAmountLen {
-				return fmt.Errorf("badgerutxo: malformed reward record at slot %d", slot)
-			}
-			rec := RewardRecord{
-				Slot:       slot,
-				Withdrawal: k[9] == 1,
-				Source:     bytes.Clone(k[11 : 11+srcLen]),
-				Tag:        k[11+srcLen],
-				Key:        bytes.Clone(k[11+srcLen+1:]),
-				Amount:     binary.BigEndian.Uint64(v),
-			}
-			if len(v) == rewardRecordLen {
-				rec.PostSnapshot = v[8] == 1
-				rec.Seq = binary.BigEndian.Uint64(v[9:])
-			}
-			if err := fn(rec); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	return nil
 }
 
 // WithdrawnAt returns the lovelace withdrawn at slot per credential (tag then
@@ -794,22 +641,12 @@ func (s *Store) WithdrawnAt(slot uint64) (out map[string]uint64, ok bool, err er
 }
 
 // pruneRewardRecords deletes the records before slot, which no rollback will
-// reach and no replay will repeat. While a consumer is registered it keeps the
-// records it has not yet copied: those numbered at or above its consumed mark.
+// reach and no replay will repeat.
 func (s *Store) pruneRewardRecords(slot uint64) error {
-	var keys, indexKeys [][]byte
+	var keys [][]byte
 	if err := s.view(func(txn *badger.Txn) error {
-		consumed, held, err := rewardConsumed(txn)
-		if err != nil {
-			return err
-		}
-		var through uint64
-		if held {
-			if through, err = readConsumedSlot(txn); err != nil {
-				return err
-			}
-		}
 		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
 		opts.Prefix = []byte{RewardRecordTag}
 		it := txn.NewIterator(opts)
 		defer it.Close()
@@ -818,26 +655,7 @@ func (s *Store) pruneRewardRecords(slot uint64) error {
 			if len(k) < 9 || binary.BigEndian.Uint64(k[1:9]) >= slot {
 				return nil
 			}
-			v, err := it.Item().ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-			if held {
-				if binary.BigEndian.Uint64(k[1:9]) > through {
-					continue
-				}
-				var seq uint64
-				if len(v) == rewardRecordLen {
-					seq = binary.BigEndian.Uint64(v[9:])
-				}
-				if seq >= consumed {
-					continue
-				}
-			}
 			keys = append(keys, k)
-			if rewardKeyIsCredit(k) && len(v) == rewardRecordLen {
-				indexKeys = append(indexKeys, rewardSeqIndexKey(binary.BigEndian.Uint64(v[9:])))
-			}
 		}
 		return nil
 	}); err != nil {
@@ -845,7 +663,7 @@ func (s *Store) pruneRewardRecords(slot uint64) error {
 	}
 	wb := s.newWriteBatch()
 	defer wb.Cancel()
-	for _, k := range slices.Concat(keys, indexKeys) {
+	for _, k := range keys {
 		if err := wb.Delete(k); err != nil {
 			return fmt.Errorf("badgerutxo: prune reward records: %w", err)
 		}
@@ -853,122 +671,8 @@ func (s *Store) pruneRewardRecords(slot uint64) error {
 	return wb.Flush()
 }
 
-// rewardConsumed returns the consumed mark and whether a consumer is
-// registered.
-func rewardConsumed(txn *badger.Txn) (uint64, bool, error) {
-	if _, err := txn.Get(rewardConsumerKey); errors.Is(err, badger.ErrKeyNotFound) {
-		return 0, false, nil
-	} else if err != nil {
-		return 0, false, err
-	}
-	item, err := txn.Get(rewardConsumedKey)
-	if errors.Is(err, badger.ErrKeyNotFound) {
-		return 0, true, nil
-	}
-	if err != nil {
-		return 0, false, err
-	}
-	v, err := item.ValueCopy(nil)
-	if err != nil || len(v) != 8 {
-		return 0, false, errors.New("badgerutxo: malformed reward consumed mark")
-	}
-	return binary.BigEndian.Uint64(v), true, nil
-}
-
-// SetRewardConsumer registers, or with on false removes, a reader that copies
-// the reward records and needs every one it has not yet acknowledged.
-func (s *Store) SetRewardConsumer(on bool) error {
-	return s.update(func(txn *badger.Txn) error {
-		_, err := txn.Get(rewardConsumerKey)
-		held := err == nil
-		if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
-			return err
-		}
-		switch {
-		case on && !held:
-			return txn.Set(rewardConsumerKey, []byte{1})
-		case !on && held:
-			if err := txn.Delete(rewardConsumedKey); err != nil {
-				return err
-			}
-			if err := txn.Delete(rewardConsumedSlotKey); err != nil {
-				return err
-			}
-			return txn.Delete(rewardConsumerKey)
-		}
-		return nil
-	})
-}
-
-// RewardRecordHigh returns the sequence number the next record will take:
-// every record held so far is numbered below it.
-func (s *Store) RewardRecordHigh() (uint64, error) {
-	var n uint64
-	err := s.view(func(txn *badger.Txn) error {
-		var err error
-		n, err = readRewardSeq(txn)
-		return err
-	})
-	return n, err
-}
-
-// AckRewardRecords records that the consumer has copied every record numbered
-// below seq and dated through slot, and the reward rows dated through slot.
-// The marks never move back.
-func (s *Store) AckRewardRecords(seq, slot uint64) error {
-	return s.update(func(txn *badger.Txn) error {
-		cur, held, err := rewardConsumed(txn)
-		if err != nil || !held {
-			return err
-		}
-		if seq > cur {
-			err := txn.Set(rewardConsumedKey, binary.BigEndian.AppendUint64(nil, seq))
-			if err != nil {
-				return err
-			}
-		}
-		prev, err := readConsumedSlot(txn)
-		if err != nil || slot <= prev {
-			return err
-		}
-		return txn.Set(rewardConsumedSlotKey, binary.BigEndian.AppendUint64(nil, slot))
-	})
-}
-
-func readConsumedSlot(txn *badger.Txn) (uint64, error) {
-	item, err := txn.Get(rewardConsumedSlotKey)
-	if errors.Is(err, badger.ErrKeyNotFound) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	v, err := item.ValueCopy(nil)
-	if err != nil || len(v) != 8 {
-		return 0, errors.New("badgerutxo: malformed reward consumed slot")
-	}
-	return binary.BigEndian.Uint64(v), nil
-}
-
-// RewardConsumedSlot returns the slot through which the consumer has copied
-// the reward rows, and whether a consumer is registered.
-func (s *Store) RewardConsumedSlot() (slot uint64, held bool, err error) {
-	err = s.view(func(txn *badger.Txn) error {
-		if _, e := txn.Get(rewardConsumerKey); errors.Is(e, badger.ErrKeyNotFound) {
-			return nil
-		} else if e != nil {
-			return e
-		}
-		held = true
-		slot, err = readConsumedSlot(txn)
-		return err
-	})
-	return slot, held, err
-}
-
 // LoadRewardRecords loads the metadata store's reward journal into a store
-// from before it kept the records, numbering them in the order feed supplies
-// them, and marks them loaded.
+// from before it kept the records, and marks them loaded.
 func (s *Store) LoadRewardRecords(
 	feed func(put func(RewardRecord) error) error,
 ) error {

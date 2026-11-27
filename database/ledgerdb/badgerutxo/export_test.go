@@ -15,6 +15,7 @@
 package badgerutxo
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -254,125 +255,139 @@ func (s *Store) SetAfterBootstrapFlushForTest(fn func() error) {
 	s.afterBootstrapFlush = fn
 }
 
-// WriteLegacyRewardRecordsForTest stores records as a store from before
-// sequences and the sequence index wrote them: the amount only, no number, no
-// index entry, and clears the marks that say the index is built.
-func (s *Store) WriteLegacyRewardRecordsForTest(recs []RewardRecord) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		for _, r := range recs {
-			v := make([]byte, rewardRecordAmountLen)
-			v[7] = byte(r.Amount) //nolint:gosec // a small test amount
-			k, err := rewardRecordKey(r)
-			if err != nil {
-				return err
-			}
-			if err := txn.Set(k, v); err != nil {
-				return err
-			}
-		}
-		if err := txn.Delete(rewardSeqKey); err != nil {
-			return err
-		}
-		return txn.Delete(rewardIndexedKey)
-	})
+// WithMigrationHookForTest runs fn after each layout migration step; an error
+// from it stops the migration there, as a crash would.
+func WithMigrationHookForTest(fn func(step string) error) Option {
+	return func(s *Store) { s.migrationHook = fn }
 }
 
-// DeleteExportFloorForTest removes the export floor, as a store written
-// before it existed lacks it.
-func (s *Store) DeleteExportFloorForTest() error {
+// WriteRetiredLayoutForTest writes rows and markers in the layout the
+// migration retires: reward records carrying a sequence number with their
+// index and consumer marks, DRep history rows with their journal entry, the
+// pool stake snapshot capture index with headed values, import baselines with
+// delegations and their journal entry, and the retired markers. It clears the
+// layout mark, as a store from before the migration lacks it.
+func (s *Store) WriteRetiredLayoutForTest(
+	record RewardRecord,
+	snapshot SnapshotRow,
+	baselineKey []byte,
+	baseline []byte,
+	journalSlot uint64,
+) error {
 	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete(exportFloorKey)
-	})
-}
-
-// PutLegacySnapshotRowForTest stores r as a store wrote it before capture
-// slots were kept: the value alone, with no index entry.
-func (s *Store) PutLegacySnapshotRowForTest(r SnapshotRow) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(snapshotKey(r), r.Value)
-	})
-}
-
-// PutUnindexedSnapshotRowForTest stores r as an interrupted backfill leaves
-// it: with its capture slot and no index entry.
-func (s *Store) PutUnindexedSnapshotRowForTest(r SnapshotRow) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(snapshotKey(r), encodeSnapshotValue(r.CapturedSlot, r.Value))
-	})
-}
-
-// ClearSnapshotSlotsMarkerForTest removes the marker that says every
-// snapshot row is indexed.
-func (s *Store) ClearSnapshotSlotsMarkerForTest() error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete(snapshotSlotsKey)
-	})
-}
-
-// SnapshotIndexMismatchForTest compares the capture index with the rows that
-// carry a capture slot and returns what differs: a row with no entry, or an
-// entry with no row or the wrong slot. It is empty when they agree.
-func (s *Store) SnapshotIndexMismatchForTest() ([]string, error) {
-	var out []string
-	err := s.db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(snapshotSlotsKey)
-		marked := err == nil
-		if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
-			return err
-		}
-		want := map[string]bool{}
-		err = eachPrefix(txn, []byte{SnapshotTag}, func(k, v []byte) error {
-			idx, err := snapshotSlotKeyOf(k, v)
-			if idx != nil {
-				want[string(idx)] = true
-			} else if err == nil && marked {
-				out = append(out, fmt.Sprintf("indexed store has legacy row: %x", k))
-			}
-			return err
-		})
+		k, err := rewardRecordKey(record)
 		if err != nil {
 			return err
 		}
-		err = eachPrefix(txn, []byte{SnapshotSlotTag}, func(k, _ []byte) error {
-			if !want[string(k)] {
-				out = append(out, fmt.Sprintf("entry without row: %x", k))
+		v := binary.BigEndian.AppendUint64(nil, record.Amount)
+		v = append(v, 0)
+		v = binary.BigEndian.AppendUint64(v, 7)
+		if err := txn.Set(k, v); err != nil {
+			return err
+		}
+		if err := txn.Set(append([]byte("mrwq"), 0, 0, 0, 0, 0, 0, 0, 7), k); err != nil {
+			return err
+		}
+		sk := snapshotKey(snapshot)
+		header := append([]byte{snapshotHeaderMark}, binary.BigEndian.AppendUint64(nil, 55)...)
+		if err := txn.Set(sk, append(header, snapshot.Value...)); err != nil {
+			return err
+		}
+		idx := append(binary.BigEndian.AppendUint64([]byte{retiredSnapshotSlotTag}, 55), sk[1:]...)
+		if err := txn.Set(idx, nil); err != nil {
+			return err
+		}
+		hist := append(binary.BigEndian.AppendUint64([]byte{retiredDRepHistoryTag}, journalSlot), 2)
+		if err := txn.Set(hist, nil); err != nil {
+			return err
+		}
+		if err := txn.Set(stateJournalKey(journalSlot, hist), []byte{0}); err != nil {
+			return err
+		}
+		if err := txn.Set(baselineKey, baseline); err != nil {
+			return err
+		}
+		if err := txn.Set(
+			stateJournalKey(journalSlot, baselineKey), append([]byte{1}, baseline...),
+		); err != nil {
+			return err
+		}
+		for _, m := range retiredMarkers {
+			if err := txn.Set(m, []byte{1}); err != nil {
+				return err
 			}
-			delete(want, string(k))
+		}
+		return txn.Delete(layoutKey)
+	})
+}
+
+// RetiredKeysForTest lists the keys the layout migration retires that the
+// store still holds.
+func (s *Store) RetiredKeysForTest() ([]string, error) {
+	var out []string
+	err := s.db.View(func(txn *badger.Txn) error {
+		for _, m := range retiredMarkers {
+			if _, err := txn.Get(m); err == nil {
+				out = append(out, string(m))
+			} else if !errors.Is(err, badger.ErrKeyNotFound) {
+				return err
+			}
+		}
+		for _, p := range retiredPrefixes {
+			if err := eachPrefix(txn, p, func(k, _ []byte) error {
+				out = append(out, fmt.Sprintf("%x", k))
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return eachPrefix(txn, []byte{StateJournalTag}, func(k, _ []byte) error {
+			if len(k) > 9 && k[9] == retiredDRepHistoryTag {
+				out = append(out, fmt.Sprintf("%x", k))
+			}
 			return nil
 		})
-		for k := range want {
-			out = append(out, fmt.Sprintf("row without entry: %x", k))
+	})
+	return out, err
+}
+
+// RawValueForTest returns the value stored under key.
+func (s *Store) RawValueForTest(key []byte) ([]byte, bool, error) {
+	var v []byte
+	var ok bool
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(key)
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
 		}
+		if err != nil {
+			return err
+		}
+		ok = true
+		v, err = item.ValueCopy(nil)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
+	return v, ok, err
 }
 
-// AddedIndexFloorForTest returns the floor the family's index of rows below
-// the floor was built at, and whether one is held.
-func (s *Store) AddedIndexFloorForTest(family byte) (uint64, bool) {
-	s.added.mu.Lock()
-	defer s.added.mu.Unlock()
-	idx := s.added.fam[family]
-	if idx == nil {
-		return 0, false
-	}
-	return idx.floor, true
+// StateJournalKeyForTest is the state journal key of the row under pk at slot.
+func StateJournalKeyForTest(slot uint64, pk []byte) []byte {
+	return stateJournalKey(slot, pk)
 }
 
-// SetAfterRowsGenerationForTest sets fn to run when EachRowChangedIn has read
-// the rows' generation and not yet begun its transaction.
-func (s *Store) SetAfterRowsGenerationForTest(fn func()) {
-	s.added.afterGen = fn
+// SnapshotKeyForTest is the key of r.
+func SnapshotKeyForTest(r SnapshotRow) []byte { return snapshotKey(r) }
+
+// RewardRecordKeyForTest is the key of r.
+func RewardRecordKeyForTest(r RewardRecord) ([]byte, error) {
+	return rewardRecordKey(r)
 }
 
-// SetBeforeAddedIndexForTest sets fn to run inside the transaction of a read
-// below the floor, before it looks up the family's index.
-func (s *Store) SetBeforeAddedIndexForTest(fn func()) {
-	s.added.beforeIndex = fn
+// PutRawForTest stores value under key.
+func (s *Store) PutRawForTest(key, value []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(key, value)
+	})
 }
 
 // StopIndexBuildAfterForTest makes the output index build of a store opened

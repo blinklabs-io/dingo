@@ -224,9 +224,10 @@ contract into a general historical database API.
 
 The ledger database opens without an SQL metadata store. Its live state is
 held in the journaled Badger set. The API-mode IndexerDB has its own metadata
-store and progress point. Some composition and backfill adapters still read
-retained ledger facts; those adapters do not give validation a dependency on
-the indexer.
+store and progress point. The indexer derives its ledger facts by replaying
+canonical blocks through the same epoch engine the ledger uses; it reads only
+the blocks and the tip from the ledger, and the ledger retains nothing on its
+behalf.
 
 ### Commit and recovery guarantees
 

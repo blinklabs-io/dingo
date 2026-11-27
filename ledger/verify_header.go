@@ -32,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -2650,15 +2649,11 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 // gone because they fell below the retention window (currentEpoch-3, see
 // snapshot.Manager.cleanupOldSnapshots). Pruning deletes whole epochs, and
 // epoch_summary rows survive it, so an epoch with no rows at all is the
-// signature; a populated snapshot that lacks the pool is not pruned. API
-// storage mode never prunes.
+// signature; a populated snapshot that lacks the pool is not pruned.
 func (ls *LedgerState) poolSnapshotPruned(
 	snapshotEpoch uint64,
 	snapshotType string,
 ) bool {
-	if ls.ledgerDB().StorageMode() == types.StorageModeAPI {
-		return false
-	}
 	current := ls.loadConsensusSnapshot().currentEpoch.EpochId
 	if current < 3 || snapshotEpoch >= current-3 {
 		return false

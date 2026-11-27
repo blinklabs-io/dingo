@@ -17,7 +17,6 @@ package ledger
 import (
 	"context"
 	"fmt"
-	"math"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 )
@@ -80,48 +79,11 @@ func (ls *LedgerState) applyIntraEraHardForkRule(ctx context.Context,
 	}
 	switch newMajor {
 	case 3:
-		state, err := ls.ledgerDB().GetNetworkState(txn)
-		if err != nil {
-			return fmt.Errorf("get network state before AVVM return: %w", err)
+		if err := ls.engine().ApplyAllegraAvvmReturn(
+			ctx, txn, newEpoch, boundarySlot,
+		); err != nil {
+			return err
 		}
-		var treasury, reserves uint64
-		if state != nil {
-			treasury = uint64(state.Treasury)
-			reserves = uint64(state.Reserves)
-		}
-		count, total, err := ls.removeAvvmUtxos(ctx, txn, boundarySlot)
-		if err != nil {
-			return fmt.Errorf(
-				"pv3 remove AVVM UTxOs at slot %d: %w",
-				boundarySlot, err,
-			)
-		}
-		if count > 0 {
-			if total > math.MaxUint64-reserves {
-				return fmt.Errorf(
-					"AVVM reserve credit overflows uint64: reserves %d, credit %d",
-					reserves,
-					total,
-				)
-			}
-			if err := ls.ledgerDB().SetNetworkState(
-				treasury, reserves+total, boundarySlot, txn,
-			); err != nil {
-				return fmt.Errorf("credit AVVM value to reserves: %w", err)
-			}
-		}
-		// Reserves are not maintained on every epoch-rollover in dingo
-		// today — this transition is the exception because the reclaimed
-		// value is a direct return to reserves. Keep the write in the
-		// enclosing transition transaction so rollback is atomic.
-		ls.config.Logger.Info(
-			"applied Allegra HARDFORK rule (pv3 AVVM return)",
-			"removed_avvm_utxos", count,
-			"reclaimed_lovelace", total,
-			"epoch", newEpoch,
-			"boundary_slot", boundarySlot,
-			"component", "ledger",
-		)
 	case 10:
 		n, err := ls.ledgerDB().ClearDanglingDRepDelegations(
 			ctx,

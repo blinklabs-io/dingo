@@ -548,8 +548,9 @@ func TestGetPoolEpochDataMapTracksChangingPoolParams(t *testing.T) {
 // TestGetPoolEpochDataMapSpendableMemberPresenceIsEpochWide pins what
 // SpendableMemberRewardPresent means, which the two RewardParitySource
 // implementations must not be able to disagree about. It reports whether the
-// epoch's reward_account_output rows survive at all — cleanupOldSnapshots
-// retains them without bound only in api storage mode — not whether any of
+// epoch's reward_account_output rows survive at all — the LedgerDB prunes
+// them below its reward window, and the IndexerDB keeps every epoch's — not
+// whether any of
 // them is a credited member reward. An epoch holding only a leader reward and a
 // withheld member reward is a populated epoch whose spendable member total is
 // genuinely zero, and reporting that as a pruned epoch would turn a correct

@@ -319,6 +319,14 @@ func TestEpochSummaryServerCountsIndexerBlocks(t *testing.T) {
 	}))
 	idx, err := dbtest.NewIndexerDatabase(t, c.db, dbtest.IndexerOptions{})
 	require.NoError(t, err)
+	// The IndexerDB writer derives its own epoch rows, so an API node's
+	// IndexerDB holds the epochs the ledger does.
+	for _, e := range []uint64{5, 6} {
+		nonce := bytes.Repeat([]byte{byte(0xa0 + e)}, 32)
+		require.NoError(t, idx.SetEpoch(
+			1000+100*(e-5), e, nonce, nil, nil, nil, 6, 1000, 100, nil,
+		))
+	}
 	for i, slot := range []uint64{1000, 1010, 1050, 1099, 1100} {
 		h := bytes.Repeat([]byte{byte(0x70 + i)}, 32)
 		require.NoError(t, idx.SetBlockNonce(h, slot, h, false, nil))

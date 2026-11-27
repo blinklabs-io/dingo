@@ -117,9 +117,6 @@ func (s *ImportLedgerDB) ImportAccount(
 		),
 		Active:    account.Active,
 		AddedSlot: account.AddedSlot,
-		Pool:      account.Pool,
-		Drep:      account.Drep,
-		DrepType:  account.DrepType,
 	}
 	if account.ImportDeposit != nil {
 		deposit := uint64(*account.ImportDeposit)
@@ -244,7 +241,6 @@ func (s *ImportLedgerDB) ImportDrep(
 		next.LastActivityEpoch = held.LastActivityEpoch
 	}
 	s.ls.stageDrep(txn, slot, next)
-	s.ls.stageDrepExpiryHistory(txn, slot, next)
 	if held == nil {
 		// The registration predates the snapshot by an unknown span; at slot
 		// zero it stands for any slot the set can be read as of.

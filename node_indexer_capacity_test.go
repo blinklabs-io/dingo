@@ -63,9 +63,7 @@ func TestMainnetIndexerCapacityWarning(t *testing.T) {
 			plugin.CapabilityStorageMetadata: {Provider: "sqlite"},
 		},
 	}}
-	store, err := indexerdb.NewStore(nil, capacityState{
-		indexerdb.BootstrapSyncKey: string(indexerdb.PhaseReplay),
-	}, 0)
+	store, err := indexerdb.NewStore(nil, capacityState{}, 0)
 	require.NoError(t, err)
 	n.warnMainnetIndexerCapacity(
 		store,
@@ -90,7 +88,7 @@ func TestMainnetIndexerCapacityWarningSkipsCompletedReplay(t *testing.T) {
 		},
 	}}
 	store, err := indexerdb.NewStore(nil, capacityState{
-		indexerdb.BootstrapSyncKey: string(indexerdb.PhaseDone),
+		indexerdb.TipSyncKey: "10:5:aa",
 	}, 0)
 	require.NoError(t, err)
 	n.warnMainnetIndexerCapacity(

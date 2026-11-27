@@ -86,8 +86,8 @@ func (a *NodeAdapter) accountFirstStakeLabel(
 // labelled E is active in epoch E+1, and only snapshots whose epoch has begun
 // are listed.
 //
-// Per-credential rows are pruned outside API storage mode and before a node
-// first retained them, so an account whose history may predate the oldest
+// The IndexerDB holds per-credential rows only from the epoch it first derived
+// them, so an account whose history may predate the oldest
 // retained row and has no retained row at all is reported as
 // ErrHistoryNotRetained rather than as an empty history. A partly retained
 // history lists the retained epochs. A node with no retained rows at all
@@ -120,7 +120,7 @@ func (a *NodeAdapter) AccountStakeHistory(
 	meta := db.Metadata()
 	// A snapshot captured before the account existed holds none of its
 	// stake, so only labels from first on can leave its history partial.
-	incomplete, err := a.rewardStakeInputsIncomplete(first, current)
+	incomplete, err := a.rewardStakeInputsIncomplete(txn, first, current)
 	if err != nil {
 		return nil, 0, fmt.Errorf("check account stake history: %w", err)
 	}

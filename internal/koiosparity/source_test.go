@@ -315,9 +315,8 @@ func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
 // (the table the per-account parity check will read): it remains fully
 // readable through DatabaseSource until something actually deletes it
 // (ledger/snapshot/rotation.go's cleanupOldSnapshots calls
-// MetadataStore.DeleteRewardStateBeforeEpoch on a rolling window in core
-// storage mode; API mode retains it without bound instead — see
-// rotation.go's doc comment). Before that deletion, the data is present;
+// DeleteRewardStateBeforeEpoch on a rolling window in every storage mode;
+// older reward history is the IndexerDB's — see rotation.go's doc comment). Before that deletion, the data is present;
 // simulating exactly the deletion cleanupOldSnapshots performs makes the
 // epoch read back as "not present" afterward — the same signal
 // GetRewardAccountOutputs already uses for "not yet computed", not an

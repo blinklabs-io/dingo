@@ -666,7 +666,6 @@ func TestRollbackAfterSlotLowersHistoryExpiryCursor(t *testing.T) {
 				return db.RollbackMetadataAfterSlot(
 					context.Background(),
 					point,
-					0,
 					nil,
 				)
 			},

@@ -223,7 +223,7 @@ func deleteSnapshotLimited(
 	limit int64,
 ) (bool, error) {
 	prefix, keep := snapshotMatcher(op)
-	return deleteKeysLimited(txn, prefix, keep, limit, deleteSnapshotRows)
+	return deleteKeysLimited(txn, prefix, keep, limit, deleteKeys)
 }
 
 // pruneRewardBlocksLimited is pruneRewardBlocks for at most limit rows.

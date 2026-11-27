@@ -60,10 +60,9 @@ func MigrateReleased(
 			Immutable:    stores.Immutable,
 			OpenMetadata: openMetadata,
 			UtxoSet: UtxoSetConfig{
-				DataDir:             cfg.DatabasePath,
-				Logger:              logger,
-				CardanoNodeConfig:   nodeCfg,
-				RetainRewardRecords: cfg.HasIndexerDB() || cfg.ServerCoreNamespace,
+				DataDir:           cfg.DatabasePath,
+				Logger:            logger,
+				CardanoNodeConfig: nodeCfg,
 			},
 			Logger:                     logger,
 			RewindBlocks:               SecurityParam(nodeCfg),

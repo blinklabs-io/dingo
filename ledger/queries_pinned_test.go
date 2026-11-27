@@ -250,6 +250,30 @@ func newStakeSnapshotsLedger(
 	pinnedMajor, liveMajor uint,
 ) *LedgerState {
 	t.Helper()
+	return newStakeSnapshotsLedgerInMode(
+		t, dbtypes.StorageModeCore, pool, pinnedMajor, liveMajor,
+	)
+}
+
+// storageModeLedgerDB reports a storage mode other than the database's: the
+// database holds a live UTxO set only in core mode, so a test that checks how
+// a ledger behaves in another mode names it here.
+type storageModeLedgerDB struct {
+	ledgerdb.LedgerDB
+	mode string
+}
+
+func (d storageModeLedgerDB) StorageMode() string { return d.mode }
+
+// newStakeSnapshotsLedgerInMode is newStakeSnapshotsLedger over a ledger that
+// reports the storage mode named.
+func newStakeSnapshotsLedgerInMode(
+	t *testing.T,
+	storageMode string,
+	pool []byte,
+	pinnedMajor, liveMajor uint,
+) *LedgerState {
+	t.Helper()
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	conwayEraId := uint(eras.ConwayEraDesc.Id)
@@ -286,6 +310,9 @@ func newStakeSnapshotsLedger(
 	ls.currentPParams = live
 	ls.currentEpoch = models.Epoch{EpochId: 6}
 	ls.publishSnapshotsLocked()
+	if storageMode != dbtypes.StorageModeCore {
+		ls.ldb = storageModeLedgerDB{LedgerDB: ls.ledgerDB(), mode: storageMode}
+	}
 	return ls
 }
 
@@ -480,6 +507,37 @@ func TestVerifyPointQueryable_RejectsPointWhoseGoSnapshotIsPruned(
 		t,
 		ls.VerifyPointQueryable(t.Context(), nil, QueryPoint{Slot: 550, Hash: retained}),
 	)
+}
+
+// The LedgerDB answers only the points whose stake snapshots it holds, in
+// every storage mode: a node in API storage mode refuses the older point as a
+// core node does.
+func TestVerifyPointQueryable_RefusesPrunedSnapshotsInEveryStorageMode(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, mode := range []string{dbtypes.StorageModeCore, dbtypes.StorageModeAPI} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			ls := newStakeSnapshotsLedgerInMode(
+				t, mode, repeatedBytes(28, 0x26), 10, 10,
+			)
+			require.Equal(t, mode, ls.ledgerDB().StorageMode())
+			require.NoError(t, seedDB(t, ls.db).SetNetworkState(0, 0, 0, nil))
+			pruned := repeatedBytes(32, 0x61)
+			seedBlockAtSlot(t, ls, 450, pruned)
+			err := ls.VerifyPointQueryable(
+				t.Context(), nil, QueryPoint{Slot: 450, Hash: pruned},
+			)
+			require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+
+			_, _, err = ls.stakeSnapshotsAsOf(
+				ls.loadConsensusSnapshot(), QueryPoint{Slot: 450, Hash: pruned}, nil,
+			)
+			require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+		})
+	}
 }
 
 // newStakePoolsLedger seeds epochs 0-6 of 100 slots, a pool registered at

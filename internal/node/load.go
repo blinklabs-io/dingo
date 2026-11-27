@@ -480,11 +480,10 @@ func openLoadUtxoSet(
 	// own database decides where its state lives.
 	dataDir := db.DataDir()
 	set, tempDir, err := nodestorage.OpenUtxoSet(nodestorage.UtxoSetConfig{
-		DataDir:             dataDir,
-		Logger:              logger,
-		CardanoNodeConfig:   nodeCfg,
-		RetainRewardRecords: cfg.HasIndexerDB(),
-		CheckpointKeep:      cfg.LedgerUtxoCheckpointKeep,
+		DataDir:           dataDir,
+		Logger:            logger,
+		CardanoNodeConfig: nodeCfg,
+		CheckpointKeep:    cfg.LedgerUtxoCheckpointKeep,
 	})
 	if err != nil {
 		return nil, "", nil, err

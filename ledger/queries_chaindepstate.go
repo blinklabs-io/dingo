@@ -234,8 +234,8 @@ func nonceFromBytes(b []byte) (lcommon.Nonce, error) {
 // epoch, the nonce fold stopped at it, the lab from its parent hash, and the
 // op-cert counters observed at or before it. Epoch rows and op-cert rows are
 // removed only by rollback. Block nonce rows keep the last three epochs; for a
-// point older than that (API storage mode accepts one) the nonce fold
-// recomputes from the stored blocks instead.
+// point older than that the nonce fold recomputes from the stored blocks
+// instead.
 func (ls *LedgerState) queryShelleyDebugChainDepState(
 	ctx context.Context,
 	at QueryPoint,

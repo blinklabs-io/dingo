@@ -643,34 +643,3 @@ func TestIndexerRollbackForTruncateHonoursTheUtxoSetRefusal(t *testing.T) {
 	require.ErrorContains(t, err, "journal floor")
 	requireIndexerTip(t, n, current)
 }
-
-func TestIndexerWriterWakesForCompletedRewardFacts(t *testing.T) {
-	t.Parallel()
-	bus := event.NewEventBus(nil, nil)
-	defer bus.Close()
-	writer := &lifecycleIndexerWriter{wakes: make(chan struct{}, 8)}
-	n := &Node{eventBus: bus, indexerWriter: writer}
-	require.NoError(t, n.startIndexerWriter(t.Context()))
-	defer n.stopIndexerWriter(context.Background()) //nolint:errcheck
-	testutil.RequireReceive(t, writer.wakes, 5*time.Second, "initial wake")
-	bus.Publish(ledger.RewardFactsEventType, event.NewEvent(
-		ledger.RewardFactsEventType,
-		ledger.RewardFactsEvent{SnapshotEpoch: 12, CapturedSlot: 300},
-	))
-	testutil.RequireReceive(
-		t,
-		writer.wakes,
-		5*time.Second,
-		"reward completion wakes idle writer",
-	)
-	require.NoError(t, n.stopIndexerWriter(t.Context()))
-	bus.Publish(ledger.RewardFactsEventType, event.NewEvent(
-		ledger.RewardFactsEventType, ledger.RewardFactsEvent{},
-	))
-	testutil.RequireNoReceive(
-		t,
-		writer.wakes,
-		50*time.Millisecond,
-		"stopped reward subscription",
-	)
-}

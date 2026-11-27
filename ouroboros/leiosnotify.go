@@ -2665,6 +2665,26 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 	manifestRaw []byte,
 	deadline time.Time,
 ) ([]cbor.RawMessage, error) {
+	return o.fetchLeiosEbTxsBatchedUntilWithClock(
+		ctx,
+		client,
+		point,
+		txCount,
+		manifestRaw,
+		deadline,
+		time.Now,
+	)
+}
+
+func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithClock(
+	ctx context.Context,
+	client leiosBlockTxsRequester,
+	point ocommon.Point,
+	txCount int,
+	manifestRaw []byte,
+	deadline time.Time,
+	now func() time.Time,
+) ([]cbor.RawMessage, error) {
 	var validate func(int, cbor.RawMessage) error
 	var references []lcommon.LeiosTransactionReference
 	if len(manifestRaw) > 0 {
@@ -2683,6 +2703,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 		point,
 		txCount,
 		deadline,
+		now,
 		references,
 		validate,
 	)
@@ -2694,6 +2715,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 	point ocommon.Point,
 	txCount int,
 	deadline time.Time,
+	now func() time.Time,
 	references []lcommon.LeiosTransactionReference,
 	validate func(int, cbor.RawMessage) error,
 ) ([]cbor.RawMessage, error) {
@@ -2765,7 +2787,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 				err,
 			)
 		}
-		if !deadline.IsZero() && time.Now().After(deadline) {
+		if !deadline.IsZero() && now().After(deadline) {
 			got := leiosCollectTxs(result)
 			return got, fmt.Errorf(
 				"leios-fetch attempt deadline exceeded after %d/%d transactions",
@@ -2829,8 +2851,8 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 				)
 			}
 			if tailStall.IsZero() {
-				tailStall = time.Now()
-			} else if time.Since(tailStall) >= o.config.LeiosTxFetchTailBudget {
+				tailStall = now()
+			} else if now().Sub(tailStall) >= o.config.LeiosTxFetchTailBudget {
 				return leiosCollectTxs(result), errors.New(
 					"leios-fetch served no new transactions within tail budget",
 				)

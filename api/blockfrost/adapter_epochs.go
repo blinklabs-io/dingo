@@ -360,7 +360,7 @@ func (a *NodeAdapter) epochStakeRows(
 	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
-	incomplete, err := a.rewardStakeInputsIncomplete(label, label+1)
+	incomplete, err := a.rewardStakeInputsIncomplete(txn, label, label+1)
 	if err != nil {
 		return nil, 0, fmt.Errorf("check epoch %d stakes: %w", epoch, err)
 	}

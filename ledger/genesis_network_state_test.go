@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -175,7 +176,7 @@ func TestCreateGenesisBlockStoresExactlyOneUtxoPerGenesisOutput(t *testing.T) {
 		append([]lcommon.Utxo{}, byronUtxos...),
 		shelleyUtxos...,
 	)
-	require.NoError(t, rejectDuplicateGenesisUtxos(genesisUtxos))
+	require.NoError(t, epochengine.RejectDuplicateGenesisUtxos(genesisUtxos))
 
 	ls := &LedgerState{
 		db: db,
@@ -467,15 +468,15 @@ func TestRejectDuplicateGenesisUtxosDetectsOverlap(t *testing.T) {
 			Output: &shelley.ShelleyTransactionOutput{OutputAmount: 2_000_000},
 		},
 	}
-	err := rejectDuplicateGenesisUtxos(utxos)
+	err := epochengine.RejectDuplicateGenesisUtxos(utxos)
 	require.ErrorContains(t, err, "duplicate genesis UTxO reference")
 
-	_, err = genesisReserveBalance(100_000_000, utxos)
+	_, err = epochengine.GenesisReserveBalance(100_000_000, utxos)
 	require.NoError(
 		t,
 		err,
-		"genesisReserveBalance alone does not see the duplicate; "+
-			"callers must run rejectDuplicateGenesisUtxos first",
+		"GenesisReserveBalance alone does not see the duplicate; "+
+			"callers must run RejectDuplicateGenesisUtxos first",
 	)
 
 	// A duplicate reference is rejected even when both entries carry the
@@ -493,7 +494,7 @@ func TestRejectDuplicateGenesisUtxosDetectsOverlap(t *testing.T) {
 	}
 	require.ErrorContains(
 		t,
-		rejectDuplicateGenesisUtxos(equalValueUtxos),
+		epochengine.RejectDuplicateGenesisUtxos(equalValueUtxos),
 		"duplicate genesis UTxO reference",
 	)
 }
@@ -512,13 +513,13 @@ func TestRejectDuplicateGenesisUtxosAllowsDistinctRefs(t *testing.T) {
 		{Id: shelley.MustNewShelleyTransactionInput(hashA, 1)},
 		{Id: shelley.MustNewShelleyTransactionInput(hashB, 0)},
 	}
-	require.NoError(t, rejectDuplicateGenesisUtxos(utxos))
+	require.NoError(t, epochengine.RejectDuplicateGenesisUtxos(utxos))
 }
 
 func TestGenesisReserveBalanceRejectsInvalidInputs(t *testing.T) {
 	t.Parallel()
 
-	_, err := genesisReserveBalance(1, []lcommon.Utxo{{}})
+	_, err := epochengine.GenesisReserveBalance(1, []lcommon.Utxo{{}})
 	require.ErrorContains(t, err, "has no output")
 
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
@@ -530,7 +531,7 @@ func TestGenesisReserveBalanceRejectsInvalidInputs(t *testing.T) {
 	utxos, err := nodeCfg.ShelleyGenesis().GenesisUtxos()
 	require.NoError(t, err)
 	require.NotEmpty(t, utxos)
-	_, err = genesisReserveBalance(0, utxos)
+	_, err = epochengine.GenesisReserveBalance(0, utxos)
 	require.ErrorContains(t, err, "exceeds max lovelace supply")
 }
 

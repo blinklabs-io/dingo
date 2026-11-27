@@ -85,7 +85,7 @@ func pruneRewardStakeInputsBefore(
 	s := stagingLedgerDB{LedgerDB: dbadapter.New(db), ls: seedLedgerOf(t, db)}
 	s.stageRewardInput(nil, RewardInputChange{
 		Kind:       RewardInputPrune,
-		PruneBelow: s.ls.rewardPruneBelow(epoch),
+		PruneBelow: epoch,
 	})
 }
 

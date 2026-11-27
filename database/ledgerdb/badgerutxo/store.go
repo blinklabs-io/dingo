@@ -112,16 +112,14 @@ type Store struct {
 	afterBootstrapFlush func() error
 	// loadsRefused is set by RefuseLoads.
 	loadsRefused atomic.Bool
-	// added holds, for each family, the index of rows below the export floor
-	// that eachRowAddedIn serves. rowsRewritten counts the operations that can
-	// put a row below the floor, each of which invalidates it.
-	added         addedIndexes
-	rowsRewritten atomic.Uint64
 	// rangeRowsVisited counts the rows and index entries the range, prefix,
 	// and added-row readers stepped over.
 	rangeRowsVisited atomic.Uint64
-	// rewardIndexVisited counts the index entries credit pages examined.
-	rewardIndexVisited atomic.Uint64
+	// retention is the window the layout migration prunes to.
+	retention Retention
+	// migrationHook observes the layout migration between its steps; an error
+	// stops it there. Only tests set it.
+	migrationHook func(step string) error
 	// memTableSize replaces Badger's memtable size when positive.
 	memTableSize int64
 	// blockCacheSize replaces Badger's block cache size when positive.
@@ -183,13 +181,9 @@ func Open(dir string, options ...Option) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
 	}
-	if err := s.ensureRewardSeqIndex(); err != nil {
+	if err := s.migrateLayout(); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
-	}
-	if err := s.ensureExportFloor(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
+		return nil, fmt.Errorf("badgerutxo: migrate %s: %w", dir, err)
 	}
 	return s, nil
 }
@@ -399,7 +393,6 @@ func (s *Store) bootstrap(
 	// The journal describes history the new contents do not share.
 	// The tip is cleared, so no floor is raised: the contents the floors
 	// describe are gone with the rows.
-	defer s.rewriteRows()()
 	if err := s.db.DropPrefix(prefixes...); err != nil {
 		return fmt.Errorf("badgerutxo: drop for bootstrap: %w", err)
 	}

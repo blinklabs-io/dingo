@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiready"
@@ -71,7 +70,7 @@ func (n *Node) apiReadiness() apiready.Check {
 		return nil
 	}
 	return func(kind indexerdb.Kind) (bool, error) {
-		return store.ReadyServing(kind, n.ledgerState.Tip().BlockNumber)
+		return store.Ready(kind, n.ledgerState.Tip().BlockNumber)
 	}
 }
 
@@ -183,13 +182,8 @@ func (n *Node) buildIndexerWriter(
 		return nil, nil, err
 	}
 	db.SetLiveOutputs(nodeLiveOutputs{node: n})
-	var factRows metadata.LedgerFacts
-	if n.ledgerState != nil && consensus == n.db {
-		factRows = n.ledgerState
-	}
 	writer, err := n.config.indexerWriterFactory(IndexerWriterDeps{
 		Consensus:                  consensus,
-		FactRows:                   factRows,
 		Indexer:                    db,
 		NodeConfig:                 n.config.cardanoNodeConfig,
 		Logger:                     n.config.logger,
@@ -197,6 +191,13 @@ func (n *Node) buildIndexerWriter(
 		SlotTime:                   n.indexerSlotTime,
 		MaxReadyLagBlocks:          n.config.indexerMaxReadyLagBlocks,
 		DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
+		DelegatorInactivity:        n.config.delegatorInactivity,
+		MinPoolMargin:              n.config.minPoolMargin,
+		PledgeLeverageEnabled:      n.config.pledgeLeverageEnabled,
+		PledgeLeverage:             n.config.pledgeLeverage,
+		FullPotRewardsEnabled:      n.config.fullPotRewardsEnabled,
+		WarmGenesisStake:           n.config.leiosRuntimeEnabled(),
+		Fatal:                      n.cancelForFatal,
 		Moved:                      n.releaseRolledBackBlocks,
 	})
 	if err != nil {
@@ -267,9 +268,9 @@ func (n *Node) rollbackIndexerForTruncate(
 	)
 }
 
-// startIndexerWriter starts the writer and wakes it on ledger tip and reward
-// fact events. It runs after the ledger started so the writer sees the tip the
-// ledger recovered to.
+// startIndexerWriter starts the writer and wakes it on ledger tip events. It
+// runs after the ledger started so the writer sees the tip the ledger
+// recovered to.
 func (n *Node) startIndexerWriter(ctx context.Context) error {
 	if n.indexerWriter == nil {
 		return nil
@@ -282,10 +283,6 @@ func (n *Node) startIndexerWriter(ctx context.Context) error {
 	writer := n.indexerWriter
 	n.indexerWakeSub = n.eventBus.SubscribeFunc(
 		ledger.TipEventType,
-		func(event.Event) { writer.Wake() },
-	)
-	n.indexerFactsSub = n.eventBus.SubscribeFunc(
-		ledger.RewardFactsEventType,
 		func(event.Event) { writer.Wake() },
 	)
 	writer.Wake()
@@ -302,10 +299,6 @@ func (n *Node) stopIndexerWriter(ctx context.Context) error {
 	if n.indexerWakeSub != 0 {
 		n.eventBus.Unsubscribe(ledger.TipEventType, n.indexerWakeSub)
 		n.indexerWakeSub = 0
-	}
-	if n.indexerFactsSub != 0 {
-		n.eventBus.Unsubscribe(ledger.RewardFactsEventType, n.indexerFactsSub)
-		n.indexerFactsSub = 0
 	}
 	var err error
 	if stopErr := n.indexerWriter.Stop(ctx); stopErr != nil {

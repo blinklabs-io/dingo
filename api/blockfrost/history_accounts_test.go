@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -308,8 +309,8 @@ func TestNodeAdapterStakeHistoryRefusesIncompleteSnapshot(t *testing.T) {
 	ctx := context.Background()
 	address := fx.addAccount(t, 0x01)
 	page := PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc}
-	// The ledger records a pending write in its own store.
-	meta := fx.adapter.ledgerState.LedgerDB()
+	// The IndexerDB records a pending write in its own sync state.
+	meta := fx.adapter.db()
 	const pendingKey = models.StakeRewardSourcePrefix + "stake-inputs-pending"
 
 	require.NoError(t, meta.SetSyncState(
@@ -361,21 +362,71 @@ func TestNodeAdapterStakeHistoryIgnoresIncompleteSnapshotBeforeAccount(t *testin
 		},
 	))
 	address := newRewardHistoryStakeAddress(t, key)
-	set, ok := livesettest.LedgerDBOf(fx.adapter.ledgerState.Database())
-	require.True(t, ok, "the fixture's ledger has a LedgerDB set")
-	require.NoError(t, set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
-		RewardInputs: []ledger.RewardInputChange{{
-			Kind: ledger.RewardInputPending,
-			Pending: []ledger.RewardStakeInputsPendingEntry{
-				{Epoch: 0, BoundarySlot: 0},
-			},
-		}},
-	}))
+	fx.setPendingStakeInputs(t, 0)
 
 	rows, total, err := fx.adapter.AccountStakeHistory(ctx, address, PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc})
 	require.NoError(t, err, "label 0 predates an account created in epoch 2")
 	assert.Equal(t, 0, total)
 	assert.Empty(t, rows)
+}
+
+// setPendingStakeInputs records, in the IndexerDB the adapter reads, that the
+// snapshot labelled epoch still has stake inputs being written.
+func (fx *epochFixture) setPendingStakeInputs(t *testing.T, epoch uint64) {
+	t.Helper()
+	raw, err := epochengine.FormatRewardStakeInputsPending(
+		[]ledger.RewardStakeInputsPendingEntry{{Epoch: epoch}},
+	)
+	require.NoError(t, err)
+	require.NoError(t, fx.adapter.db().SetSyncState(
+		models.RewardStakeInputsPendingKey, raw, nil,
+	))
+}
+
+// A snapshot the IndexerDB is still writing the stake inputs of makes the
+// account's history unavailable, and one only the ledger is still writing does
+// not: the rows the API serves are the IndexerDB's.
+func TestNodeAdapterStakeHistoryReadsTheIndexerDBPendingState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	page := PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc}
+	newAccount := func(fx *epochFixture) string {
+		key := bytes32of(28, 0x0a)
+		require.NoError(t, fx.adapter.db().CreateAccount(
+			ctx, nil, &models.Account{
+				CredentialTag: 0, StakingKey: key, Active: true,
+				AddedSlot: 1, CreatedSlot: 1,
+			},
+		))
+		return newRewardHistoryStakeAddress(t, key)
+	}
+
+	t.Run("pending in the IndexerDB", func(t *testing.T) {
+		t.Parallel()
+		fx := newEpochFixture(t)
+		address := newAccount(fx)
+		fx.setPendingStakeInputs(t, 1)
+		_, _, err := fx.adapter.AccountStakeHistory(ctx, address, page)
+		require.ErrorIs(t, err, ErrHistoryNotRetained)
+	})
+
+	t.Run("pending only in the ledger", func(t *testing.T) {
+		t.Parallel()
+		fx := newEpochFixture(t)
+		address := newAccount(fx)
+		set, ok := livesettest.LedgerDBOf(fx.adapter.ledgerState.Database())
+		require.True(t, ok, "the fixture's ledger has a LedgerDB set")
+		require.NoError(t, set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
+			RewardInputs: []ledger.RewardInputChange{{
+				Kind: ledger.RewardInputPending,
+				Pending: []ledger.RewardStakeInputsPendingEntry{
+					{Epoch: 1, BoundarySlot: 0},
+				},
+			}},
+		}))
+		_, _, err := fx.adapter.AccountStakeHistory(ctx, address, page)
+		require.NoError(t, err)
+	})
 }
 
 func TestNodeAdapterAccountAggregateReadBudget(t *testing.T) {

@@ -66,10 +66,9 @@ func openMigratedLedger(
 	m.db, closeDB = openConsensusRewound(t, dir, rewind)
 	var err error
 	m.set, _, err = nodestorage.OpenUtxoSet(nodestorage.UtxoSetConfig{
-		DataDir:             dir,
-		Logger:              logger,
-		CardanoNodeConfig:   nodeCfg,
-		RetainRewardRecords: true,
+		DataDir:           dir,
+		Logger:            logger,
+		CardanoNodeConfig: nodeCfg,
 	})
 	require.NoError(t, err)
 	m.bus = event.NewEventBus(nil, logger)

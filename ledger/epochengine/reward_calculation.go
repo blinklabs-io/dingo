@@ -2749,7 +2749,6 @@ func (e *Engine) SaveStakeRewardPrecompute(
 	if err := saveRewardPrecomputeCursor(meta, metaTxn, &cursor); err != nil {
 		return err
 	}
-	e.rewardFactsAfterCommit(metaTxn, app.Epochs.Snapshot, capturedSlot)
 	e.config.Logger.Info(
 		"precomputed stake rewards",
 		"component", "ledger",
@@ -4966,11 +4965,4 @@ func SuppressBootstrapStakeRewards(result *rewards.Result) {
 	result.Unspendable = 0
 	result.UnspendableDeficit = 0
 	result.Undistributed = result.AvailableRewards
-}
-
-func (e *Engine) rewardFactsAfterCommit(
-	txn ledgerdb.Txn,
-	epoch, slot uint64,
-) {
-	e.host.PublishRewardFacts(txn, epoch, slot)
 }

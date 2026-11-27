@@ -20,29 +20,23 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/indexer"
-	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -75,72 +69,9 @@ func newEquivalenceDB(t *testing.T) *database.Database {
 }
 
 // equivalenceLoadConfig is the configuration of the API node whose database
-// the tests load, so the live UTxO set keeps the reward records the IndexerDB
-// copies.
+// the tests load.
 func equivalenceLoadConfig() *config.Config {
 	return &config.Config{Network: "preview", StorageMode: "api"}
-}
-
-// equivalenceParts are the store, the fact source and the block indexer a
-// node's writer over consensus and idxDB is built from, with the fact rows
-// read through ls.
-func equivalenceParts(
-	t *testing.T,
-	consensus, idxDB *database.Database,
-	ls *ledger.LedgerState,
-) (*indexerdb.Store, indexer.FactsSource, *Backfill) {
-	t.Helper()
-	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
-		cardano.EmbeddedConfigPath("preview"), "preview",
-		cardano.EmbeddedConfigFS,
-	)
-	require.NoError(t, err)
-	store, err := indexerdb.NewStore(idxDB, idxDB, 10)
-	require.NoError(t, err)
-	facts, err := indexer.NewMetadataFacts(ls, idxDB)
-	require.NoError(t, err)
-	bf := NewBackfill(
-		idxDB, nodeCfg, slog.New(slog.NewTextHandler(io.Discard, nil)),
-	)
-	bf.SetDelegatorInactivityEnabled(false)
-	return store, facts, bf
-}
-
-// newEquivalenceWriter is the writer a node runs over the parts, reading the
-// chain through src.
-func newEquivalenceWriter(
-	store *indexerdb.Store,
-	src indexer.ChainSource,
-	facts indexer.FactsSource,
-	bf *Backfill,
-) *indexer.Writer {
-	return indexer.NewWriter(
-		store, src, bf, slog.New(slog.NewTextHandler(io.Discard, nil)), 700,
-	).WithFacts(facts).WithGenesisSeed(bf.SeedGenesis)
-}
-
-// indexFromGenesis fills a new IndexerDB over consensus by one uninterrupted
-// pass of the writer from genesis through src, which is how a node started
-// over a loaded database fills its own. It is the reference the other writer
-// paths (a retry, a rollback, a Mithril bootstrap) are compared with.
-func indexFromGenesis(
-	t *testing.T,
-	consensus *database.Database,
-	ls *ledger.LedgerState,
-	src indexer.ChainSource,
-) (*database.Database, *sql.DB) {
-	t.Helper()
-	idxDB, idxRaw := newEquivalenceIndexer(t, consensus)
-	store, facts, bf := equivalenceParts(t, consensus, idxDB, ls)
-	if src == nil {
-		src = indexer.NewDatabaseSource(consensus)
-	}
-	require.NoError(
-		t,
-		newEquivalenceWriter(store, src, facts, bf).
-			CatchUp(context.Background()),
-	)
-	return idxDB, idxRaw
 }
 
 // newEquivalenceIndexer opens an IndexerDB the way the node does: its own
@@ -299,93 +230,6 @@ func firstN(s []string, n int) []string {
 	return s
 }
 
-// A rollback of the canonical chain leaves the rows an IndexerDB indexed only
-// up to the rollback point holds, and indexing forward again reproduces the
-// rows of an uninterrupted pass. That the writer's rows are those a ledger
-// applying the blocks itself wrote is proven against a released version's
-// database by TestMigratedNodeServesTheSameAPIsAsAFreshOne.
-func TestIndexerWriterRollbackMatchesAFreshIndex(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	consensus := chainStoreTemplate.openEquivalence(t)
-	ls, _ := openFactLedger(t, consensus)
-
-	idxDB, idxRaw := newEquivalenceIndexer(t, consensus)
-	// One block indexer serves both writers, as a node's does across a
-	// rollback: its running epoch state follows the rows it wrote.
-	store, facts, bf := equivalenceParts(t, consensus, idxDB, ls)
-	src := indexer.NewDatabaseSource(consensus)
-	w := newEquivalenceWriter(store, src, facts, bf)
-	require.NoError(t, w.CatchUp(ctx))
-
-	tip, err := store.Tip(nil)
-	require.NoError(t, err)
-	ledgerTip, err := consensus.GetTip(nil)
-	require.NoError(t, err)
-	require.Equal(t, ledgerTip.Point.Hash, tip.Hash)
-
-	want := dumpTables(t, idxRaw)
-	for _, n := range slices.Sorted(maps.Keys(want)) {
-		if len(want[n]) > 0 {
-			t.Logf("compared %s: %d rows", n, len(want[n]))
-		}
-	}
-
-	// The point is mid-epoch, past several boundaries, so epoch facts, stake
-	// snapshots and reward state roll back.
-	last := ledgerTip.Point.Slot
-	var point models.Block
-	for blocks, after := ([]models.Block)(nil), (indexerdb.Tip{}); ; {
-		blocks, err = src.BlocksAfter(ctx, after, last*6/10, 500)
-		require.NoError(t, err)
-		if len(blocks) == 0 {
-			break
-		}
-		point = blocks[len(blocks)-1]
-		after = indexerdb.Tip{
-			Slot:        point.Slot,
-			BlockNumber: point.Number,
-			Hash:        point.Hash,
-		}
-	}
-	require.NotEmpty(t, point.Hash)
-	cut := &truncatedSource{ChainSource: src, limit: point}
-
-	rolled := newEquivalenceWriter(store, cut, facts, bf)
-	rollBack := func() {
-		require.NoError(t, rolled.CatchUp(ctx))
-		tipNow, err := store.Tip(nil)
-		require.NoError(t, err)
-		require.Equal(t, point.Hash, tipNow.Hash)
-	}
-	rollBack()
-	// Indexing forward again from the rollback point must reproduce the
-	// original result: parameter resolution and epoch tracking restart
-	// from the rolled-back state.
-	require.NoError(t, w.CatchUp(ctx))
-	again := dumpTables(t, idxRaw)
-	// The rollback clears the reward pot of every epoch whose round has no
-	// pool outputs (rewardPotWithoutOutputsResetQuery), and a forward pass
-	// copies only rows dated after the rollback point, so the cleared pots of
-	// earlier epochs stay cleared, while an index that was never rolled back
-	// copied them complete.
-	delete(want, "reward_ada_pots")
-	delete(again, "reward_ada_pots")
-	requireSameTables(t, want, again)
-	rollBack()
-
-	// An IndexerDB that never held the rolled-back blocks is the oracle.
-	_, shortRaw := indexFromGenesis(t, consensus, ls, cut)
-	after := dumpTables(t, shortRaw)
-	require.Less(t, len(after["epoch"]), len(want["epoch"]),
-		"the rollback must remove epochs, or it checked nothing")
-	rolledBack := dumpTables(t, idxRaw)
-	delete(after, "reward_ada_pots")
-	delete(rolledBack, "reward_ada_pots")
-	requireSameTables(t, after, rolledBack)
-}
-
 // truncatedSource presents the canonical chain as ending at limit, as it
 // does after a rollback to that block.
 type truncatedSource struct {
@@ -427,61 +271,4 @@ func (s *truncatedSource) BlocksAfter(
 
 func (s *truncatedSource) FromGenesis(ctx context.Context) (bool, error) {
 	return s.ChainSource.(indexer.GenesisChain).FromGenesis(ctx)
-}
-
-// openFactLedger opens the ledger over a loaded consensus database and its
-// live UTxO set, as a node does at startup. The ledger-state families live in
-// the set, so the ledger is what a node's writer reads its fact rows from.
-// The returned function closes the ledger and the set; it must run before
-// the database is loaded again or closed.
-func openFactLedger(
-	t *testing.T,
-	consensus *database.Database,
-) (*ledger.LedgerState, func()) {
-	t.Helper()
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
-		cardano.EmbeddedConfigPath("preview"), "preview",
-		cardano.EmbeddedConfigFS,
-	)
-	require.NoError(t, err)
-	set, _, err := nodestorage.OpenUtxoSet(nodestorage.UtxoSetConfig{
-		DataDir:             consensus.DataDir(),
-		Logger:              logger,
-		CardanoNodeConfig:   nodeCfg,
-		RetainRewardRecords: true,
-	})
-	require.NoError(t, err)
-	cm, err := chain.NewManager(ctx, consensus, nil)
-	require.NoError(t, err)
-	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:              consensus,
-		UtxoSet:               set,
-		ChainManager:          cm,
-		Logger:                logger,
-		CardanoNodeConfig:     nodeCfg,
-		Network:               "preview",
-		PromRegistry:          prometheus.NewRegistry(),
-		ManualBlockProcessing: true,
-	})
-	require.NoError(t, err)
-	require.NoError(t, (nodestorage.Reconcile{
-		DB:     consensus,
-		Set:    set,
-		Logger: logger,
-		Resume: ls.ResumeUtxoSetFrom,
-	}).Run(ctx))
-	require.NoError(t, ls.Start(ctx))
-	closed := false
-	closeLedger := func() {
-		if closed {
-			return
-		}
-		closed = true
-		require.NoError(t, ls.Close())
-		require.NoError(t, set.Close())
-	}
-	t.Cleanup(closeLedger)
-	return ls, closeLedger
 }

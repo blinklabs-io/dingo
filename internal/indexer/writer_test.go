@@ -455,39 +455,6 @@ func TestWriterRollsBackToNothingWhenNoCheckpointIsOnTheChain(t *testing.T) {
 	}
 }
 
-func TestRollbackToBelowTheAnchorIsRefused(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t)
-	chain := newFakeChain(10, "a")
-	idx := &syncRowIndexer{}
-	w := NewWriter(store, chain, idx, nil, 4)
-	require.NoError(t, w.CatchUp(t.Context()))
-	anchorBlock := chain.canonical[5]
-	require.NoError(t, store.Database().Transaction(t.Context(), true).Do(
-		func(txn *database.Txn) error {
-			return store.SetAnchor(indexerdb.Tip{
-				Slot:        anchorBlock.Slot,
-				BlockNumber: anchorBlock.Number,
-				Hash:        anchorBlock.Hash,
-			}, txn)
-		},
-	))
-	below := chain.canonical[3]
-	err := w.RollbackTo(t.Context(), indexerdb.Tip{
-		Slot: below.Slot, BlockNumber: below.Number, Hash: below.Hash,
-	})
-	require.ErrorIs(t, err, ErrRollbackBelowAnchor)
-	requireMatchesChain(t, store, chain)
-
-	at := chain.canonical[5]
-	require.NoError(t, w.RollbackTo(t.Context(), indexerdb.Tip{
-		Slot: at.Slot, BlockNumber: at.Number, Hash: at.Hash,
-	}))
-	tip, err := store.Tip(nil)
-	require.NoError(t, err)
-	require.Equal(t, at.Number, tip.BlockNumber)
-}
-
 // notFromGenesis is a chain that starts at an imported state rather than at
 // genesis.
 type notFromGenesis struct {
@@ -687,49 +654,6 @@ func TestCatchUpGrowsBatchBackAfterTheDenseRegion(t *testing.T) {
 	require.Equal(t, []int{8, 4, 8, 4, 8, 8, 8, 8}, chain.limits)
 }
 
-// tooBigAboveIndexer refuses a call for more than limit blocks while still
-// counting the transactions of the calls it accepts.
-type tooBigAboveIndexer struct {
-	*countingIndexer
-	limit int
-}
-
-func (s *tooBigAboveIndexer) IndexBlocks(
-	ctx context.Context, txn *database.Txn, blocks []models.Block,
-) error {
-	if len(blocks) > s.limit {
-		return fmt.Errorf("set utxo offset: %w", badger.ErrTxnTooBig)
-	}
-	return s.countingIndexer.IndexBlocks(ctx, txn, blocks)
-}
-
-func TestReplayShrinksBatchWhenBlobWritesAreTooBig(t *testing.T) {
-	t.Parallel()
-	log := &[]string{}
-	chain := &anchoredChain{
-		fakeChain: newFakeChain(30, "c"), anchorNumber: 12,
-	}
-	store := newTestStore(t)
-	facts := &anchorFacts{recordingFacts: &recordingFacts{log: log}}
-	idx := &tooBigAboveIndexer{
-		countingIndexer: &countingIndexer{
-			loggingIndexer: &loggingIndexer{
-				syncRowIndexer: &syncRowIndexer{},
-				log:            log,
-			},
-		},
-		limit: 2,
-	}
-	w := NewWriter(store, chain, idx, nil, 5).WithFacts(facts)
-	require.NoError(t, w.CatchUp(t.Context()))
-	// The refused batches rolled back with their transaction count, so the
-	// replay still counts each of blocks 0..12 once.
-	require.Contains(t, *log, "verify@120 replayed=13")
-	tip, err := store.Tip(nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(29), tip.BlockNumber)
-}
-
 // withContent gives every block of the chain a CBOR body of size bytes.
 func (c *fakeChain) withContent(size int) *fakeChain {
 	c.mu.Lock()
@@ -813,4 +737,31 @@ func TestSparseBatchesKeepReadPrefixWhenContinuationFails(t *testing.T) {
 	w.sparseBytes = 1000
 	require.NoError(t, w.CatchUp(t.Context()))
 	requireMatchesChain(t, store, chain.fakeChain)
+}
+
+// An empty IndexerDB over a block history that starts after genesis, as a
+// Mithril restore that kept only recent blocks leaves, cannot be derived: the
+// writer refuses it, and Run stops and reports it rather than retrying.
+func TestWriterRefusesABlockHistoryThatDoesNotStartAtGenesis(t *testing.T) {
+	t.Parallel()
+	chain := newFakeChain(8, "a")
+	chain.mu.Lock()
+	chain.canonical = chain.canonical[3:]
+	chain.mu.Unlock()
+	store := newTestStore(t)
+	fatal := make(chan error, 1)
+	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 2).
+		WithFatal(func(err error) { fatal <- err })
+
+	require.ErrorIs(t, w.CatchUp(t.Context()), ErrChainNotFromGenesis)
+	require.Empty(t, rows(t, store), "nothing is indexed past the gap")
+
+	done := make(chan error, 1)
+	go func() { done <- w.Run(t.Context()) }()
+	require.ErrorIs(t,
+		testutil.RequireReceive(t, done, 5*time.Second, "Run must stop"),
+		ErrChainNotFromGenesis)
+	require.ErrorIs(t,
+		testutil.RequireReceive(t, fatal, time.Second, "the stop is reported"),
+		ErrChainNotFromGenesis)
 }

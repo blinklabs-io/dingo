@@ -475,11 +475,13 @@ a busy error. Set `MCP_SSE_SURVIVAL_TEST=1` when running the MCP tests to
 include the 61-second SSE idle-survival regression.
 
 Epoch nonce reporting reads `epoch_summary.epoch_nonce` with `epoch.nonce` as
-fallback. On a node with an IndexerDB, the recorded block count is the
-IndexerDB's `block_nonce` rows inside the stored epoch slot boundaries, which
-cover every indexed block of the epoch. On a core node the count covers the
-ledger's retained `block_nonce` rows only, so an older epoch reports fewer
-blocks; the output says so after the count.
+fallback. Recorded block counts cover the `block_nonce` rows inside the
+stored epoch slot boundaries. With a SQLite IndexerDB the tool reads the
+epoch, nonce and count from it, and it keeps a row for every indexed block.
+Without one the tool reads the epoch and nonce from the ledger state; on a
+node with a PostgreSQL or MySQL IndexerDB the count is the IndexerDB's, and on
+a core node it covers the ledger's retained `block_nonce` rows only, so an
+older epoch reports fewer blocks and the output says so after the count.
 Transaction totals cover retained `utxo` rows and cannot reconstruct pruned
 outputs. Pool stake and pledge are reported in lovelace.
 

@@ -280,7 +280,6 @@ UPDATE utxo SET deleted_slot = 20, spent_at_tx_id = (SELECT id FROM "transaction
 				err = db.RollbackMetadataAfterSlot(
 					t.Context(),
 					ocommon.NewPoint(10, []byte("rollback")),
-					0,
 					nil,
 				)
 			}
