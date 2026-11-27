@@ -503,9 +503,11 @@ func TestEventSubscribeReleasesStalledConnection(t *testing.T) {
 				)
 			}()
 			waitActive(t, f, 1)
-			appendBlockingBatch(f)
-			s.wait(t)
+			// Stall before the batch: with receive windows this large, a
+			// client still reading could take the whole batch before it
+			// stopped, and the server's write would never block.
 			stall()
+			appendBlockingBatch(f)
 			conn := <-accepted
 			// The server is stuck once a connection write makes no progress
 			// between two polls.
