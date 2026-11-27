@@ -33,6 +33,12 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/handshake"
 )
 
+// errOutboundClosedBeforeAttach is the dial failure recorded for a connection
+// that closed before the worker could record it on its peer.
+var errOutboundClosedBeforeAttach = errors.New(
+	"outbound connection closed before it was recorded",
+)
+
 var networkMagicFieldPattern = regexp.MustCompile(
 	`\bunNetworkMagic\s*=\s*([0-9]+)\b`,
 )
@@ -361,6 +367,16 @@ func (p *PeerGovernor) createOutboundConnection(
 			return
 		}
 		currentPeer = p.peers[peerIdx]
+		// The entry was removed and the address added again: the new
+		// entry has a worker of its own, and two would dial it at once.
+		if currentPeer != reconnectPeer {
+			p.mu.Unlock()
+			p.config.Logger.Debug(
+				"outbound: peer entry replaced, stopping connection attempts",
+				"address", peer.Address,
+			)
+			return
+		}
 		if p.isPeerDeniedLocked(currentPeer) {
 			p.mu.Unlock()
 			p.config.Logger.Debug(
@@ -480,8 +496,26 @@ func (p *PeerGovernor) createOutboundConnection(
 				)
 				return
 			}
-			// Use the peer from the slice in case the pointer changed
 			currentPeer := p.peers[peerIdx]
+			// Recording conn over a replacement entry's connection, or
+			// over one an inbound duplex arrival recorded during the dial,
+			// would leave the overwritten connection open with no peer
+			// holding it.
+			if currentPeer != reconnectPeer ||
+				currentPeer.hasClientConnection() {
+				p.mu.Unlock()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"outbound: error closing superseded connection",
+					"address", peer.Address,
+				)
+				p.config.Logger.Debug(
+					"outbound: peer entry replaced or already connected during connection, closing",
+					"address", peer.Address,
+				)
+				return
+			}
 			if p.isPeerDeniedLocked(currentPeer) {
 				p.mu.Unlock()
 				closeConnAndLog(
@@ -496,25 +530,35 @@ func (p *PeerGovernor) createOutboundConnection(
 				)
 				return
 			}
-			oldSource := currentPeer.Source
-			oldConn := clonePeerConnection(currentPeer.Connection)
-			p.attachOutboundConnLocked(currentPeer, conn, time.Now())
-			selectionEvents := p.appendChainSelectionEventsLocked(
-				nil,
-				p.bootstrapExited,
-				oldSource,
-				oldConn,
-				currentPeer,
-			)
-			p.updatePeerMetrics()
+			// The connection manager removes a closed connection before
+			// it publishes the close, so a connection still registered here
+			// has its close event handled after this attach. One already
+			// removed had its close event handled while no peer held it;
+			// recording it would leave the peer on a dead connection that
+			// nothing clears.
+			if p.config.ConnManager.GetConnectionById(connId) == conn {
+				oldSource := currentPeer.Source
+				oldConn := clonePeerConnection(currentPeer.Connection)
+				p.attachOutboundConnLocked(currentPeer, conn, time.Now())
+				selectionEvents := p.appendChainSelectionEventsLocked(
+					nil,
+					p.bootstrapExited,
+					oldSource,
+					oldConn,
+					currentPeer,
+				)
+				p.updatePeerMetrics()
+				p.mu.Unlock()
+				p.publishPendingEvents(selectionEvents)
+				// Generate event
+				p.publishEvent(
+					OutboundConnectionEventType,
+					OutboundConnectionEvent{ConnectionId: connId},
+				)
+				return
+			}
 			p.mu.Unlock()
-			p.publishPendingEvents(selectionEvents)
-			// Generate event
-			p.publishEvent(
-				OutboundConnectionEventType,
-				OutboundConnectionEvent{ConnectionId: connId},
-			)
-			return
+			err = errOutboundClosedBeforeAttach
 		}
 		if isConnectionCancellationError(err) {
 			select {
