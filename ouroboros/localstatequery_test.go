@@ -1498,14 +1498,17 @@ func TestLocalstatequeryReopen_CloseDuringReopenLeavesNoView(t *testing.T) {
 }
 
 // TestLocalStateQueryAcquireWaitBelowClientTimeout pins the server's Acquire
-// wait below the gouroboros client's default Acquire timeout. With the two
-// equal, a client always timed out in Acquiring before the AcquireFailure
-// reached it, and closed the connection.
+// wait below a gouroboros client's Acquire timeout. With the two equal, a
+// client always timed out in Acquiring before the AcquireFailure reached it,
+// and closed the connection. gouroboros clients now set no timeout unless
+// configured, so the margin is held against the 5s the default used to be,
+// which clients configured with WithAcquireTimeout may still use.
 func TestLocalStateQueryAcquireWaitBelowClientTimeout(t *testing.T) {
 	t.Parallel()
 
-	clientTimeout := olocalstatequery.NewConfig().AcquireTimeout
-	require.Positive(t, clientTimeout)
+	require.Zero(t, olocalstatequery.NewConfig().AcquireTimeout,
+		"gouroboros clients have no default Acquire timeout")
+	const clientTimeout = 5 * time.Second
 	require.Less(
 		t,
 		localStateQueryAcquireWait,
