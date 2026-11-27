@@ -245,7 +245,9 @@ func TestCreateOutboundConnection_StaleWorkerDoesNotReplaceNewEntry(
 	// and peer sharing adds the address again with a worker of its own.
 	pg.mu.Lock()
 	removed := 0
-	pg.enforceStateLimit(PeerStateCold, 0, false, &removed)
+	pg.enforceStateLimit(
+		PeerStateCold, 0, false, &removed, new([]deferredClose),
+	)
 	pg.mu.Unlock()
 	require.Equal(t, 1, removed)
 	require.NoError(t, pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip))
@@ -339,7 +341,9 @@ func TestCreateOutboundConnection_StaleWorkerFailureLeavesNewEntry(
 	waitDone(t, firstDialing, "the first dial")
 	pg.mu.Lock()
 	removed := 0
-	pg.enforceStateLimit(PeerStateCold, 0, false, &removed)
+	pg.enforceStateLimit(
+		PeerStateCold, 0, false, &removed, new([]deferredClose),
+	)
 	pg.mu.Unlock()
 	require.Equal(t, 1, removed)
 	require.NoError(t, pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip))
