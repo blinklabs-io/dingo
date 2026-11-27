@@ -290,3 +290,62 @@ func TestReconcile_DialsKnownColdPeerBelowEstablishedTarget(t *testing.T) {
 	requireDialStarted(t, pg, held, true,
 		"one established peer of three: reconcile dials the held peer")
 }
+
+// The fill's deficit counts dials still in flight. Without that, a second
+// reconcile before the first fill dial completes dials another peer past the
+// target, the warm limit then demotes one, and the next fill dials it again:
+// the connect/disconnect loop the target exists to prevent.
+func TestReconcile_FillCountsDialsInFlight(t *testing.T) {
+	t.Parallel()
+	pg := newBlockedDialGovernor(t, PeerGovernorConfig{
+		TargetNumberOfEstablishedPeers: 3,
+		TargetNumberOfActivePeers:      1,
+		TargetNumberOfKnownPeers:       100,
+		MinHotPeers:                    1,
+	})
+	hot := starvationPeer(0, PeerSourceP2PGossip, PeerStateHot, true)
+	hot.LastActivity = time.Now()
+	warm1 := starvationPeer(1, PeerSourceP2PGossip, PeerStateWarm, true)
+	warm2 := starvationPeer(2, PeerSourceP2PGossip, PeerStateWarm, true)
+	pg.mu.Lock()
+	pg.bootstrapExited = true
+	pg.peers = []*Peer{hot, warm1, warm2}
+	pg.mu.Unlock()
+
+	held := []string{"44.0.0.1:3001", "44.0.0.2:3001"}
+	for _, addr := range held {
+		require.NoError(t, pg.AddPeer(addr, PeerSourceP2PGossip))
+		requireDialStarted(t, pg, addr, false,
+			"established peers are at the target: the peer is held cold")
+	}
+
+	pg.mu.Lock()
+	kept := []*Peer{hot, warm1}
+	for _, addr := range held {
+		idx := pg.peerIndexByAddress(addr)
+		require.NotEqual(t, -1, idx)
+		kept = append(kept, pg.peers[idx])
+	}
+	pg.peers = kept
+	pg.mu.Unlock()
+
+	dialing := func() int {
+		pg.mu.Lock()
+		defer pg.mu.Unlock()
+		n := 0
+		for _, addr := range held {
+			if pg.reconnectingLocked(addr) {
+				n++
+			}
+		}
+		return n
+	}
+
+	pg.reconcile(t.Context())
+	require.Equal(t, 1, dialing(),
+		"two established peers of three: reconcile dials one held peer")
+
+	pg.reconcile(t.Context())
+	assert.Equal(t, 1, dialing(),
+		"the dial in flight fills the deficit: no second dial")
+}
