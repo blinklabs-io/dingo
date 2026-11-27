@@ -20,9 +20,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,6 +57,18 @@ func newEventFixture(
 	publish bool,
 ) *eventFixture {
 	t.Helper()
+	return newEventFixtureOn(t, mutate, publish, nil)
+}
+
+// newEventFixtureOn is newEventFixture with the server's listener passed
+// through wrap, when it is not nil.
+func newEventFixtureOn(
+	t *testing.T,
+	mutate func(*BarkConfig),
+	publish bool,
+	wrap func(net.Listener) net.Listener,
+) *eventFixture {
+	t.Helper()
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	cfg := BarkConfig{
@@ -72,6 +87,10 @@ func newEventFixture(
 	)
 	mux.Handle(path, handler)
 	srv := httptest.NewUnstartedServer(mux)
+	srv.Config.ConnContext = eventConnContext
+	if wrap != nil {
+		srv.Listener = wrap(srv.Listener)
+	}
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	// Cleanups run last-in first-out: the hub must end its streams before
@@ -380,6 +399,18 @@ func TestEventSubscribeDetachesClientThatStopsReading(t *testing.T) {
 		f.hub.append(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
 	}
 	waitActive(t, f, 0)
+	// Only the stream was stuck, so its connection stays open for the
+	// client's other calls.
+	var reused bool
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
+	})
+	_, err := f.client.ListEventTypes(
+		ctx,
+		connect.NewRequest(&eventv1alpha1.ListEventTypesRequest{}),
+	)
+	require.NoError(t, err)
+	require.True(t, reused, "the detached stream's connection was closed")
 }
 
 // A stuck client must not hold shutdown either: closing the hub ends its
@@ -425,6 +456,160 @@ func TestEventAckDetachesClientThatStopsReading(t *testing.T) {
 		f.hub.append(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
 	}
 	waitActive(t, f, 0)
+}
+
+// A client whose process stops reads nothing on its connection, so the server
+// blocks in the connection write itself, where resetting the stream cannot
+// reach it. The stream must still be detached once it lags out of the ring,
+// and shutdown must not wait for the stalled client.
+func TestEventSubscribeReleasesStalledConnection(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		release func(*testing.T, *eventFixture)
+	}{
+		{name: "lagged", release: func(_ *testing.T, f *eventFixture) {
+			for range 200 {
+				f.hub.append(&eventv1alpha1.Event{EventType: eventtype.PeerChurn})
+			}
+		}},
+		{name: "shutdown", release: func(t *testing.T, f *eventFixture) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			require.NoError(t, f.srv.Config.Shutdown(ctx))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			accepted := make(chan *writeTrackingConn, 1)
+			f := newEventFixtureOn(
+				t,
+				func(c *BarkConfig) { c.EventBufferSize = 64 },
+				false,
+				func(l net.Listener) net.Listener {
+					return &trackingListener{Listener: l, accepted: accepted}
+				},
+			)
+			f.srv.Config.RegisterOnShutdown(f.hub.close)
+			client, stall := stallingEventClient(t, f)
+			s := &subStream{ready: make(chan struct{})}
+			go func() {
+				defer close(s.ready)
+				s.stream, s.err = client.Subscribe(
+					t.Context(),
+					connect.NewRequest(&eventv1alpha1.SubscribeRequest{}),
+				)
+			}()
+			waitActive(t, f, 1)
+			// Stall before the batch: with receive windows this large, a
+			// client still reading could take the whole batch before it
+			// stopped, and the server's write would never block.
+			stall()
+			appendBlockingBatch(f)
+			conn := <-accepted
+			// The server is stuck once a connection write makes no progress
+			// between two polls.
+			var last uint64
+			require.Eventually(t, func() bool {
+				n := conn.written.Load()
+				stuck := conn.writing.Load() > 0 && n == last
+				last = n
+				return stuck
+			}, 5*time.Second, 10*time.Millisecond)
+			tc.release(t, f)
+			waitActive(t, f, 0)
+		})
+	}
+}
+
+// stallingEventClient returns a client of f whose connection stops being read
+// once stall is called, as when the client process is stopped. Its receive
+// windows exceed the stream, so the server can block only on the connection.
+func stallingEventClient(
+	t *testing.T,
+	f *eventFixture,
+) (eventconnect.EventServiceClient, func()) {
+	t.Helper()
+	var stalled atomic.Bool
+	resume := make(chan struct{})
+	base, ok := f.srv.Client().Transport.(*http.Transport)
+	require.True(t, ok)
+	transport := &http.Transport{
+		TLSClientConfig:   base.TLSClientConfig.Clone(),
+		ForceAttemptHTTP2: true,
+		HTTP2: &http.HTTP2Config{
+			MaxReceiveBufferPerConnection: 1 << 30,
+			MaxReceiveBufferPerStream:     1 << 30,
+		},
+		DialContext: func(
+			ctx context.Context,
+			network, addr string,
+		) (net.Conn, error) {
+			var d net.Dialer
+			c, err := d.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return &stallingConn{Conn: c, stalled: &stalled, resume: resume}, nil
+		},
+	}
+	t.Cleanup(func() {
+		close(resume)
+		transport.CloseIdleConnections()
+	})
+	return eventconnect.NewEventServiceClient(
+		&http.Client{Transport: transport},
+		f.srv.URL,
+	), func() { stalled.Store(true) }
+}
+
+type stallingConn struct {
+	net.Conn
+	stalled *atomic.Bool
+	resume  chan struct{}
+}
+
+func (c *stallingConn) Read(p []byte) (int, error) {
+	if c.stalled.Load() {
+		<-c.resume
+	}
+	return c.Conn.Read(p)
+}
+
+type trackingListener struct {
+	net.Listener
+	accepted chan *writeTrackingConn
+}
+
+func (l *trackingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	tc := &writeTrackingConn{Conn: c}
+	select {
+	case l.accepted <- tc:
+	default:
+	}
+	return tc, nil
+}
+
+// writeTrackingConn counts the bytes its writes complete and the writes in
+// progress.
+type writeTrackingConn struct {
+	net.Conn
+	writing atomic.Int32
+	written atomic.Uint64
+}
+
+func (c *writeTrackingConn) Write(p []byte) (int, error) {
+	c.writing.Add(1)
+	defer c.writing.Add(-1)
+	n, err := c.Conn.Write(p)
+	c.written.Add(uint64(n)) //nolint:gosec // n is never negative
+	return n, err
 }
 
 // appendBlockingBatch fills a 64-slot ring under one lock, so the handler reads
