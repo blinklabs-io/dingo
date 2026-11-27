@@ -594,6 +594,7 @@ func (p *PeerGovernor) enforcePeerLimits(
 	if p.config.TargetNumberOfEstablishedPeers > 0 {
 		events = append(events, p.demoteExcessWarmPeersLocked(
 			p.config.TargetNumberOfEstablishedPeers,
+			closes,
 		)...)
 	}
 
@@ -629,9 +630,13 @@ func (p *PeerGovernor) enforcePeerLimits(
 // demoted peer stays known: removing it would let the next peer-sharing or
 // ledger round add and dial it again. Topology peers and inbound peers are
 // never demoted here.
-// Returns events that should be published after releasing the lock.
-// Must be called with p.mu held.
-func (p *PeerGovernor) demoteExcessWarmPeersLocked(limit int) []pendingEvent {
+// Returns events that should be published after releasing the lock; the
+// demoted connections are appended to closes for the caller to close after
+// releasing it. Must be called with p.mu held.
+func (p *PeerGovernor) demoteExcessWarmPeersLocked(
+	limit int,
+	closes *[]deferredClose,
+) []pendingEvent {
 	var warm, candidates []*Peer
 	for _, peer := range p.peers {
 		if peer == nil || peer.State != PeerStateWarm ||
@@ -666,17 +671,13 @@ func (p *PeerGovernor) demoteExcessWarmPeersLocked(limit int) []pendingEvent {
 			"source", peer.Source,
 			"limit", limit,
 		)
-		if peer.Connection != nil && p.config.ConnManager != nil {
-			conn := p.config.ConnManager.GetConnectionById(peer.Connection.Id)
-			if conn != nil {
-				closeConnAndLog(
-					p.config.Logger,
-					conn,
-					"error closing connection for peer demoted due to limit exceeded",
-					"address",
-					peer.Address,
-				)
-			}
+		if peer.Connection != nil {
+			*closes = p.deferCloseLocked(
+				*closes,
+				peer.Connection.Id,
+				"error closing connection for peer demoted due to limit exceeded",
+				peer.Address,
+			)
 		}
 		peer.Connection = nil
 		p.recordPeerStateChange(peer.State, PeerStateCold)

@@ -220,6 +220,48 @@ func TestGovernorPassesCloseConnectionsOutsideLock(t *testing.T) {
 			},
 		},
 		{
+			name: "reconcile demotes a warm peer over the established target",
+			setup: func(t *testing.T) (*PeerGovernor, ouroboros.ConnectionId, func()) {
+				pg := NewPeerGovernor(PeerGovernorConfig{
+					Logger:                         slog.New(slog.NewJSONHandler(io.Discard, nil)),
+					EventBus:                       newMockEventBus(),
+					DisableOutbound:                true,
+					MinHotPeers:                    1,
+					TargetNumberOfEstablishedPeers: 1,
+				})
+				id := closeLockConnId(8)
+				// The hot peer meets MinHotPeers, so reconcile promotes
+				// neither warm peer before the established limit runs.
+				pg.peers = []*Peer{
+					{
+						Address:          "44.0.1.10:3001",
+						Source:           PeerSourceP2PGossip,
+						State:            PeerStateHot,
+						PerformanceScore: 0.9,
+						LastActivity:     time.Now(),
+						Connection:       &PeerConnection{Id: closeLockConnId(10), IsClient: true},
+					},
+					{
+						Address:          "44.0.1.8:3001",
+						Source:           PeerSourceP2PGossip,
+						State:            PeerStateWarm,
+						PerformanceScore: 0.1,
+						LastActivity:     time.Now(),
+						Connection:       &PeerConnection{Id: id, IsClient: true},
+					},
+					{
+						Address:          "44.0.1.9:3001",
+						Source:           PeerSourceP2PGossip,
+						State:            PeerStateWarm,
+						PerformanceScore: 0.9,
+						LastActivity:     time.Now(),
+						Connection:       &PeerConnection{Id: closeLockConnId(9), IsClient: true},
+					},
+				}
+				return pg, id, func() { pg.reconcile(context.Background()) }
+			},
+		},
+		{
 			name: "topology reload removes a local root",
 			setup: func(t *testing.T) (*PeerGovernor, ouroboros.ConnectionId, func()) {
 				pg := NewPeerGovernor(PeerGovernorConfig{

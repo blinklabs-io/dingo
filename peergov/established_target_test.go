@@ -213,7 +213,7 @@ func TestEnforcePeerLimits_DemotesExcessWarmAndKeepsPeerKnown(t *testing.T) {
 	pg.mu.Lock()
 	pg.peers = []*Peer{keep, drop, hot, topo}
 	removed := 0
-	events := pg.enforcePeerLimits(&removed)
+	events := pg.enforcePeerLimits(&removed, new([]deferredClose))
 	pg.mu.Unlock()
 
 	assert.Zero(t, removed, "the limit demotes, it does not remove")
