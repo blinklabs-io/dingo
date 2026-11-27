@@ -377,6 +377,18 @@ func (c *txsubmissionBlockingWaitConsumer) NextTx(
 	return c.Consumer.NextTx(blocking)
 }
 
+// NextTxUntil is the call the RequestTxIds callback makes for a blocking
+// wait, so it is the one reported.
+func (c *txsubmissionBlockingWaitConsumer) NextTxUntil(
+	blocking bool,
+	stop <-chan struct{},
+) *mempool.MempoolTransaction {
+	if blocking {
+		c.onBlockingNextTx()
+	}
+	return c.Consumer.NextTxUntil(blocking, stop)
+}
+
 // txsubmissionServiceWithoutHeadroom limits the wrapped service's method set
 // to mempool.Service so the relay pump uses its batched-request path.
 type txsubmissionServiceWithoutHeadroom struct {
