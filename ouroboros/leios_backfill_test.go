@@ -492,12 +492,13 @@ func TestFetchLeiosEbTxsBatchedUntilPastDeadline(t *testing.T) {
 }
 
 // dribbleBlockTxsRequester simulates a slow-but-alive relay that answers every
-// request in full but takes real time per round, so the
+// request in full but advances simulated time per round, so the
 // leios-fetch protocol per-message timeout never fires yet the fetch never
-// promptly completes. The per-round latency exercises the wall-clock per-attempt
-// deadline (it is relay-latency simulation, not goroutine synchronization).
+// promptly completes. Simulated time keeps the per-attempt deadline check
+// deterministic under race-test load.
 type dribbleBlockTxsRequester struct {
 	perRound time.Duration
+	now      *time.Time
 	calls    int
 }
 
@@ -507,7 +508,7 @@ func (r *dribbleBlockTxsRequester) BlockTxsRequest(
 	bitmaps map[uint16]uint64,
 ) (protocol.Message, error) {
 	r.calls++
-	time.Sleep(r.perRound)
+	*r.now = r.now.Add(r.perRound)
 	requested := leiosBitmapTxIndices(bitmaps)
 	slices.Sort(requested)
 	if len(requested) == 0 {
@@ -527,21 +528,25 @@ func (r *dribbleBlockTxsRequester) BlockTxsRequest(
 // deadline the fetch would run until every transaction was served, parking the
 // whole backfill on one peer.
 func TestFetchLeiosEbTxsBatchedUntilAbandonsSlowRelay(t *testing.T) {
-	t.Parallel()
 	o := &Ouroboros{}
 	o.config.LeiosTxFetchTailBudget = time.Minute
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x0a}}
 	// Each round serves one request batch, so the block spans many rounds.
 	const txCount = 16 * leiosTxFetchWindowsPerRequest * leiosTxFetchWindowSize
-	requester := &dribbleBlockTxsRequester{perRound: 20 * time.Millisecond}
+	clock := time.Now()
+	requester := &dribbleBlockTxsRequester{
+		perRound: 20 * time.Millisecond,
+		now:      &clock,
+	}
 
-	txs, err := o.fetchLeiosEbTxsBatchedUntil(
+	txs, err := o.fetchLeiosEbTxsBatchedUntilWithClock(
 		context.Background(),
 		requester,
 		point,
 		txCount,
 		nil,
-		time.Now().Add(60*time.Millisecond),
+		clock.Add(60*time.Millisecond),
+		func() time.Time { return clock },
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "deadline")
