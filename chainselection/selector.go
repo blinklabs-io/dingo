@@ -4327,6 +4327,54 @@ func (cs *ChainSelector) catchingUpLocked(bestKnownBlock *uint64) bool {
 	return best-local > catchUpPinBlockThreshold
 }
 
+// observeLocalProgressLocked brings the stall clock read by
+// localTipStalledLocked up to date for one selection pass. SetLocalTip runs
+// only on the chain-sync recycler's tick, which by default is longer than
+// catchUpPinStallTimeout, so a block applied since its last call would
+// otherwise count as no progress until the next tick. And while no live peer
+// has delivered a header past the applied tip, the node has nothing to apply,
+// so it is not stalled however long the chain has been quiet: without
+// restarting the clock then, the first header after a quiet spell of catchUpPinStallTimeout
+// would release the pin to whichever peer delivered it first, away from an
+// incumbent that delivers the same block moments later. Must be called with
+// cs.mutex held for writing.
+func (cs *ChainSelector) observeLocalProgressLocked() {
+	applied := cs.localTip.BlockNumber
+	if cs.config.AppliedTip != nil {
+		if tip, ok := cs.config.AppliedTip(); ok {
+			applied = tip.BlockNumber
+			if applied > cs.localTipProgressBlock {
+				cs.localTipProgressAt = cs.now()
+			}
+			cs.localTipProgressBlock = applied
+		}
+	}
+	// A clock that never started stays unstarted, as localTipStalledLocked
+	// documents for a freshly started node.
+	if cs.localTipProgressAt.IsZero() {
+		return
+	}
+	if !cs.deliveredFrontierPastLocked(applied) {
+		cs.localTipProgressAt = cs.now()
+	}
+}
+
+// deliveredFrontierPastLocked reports whether any live, eligible, non-stale
+// peer has delivered a header past block. It deliberately ignores Genesis
+// corroboration: a challenger leading with headers no other peer has
+// delivered yet is uncorroborated, and it is exactly what a node with a
+// silent incumbent is waiting to apply, so the stall clock must keep running
+// for it. Must be called with cs.mutex held.
+func (cs *ChainSelector) deliveredFrontierPastLocked(block uint64) bool {
+	for connId, pt := range cs.peerTips {
+		if pt.SelectionTip().BlockNumber > block &&
+			cs.peerLiveEligibleNonStaleLocked(connId, pt) {
+			return true
+		}
+	}
+	return false
+}
+
 // localTipStalledLocked reports whether the applied local tip has stopped
 // advancing for at least catchUpPinStallTimeout. This is the progress-aware
 // escape: when true, the pin releases so the node can switch away from a
@@ -4559,6 +4607,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	// One frontier serves the whole pass: the mode check, every candidate,
 	// the incumbent re-check and the anti-flap pin.
 	bestKnownBlock := cs.prepareSelectionLocked()
+	cs.observeLocalProgressLocked()
 	// Compute Genesis corroboration status once per evaluation, independent of
 	// which peer (if any) is ultimately selected, so a stalled selection still
 	// reports why the densest fast source was denied.
