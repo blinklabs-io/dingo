@@ -108,9 +108,9 @@ func proposalDepositAccountActive(
 // The return account's own active/CIP-0163 expiry gates are applied the
 // same way VotingPowerBatchSQL applies them to ordinary stake, so a return
 // account already excluded from the ordinary tally by those gates does not
-// have its deposit counted either. AlwaysAbstain delegators are excluded
-// entirely, mirroring tallyDRepVotes' treatment of Abstain stake as outside
-// every DRep's power (and every other bucket).
+// have its deposit counted either. AlwaysAbstain deposits are omitted from
+// the proposal tally; the complete boundary distribution retains them
+// separately.
 func ActiveProposalDepositDRepPower(
 	ctx context.Context,
 	db ledgerdb.LedgerDB,
@@ -118,9 +118,16 @@ func ActiveProposalDepositDRepPower(
 	currentEpoch uint64,
 	expiryEpoch uint64,
 ) (map[string]uint64, uint64, error) {
-	return activeProposalDepositDRepPowerAtEpochs(ctx,
+	power, err := activeProposalDepositDRepPowerAtEpochs(ctx,
 		db, txn, currentEpoch, expiryEpoch,
 	)
+	return power.Credential, power.NoConfidence, err
+}
+
+type proposalDepositDRepPower struct {
+	Credential   map[string]uint64
+	Abstain      uint64
+	NoConfidence uint64
 }
 
 func activeProposalDepositDRepPowerAtEpochs(
@@ -129,24 +136,25 @@ func activeProposalDepositDRepPowerAtEpochs(
 	txn ledgerdb.Txn,
 	activeProposalEpoch uint64,
 	expiryEpoch uint64,
-) (map[string]uint64, uint64, error) {
+) (proposalDepositDRepPower, error) {
 	deposits, err := activeProposalDepositsByReturnCredential(ctx,
 		db, txn, activeProposalEpoch,
 	)
 	if err != nil {
-		return nil, 0, err
+		return proposalDepositDRepPower{}, err
 	}
 	if len(deposits) == 0 {
-		return nil, 0, nil
+		return proposalDepositDRepPower{}, nil
 	}
 
 	accounts, err := accountsForProposalDeposits(ctx, db, txn, deposits)
 	if err != nil {
-		return nil, 0, err
+		return proposalDepositDRepPower{}, err
 	}
 
-	drepPower := make(map[string]uint64, len(accounts))
-	var noConfidencePower uint64
+	power := proposalDepositDRepPower{
+		Credential: make(map[string]uint64, len(accounts)),
+	}
 	for key, deposit := range deposits {
 		account, ok := accounts[key]
 		if !ok {
@@ -161,10 +169,17 @@ func activeProposalDepositDRepPowerAtEpochs(
 		}
 		amount := deposit.Amount
 		switch account.DrepType {
-		case models.DrepTypeAlwaysNoConfidence:
-			noConfidencePower, err = addUint64(noConfidencePower, amount)
+		case models.DrepTypeAlwaysAbstain:
+			power.Abstain, err = addUint64(power.Abstain, amount)
 			if err != nil {
-				return nil, 0, fmt.Errorf(
+				return proposalDepositDRepPower{}, fmt.Errorf(
+					"active proposal deposit abstain power: %w", err,
+				)
+			}
+		case models.DrepTypeAlwaysNoConfidence:
+			power.NoConfidence, err = addUint64(power.NoConfidence, amount)
+			if err != nil {
+				return proposalDepositDRepPower{}, fmt.Errorf(
 					"active proposal deposit no-confidence power: %w", err,
 				)
 			}
@@ -179,14 +194,14 @@ func activeProposalDepositDRepPowerAtEpochs(
 				account.Drep,
 			)
 			mapKey := drepRef.MapKey()
-			sum, err := addUint64(drepPower[mapKey], amount)
+			sum, err := addUint64(power.Credential[mapKey], amount)
 			if err != nil {
-				return nil, 0, fmt.Errorf(
+				return proposalDepositDRepPower{}, fmt.Errorf(
 					"active proposal deposit drep power: %w", err,
 				)
 			}
-			drepPower[mapKey] = sum
+			power.Credential[mapKey] = sum
 		}
 	}
-	return drepPower, noConfidencePower, nil
+	return power, nil
 }

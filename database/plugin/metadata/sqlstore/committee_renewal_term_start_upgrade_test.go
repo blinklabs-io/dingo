@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -46,6 +47,7 @@ func TestCommitteeRenewalTermStartUpgradeRestoresHotKey(t *testing.T) {
 	})
 	require.GreaterOrEqual(t, index, 0)
 	locker := migrations.NewFileLocker(path + ".migrate.lock")
+	var logs bytes.Buffer
 	openStore := func(versions []migrations.Migration) (*Store, *sql.DB) {
 		t.Helper()
 		db, err := sql.Open(
@@ -54,10 +56,15 @@ func TestCommitteeRenewalTermStartUpgradeRestoresHotKey(t *testing.T) {
 		)
 		require.NoError(t, err)
 		store, err := New(Config{
-			WriteDB:         db,
-			Dialect:         SQLiteDialect(),
-			Migrations:      versions,
-			MigrationLocker: locker,
+			WriteDB:           db,
+			Dialect:           SQLiteDialect(),
+			Migrations:        versions,
+			MigrationLocker:   locker,
+			LazyHotStatements: true,
+			Logger: slog.New(slog.NewTextHandler(
+				&logs,
+				nil,
+			)),
 		})
 		require.NoError(t, err)
 		require.NoError(t, store.Start(ctx))
@@ -136,6 +143,11 @@ INSERT INTO auth_committee_hot (
 	store, _ = openStore(registry)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	require.Equal(t, [][]byte{renewed}, activeColdCredentials(store))
+	require.NotContains(
+		t,
+		logs.String(),
+		"sqlstore: skipping prepared-statement cache entry",
+	)
 }
 
 func setEnactedUpdateCommittee(

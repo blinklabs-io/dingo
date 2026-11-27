@@ -127,6 +127,10 @@ type CertifiedClosureSource interface {
 		hash []byte,
 		slot uint64,
 	) ([]byte, []cbor.RawMessage, error)
+	// UsesTransactionBacking reports whether the ledger's offsets for the
+	// endorser block target its transaction-list record rather than a
+	// standalone closure blob.
+	UsesTransactionBacking(hash []byte, slot uint64) (bool, error)
 }
 
 // ledgerClosureSource reads through the ledger state: the parent may be a
@@ -154,6 +158,13 @@ func (s ledgerClosureSource) EndorserBlockData(
 	)
 }
 
+func (s ledgerClosureSource) UsesTransactionBacking(
+	hash []byte,
+	slot uint64,
+) (bool, error) {
+	return s.ls.db.CanUseLeiosTransactionBacking(slot, hash)
+}
+
 // databaseClosureSource reads a closure from a database alone, as a consumer
 // that applies blocks the ledger already committed does.
 type databaseClosureSource struct{ db *database.Database }
@@ -177,6 +188,13 @@ func (s databaseClosureSource) EndorserBlockData(
 	slot uint64,
 ) ([]byte, []cbor.RawMessage, error) {
 	return readEndorserBlockData(s.db, hash, slot, nil)
+}
+
+func (s databaseClosureSource) UsesTransactionBacking(
+	hash []byte,
+	slot uint64,
+) (bool, error) {
+	return s.db.CanUseLeiosTransactionBacking(slot, hash)
 }
 
 func readEndorserBlockData(
@@ -313,6 +331,37 @@ func LoadCertifiedClosure(
 		manifest:          manifest,
 		transactions:      blockTransactions,
 	}, nil
+}
+
+// PayloadLocator names the datums, scripts and metadata of the closure's
+// transactions by their position in the endorser block's transaction list,
+// which the LeiosDB keeps for a certified endorser block.
+func (c *CertifiedClosure) PayloadLocator() (types.PayloadLocator, error) {
+	backing, err := database.LeiosEndorserBacking(c.transactions)
+	if err != nil {
+		return nil, err
+	}
+	return types.NewEndorserPayloadLocator(
+		c.EndorserBlockSlot, c.EndorserBlockHash.Bytes(), backing,
+	)
+}
+
+// CertifiedClosurePayloads returns the payload locator of the closure block
+// certifies, or nil when it certifies none and its own CBOR holds its
+// payloads.
+func (ls *LedgerState) CertifiedClosurePayloads(
+	ctx context.Context,
+	block models.Block,
+) (types.PayloadLocator, error) {
+	decoded, err := block.Decode()
+	if err != nil {
+		return nil, fmt.Errorf("decode block %x: %w", block.Hash, err)
+	}
+	closure, err := ls.loadCertifiedClosure(ctx, decoded)
+	if err != nil || closure == nil {
+		return nil, err
+	}
+	return closure.PayloadLocator()
 }
 
 // RawTransactions returns the closure's transactions as delivered, in

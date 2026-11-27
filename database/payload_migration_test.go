@@ -1,0 +1,445 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package database
+
+import (
+	"bytes"
+	"testing"
+
+	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	"github.com/stretchr/testify/require"
+)
+
+// MigratePayloadOffsets reads each row's block from the block stores: a
+// released store's copies become offsets into the canonical block at the
+// row's slot, and every reader returns the bytes the copy held.
+func TestMigratePayloadOffsetsReadsBlocksFromTheBlockStores(t *testing.T) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	datum := []byte{0xd8, 0x79, 0x9f, 0x01, 0xff}
+	script := []byte{0x49, 0x01, 0x00, 0x00, 0x22, 0x23, 0x32, 0x00}
+	metadata := []byte{0xa1, 0x19, 0x02, 0xd1, 0x65, 'h', 'e', 'l', 'l', 'o'}
+	block := models.Block{
+		ID: 1, Slot: 100, Number: 1, Type: 1,
+		Hash: bytes.Repeat([]byte{0xc1}, 32),
+		Cbor: bytes.Join([][]byte{
+			[]byte("header"), datum, script, metadata, []byte("trailer"),
+		}, []byte{'|'}),
+	}
+	require.NoError(t, pair.ledger.BlockCreate(block, nil))
+
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		_, err := raw.Exec(query, args...)
+		require.NoError(t, err, query)
+	}
+	datumHash := lcommon.Blake2b256Hash(datum)
+	scriptHash := bytes.Repeat([]byte{0x22}, 28)
+	txHash := bytes.Repeat([]byte{0x11}, 32)
+	exec(
+		"INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, 100)",
+		datumHash.Bytes(), datum,
+	)
+	exec(
+		"INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 100, 1)",
+		scriptHash, script,
+	)
+	exec(`INSERT INTO "transaction" (id, hash) VALUES (1, ?)`, txHash)
+	exec(
+		`INSERT INTO applied_transaction
+(tx_id, block_hash, metadata, slot, type, fee, collateral_fee, ttl, block_index, valid)
+VALUES (1, ?, ?, 100, 0, '0', '0', '0', 0, 1)`,
+		block.Hash, metadata,
+	)
+
+	require.NoError(t, pair.indexer.MigratePayloadOffsets(t.Context()))
+
+	gotDatum, err := pair.indexer.GetDatum(t.Context(), datumHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, datum, gotDatum.RawDatum)
+	gotMetadata, err := pair.indexer.GetTransactionMetadataByHash(
+		t.Context(), txHash, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, metadata, gotMetadata)
+	var column []byte
+	require.NoError(t, raw.QueryRow("SELECT content FROM script").Scan(&column))
+	offset, err := types.DecodeCborOffset(column)
+	require.NoError(t, err, "the script column holds an offset")
+	require.EqualValues(t, 100, offset.BlockSlot)
+	require.Equal(t, block.Hash, offset.BlockHash[:])
+	require.Equal(
+		t, script,
+		block.Cbor[offset.ByteOffset:offset.ByteOffset+offset.ByteLength],
+	)
+
+	// A second run converts nothing and still reads the same bytes.
+	require.NoError(t, pair.indexer.MigratePayloadOffsets(t.Context()))
+	gotDatum, err = pair.indexer.GetDatum(t.Context(), datumHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, datum, gotDatum.RawDatum)
+}
+
+// A datum or script row written by a store that rolled back keeps the slot of
+// the block that first carried it. When no canonical block is stored at that
+// slot and no canonical transaction carries the content, nothing reachable
+// names the row: the migration removes it instead of stopping.
+func TestMigratePayloadOffsetsRemovesRowsNoCanonicalTransactionCarries(
+	t *testing.T,
+) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	datum := []byte{0xd8, 0x79, 0x80}
+	_, err := raw.Exec(
+		"INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, 999)",
+		lcommon.Blake2b256Hash(datum).Bytes(), datum,
+	)
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		"INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 998, 1)",
+		bytes.Repeat([]byte{0x22}, 28), []byte{0x41, 0x00},
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, pair.indexer.MigratePayloadOffsets(t.Context()))
+
+	var count int
+	require.NoError(t, raw.QueryRow("SELECT COUNT(*) FROM datum").Scan(&count))
+	require.Zero(t, count, "the orphaned datum row was kept")
+	require.NoError(t, raw.QueryRow("SELECT COUNT(*) FROM script").Scan(&count))
+	require.Zero(t, count, "the orphaned script row was kept")
+}
+
+// An orphaned row whose content a canonical transaction carries is pointed at
+// the canonical block that carries it, and its slot follows, so the block is
+// the one the active-payload check holds.
+func TestMigratePayloadOffsetsRepointsOrphanedRowsToACanonicalCarrier(
+	t *testing.T,
+) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	datum := []byte{0xd8, 0x79, 0x9f, 0x01, 0xff}
+	script := []byte{0x49, 0x01, 0x00, 0x00, 0x22, 0x23, 0x32, 0x00}
+	block := models.Block{
+		ID: 1, Slot: 100, Number: 1, Type: 1,
+		Hash: bytes.Repeat([]byte{0xc1}, 32),
+		Cbor: bytes.Join([][]byte{
+			[]byte("header"), datum, script, []byte("trailer"),
+		}, []byte{'|'}),
+	}
+	require.NoError(t, pair.ledger.BlockCreate(block, nil))
+
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		_, err := raw.Exec(query, args...)
+		require.NoError(t, err, query)
+	}
+	datumHash := lcommon.Blake2b256Hash(datum)
+	scriptHash := bytes.Repeat([]byte{0x22}, 28)
+	exec("INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, 999)",
+		datumHash.Bytes(), datum)
+	exec("INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 999, 1)",
+		scriptHash, script)
+	exec(`INSERT INTO "transaction" (id, hash) VALUES (1, ?)`,
+		bytes.Repeat([]byte{0x11}, 32))
+	exec(`INSERT INTO applied_transaction
+(tx_id, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid)
+VALUES (1, ?, 100, 0, '0', '0', '0', 0, 1)`, block.Hash)
+	exec("INSERT INTO plutus_data (data, transaction_id) VALUES (?, 1)", datum)
+	exec("INSERT INTO witness_scripts (script_hash, transaction_id, type) VALUES (?, 1, 1)",
+		scriptHash)
+
+	require.NoError(t, pair.indexer.MigratePayloadOffsets(t.Context()))
+
+	gotDatum, err := pair.indexer.GetDatum(t.Context(), datumHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, datum, gotDatum.RawDatum)
+	require.EqualValues(t, 100, gotDatum.AddedSlot)
+	var content []byte
+	var created uint64
+	require.NoError(t, raw.QueryRow(
+		"SELECT content, created_slot FROM script",
+	).Scan(&content, &created))
+	offset, err := types.DecodeCborOffset(content)
+	require.NoError(t, err)
+	require.EqualValues(t, 100, offset.BlockSlot)
+	require.EqualValues(t, 100, created)
+	require.Equal(
+		t, script,
+		block.Cbor[offset.ByteOffset:offset.ByteOffset+offset.ByteLength],
+	)
+}
+
+// A row that a canonical transaction carries, whose bytes the canonical block
+// does not hold, is not dropped: the migration stops with the row named.
+func TestMigratePayloadOffsetsFailsWhenACarrierBlockLacksTheBytes(
+	t *testing.T,
+) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	datum := []byte{0xd8, 0x79, 0x80}
+	block := models.Block{
+		ID: 1, Slot: 100, Number: 1, Type: 1,
+		Hash: bytes.Repeat([]byte{0xc1}, 32),
+		Cbor: []byte("a block that carries no datum"),
+	}
+	require.NoError(t, pair.ledger.BlockCreate(block, nil))
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		_, err := raw.Exec(query, args...)
+		require.NoError(t, err, query)
+	}
+	exec("INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, 999)",
+		lcommon.Blake2b256Hash(datum).Bytes(), datum)
+	exec(`INSERT INTO "transaction" (id, hash) VALUES (1, ?)`,
+		bytes.Repeat([]byte{0x11}, 32))
+	exec(`INSERT INTO applied_transaction
+(tx_id, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid)
+VALUES (1, ?, 100, 0, '0', '0', '0', 0, 1)`, block.Hash)
+	exec("INSERT INTO plutus_data (data, transaction_id) VALUES (?, 1)", datum)
+
+	err := pair.indexer.MigratePayloadOffsets(t.Context())
+	require.ErrorContains(t, err, "datum")
+	require.ErrorIs(t, err, types.ErrPayloadNotInBlock)
+	var column []byte
+	require.NoError(
+		t, raw.QueryRow("SELECT raw_datum FROM datum").Scan(&column),
+	)
+	require.Equal(t, datum, column, "the datum row was changed")
+}
+
+// With no archive configured, the payload of a block that expired locally is
+// not kept: the migration completes, the column holds a marker with no bytes,
+// and a read fails naming the expired block instead of returning empty or
+// wrong bytes. Rows of blocks that are still stored convert as usual.
+func TestMigratePayloadOffsetsDropsPayloadsOfExpiredBlocksWithoutAnArchive(
+	t *testing.T,
+) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	expiredDatum := []byte{0xd8, 0x79, 0x9f, 0x01, 0xff}
+	keptDatum := []byte{0xd8, 0x79, 0x9f, 0x02, 0xff}
+	expired := models.Block{
+		ID: 1, Slot: 100, Number: 1, Type: 1,
+		Hash: bytes.Repeat([]byte{0xe1}, 32),
+		Cbor: bytes.Join([][]byte{[]byte("old"), expiredDatum}, []byte{'|'}),
+	}
+	kept := models.Block{
+		ID: 2, Slot: 200, Number: 2, Type: 1,
+		Hash: bytes.Repeat([]byte{0xe2}, 32),
+		Cbor: bytes.Join([][]byte{[]byte("new"), keptDatum}, []byte{'|'}),
+	}
+	require.NoError(t, pair.ledger.BlockCreate(expired, nil))
+	require.NoError(t, pair.ledger.BlockCreate(kept, nil))
+	_, err := pair.ledger.PruneBlock(t.Context(), expired.Slot, expired.Hash)
+	require.NoError(t, err)
+
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	for _, row := range []struct {
+		datum []byte
+		slot  uint64
+	}{{expiredDatum, 100}, {keptDatum, 200}} {
+		_, err := raw.Exec(
+			"INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, ?)",
+			lcommon.Blake2b256Hash(row.datum).Bytes(), row.datum, row.slot,
+		)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, pair.indexer.MigratePayloadOffsets(t.Context()))
+
+	_, err = pair.indexer.GetDatum(
+		t.Context(), lcommon.Blake2b256Hash(expiredDatum).Bytes(), nil,
+	)
+	require.ErrorIs(t, err, types.ErrHistoryExpired)
+	var expiredErr *types.HistoryExpiredError
+	require.ErrorAs(t, err, &expiredErr)
+	require.EqualValues(t, 100, expiredErr.Slot)
+	require.Equal(t, expired.Hash, expiredErr.Hash)
+	var column []byte
+	require.NoError(t, raw.QueryRow(
+		"SELECT raw_datum FROM datum WHERE added_slot = 100",
+	).Scan(&column))
+	require.NotContains(t, string(column), string(expiredDatum))
+
+	gotKept, err := pair.indexer.GetDatum(
+		t.Context(), lcommon.Blake2b256Hash(keptDatum).Bytes(), nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, keptDatum, gotKept.RawDatum)
+}
+
+type auxScripts struct {
+	lcommon.AuxiliaryData
+	v1 []lcommon.PlutusV1Script
+}
+
+func (a auxScripts) NativeScripts() ([]lcommon.NativeScript, error) { return nil, nil }
+
+func (a auxScripts) PlutusV1Scripts() ([]lcommon.PlutusV1Script, error) {
+	return a.v1, nil
+}
+
+func (a auxScripts) PlutusV2Scripts() ([]lcommon.PlutusV2Script, error) { return nil, nil }
+func (a auxScripts) PlutusV3Scripts() ([]lcommon.PlutusV3Script, error) { return nil, nil }
+func (a auxScripts) PlutusV4Scripts() ([]lcommon.PlutusV4Script, error) { return nil, nil }
+
+type auxTransaction struct {
+	lcommon.Transaction
+	aux lcommon.AuxiliaryData
+}
+
+func (t auxTransaction) AuxiliaryData() lcommon.AuxiliaryData { return t.aux }
+
+// An orphaned script row whose only canonical carrier is a transaction's
+// auxiliary data, which no indexed table links to the transaction, is
+// re-pointed to that block and not deleted.
+func TestMigratePayloadOffsetsRepointsAScriptCarriedOnlyInAuxiliaryData(
+	t *testing.T,
+) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	script := lcommon.PlutusV1Script{0x49, 0x01, 0x00, 0x00, 0x22, 0x23, 0x32, 0x00}
+	block := models.Block{
+		ID: 1, Slot: 100, Number: 1, Type: 1,
+		Hash: bytes.Repeat([]byte{0xc1}, 32),
+		Cbor: bytes.Join([][]byte{
+			[]byte("header"), script.RawScriptBytes(), []byte("trailer"),
+		}, []byte{'|'}),
+	}
+	require.NoError(t, pair.ledger.BlockCreate(block, nil))
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	_, err := raw.Exec(
+		"INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 999, 1)",
+		script.Hash().Bytes(), script.RawScriptBytes(),
+	)
+	require.NoError(t, err)
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(bytes.Repeat([]byte{0x11}, 32))
+	source := &slotPayloadSource{
+		db: pair.indexer,
+		decode: func(uint, []byte) ([]lcommon.Transaction, error) {
+			return []lcommon.Transaction{auxTransaction{
+				Transaction: tx,
+				aux:         auxScripts{v1: []lcommon.PlutusV1Script{script}},
+			}}, nil
+		},
+	}
+	migrator, ok := pair.indexer.Metadata().(metadata.PayloadColumnMigrator)
+	require.True(t, ok)
+
+	require.NoError(t, migrator.MigratePayloadColumns(t.Context(), source))
+
+	var content []byte
+	var created uint64
+	require.NoError(t, raw.QueryRow(
+		"SELECT content, created_slot FROM script",
+	).Scan(&content, &created), "the script row was deleted")
+	offset, err := types.DecodeCborOffset(content)
+	require.NoError(t, err)
+	require.EqualValues(t, 100, created)
+	require.Equal(
+		t, script.RawScriptBytes(),
+		block.Cbor[offset.ByteOffset:offset.ByteOffset+offset.ByteLength],
+	)
+}
+
+// An orphaned row that no readable canonical block carries, while a canonical
+// block expired with no archive, might be carried in that block. The payload
+// is not kept: the migration completes and a read fails with the
+// expired-history error instead of the row being deleted.
+func TestMigratePayloadOffsetsMarksAnOrphanWhoseCarrierMayHaveExpired(
+	t *testing.T,
+) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	script := []byte{0x49, 0x01, 0x00, 0x00, 0x22, 0x23, 0x32, 0x00}
+	expired := models.Block{
+		ID: 1, Slot: 100, Number: 1, Type: 1,
+		Hash: bytes.Repeat([]byte{0xe1}, 32),
+		Cbor: bytes.Join([][]byte{[]byte("old"), script}, []byte{'|'}),
+	}
+	require.NoError(t, pair.ledger.BlockCreate(expired, nil))
+	_, err := pair.ledger.PruneBlock(t.Context(), expired.Slot, expired.Hash)
+	require.NoError(t, err)
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	scriptHash := bytes.Repeat([]byte{0x22}, 28)
+	_, err = raw.Exec(
+		"INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 999, 1)",
+		scriptHash, script,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, pair.indexer.MigratePayloadOffsets(t.Context()))
+
+	_, err = pair.indexer.GetScript(
+		t.Context(), lcommon.NewBlake2b224(scriptHash).Bytes(), nil,
+	)
+	require.ErrorIs(t, err, types.ErrHistoryExpired)
+	var expiredErr *types.HistoryExpiredError
+	require.ErrorAs(t, err, &expiredErr)
+	require.EqualValues(t, 100, expiredErr.Slot)
+}
+
+// The real block decoder runs over real preview-network blocks: none of their
+// transactions carries the orphaned script, so the scan reads and decodes
+// every block, finds no carrier and the row is deleted. The test data holds no
+// transaction with a script in auxiliary data to find.
+func TestMigratePayloadOffsetsScansRealBlocks(t *testing.T) {
+	t.Parallel()
+	pair := newIndexerTestDB(t, nil)
+	imm, err := immutable.New("immutable/testdata")
+	require.NoError(t, err)
+	it, err := imm.BlocksInChunk(299)
+	require.NoError(t, err)
+	created := 0
+	for created < 100 {
+		next, err := it.Next()
+		require.NoError(t, err)
+		if next == nil {
+			break
+		}
+		decoded, err := ledger.NewBlockFromCbor(next.Type, next.Cbor)
+		require.NoError(t, err)
+		created++
+		require.NoError(t, pair.ledger.BlockCreate(models.Block{
+			ID: uint64(created), Slot: next.Slot, Hash: next.Hash,
+			Number: decoded.BlockNumber(), Type: next.Type, Cbor: next.Cbor,
+		}, nil))
+	}
+	require.NotZero(t, created, "no real blocks were loaded")
+	raw := rawSQLiteMetadataFixture(t, pair.indexer)
+	_, err = raw.Exec(
+		"INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 999999999, 1)",
+		bytes.Repeat([]byte{0x22}, 28), []byte{0x49, 0x01, 0x00, 0x00, 0x22},
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, pair.indexer.MigratePayloadOffsets(t.Context()))
+
+	var count int
+	require.NoError(t, raw.QueryRow("SELECT COUNT(*) FROM script").Scan(&count))
+	require.Zero(t, count)
+}

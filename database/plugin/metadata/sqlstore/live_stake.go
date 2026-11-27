@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -96,19 +95,6 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
     updated_slot = excluded.updated_slot,
     calculation_version = excluded.calculation_version`
 
-// SetRewardLiveStakeDrained records that the live-stake family is drained
-// (or not): every maintenance path of reward_live_stake then does nothing and
-// RewardLiveStakeNeedsBackfill reports false.
-func (s *Store) SetRewardLiveStakeDrained(drained bool) {
-	s.rewardLiveStakeDrained.Store(drained)
-}
-
-// ErrRewardLiveStakeDrained is returned by the batched rebuilds, which carry
-// a caller's checkpoint state, once the live-stake family is drained.
-var ErrRewardLiveStakeDrained = errors.New(
-	"reward_live_stake is drained from the metadata store",
-)
-
 func (s *Store) refreshRewardLiveStakeAggregate(
 	ctx context.Context,
 	db queryer,
@@ -130,7 +116,7 @@ func (s *Store) refreshRewardLiveStakeAggregateNetOfPending(
 	slot uint64,
 	pending int64,
 ) error {
-	if len(ref.Key) == 0 || s.liveStakeMaintenanceStopped() {
+	if len(ref.Key) == 0 {
 		return nil
 	}
 	utxoStake, err := s.sumCredentialUtxoStake(ctx, db, ref)
@@ -334,7 +320,7 @@ func (s *Store) refreshRewardLiveStakeAggregateDelta(
 	slot uint64,
 	delta int64,
 ) error {
-	if len(ref.Key) == 0 || s.liveStakeMaintenanceStopped() {
+	if len(ref.Key) == 0 {
 		return nil
 	}
 	prior, err := s.priorLiveStake(ctx, db, ref)
@@ -351,14 +337,6 @@ func (s *Store) refreshRewardLiveStakeAggregateDelta(
 		utxoStake, err = s.sumCredentialUtxoStake(ctx, db, ref)
 		if err != nil {
 			return fmt.Errorf("sum reward live stake UTxOs: %w", err)
-		}
-		// Utxo rows already include this write's outputs and spends; the
-		// live set does not yet, so its sum takes the write's own change.
-		if preWrite, _ := ctx.Value(liveUtxoPreWriteKey{}).(bool); preWrite {
-			utxoStake, err = applyUtxoStakeDelta(utxoStake, delta, ref)
-			if err != nil {
-				return err
-			}
 		}
 	}
 	return s.applyRewardLiveStakeAggregateWithPrior(
@@ -992,9 +970,6 @@ func (s *Store) rebuildRewardLiveStake(
 	txn types.Txn,
 	fromRunningTotals bool,
 ) error {
-	if s.rewardLiveStakeDrained.Load() {
-		return nil
-	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1118,9 +1093,6 @@ func (s *Store) rebuildRewardLiveStakeInBatches(
 	runTxn func(func(types.Txn) error) error,
 	afterBatch func(int64) error,
 ) error {
-	if s.rewardLiveStakeDrained.Load() {
-		return ErrRewardLiveStakeDrained
-	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1680,9 +1652,6 @@ func (u *rewardLiveStakeUpserter) Close() error {
 func (s *Store) RewardLiveStakeNeedsBackfill(
 	txn types.Txn,
 ) (bool, error) {
-	if s.rewardLiveStakeDrained.Load() {
-		return false, nil
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return false, fmt.Errorf(
@@ -1834,121 +1803,10 @@ LEFT JOIN reward_live_stake ON reward_live_stake.credential_tag = canonical.cred
 	return orphan, nil
 }
 
-func (s *Store) StaleConsensusStakeSnapshotsExist(
-	txn types.Txn,
-) (bool, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return false, fmt.Errorf(
-			"stale consensus stake snapshots: resolve db: %w",
-			err,
-		)
-	}
-	var stale bool
-	if s.familyDrained(nodesettings.FamilyRewardInputs) {
-		// The mark snapshots' versions are in the live UTxO set, which the
-		// node checks itself; the emptied table holds none.
-		err = db.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM pool_stake_snapshot
-    WHERE snapshot_type IN ('mark', 'set', 'go')
-      AND calculation_version <> ?
-)`, models.RewardStakeCalculationVersion).Scan(&stale)
-		if err != nil {
-			return false, fmt.Errorf(
-				"checking stake snapshot provenance: %w", err,
-			)
-		}
-		return stale, nil
-	}
-	// The reward_snapshot clause deliberately does not restrict to
-	// authoritative rows: a non-authoritative fallback row (written by
-	// captureMarkSnapshot) is a real source for reward calculation whenever
-	// no authoritative row has been captured yet, so it must fail this gate
-	// on its own version rather than rely on authoritativeMarkRewardSnapshotExists
-	// separately rejecting a version mismatch when the fallback is consulted.
-	err = db.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM pool_stake_snapshot
-    WHERE snapshot_type IN ('mark', 'set', 'go')
-      AND calculation_version <> ?
-) OR EXISTS (
-    SELECT 1 FROM reward_snapshot
-    WHERE snapshot_type = 'mark'
-      AND calculation_version <> ?
-)`,
-		models.RewardStakeCalculationVersion,
-		models.RewardStakeCalculationVersion,
-	).Scan(&stale)
-	if err != nil {
-		return false, fmt.Errorf(
-			"checking stake snapshot provenance: %w",
-			err,
-		)
-	}
-	return stale, nil
-}
-
-// StaleConsensusStakeSnapshotEpochs is diagnostics only, for the operator-
-// facing error StaleConsensusStakeSnapshotsExist gates on; it is not itself
-// part of the fail-closed check.
-func (s *Store) StaleConsensusStakeSnapshotEpochs(
-	txn types.Txn,
-) ([]uint64, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"stale consensus stake snapshot epochs: resolve db: %w",
-			err,
-		)
-	}
-	query := `
-SELECT epoch FROM pool_stake_snapshot
-WHERE snapshot_type IN ('mark', 'set', 'go') AND calculation_version <> ?
-UNION
-SELECT epoch FROM reward_snapshot
-WHERE snapshot_type = 'mark' AND calculation_version <> ?
-ORDER BY epoch`
-	args := []any{
-		models.RewardStakeCalculationVersion,
-		models.RewardStakeCalculationVersion,
-	}
-	if s.familyDrained(nodesettings.FamilyRewardInputs) {
-		query = `
-SELECT epoch FROM pool_stake_snapshot
-WHERE snapshot_type IN ('mark', 'set', 'go') AND calculation_version <> ?
-ORDER BY epoch`
-		args = args[:1]
-	}
-	rows, err := db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"listing stale stake snapshot epochs: %w",
-			err,
-		)
-	}
-	defer rows.Close()
-	var epochs []uint64
-	for rows.Next() {
-		var epoch uint64
-		if err := rows.Scan(&epoch); err != nil {
-			return nil, err
-		}
-		epochs = append(epochs, epoch)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return epochs, nil
-}
-
 func (s *Store) GetPostSnapshotRewardCredits(
 	slot uint64,
 	txn types.Txn,
 ) ([]*models.AccountRewardDelta, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, err
-	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -2016,9 +1874,6 @@ func (s *Store) GetPostSnapshotRewardCreditEvents(
 	slot uint64,
 	txn types.Txn,
 ) ([]*models.AccountRewardDelta, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, err
-	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -2083,9 +1938,6 @@ func (s *Store) GetLiveStakeInputsForPools(
 	expiryEpoch uint64,
 	txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	if err := s.refuseDrained(rewardReadTables...); err != nil {
-		return nil, err
-	}
 	if len(poolKeyHashes) == 0 {
 		return nil, nil
 	}
@@ -2291,102 +2143,6 @@ WHERE pool_key_hash IS NOT NULL AND LENGTH(pool_key_hash) > 0`)
 		ret = append(ret, hash)
 	}
 	return ret, rows.Err()
-}
-
-// RefreshRewardLiveStakeRefs recomputes the live reward aggregate of each
-// credential in refs, recording slot as its update.
-func (s *Store) RefreshRewardLiveStakeRefs(
-	refs []models.StakeCredentialRef,
-	slot uint64,
-	txn types.Txn,
-) error {
-	return s.withWriteTransaction(
-		txn,
-		func(db queryer, ctx context.Context) error {
-			return s.refreshRewardLiveStakeRefs(
-				ctx, db, mergeStakeCredentialRefs(refs), slot,
-			)
-		},
-	)
-}
-
-// eachRewardLiveStakePage is how many rows EachRewardLiveStake reads per
-// query.
-const eachRewardLiveStakePage = 1000
-
-// EachRewardLiveStake calls fn with every reward_live_stake row in id order.
-// It reads the table whether or not the family is drained, so it is for the
-// drain's own comparison, which runs before the rows are deleted.
-func (s *Store) EachRewardLiveStake(
-	txn types.Txn,
-	fn func(*models.RewardLiveStake) error,
-) error {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return fmt.Errorf("each reward live stake: resolve db: %w", err)
-	}
-	var after uint
-	for {
-		rows, err := db.QueryContext(ctx, `
-SELECT id, credential_tag, staking_key, pool_key_hash, utxo_stake,
-       reward_stake, total_stake, registered
-FROM reward_live_stake
-WHERE id > ?
-ORDER BY id
-LIMIT ?`, after, eachRewardLiveStakePage)
-		if err != nil {
-			return fmt.Errorf("read reward live stake: %w", err)
-		}
-		n := 0
-		for rows.Next() {
-			var row models.RewardLiveStake
-			var utxo, reward, total sql.NullString
-			if err := rows.Scan(
-				&row.ID, &row.CredentialTag, &row.StakingKey,
-				&row.PoolKeyHash, &utxo, &reward, &total, &row.Registered,
-			); err != nil {
-				_ = rows.Close()
-				return fmt.Errorf("scan reward live stake: %w", err)
-			}
-			for _, f := range []struct {
-				name string
-				in   sql.NullString
-				out  *types.Uint64
-			}{
-				{"utxo stake", utxo, &row.UtxoStake},
-				{"reward stake", reward, &row.RewardStake},
-				{"total stake", total, &row.TotalStake},
-			} {
-				if !f.in.Valid {
-					_ = rows.Close()
-					return fmt.Errorf(
-						"reward live stake %d:%x has no %s",
-						row.CredentialTag, row.StakingKey, f.name,
-					)
-				}
-				v, err := parseUint64("reward live stake "+f.name, f.in.String)
-				if err != nil {
-					_ = rows.Close()
-					return err
-				}
-				*f.out = types.Uint64(v)
-			}
-			after = row.ID
-			n++
-			if err := fn(&row); err != nil {
-				_ = rows.Close()
-				return err
-			}
-		}
-		err = rows.Err()
-		_ = rows.Close()
-		if err != nil {
-			return err
-		}
-		if n < eachRewardLiveStakePage {
-			return nil
-		}
-	}
 }
 
 // errLiveUtxoStakeIncomplete reports a stake read that would fall back to

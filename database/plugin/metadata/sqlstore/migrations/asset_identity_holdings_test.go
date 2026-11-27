@@ -27,7 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const assetSplitVersion = 74
+const assetSplitVersion = 73
 
 // legacyAssetRow is one row of the pre-split asset table. A nil field is
 // stored as NULL.
@@ -425,6 +425,9 @@ func TestAssetIdentityHoldingsExpandReplays(t *testing.T) {
 	want := assetHoldings(t, db)
 
 	_, err := db.Exec(`
+DELETE FROM schema_migrations WHERE version > ?`, assetSplitVersion)
+	require.NoError(t, err)
+	_, err = db.Exec(`
 UPDATE schema_migrations
 SET phase = 'expand', dirty = 1, completed_at = NULL WHERE version = ?`,
 		assetSplitVersion)

@@ -17,15 +17,19 @@ package plugins
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -43,53 +47,10 @@ func localStorageSelections() StorageSelections {
 	}
 }
 
-func TestOpenDatabaseReturnsRecoveryErrorOnRuntime(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	deps := StorageDependencies{DataDir: dataDir}
-	runtime, err := OpenDatabase(
-		context.Background(),
-		&database.Config{DataDir: dataDir},
-		localStorageSelections(),
-		deps,
-	)
-	require.NoError(t, err)
-	firstRuntime := runtime
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		require.NoError(t, firstRuntime.Close(ctx))
-	})
-
-	metaTxn := runtime.Database.Metadata().Transaction(t.Context())
-	require.NoError(
-		t,
-		runtime.Database.Metadata().SetCommitTimestamp(123456789, metaTxn),
-	)
-	require.NoError(t, metaTxn.Commit())
-	require.NoError(t, runtime.Close(context.Background()))
-
-	runtime, err = OpenDatabase(
-		context.Background(),
-		&database.Config{DataDir: dataDir},
-		localStorageSelections(),
-		deps,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, runtime)
-	t.Cleanup(func() {
-		require.NoError(t, runtime.Close(context.Background()))
-	})
-	var timestampErr database.CommitTimestampError
-	require.ErrorAs(t, runtime.RecoveryError(), &timestampErr)
-	require.Equal(t, int64(123456789), timestampErr.MetadataTimestamp)
-	require.Zero(t, timestampErr.BlobTimestamp)
-}
-
 func TestOpenDatabaseErrorDoesNotReturnLiveRuntime(t *testing.T) {
 	t.Parallel()
 	selections := localStorageSelections()
-	selections.Metadata.Provider = "missing"
+	selections.Blob.Provider = "missing"
 	runtime, err := OpenDatabase(
 		context.Background(),
 		&database.Config{DataDir: t.TempDir()},
@@ -101,11 +62,11 @@ func TestOpenDatabaseErrorDoesNotReturnLiveRuntime(t *testing.T) {
 	require.ErrorContains(
 		t,
 		err,
-		"plugin provider not found: storage.metadata/missing",
+		"plugin provider not found: storage.blob/missing",
 	)
 }
 
-func openSplitPair(
+func openIndexerPair(
 	t *testing.T,
 	reg prometheus.Registerer,
 ) (*DatabaseRuntime, *database.Database, StorageDependencies, string) {
@@ -133,18 +94,11 @@ func openSplitPair(
 
 func TestOpenIndexerDatabaseIsASeparateAPIStoreOverTheSharedBlobs(t *testing.T) {
 	t.Parallel()
-	runtime, indexer, _, dataDir := openSplitPair(t, nil)
+	runtime, indexer, _, dataDir := openIndexerPair(t, nil)
 
 	require.Equal(t, "core", runtime.Database.StorageMode())
 	require.Equal(t, "api", indexer.StorageMode())
-	require.FileExists(t, filepath.Join(dataDir, "metadata.sqlite"))
 	require.FileExists(t, filepath.Join(dataDir, IndexerDirName, "metadata.sqlite"))
-
-	// A row written through one store is not visible through the other.
-	require.NoError(t, indexer.SetSyncState("only_in_indexer", "x", nil))
-	got, err := runtime.Database.GetSyncState("only_in_indexer", nil)
-	require.NoError(t, err)
-	require.Empty(t, got)
 
 	// The indexer sees the ledger's blocks through the shared blob store.
 	require.NoError(t, runtime.Database.BlockCreate(models.Block{
@@ -155,23 +109,12 @@ func TestOpenIndexerDatabaseIsASeparateAPIStoreOverTheSharedBlobs(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, uint64(7), blk.Slot)
 
-	// Committing in the indexer must not move the ledger's commit timestamp
-	// pairing: the consensus database reopens cleanly with no mismatch.
-	before, err := runtime.Database.Blob().GetCommitTimestamp()
-	require.NoError(t, err)
-	txn := indexer.Transaction(t.Context(), true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return indexer.SetSyncState("k", "v", txn)
-	}))
-	after, err := runtime.Database.Blob().GetCommitTimestamp()
-	require.NoError(t, err)
-	require.Equal(t, before, after, "an indexer commit must not write the ledger's commit timestamp")
 }
 
 func TestOpenIndexerDatabaseRegistersMetricsUnderTheIndexerRole(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
-	openSplitPair(t, reg)
+	openIndexerPair(t, reg)
 	families, err := reg.Gather()
 	require.NoError(t, err)
 	var indexerSeries, ledgerSeries int
@@ -219,7 +162,7 @@ func TestIndexerMetadataSelection(t *testing.T) {
 	_, _, err = IndexerMetadataSelection(pg, "/data")
 	require.ErrorContains(t, err, "its own namespace",
 		"a server store without the consensus namespace would share its tables")
-	pg.SplitIndexer = true
+	pg.IndexerDB = true
 	sel, _, err = IndexerMetadataSelection(pg, "/data")
 	require.NoError(t, err)
 	require.Equal(t, "postgres://a/ledger", sel.Config["dsn"],
@@ -230,9 +173,98 @@ func TestConfiguredStorageSelectionsSelectsTheConsensusNamespace(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{StorageMode: "api"}
 	cfg.Plugins.Storage.Metadata = plugin.Selection{Provider: "postgres"}
-	require.True(t, ConfiguredStorageSelections(cfg).SplitIndexer)
+	require.True(t, ConfiguredStorageSelections(cfg).IndexerDB)
 	cfg.StorageMode = "core"
-	require.False(t, ConfiguredStorageSelections(cfg).SplitIndexer)
+	require.False(t, ConfiguredStorageSelections(cfg).IndexerDB)
 	cfg.ServerCoreNamespace = true
-	require.True(t, ConfiguredStorageSelections(cfg).SplitIndexer)
+	require.True(t, ConfiguredStorageSelections(cfg).IndexerDB)
+}
+
+// Opening an API IndexerDB over a pending address-history rebuild reads a
+// closure transaction's body through the ledger's Leios store while the
+// database is still being constructed. The store belongs to the ledger's
+// database, so the IndexerDB must neither open the directory a second time nor
+// close it.
+func TestOpenIndexerDatabaseRebuildReadsClosureThroughConsensusLeiosStore(
+	t *testing.T,
+) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	deps := StorageDependencies{DataDir: dataDir, StorageMode: "core"}
+	selections := localStorageSelections()
+	dbConfig := &database.Config{DataDir: dataDir, IndexerLayout: "split"}
+	runtime, err := OpenDatabase(t.Context(), dbConfig, selections, deps)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, runtime.Close(context.WithoutCancel(t.Context())))
+	})
+	consensus := runtime.Database
+
+	// A closure transaction body that produces one output.
+	body, err := cbor.Encode(map[uint]any{
+		0: []any{},
+		1: []any{map[uint]any{
+			0: append([]byte{0x60}, bytes.Repeat([]byte{0x51}, 28)...),
+			1: uint64(1_000_000),
+		}},
+		2: uint64(5),
+	})
+	require.NoError(t, err)
+	txHash := lcommon.Blake2b256Hash(body).Bytes()
+	const ebSlot, rbSlot = uint64(90), uint64(100)
+	ebHash := bytes.Repeat([]byte{0xee}, 32)
+	rbHash := bytes.Repeat([]byte{0xbb}, 32)
+	leios, err := consensus.LeiosDB()
+	require.NoError(t, err)
+	require.NoError(t, leios.PutClosure(
+		leiosdb.Ref{Slot: ebSlot, Hash: ebHash}, body,
+	))
+
+	// First open: creates the schema, with no rebuild pending.
+	indexer, err := OpenIndexerDatabase(
+		t.Context(), runtime.Host, consensus, dbConfig, selections, deps,
+	)
+	require.NoError(t, err)
+	var ebHashArr [32]byte
+	copy(ebHashArr[:], ebHash)
+	blobTxn := indexer.BlobTxn(true)
+	require.NoError(t, blobTxn.Do(func(txn *database.Txn) error {
+		return indexer.Blob().SetTx(
+			txn.Blob(), txHash, database.EncodeTxOffset(&database.CborOffset{
+				BlockSlot:  ebSlot,
+				BlockHash:  ebHashArr,
+				ByteLength: uint32(len(body)), //nolint:gosec // small test body
+			}),
+		)
+	}))
+	require.NoError(t, indexer.Close())
+
+	// Leave the legacy rebuild pending for the next open.
+	raw, err := sql.Open(
+		"sqlite",
+		"file:"+filepath.Join(dataDir, IndexerDirName, "metadata.sqlite")+
+			"?_pragma=busy_timeout(30000)",
+	)
+	require.NoError(t, err)
+	result, err := testutil.ExecTransactionInsert(raw, `
+INSERT INTO "transaction" (hash, block_hash, slot, type, block_index, valid)
+VALUES (?, ?, ?, 0, 0, TRUE)`, txHash, rbHash, int64(rbSlot))
+	require.NoError(t, err)
+	id, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = raw.ExecContext(t.Context(), `
+INSERT INTO address_transaction_rebuild_source (transaction_id) VALUES (?)`, id)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	indexer, err = OpenIndexerDatabase(
+		t.Context(), runtime.Host, consensus, dbConfig, selections, deps,
+	)
+	require.NoError(t, err)
+	require.NoError(t, indexer.Close())
+
+	// The ledger's Leios store is still open and still serves the closure.
+	got, err := leios.GetClosure(leiosdb.Ref{Slot: ebSlot, Hash: ebHash})
+	require.NoError(t, err)
+	require.Equal(t, body, got)
 }

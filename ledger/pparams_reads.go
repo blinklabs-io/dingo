@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"bytes"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -28,17 +27,17 @@ import (
 // keeps them.
 type PParamsReader interface {
 	// PParamsLoaded reports whether the reader holds every protocol
-	// parameter row; until it does, reads stay on the metadata store.
+	// parameter row; until it does, the set does not serve the reads.
 	PParamsLoaded() (bool, error)
 	// PParamsForEra returns era's rows in the order they were written.
 	PParamsForEra(era uint) ([]models.PParams, error)
 }
 
 // pparamsReader returns the set's protocol parameter reader and the read
-// mode, or false when these reads stay on the metadata store.
+// mode, or false when the set does not serve them.
 func (ls *LedgerState) pparamsReader(txn ledgerdb.Txn) (PParamsReader, bool) {
 	_, mode := ls.utxoSetReader()
-	if !mode {
+	if !mode || ls.utxoSetFailed.Load() {
 		return nil, false
 	}
 	r, ok := ls.readSet(txn).(PParamsReader)
@@ -96,13 +95,6 @@ func latestPParams(rows []models.PParams, epoch uint64) *models.PParams {
 		}
 	}
 	return best
-}
-
-func samePParamsRows(a, b []models.PParams) bool {
-	return slices.EqualFunc(a, b, func(x, y models.PParams) bool {
-		return x.AddedSlot == y.AddedSlot && x.Epoch == y.Epoch &&
-			x.EraId == y.EraId && bytes.Equal(x.Cbor, y.Cbor)
-	})
 }
 
 func (s stagingLedgerDB) GetPParams(

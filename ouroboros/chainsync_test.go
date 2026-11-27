@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"io"
 	"log/slog"
 	"net"
@@ -3171,16 +3172,19 @@ func newTestLedgerStateWithChainAtAndConfig(
 	cardanoConfig *cardano.CardanoNodeConfig,
 ) (*ledger.LedgerState, *database.Database) {
 	return newTestLedgerStateWithChainAtAndConfigAndSet(
-		t, blockCount, dataDir, cardanoConfig, livesettest.New(),
+		t, blockCount, dataDir, cardanoConfig, nil,
 	)
 }
 
+// newTestLedgerStateWithChainAtAndConfigAndSet calls prepare, when set, with
+// the LedgerDB set after the chain's blocks are applied to it and before the
+// ledger opens on it.
 func newTestLedgerStateWithChainAtAndConfigAndSet(
 	t *testing.T,
 	blockCount uint64,
 	dataDir string,
 	cardanoConfig *cardano.CardanoNodeConfig,
-	utxoSet ledger.UtxoSetWriter,
+	prepare func(*utxoset.Set),
 ) (*ledger.LedgerState, *database.Database) {
 	t.Helper()
 
@@ -3210,9 +3214,22 @@ func newTestLedgerStateWithChainAtAndConfigAndSet(
 		cm.SetLedger(testSecurityParamLedger{securityParam: 2160}),
 	)
 
+	// Each block is one the ledger applied, so it is a point in the LedgerDB
+	// set's journal, which a query pinned to it reads.
+	set := livesettest.OpenLedgerDB(t, db)
+	for slot := uint64(1); slot <= blockCount; slot++ {
+		point := ocommon.NewPoint(slot, bytes.Repeat([]byte{byte(slot)}, 32))
+		require.NoError(t, set.ApplyUtxoChanges(
+			&point, []ledger.UtxoEvent{{Point: point}},
+		))
+	}
+	if prepare != nil {
+		prepare(set)
+	}
+
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           utxoSet,
+		UtxoSet:           set,
 		ChainManager:      cm,
 		CardanoNodeConfig: cardanoConfig,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -3689,6 +3706,9 @@ func TestOutboundChainsyncStartFailureClosesConnection(t *testing.T) {
 		BlockNumber: 2,
 	})
 	require.NoError(t, dbtest.CloseDatabase(db))
+	// The fixture's LedgerDB set opened after the leak baseline; its
+	// background goroutines are not the connection's.
+	require.NoError(t, livesettest.CloseLedgerDB(db))
 	_, _, anchorErr := ls.RollbackWindowIntersectAnchor(context.Background())
 	require.Error(t, anchorErr, "fixture must produce an anchor lookup error")
 
@@ -5519,13 +5539,36 @@ func TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply(
 func TestChainsyncServerRequestNextIteratorErrorAfterAwaitReplyUnparksClient(
 	t *testing.T,
 ) {
-	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	waiting := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWaiter := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	f := newChainsyncServerFixtureWithConfig(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		func(o *Ouroboros) {
+			o.chainsyncServerAwaitNextHook = func() {
+				close(waiting)
+				<-release
+			}
+		},
+	)
+	t.Cleanup(releaseWaiter)
 	f.parkInAwaitReply(t)
+	testutil.RequireReceive(
+		t,
+		waiting,
+		5*time.Second,
+		"post-AwaitReply iterator waiter did not start",
+	)
 
-	// Break the backing store, then wake the parked iterator so its next
-	// lookup fails for real rather than returning the chain-tip sentinel.
+	// Break the backing store before the waiter reads, so the failure is
+	// immediate and independent of iterator notification timing.
 	require.NoError(t, dbtest.CloseDatabase(f.o.ledgerState.Database()))
-	f.o.ledgerState.Chain().NotifyIterators()
+	releaseWaiter()
 
 	f.requireClientUnparked(
 		t,
@@ -5912,7 +5955,7 @@ func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
-		UtxoSet:      livesettest.New(),
+		UtxoSet:      livesettest.OpenLedgerDB(t, db),
 		ChainManager: cm,
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -7553,7 +7596,7 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		event.ChainsyncResyncReasonPeerTipBehindMithril,
 		event.ChainsyncResyncReasonLiveTxValidationRecovery,
 		event.ChainsyncResyncReasonDeterministicTxValidationRecovery,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 		event.ChainsyncResyncReasonReplayRecoveryNonConverging,
 		event.ChainsyncResyncReasonChainSwitchCursorAhead,
 		// This connection runs no chainsync client, so the local reasons
@@ -8177,7 +8220,7 @@ func TestChainsyncResyncDeniesPeerByReason(
 			wantDeniesPeer: false,
 		},
 		{
-			reason: event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+			reason: event.ChainsyncResyncReasonRollbackBelowUtxoSetJournal,
 			// The rollback cannot be crossed locally, so the stale bearer
 			// must be replaced before the peer can retry its chain.
 			wantDeniesPeer: false,

@@ -15,12 +15,11 @@
 // Package leiosdb holds Leios endorser blocks in a store of their own, apart
 // from the ranking-block blob store.
 //
-// Records are keyed slot first and split into two partitions. The volatile
-// partition holds every endorser block seen for a slot range that can still be
-// rolled back, and is garbage-collected by slot once the immutable tip has
-// passed it. The immutable partition holds the endorser blocks certified by a
-// ranking block that has itself become immutable, and keeps them permanently.
-// An endorser block is moved from one to the other by Pin.
+// Records are keyed slot first. Current payloads live in a stable data
+// partition, while small volatile and pin records carry retention state. The
+// older volatile and immutable payload partitions remain readable. Unpinned
+// data is garbage-collected by slot once the immutable tip has passed it;
+// pinned data is kept permanently.
 package leiosdb
 
 import (
@@ -122,24 +121,26 @@ const (
 type Store interface {
 	// PutVolatile stores content for the endorser block. It returns
 	// ErrBehindImmutableTip when the slot is below the collection watermark and
-	// the block is not pinned. A pinned block's content goes to the immutable
+	// the block is not pinned. A pinned block's content updates the stable data
 	// partition, which is how a content-pending pin is repaired.
 	PutVolatile(eb Ref, content Content) error
-	// PutClosure stores the certified closure CBOR that transaction offsets
-	// resolve into. It follows the same partition rule as PutVolatile except
-	// that it is never refused: the closure belongs to a block certification
-	// has already accepted.
+	// PutClosure stores legacy standalone certified-closure CBOR. The write is
+	// never refused: the backing belongs to a block certification already
+	// accepted.
 	PutClosure(eb Ref, closure []byte) error
-	// Get returns the endorser block's content from the immutable partition,
-	// then the volatile one. ErrNotFound when neither holds a manifest.
+	// Get returns the endorser block's content from current storage, then its
+	// compatible legacy partition. ErrNotFound when neither holds a manifest.
 	Get(eb Ref) (Content, error)
-	// GetClosure returns the closure CBOR, immutable partition first.
+	// GetClosure returns the CBOR that certified-closure offsets resolve into.
+	// It supports both current transaction-list backing and legacy standalone
+	// closure records.
 	GetClosure(eb Ref) ([]byte, error)
 	// IsPinned reports whether the endorser block has been pinned.
 	IsPinned(eb Ref) (bool, error)
-	// Pin moves the endorser block into the immutable partition, recording the
-	// ranking block that certifies it. It is idempotent and never fails for
-	// missing content; see PinResult.
+	// Pin records the ranking block that certifies an endorser block and removes
+	// its volatile marker. Current payloads stay under the same keys; legacy
+	// volatile payloads are promoted into their immutable partition. Pin is
+	// idempotent and never fails for missing content; see PinResult.
 	Pin(eb, certifier Ref) (PinResult, error)
 	// AdvancePinnedThrough records that every certification up to and
 	// including the ranking block has been pinned. It never moves backwards.
@@ -152,14 +153,14 @@ type Store interface {
 	GarbageCollect(ctx context.Context, beforeSlot uint64) (int, error)
 	// Watermarks returns the persisted frontiers.
 	Watermarks() (Watermarks, error)
-	// MaxSlot returns the highest slot holding a manifest in either
-	// partition. found is false when the store holds none.
+	// MaxSlot returns the highest slot holding a manifest in current or legacy
+	// storage. found is false when the store holds none.
 	MaxSlot() (slot uint64, found bool, err error)
 	// PendingPins lists pins that still lack complete content.
 	PendingPins() ([]PendingPin, error)
 	// RollbackPins unpins the endorser blocks certified by a ranking block
-	// above the target's slot, moving their records back to the volatile
-	// partition, then sets the pin
+	// above the target's slot, restoring their volatile marker (or moving legacy
+	// records back to the volatile partition), then sets the pin
 	// watermark to target and lowers the collection watermark to the target's
 	// slot so the re-applied chain can store and pin again. A pin whose
 	// certifier is unknown (the zero Ref) is kept. It returns the number of
@@ -171,4 +172,12 @@ type Store interface {
 	SetMigrationState(MigrationState) error
 	// Close releases the store.
 	Close() error
+}
+
+// TransactionBackingStore can use its transaction-list record directly as
+// certified-offset backing. Store implementations without this extension keep
+// receiving a standalone closure through PutClosure.
+type TransactionBackingStore interface {
+	PutTransactionBacking(eb Ref, transactions []byte) error
+	HasStandaloneClosure(eb Ref) (bool, error)
 }

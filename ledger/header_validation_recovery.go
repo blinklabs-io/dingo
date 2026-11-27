@@ -213,7 +213,7 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	}
 
 	yielded := false
-	err = ls.withConsumedUtxoPruneBoundary(func() error {
+	err = ls.withRollbackBoundary(func() error {
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}

@@ -20,6 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,7 +39,7 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
-				ls, db := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
+				ls, _ := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
 				bus := event.NewEventBus(nil, nil)
 				defer bus.Close()
 				ls.config.EventBus = bus
@@ -47,7 +48,7 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 					received <- ev.Data.(RewardFactsEvent)
 				})
 				ldb := ls.ledgerDB()
-				round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+				round, ok, err := ls.engine().ResolveStakeRewardPrecomputeRound(
 					4,
 					200,
 					1200,
@@ -57,7 +58,7 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 				txn := ldb.Begin(t.Context(), true)
 				defer txn.Release()
 				if chunked {
-					done, err := ls.stakeRewardPrecomputeChunksInTxn(
+					done, err := ls.engine().StakeRewardPrecomputeChunksInTxn(
 						t.Context(),
 						txn,
 						round,
@@ -66,10 +67,10 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 					require.NoError(t, err)
 					require.True(t, done)
 				} else {
-					app, ok, err := ls.precomputeStakeRewardsCalculate(txn, 4, 200, 1200)
+					app, ok, err := ls.engine().PrecomputeStakeRewardsCalculate(txn, 4, 200, 1200)
 					require.NoError(t, err)
 					require.True(t, ok)
-					require.NoError(t, ls.saveStakeRewardPrecompute(ldb, txn, app, 4, 200, 1200))
+					require.NoError(t, ls.engine().SaveStakeRewardPrecompute(ldb, txn, app, 4, 200, 1200))
 				}
 				testutil.RequireNoReceive(
 					t,
@@ -79,7 +80,7 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 				)
 				if !commit {
 					require.NoError(t, txn.Rollback())
-					cursor, err := loadRewardPrecomputeCursor(ldb, nil, 1)
+					cursor, err := epochengine.LoadRewardPrecomputeCursor(ldb, nil, 1)
 					require.NoError(t, err)
 					require.Nil(t, cursor)
 					testutil.RequireNoReceive(
@@ -102,16 +103,16 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 					RewardFactsEvent{SnapshotEpoch: 1, CapturedSlot: 200},
 					ev,
 				)
-				cursor, err := loadRewardPrecomputeCursor(ldb, nil, 1)
+				cursor, err := epochengine.LoadRewardPrecomputeCursor(ldb, nil, 1)
 				require.NoError(t, err)
 				require.NotNil(t, cursor, "event readers can discover the round")
 				require.True(t, cursor.Done)
-				require.Equal(t, len(round.poolInputs), cursor.CompletedPools)
-				require.Equal(t, round.inputFingerprint, cursor.InputFingerprint)
+				require.Equal(t, len(round.PoolInputs), cursor.CompletedPools)
+				require.Equal(t, round.InputFingerprint, cursor.InputFingerprint)
 				require.Equal(t, uint64(200), cursor.CapturedSlot)
-				rows, err := db.Metadata().GetRewardPoolOutputs(1, nil)
+				rows, err := ldb.GetRewardPoolOutputs(1, nil)
 				require.NoError(t, err)
-				require.Equal(t, rewardPoolOutputFingerprint(rows), cursor.OutputFingerprint)
+				require.Equal(t, epochengine.RewardPoolOutputFingerprint(rows), cursor.OutputFingerprint)
 				require.NotEmpty(
 					t,
 					rows,
@@ -128,13 +129,13 @@ func TestSinglePassShelleyRewardCompletion(t *testing.T) {
 	ldb := ls.ledgerDB()
 	txn := ldb.Begin(t.Context(), true)
 	defer txn.Release()
-	app, ok, err := ls.precomputeStakeRewardsCalculate(txn, 4, 1200, 1200)
+	app, ok, err := ls.engine().PrecomputeStakeRewardsCalculate(txn, 4, 1200, 1200)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.False(t, app.params.SupportsPerPoolMemberRewards())
-	require.NoError(t, ls.saveStakeRewardPrecompute(ldb, txn, app, 4, 1200, 1200))
+	require.False(t, app.Params.SupportsPerPoolMemberRewards())
+	require.NoError(t, ls.engine().SaveStakeRewardPrecompute(ldb, txn, app, 4, 1200, 1200))
 	require.NoError(t, txn.Commit())
-	cursor, err := loadRewardPrecomputeCursor(ldb, nil, 1)
+	cursor, err := epochengine.LoadRewardPrecomputeCursor(ldb, nil, 1)
 	require.NoError(t, err)
 	require.NotNil(t, cursor)
 	require.True(t, cursor.Done)

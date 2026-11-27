@@ -261,6 +261,7 @@ func (ls *LedgerState) WithParallelLeiosSelection(
 			_ func(func() error) (bool, error),
 			apply txValidationApplyFunc,
 			_ txValidationResolveFunc,
+			_ txValidationAppliedFunc,
 			measure forging.TxRefScriptSizeFunc,
 		) error {
 			var validated *preparedLeiosSelectionTransaction

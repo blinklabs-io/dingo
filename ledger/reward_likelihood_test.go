@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -31,54 +32,54 @@ import (
 )
 
 func TestRewardLikelihoodReferenceArithmetic(t *testing.T) {
-	current := rewardPoolLikelihood(3, 1_000, 0.0005)
-	require.Len(t, current, rewardLikelihoodSampleCount)
+	current := epochengine.RewardPoolLikelihood(3, 1_000, 0.0005)
+	require.Len(t, current, epochengine.RewardLikelihoodSampleCount)
 	require.Equal(t, uint32(0xc17e5bef), math.Float32bits(current[0]))
 	require.Equal(t, uint32(0xc016cef1), math.Float32bits(current[49]))
 	require.Equal(t, uint32(0xbf02dbf1), math.Float32bits(current[99]))
 
-	previous := make([]float32, rewardLikelihoodSampleCount)
+	previous := make([]float32, epochengine.RewardLikelihoodSampleCount)
 	for i := range previous {
 		previous[i] = float32(i) / 10
 	}
-	combined, err := combineRewardLikelihood(previous, current)
+	combined, err := epochengine.CombineRewardLikelihood(previous, current)
 	require.NoError(t, err)
 	require.Equal(t, float32(0), combined[0])
 	require.Equal(t, uint32(0x418f9bc7), math.Float32bits(combined[49]))
 	require.Equal(t, uint32(0x41c25ec6), math.Float32bits(combined[99]))
 
-	estimate, err := rewardPerformanceEstimate(combined)
+	estimate, err := epochengine.RewardPerformanceEstimate(combined)
 	require.NoError(t, err)
 	require.Equal(t, 0.915, estimate)
 }
 
 func TestRewardLikelihoodEncodingRejectsWrongShape(t *testing.T) {
-	_, err := encodeRewardLikelihood(make([]float32, 99))
+	_, err := epochengine.EncodeRewardLikelihood(make([]float32, 99))
 	require.ErrorContains(t, err, "99 samples")
-	_, err = decodeRewardLikelihood(make([]byte, 399))
+	_, err = epochengine.DecodeRewardLikelihood(make([]byte, 399))
 	require.ErrorContains(t, err, "399 bytes")
 }
 
 func TestRewardLikelihoodHistoryCompleteness(t *testing.T) {
-	bootstrap := stakeRewardEpochs{snapshot: 4, pots: 4, bootstrap: true}
-	require.True(t, rewardLikelihoodHistoryComplete(nil, 5, bootstrap))
+	bootstrap := epochengine.StakeRewardEpochs{Snapshot: 4, Pots: 4, Bootstrap: true}
+	require.True(t, epochengine.RewardLikelihoodHistoryComplete(nil, 5, bootstrap))
 	require.True(
 		t,
-		rewardLikelihoodHistoryComplete(nil, 1, stakeRewardEpochs{}),
+		epochengine.RewardLikelihoodHistoryComplete(nil, 1, epochengine.StakeRewardEpochs{}),
 	)
 	require.False(
 		t,
-		rewardLikelihoodHistoryComplete(nil, 5, stakeRewardEpochs{}),
+		epochengine.RewardLikelihoodHistoryComplete(nil, 5, epochengine.StakeRewardEpochs{}),
 	)
-	require.False(t, rewardLikelihoodHistoryComplete(
+	require.False(t, epochengine.RewardLikelihoodHistoryComplete(
 		&models.RewardLikelihoodState{Complete: false},
 		6,
 		bootstrap,
 	))
-	require.True(t, rewardLikelihoodHistoryComplete(
+	require.True(t, epochengine.RewardLikelihoodHistoryComplete(
 		&models.RewardLikelihoodState{Complete: true},
 		6,
-		stakeRewardEpochs{},
+		epochengine.StakeRewardEpochs{},
 	))
 }
 
@@ -147,33 +148,83 @@ func TestRewardLikelihoodStakeShareUsesCirculation(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	pool := bytes.Repeat([]byte{0x31}, 28)
-	app := &stakeRewardApplication{
-		params: rewards.Parameters{
+	app := &epochengine.StakeRewardApplication{
+		Params: rewards.Parameters{
 			Decentralization: big.NewRat(0, 1),
 			ActiveSlotsCoeff: big.NewRat(1, 10),
 			EpochLength:      100,
 		},
-		pots:                     &models.RewardAdaPots{},
-		epochs:                   stakeRewardEpochs{pots: 0},
-		snapshotTotalActiveStake: 100_000,
-		totalCirculation:         1_000_000,
-		likelihoodPoolInputs: []*models.RewardPoolInput{{
+		Pots:                     &models.RewardAdaPots{},
+		Epochs:                   epochengine.StakeRewardEpochs{Pots: 0},
+		SnapshotTotalActiveStake: 100_000,
+		TotalCirculation:         1_000_000,
+		LikelihoodPoolInputs: []*models.RewardPoolInput{{
 			PoolKeyHash:    pool,
 			DelegatedStake: 10_000,
 		}},
-		likelihoodBlockCounts: map[string]uint64{string(pool): 1},
+		LikelihoodBlockCounts: map[string]uint64{string(pool): 1},
 	}
-	require.NoError(t, ls.saveRewardLikelihoodForApplication(app, 10, nil))
+	require.NoError(t, ls.engine().SaveRewardLikelihoodForApplication(app, 10, nil))
 
-	rows, err := ls.ledgerDB().GetRewardPoolLikelihoods(1, nil)
+	rows, err := ls.rewardLikelihoodDB().GetRewardPoolLikelihoods(1, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
-	got, err := decodeRewardLikelihood(rows[0].LogWeights)
+	got, err := epochengine.DecodeRewardLikelihood(rows[0].LogWeights)
 	require.NoError(t, err)
-	want, err := combineRewardLikelihood(
-		make([]float32, rewardLikelihoodSampleCount),
-		rewardPoolLikelihood(1, 100, rewardLeaderProbability(0.1, 0.01, 0)),
+	want, err := epochengine.CombineRewardLikelihood(
+		make([]float32, epochengine.RewardLikelihoodSampleCount),
+		epochengine.RewardPoolLikelihood(1, 100, epochengine.RewardLeaderProbability(0.1, 0.01, 0)),
 	)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
+}
+
+// Two reward updates applied in one transaction chain their likelihoods: the
+// second reads the first's pools from the transaction's staged changes, before
+// either reaches the LedgerDB set.
+func TestRewardLikelihoodChainsWithinOneTransaction(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	pool := bytes.Repeat([]byte{0x32}, 28)
+	app := func(pots uint64) *epochengine.StakeRewardApplication {
+		return &epochengine.StakeRewardApplication{
+			Params: rewards.Parameters{
+				Decentralization: big.NewRat(0, 1),
+				ActiveSlotsCoeff: big.NewRat(1, 10),
+				EpochLength:      100,
+			},
+			Pots:             &models.RewardAdaPots{CapturedSlot: pots * 100},
+			Epochs:           epochengine.StakeRewardEpochs{Pots: pots},
+			TotalCirculation: 1_000_000,
+			LikelihoodPoolInputs: []*models.RewardPoolInput{{
+				PoolKeyHash:    pool,
+				DelegatedStake: 10_000,
+			}},
+			LikelihoodBlockCounts: map[string]uint64{string(pool): 1},
+		}
+	}
+	txn := ls.ledgerDB().Begin(t.Context(), true)
+	require.NoError(t, ls.engine().SaveRewardLikelihoodForApplication(app(0), 100, txn))
+	require.NoError(t, ls.engine().SaveRewardLikelihoodForApplication(app(1), 200, txn))
+	require.NoError(t, txn.Commit())
+	txn.Release()
+
+	rows, err := ls.rewardLikelihoodDB().GetRewardPoolLikelihoods(2, nil)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	got, err := epochengine.DecodeRewardLikelihood(rows[0].LogWeights)
+	require.NoError(t, err)
+	current := epochengine.RewardPoolLikelihood(1, 100, epochengine.RewardLeaderProbability(0.1, 0.01, 0))
+	first, err := epochengine.CombineRewardLikelihood(
+		make([]float32, epochengine.RewardLikelihoodSampleCount), current,
+	)
+	require.NoError(t, err)
+	want, err := epochengine.CombineRewardLikelihood(first, current)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	state, err := ls.rewardLikelihoodDB().GetRewardLikelihoodStateAtSlot(150, nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, uint64(1), state.Epoch)
 }

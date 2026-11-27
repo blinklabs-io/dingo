@@ -18,8 +18,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 var errReadsBusy = errors.New("too many concurrent SQLite queries")
@@ -38,54 +37,9 @@ type readLimits struct {
 	// maxOffset is the largest OFFSET a paginated tool accepts; zero means
 	// unlimited.
 	maxOffset int
-	// drained reports the ledger-state families whose SQL rows are deleted;
-	// nil means none is.
-	drained func() nodesettings.FamilyMask
-}
-
-// ErrDrainedFamily is wrapped by the error a tool returns for a read of SQL
-// tables whose family the metadata store no longer holds.
-var ErrDrainedFamily = errors.New(
-	"the metadata database no longer holds this ledger-state family",
-)
-
-func (l *readLimits) drainedMask() nodesettings.FamilyMask {
-	if l == nil || l.drained == nil {
-		return 0
-	}
-	return l.drained()
-}
-
-// refuseDrainedTables refuses a caller's SQL that names a table of a drained
-// family: the table is empty, and an empty answer would read as the truth.
-func (l *readLimits) refuseDrainedTables(query string) error {
-	family, table, ok := statedrain.DrainedTableIn(l.drainedMask(), query)
-	if !ok {
-		return nil
-	}
-	return fmt.Errorf(
-		"%w: table %s belongs to family %s; use a tool that reads the ledger state",
-		ErrDrainedFamily,
-		table,
-		family,
-	)
-}
-
-// refuseDrainedFamilies refuses a tool path that reads the SQL tables of any
-// of families directly.
-func (l *readLimits) refuseDrainedFamilies(
-	families ...nodesettings.Family,
-) error {
-	mask := l.drainedMask()
-	for _, family := range families {
-		if mask.Has(family) {
-			return fmt.Errorf(
-				"%w: family %s; the tool needs the ledger state",
-				ErrDrainedFamily, family,
-			)
-		}
-	}
-	return nil
+	// payloads resolves the offsets the payload columns hold into the bytes
+	// they name; nil when the server has no block source.
+	payloads types.PayloadResolver
 }
 
 func newReadLimits() *readLimits {
@@ -168,4 +122,22 @@ func (l *readLimits) assetScanLimit() int {
 		return -1
 	}
 	return l.maxAssetRows + 1
+}
+
+// payloadColumn returns the bytes a payload column holds. The columns hold the
+// offset of their bytes in the block that carried them, which the resolver
+// reads from the block stores; a column holding the bytes themselves is
+// returned as it is.
+func (l *readLimits) payloadColumn(column []byte) ([]byte, error) {
+	if _, err := types.DecodeCborOffset(column); err != nil &&
+		!types.IsEndorserOffset(column) && !types.IsExpiredPayload(column) &&
+		!types.IsLiveOutputOffset(column) {
+		return column, nil
+	}
+	if l == nil || l.payloads == nil {
+		return nil, errors.New(
+			"the payload is stored as a block offset and this server has no block source to read it from",
+		)
+	}
+	return l.payloads.ResolvePayload(column)
 }

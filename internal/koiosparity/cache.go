@@ -1673,7 +1673,7 @@ func (c *Cache) GetAllFetchedEpochs(network string) ([]uint64, error) {
 // never enables accounts sees no behavior change and never has an epoch queued
 // for recheck purely because its account coverage happens to be absent (which
 // is simply expected in that mode, not a discrepancy worth flagging). See
-// ARCHITECTURE.md's Koios Parity Tracker "Per-account exact parity" subsection
+// README.md's "Per-account exact parity" section
 // for the full epoch-selection design this is part of.
 func (c *Cache) GetEpochsNeedingCheck(
 	network string,
@@ -1731,8 +1731,7 @@ func (c *Cache) GetEpochsNeedingCheck(
 // unions this into its epoch list only when cfg.AccountsEnabled, and skips
 // the redundant pool-history re-fetch for any epoch this returns that
 // GetUncachedEpochs did not also return (see fetchEpoch's caller in fetch.go).
-// See ARCHITECTURE.md's Koios Parity Tracker "Per-account exact parity"
-// subsection.
+// See README.md's "Per-account exact parity" section.
 func (c *Cache) GetEpochsMissingAccountCoverage(
 	network string,
 	from, through uint64,
@@ -1791,8 +1790,7 @@ func (c *Cache) GetEpochsMissingParams(
 	// preprod /epoch_params?_epoch_no=0 and _epoch_no=1 both return [] — so
 	// without this filter they would be selected for parameter backfill on
 	// every run forever, fail the fetch as a transient error, and land in
-	// FailedEpochs permanently, which cmd/koios-parity turns into a hard
-	// error that skips the check phase.
+	// FailedEpochs permanently.
 	rows, err := c.db.Query(
 		`SELECT i.epoch FROM koios_epoch_info i
 		 WHERE i.network = ? AND i.epoch >= ? AND i.epoch <= ?
@@ -1853,7 +1851,8 @@ func (c *Cache) RecordObserverError(
 }
 
 // GetEpochsNeedingRetry returns ERROR epochs belonging to one observer queue.
-// Freshness-based CLI selection remains separate from the observer retry policy.
+// The observer selects new work with GetEpochsNeedingCheck, whose freshness
+// rule is separate from this retry policy.
 func (c *Cache) GetEpochsNeedingRetry(network string, accounts bool) ([]uint64, error) {
 	column := "aggregate_status"
 	if accounts {
@@ -2778,9 +2777,9 @@ func (c *Cache) RecordKoiosSource(
 // assertClaimedSource fails a write whose cache has since been re-pointed at
 // a different oracle by another process.
 //
-// The cache path is shared by default across the standalone commands and the
-// in-process observer, so an observer on one host and a `fetch --koios-url`
-// on another are a reachable pair. RecordKoiosSource only invalidates the rows
+// The cache path can be shared between the in-process observer and the
+// from-genesis run in internal/nodeparity, so two clients pointed at different
+// Koios hosts are a reachable pair. RecordKoiosSource only invalidates the rows
 // present when it runs; without this the older client would go on appending
 // its host's answers under the newer host's marker, which is the mixed-oracle
 // state the marker exists to make impossible.
@@ -3281,13 +3280,6 @@ func MarshalPoolList(pools []string) string {
 		return "[]"
 	}
 	return string(b)
-}
-
-// UnmarshalPoolList decodes a JSON string from DB storage to a pool ID slice.
-func UnmarshalPoolList(s string) []string {
-	var pools []string
-	_ = json.Unmarshal([]byte(s), &pools)
-	return pools
 }
 
 func migrateSignificantMismatchCounts(db *sql.DB) error {

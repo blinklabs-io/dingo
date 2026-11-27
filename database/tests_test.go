@@ -88,10 +88,8 @@ func TestCloseIsIdempotentWithSizeMetrics(t *testing.T) {
 	require.NoError(t, db.Close())
 }
 
-// TestWriteDBInfoSidecarOnFirstStart pins that a normal, fully-configured
-// first start actually produces the dbinfo sidecar on disk with the
-// configured metadata plugin name -- without this, internal/settingsresolve's
-// pre-open check would have nothing to read on any real database.
+// A fully configured first start records the metadata plugin in the data
+// directory, where internal/settingsresolve reads it before opening anything.
 func TestWriteDBInfoSidecarOnFirstStart(t *testing.T) {
 	t.Parallel()
 
@@ -108,15 +106,13 @@ func TestWriteDBInfoSidecarOnFirstStart(t *testing.T) {
 
 	info, err := dbinfo.Read(dataDir)
 	require.NoError(t, err)
-	require.Equal(t, "sqlite", info.MetadataPlugin)
+	require.True(t, info.HoldsGates())
+	require.Equal(t, "sqlite", info.Plugin())
 }
 
-// TestWriteDBInfoSidecarSkippedOnPartialConfig guards the first of
-// writeDBInfoSidecar's two guards: mithril/sync.go and
-// database/lifecycle/restore.go reopen an existing database with a Config
-// that never sets MetadataPlugin, so writing an empty plugin name would
-// poison the pre-open check for every later, complete start against the
-// same directory.
+// mithril/sync.go and database/lifecycle/restore.go open a database with a
+// Config that never sets MetadataPlugin. Their settings are recorded without
+// a plugin, which a later complete start fills in.
 func TestWriteDBInfoSidecarSkippedOnPartialConfig(t *testing.T) {
 	t.Parallel()
 
@@ -132,52 +128,45 @@ func TestWriteDBInfoSidecarSkippedOnPartialConfig(t *testing.T) {
 
 	info, err := dbinfo.Read(dataDir)
 	require.NoError(t, err)
-	require.Empty(t, info.MetadataPlugin)
+	require.True(t, info.HoldsGates())
+	require.Empty(t, info.Plugin())
 }
 
-// TestWriteDBInfoSidecarNeverOverwritesExisting guards writeDBInfoSidecar's
-// second guard: a sidecar already present, even one naming a different
-// plugin than what is about to open successfully, must be left alone --
-// overwriting it would erase the exact mismatch signal the file exists to
-// carry.
+// A v0.94.2 file naming another metadata plugin carries that plugin into the
+// settings, so the open is refused and the file still names it.
 func TestWriteDBInfoSidecarNeverOverwritesExisting(t *testing.T) {
 	t.Parallel()
 
 	dataDir := t.TempDir()
 	require.NoError(t, dbinfo.Write(dataDir, dbinfo.Info{
-		FormatVersion:  dbinfo.CurrentFormatVersion,
+		FormatVersion:  dbinfo.ReleasedFormatVersion,
 		MetadataPlugin: "postgres",
 	}))
 
-	db, err := newTestDatabase(t, &Config{
+	// The file v0.94.2 wrote is read by the database opened as the source
+	// of the migration.
+	_, err := newTestDatabase(t, &Config{
 		DataDir:        dataDir,
+		Role:           RoleReleased,
 		StorageMode:    "core",
 		Network:        "preprod",
 		BlobPlugin:     "badger",
 		MetadataPlugin: "sqlite",
 	})
-	require.NoError(t, err)
-	require.NoError(t, closeTestDatabase(db))
+	var settingsErr NodeSettingsError
+	require.ErrorAs(t, err, &settingsErr)
+	require.Contains(t, settingsErr.Error(), "metadata plugin")
 
 	info, err := dbinfo.Read(dataDir)
 	require.NoError(t, err)
-	require.Equal(
-		t,
-		"postgres",
-		info.MetadataPlugin,
-		"an existing sidecar naming a different plugin must never be overwritten",
-	)
+	require.Equal(t, "postgres", info.Plugin())
 }
 
-// TestWriteDBInfoSidecarRecreatedOnSteadyStateStart is a regression test for
-// a bug where evaluateAndPersistGates returned early whenever there was
-// nothing new to write to node_settings_gate -- the normal case for every
-// start after the first -- without ever reaching writeGateValues, the only
-// place that called writeDBInfoSidecar. An operator who deleted the sidecar
-// (or lost it to a partial restore) would never get it back on any later
-// steady-state start, silently disabling internal/settingsresolve's
-// pre-open metadata-plugin check from then on.
-func TestWriteDBInfoSidecarRecreatedOnSteadyStateStart(t *testing.T) {
+// A data directory whose dbinfo file was deleted has lost its settings. The
+// blob store's identity shows the database is not fresh, and the metadata
+// store holds no settings to move, so the open is refused rather than
+// refilled from the current configuration.
+func TestDeletedNodeSettingsRefuseTheOpen(t *testing.T) {
 	t.Parallel()
 
 	dataDir := t.TempDir()
@@ -188,29 +177,14 @@ func TestWriteDBInfoSidecarRecreatedOnSteadyStateStart(t *testing.T) {
 		BlobPlugin:     "badger",
 		MetadataPlugin: "sqlite",
 	}
-
 	db, err := newTestDatabase(t, cfg)
 	require.NoError(t, err)
 	require.NoError(t, closeTestDatabase(db))
+	require.NoError(t, os.Remove(filepath.Join(dataDir, dbinfo.FileName)))
 
-	sidecarPath := filepath.Join(dataDir, dbinfo.FileName)
-	_, err = os.Stat(sidecarPath)
-	require.NoError(t, err, "sidecar must exist after the first start")
-	require.NoError(t, os.Remove(sidecarPath))
-
-	// Reopen with the identical config: every gate already matches what is
-	// persisted, so this start has nothing to write to node_settings_gate.
-	reopened, err := newTestDatabase(t, cfg)
-	require.NoError(t, err)
-	require.NoError(t, closeTestDatabase(reopened))
-
-	info, err := dbinfo.Read(dataDir)
-	require.NoError(
-		t,
-		err,
-		"a deleted sidecar must be recreated even when no gate needed writing",
-	)
-	require.Equal(t, "sqlite", info.MetadataPlugin)
+	cfg.Network = "preview"
+	_, err = newTestDatabase(t, cfg)
+	require.ErrorIs(t, err, ErrNodeSettingsMissing)
 }
 
 // sidecarTrapPath returns a path that behaves like an unusable data
@@ -226,13 +200,8 @@ func sidecarTrapPath(t *testing.T) string {
 	return trap
 }
 
-// TestNewDatabaseFailsWhenSidecarCannotBeEstablished pins Finding 3's fix:
-// for a brand-new database, the sidecar is the only thing that will later
-// stop a mistyped provider from silently creating a second, empty database
-// beside the real one (there is no metadata_plugin gate row yet for
-// settingsresolve to compare against -- this open is what creates it), so
-// failing to establish it here must fail the open instead of warning and
-// continuing.
+// The data directory's dbinfo file is where the ledger's settings live, so
+// an open that cannot read or write it fails.
 func TestNewDatabaseFailsWhenSidecarCannotBeEstablished(t *testing.T) {
 	t.Parallel()
 
@@ -246,102 +215,11 @@ func TestNewDatabaseFailsWhenSidecarCannotBeEstablished(t *testing.T) {
 		BlobPlugin:     "badger",
 		MetadataPlugin: "sqlite",
 	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "dbinfo sidecar")
-}
-
-func TestSidecarFailureDoesNotLatchMetadataPluginGate(t *testing.T) {
-	t.Parallel()
-
-	metaDir := t.TempDir()
-	blobDir := t.TempDir()
-	trapDataDir := sidecarTrapPath(t)
-
-	_, err := newTestDatabaseAt(t, metaDir, blobDir, &Config{
-		DataDir:        trapDataDir,
-		StorageMode:    "core",
-		Network:        "preprod",
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-	})
-	require.Error(t, err)
-	func() {
-		host := plugin.NewHost()
-		require.NoError(t, sqlite.RegisterProvider(host))
-		defer func() { require.NoError(t, host.Stop(context.Background())) }()
-		store, resolveErr := plugin.Resolve[metadata.MetadataStore](
-			context.Background(), host,
-			plugin.CapabilityStorageMetadata, sqlite.ProviderName, nil,
-			metadata.ProviderDependencies{DataDir: metaDir},
-		)
-		require.NoError(t, resolveErr)
-		gates, getErr := store.GetNodeSettingsGates(context.Background())
-		require.NoError(t, getErr)
-		_, hasMetadataPluginGate := gates["metadata_plugin"]
-		require.False(t, hasMetadataPluginGate)
-	}()
-
-	dataDir := t.TempDir()
-	db, err := newTestDatabaseAt(t, metaDir, blobDir, &Config{
-		DataDir:        dataDir,
-		StorageMode:    "core",
-		Network:        "preprod",
-		BlobPlugin:     "badger",
-		MetadataPlugin: sqlite.ProviderName,
-	})
-	require.NoError(t, err)
-
-	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, sqlite.ProviderName, gates["metadata_plugin"])
-}
-
-// TestExistingDatabaseSidecarFailureIsNonFatal pins the other half of
-// Finding 3: an already-established database (one with a prior
-// writeGateValues call, so a metadata_plugin gate row already exists)
-// backfilling a lost or never-written sidecar on a later gate write must
-// still warn and continue, not fail the open -- node_settings_gate's own
-// metadata_plugin gate is already the real enforcement for it by then.
-func TestExistingDatabaseSidecarFailureIsNonFatal(t *testing.T) {
-	t.Parallel()
-
-	metaDir := t.TempDir()
-	blobDir := t.TempDir()
-	realDataDir := t.TempDir()
-
-	db, err := newTestDatabaseAt(t, metaDir, blobDir, &Config{
-		DataDir:        realDataDir,
-		StorageMode:    "api",
-		Network:        "preprod",
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-	})
-	require.NoError(t, err)
-	require.NoError(t, closeTestDatabase(db))
-
-	// Reopen the same stores with a gate that still needs a genuine write
-	// (storage_mode's permitted api -> core move) so this reaches
-	// writeGateValues again, but point Config.DataDir at a sidecar trap
-	// this time. legacy is already non-nil from the open above, so this is
-	// not a new database.
-	reopened, err := newTestDatabaseAt(t, metaDir, blobDir, &Config{
-		DataDir:        sidecarTrapPath(t),
-		StorageMode:    "core",
-		Network:        "preprod",
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-	})
-	require.NoError(
-		t,
-		err,
-		"a sidecar failure while backfilling an already-established "+
-			"database must not fail the open",
-	)
-	require.NoError(t, closeTestDatabase(reopened))
+	require.ErrorContains(t, err, "node settings")
 }
 
 func TestGenesisTransactionMetadataErrorWithShortHashes(t *testing.T) {
-	db := newTestDB(t)
+	db := openTestDBWithStorageMode(t, "")
 	for _, length := range []int{0, 1, 7, 8, 32} {
 		for _, shortTx := range []bool{false, true} {
 			t.Run(
@@ -392,7 +270,7 @@ func TestGenesisTransactionMetadataErrorWithShortHashes(t *testing.T) {
 func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
 	acc := db.NewBatchAccumulator()
@@ -455,7 +333,7 @@ func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
 func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
 	// Batch 1: ingest and flush the producer so its output is committed.
@@ -535,7 +413,7 @@ func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
 func TestSetTransactionBatched_MissingProducerNotFabricated(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
 	acc := db.NewBatchAccumulator()
@@ -624,7 +502,7 @@ func TestSetTransactionBatched_InFlightDoesNotSkipExistingRowRepair(
 ) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
 	// Pass 1: ingest normally so the output is spent and the consumer tx row
@@ -675,7 +553,9 @@ WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 // a slot so the history query must use block_index as its tie-breaker, and the
 // second write is repeated to cover the certificate upsert path.
 func TestSetGapBlockTransactionPersistsPositionedCertificates(t *testing.T) {
-	db := openTestDB(t)
+	// The seeded inputs have no address, which only an API-mode store
+	// requires.
+	db := openTestDBWithStorageMode(t, "")
 
 	stakeKey := lcommon.NewBlake2b224(bytes.Repeat([]byte{0x31}, 28))
 	credential := lcommon.Credential{
@@ -842,6 +722,7 @@ func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 	t.Parallel()
 
 	db, err := newTestDatabase(t, &Config{
+		Role:    RoleIndexer,
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -1094,6 +975,7 @@ func mustBlockOffsets(
 	return &BlockIngestionResult{
 		TxOffsets:   offsets.TxOffsets,
 		UtxoOffsets: offsets.UtxoOffsets,
+		Payloads:    offsets.Payloads,
 	}
 }
 
@@ -1468,7 +1350,7 @@ func TestPhase1PersistsNetworkMagicOnFirstStart(t *testing.T) {
 		NetworkMagic: 1,
 	})
 	require.NoError(t, err)
-	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "1", gates["network_magic"])
 	require.NoError(t, closeTestDatabase(db))
@@ -1520,7 +1402,7 @@ func TestPhase1RecordsNoStartEraAndRejectsLaterDijkstra(t *testing.T) {
 		MetadataPlugin: "sqlite",
 	})
 	require.NoError(t, err)
-	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, nodesettings.NoStartEra, gates["start_era"])
 	require.NoError(t, closeTestDatabase(db))
@@ -1566,7 +1448,7 @@ func TestPhase1AllowsAPIToCore(t *testing.T) {
 		Network:     "preprod",
 	})
 	require.NoError(t, err)
-	gates, err := reopened.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := reopened.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "core", gates["storage_mode"])
 	require.NoError(t, closeTestDatabase(reopened))
@@ -1580,17 +1462,9 @@ func TestPhase1AllowsAPIToCore(t *testing.T) {
 	require.True(t, errors.As(err, &settingsErr))
 }
 
-// TestPhase1LatchAndNetworkFillTogether pins Critical 2 from round 3: when
-// storage_mode latches (api -> core) and network is filled for the first
-// time on the very same open, both gates must land in node_settings_gate,
-// and the legacy node_settings row's network backfill (best-effort, for
-// older tooling -- see writeGateValues's doc comment) must also succeed.
-// The bug this guards was using the new, not-yet-persisted effective
-// storage_mode ("core") as the backfill's WHERE match key while the row's
-// actual physical storage_mode column was still "api" from first insert:
-// the match always missed, and network was silently never recorded either
-// in the legacy row or (in an earlier version of this fix) in
-// node_settings_gate.
+// TestPhase1LatchAndNetworkFillTogether: when storage_mode latches (api ->
+// core) and network is filled for the first time on the same open, both
+// gates are recorded.
 func TestPhase1LatchAndNetworkFillTogether(t *testing.T) {
 	t.Parallel()
 
@@ -1608,14 +1482,10 @@ func TestPhase1LatchAndNetworkFillTogether(t *testing.T) {
 		Network:     "preprod",
 	})
 	require.NoError(t, err)
-	gates, err := reopened.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := reopened.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "core", gates["storage_mode"])
 	require.Equal(t, "preprod", gates["network"])
-	legacy, err := reopened.Metadata().GetNodeSettings(context.Background())
-	require.NoError(t, err)
-	require.NotNil(t, legacy)
-	require.Equal(t, "preprod", legacy.Network)
 	require.NoError(t, closeTestDatabase(reopened))
 }
 
@@ -1686,10 +1556,8 @@ func TestPhase1SkipsHistoryExpiryGateOnPartialReopen(t *testing.T) {
 	// Simulate a database that previously ran with history expiry enabled:
 	// there is no phase-1 Config field to drive this through, so persist the
 	// gate directly the way phase 2's write path eventually will.
-	require.NoError(t, db.Metadata().SetNodeSettingsGates(context.Background(),
+	require.NoError(t, db.SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{"history_expiry_active": nodesettings.LatchOn},
-		0,
-		0,
 	))
 	require.NoError(t, closeTestDatabase(db))
 
@@ -1702,124 +1570,12 @@ func TestPhase1SkipsHistoryExpiryGateOnPartialReopen(t *testing.T) {
 	require.NoError(t, closeTestDatabase(reopened))
 }
 
-// openForRecoveryTest opens a database directly through New, the same way
-// node.go does, rather than through newTestDatabase: newTestDatabase
-// discards the returned *Database on any error, but node.go's
-// dbNeedsRecovery path -- and this test -- specifically needs the
-// *Database New still returns alongside a CommitTimestampError, since a
-// database on that path is available for recovery rather than closed. See
-// newTestDatabaseWithHost's doc comment (tests_test.go) for the
-// keepOnError contract this delegates to.
-func openForRecoveryTest(
-	tb testing.TB,
-	config *Config,
-) (*Database, error) {
-	tb.Helper()
-	return newTestDatabaseWithHost(tb, config, true)
-}
-
-// TestPhase1SkippedOnRecoveryPathButCatchesMismatchOnceReCheckable pins the
-// P1 fix: database.New returns a CommitTimestampError before it ever calls
-// CheckNodeSettings (checkCommitTimestamp runs first in init and returns
-// immediately on failure), so phase 1 -- and the gates only it validates,
-// like blob_plugin -- goes completely unchecked for that entire open. This
-// reproduces that gap directly (a commit-timestamp mismatch combined with a
-// blob_plugin change reports only CommitTimestampError, never the gate
-// mismatch), then proves the fix: calling the now-exported
-// CheckNodeSettings on the *Database New still returned -- exactly what
-// node.go's dbNeedsRecovery path does once RecoverCommitTimestampConflict
-// succeeds -- does catch it.
-func TestPhase1SkippedOnRecoveryPathButCatchesMismatchOnceReCheckable(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	dataDir := t.TempDir()
-	db, err := newTestDatabase(t, &Config{
-		DataDir:        dataDir,
-		StorageMode:    "core",
-		Network:        "preprod",
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-	})
-	require.NoError(t, err)
-	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, "badger", gates["blob_plugin"])
-
-	// Induce a commit-timestamp mismatch the same way
-	// TestCheckCommitTimestamp_MetadataOnly does: give metadata a commit
-	// timestamp with none on the blob side.
-	metaTxn := db.Metadata().Transaction(t.Context())
-	require.NoError(t, db.Metadata().SetCommitTimestamp(123456789, metaTxn))
-	require.NoError(t, metaTxn.Commit())
-	require.NoError(t, closeTestDatabase(db))
-
-	// Reopen with a changed blob_plugin. On a healthy reopen this alone
-	// would be a NodeSettingsError from phase 1. Here, the commit-timestamp
-	// mismatch above makes checkCommitTimestamp fail first, and init
-	// returns immediately without ever reaching CheckNodeSettings.
-	reopened, reopenErr := openForRecoveryTest(t, &Config{
-		DataDir:        dataDir,
-		StorageMode:    "core",
-		Network:        "preprod",
-		BlobPlugin:     "gcs",
-		MetadataPlugin: "sqlite",
-	})
-	require.Error(t, reopenErr)
-	var cte CommitTimestampError
-	require.ErrorAs(
-		t,
-		reopenErr,
-		&cte,
-		"phase 1 must not run before the commit-timestamp conflict is "+
-			"resolved, so the error on this open must be exactly "+
-			"CommitTimestampError, not a NodeSettingsError from the "+
-			"blob_plugin change",
-	)
-	var settingsErr NodeSettingsError
-	require.False(
-		t,
-		errors.As(reopenErr, &settingsErr),
-		"the blob_plugin mismatch must not have been reported yet -- "+
-			"phase 1 has not run on this open at all",
-	)
-	require.NotNil(
-		t,
-		reopened,
-		"New must still return the *Database on a CommitTimestampError so "+
-			"the caller can recover it, per node.go's dbNeedsRecovery path",
-	)
-
-	// This is the fix: node.go calls CheckNodeSettings explicitly once
-	// RecoverCommitTimestampConflict succeeds. Simulate that here directly
-	// against the *Database New returned above, without needing a real
-	// ledgerState-driven recovery run (recovery repairs the commit
-	// timestamp, an orthogonal concern from the blob_plugin gate this
-	// checks).
-	checkErr := reopened.CheckNodeSettings(context.Background())
-	require.True(
-		t,
-		errors.As(checkErr, &settingsErr),
-		"re-invoking CheckNodeSettings after recovery must catch the "+
-			"blob_plugin change phase 1 never got to see: got %v",
-		checkErr,
-	)
-	require.Contains(t, settingsErr.Error(), "blob plugin")
-}
-
-// TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch pins Finding 2's fix: a
-// gate written for the first time ever can race against a second opener
-// doing the same first-ever write. Two *Database instances race to open
-// against the SAME metadata directory concurrently -- each with its own
-// separate blob store directory, so badger's exclusive per-directory lock
-// (which rules this race out for a real shared node) never enters into it,
-// isolating the metadata-side race this fix targets -- with different
-// NetworkMagic. Before the fix, node_settings_gate's plain upsert let
-// whichever opener wrote last silently overwrite the other with no record
-// a collision happened. After it, exactly one opener may win the first-ever
-// write; the other must observe the winner's value and fail loudly on its
-// own now-conflicting configuration, never silently adopt or overwrite it.
+// TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch: an IndexerDB on a
+// server provider is shared across processes, so a gate's first write can
+// race a second opener's. Two IndexerDBs race to open against the same
+// metadata directory, each over its own blob store so Badger's lock stays
+// out of it, with different NetworkMagic. Exactly one wins the first write;
+// the other observes the winner's value and fails on its own configuration.
 func TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch(t *testing.T) {
 	t.Parallel()
 
@@ -1838,7 +1594,8 @@ func TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch(t *testing.T) {
 				defer wg.Done()
 				_, errA = newTestDatabaseAt(t, metaDir, blobDirA, &Config{
 					DataDir:      metaDir,
-					StorageMode:  "core",
+					Role:         RoleIndexer,
+					StorageMode:  "api",
 					Network:      "preprod",
 					NetworkMagic: 1,
 				})
@@ -1847,7 +1604,8 @@ func TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch(t *testing.T) {
 				defer wg.Done()
 				_, errB = newTestDatabaseAt(t, metaDir, blobDirB, &Config{
 					DataDir:      metaDir,
-					StorageMode:  "core",
+					Role:         RoleIndexer,
+					StorageMode:  "api",
 					Network:      "preprod",
 					NetworkMagic: 2,
 				})
@@ -1903,7 +1661,7 @@ func TestSetTransactionStoresEpochZeroProposals(t *testing.T) {
 
 	t.Run("block", func(t *testing.T) {
 		t.Parallel()
-		db := openTestDB(t)
+		db := openIndexerTestDB(t)
 		candidate := findGapRollbackCandidateWithoutCertificates(t)
 		for _, block := range candidate.producerBlocks {
 			storeBlockOffsetsOnly(t, db, block)
@@ -1918,7 +1676,7 @@ func TestSetTransactionStoresEpochZeroProposals(t *testing.T) {
 			0,
 			updates,
 			nil,
-			mustBlockOffsets(t, candidate.consumerBlock),
+			testPayloadOffsets(t, db, mustBlockOffsets(t, candidate.consumerBlock)),
 			nil, 0,
 		))
 		requireStored(t, db)
@@ -1926,7 +1684,7 @@ func TestSetTransactionStoresEpochZeroProposals(t *testing.T) {
 
 	t.Run("batch", func(t *testing.T) {
 		t.Parallel()
-		db := openTestDB(t)
+		db := openIndexerTestDB(t)
 		candidate := findBatchedCrossBlockSpendCandidate(t)
 		stagedProducer(t, db, candidate)
 		require.True(t, candidate.producerTx.IsValid())
@@ -1944,7 +1702,7 @@ func TestSetTransactionStoresEpochZeroProposals(t *testing.T) {
 				0,
 				updates,
 				nil,
-				mustBlockOffsets(t, candidate.producerBlock),
+				testPayloadOffsets(t, db, mustBlockOffsets(t, candidate.producerBlock)),
 				acc,
 				txn,
 				BatchedTxIngestOpts{},
@@ -2054,21 +1812,19 @@ func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
 	db, err := newSettingsTestDB(t, dataDir, "core", "")
 	require.NoError(t, err)
 
-	s, err := db.Metadata().GetNodeSettings(context.Background())
+	s, err := db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
-	require.NotNil(t, s)
-	require.Equal(t, "core", s.StorageMode)
-	require.Equal(t, "", s.Network)
+	require.Equal(t, "core", s["storage_mode"])
+	require.Equal(t, "", s["network"])
 	require.NoError(t, closeTestDatabase(db))
 
 	db, err = newSettingsTestDB(t, dataDir, "core", "preview")
 	require.NoError(t, err)
 
-	s, err = db.Metadata().GetNodeSettings(context.Background())
+	s, err = db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
-	require.NotNil(t, s)
-	require.Equal(t, "core", s.StorageMode)
-	require.Equal(t, "preview", s.Network)
+	require.Equal(t, "core", s["storage_mode"])
+	require.Equal(t, "preview", s["network"])
 	require.NoError(t, closeTestDatabase(db))
 }
 
@@ -2121,11 +1877,10 @@ func TestNodeSettingsAPIMode(t *testing.T) {
 	db, err := newSettingsTestDB(t, dataDir, "api", "mainnet")
 	require.NoError(t, err)
 
-	s, err := db.Metadata().GetNodeSettings(context.Background())
+	s, err := db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
-	require.NotNil(t, s)
-	require.Equal(t, "api", s.StorageMode)
-	require.Equal(t, "mainnet", s.Network)
+	require.Equal(t, "api", s["storage_mode"])
+	require.Equal(t, "mainnet", s["network"])
 	require.NoError(t, closeTestDatabase(db))
 
 	// Reopen: succeeds
@@ -2138,40 +1893,6 @@ func TestNodeSettingsAPIMode(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "core", db.StorageMode())
 	require.NoError(t, closeTestDatabase(db))
-}
-
-func TestNodeSettingsMetadataSetDoesNotOverwrite(t *testing.T) {
-	t.Parallel()
-
-	dataDir := t.TempDir()
-
-	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
-	require.NoError(t, err)
-
-	err = db.Metadata().SetNodeSettings(context.Background(), &types.NodeSettings{
-		StorageMode: "api",
-		Network:     "mainnet",
-	})
-	require.NoError(t, err)
-
-	s, err := db.Metadata().GetNodeSettings(context.Background())
-	require.NoError(t, err)
-	require.NotNil(t, s)
-	require.Equal(t, "core", s.StorageMode)
-	require.Equal(t, "preview", s.Network)
-	require.NoError(t, closeTestDatabase(db))
-
-	db, err = newSettingsTestDB(t, dataDir, "core", "preview")
-	require.NoError(t, err)
-	require.NoError(t, closeTestDatabase(db))
-
-	db, err = newSettingsTestDB(t, dataDir, "api", "mainnet")
-	require.Error(t, err)
-	var nsErr NodeSettingsError
-	require.True(t, errors.As(err, &nsErr))
-	if db != nil {
-		require.NoError(t, closeTestDatabase(db))
-	}
 }
 
 var testDatabaseHosts sync.Map
@@ -2198,17 +1919,10 @@ func newTestDatabaseWithRunMode(
 	return newTestDatabaseWithHostRunMode(tb, config, false, runMode)
 }
 
-// newTestDatabaseWithHost is the shared body behind newTestDatabase and
-// openForRecoveryTest (database/tests_test.go): register the
-// badger and sqlite providers, resolve the blob and metadata stores from
-// config, and call New. The two callers differ only in keepOnError: New can
-// return a non-nil *Database alongside an error on a CommitTimestampError,
-// since that database is available for recovery rather than closed.
-// newTestDatabase passes false -- none of its many callers need the failed
-// handle, so it is closed (via a host stop) and discarded like any other
-// open error. openForRecoveryTest passes true, matching node.go's
-// dbNeedsRecovery path, which specifically needs the *Database New still
-// returns alongside the error.
+// newTestDatabaseWithHost registers the badger and sqlite providers,
+// resolves the blob and metadata stores from config, and calls New. With
+// keepOnError false a database New returns beside an error is closed, through
+// a host stop, and discarded.
 func newTestDatabaseWithHost(
 	tb testing.TB,
 	config *Config,
@@ -2263,17 +1977,20 @@ func newTestDatabaseWithBlobConfig(
 	if err != nil {
 		return nil, err
 	}
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		context.Background(), host,
-		plugin.CapabilityStorageMetadata, "sqlite", nil,
-		metadata.ProviderDependencies{
-			DataDir: config.DataDir, StorageMode: config.StorageMode,
-			Logger: config.Logger, PromRegistry: config.PromRegistry,
-		},
-	)
-	if err != nil {
-		_ = host.Stop(context.Background())
-		return nil, err
+	var metadataStore metadata.MetadataStore
+	if config.Role != "" {
+		metadataStore, err = plugin.Resolve[metadata.MetadataStore](
+			context.Background(), host,
+			plugin.CapabilityStorageMetadata, "sqlite", nil,
+			metadata.ProviderDependencies{
+				DataDir: config.DataDir, StorageMode: config.StorageMode,
+				Logger: config.Logger, PromRegistry: config.PromRegistry,
+			},
+		)
+		if err != nil {
+			_ = host.Stop(context.Background())
+			return nil, err
+		}
 	}
 	db, dbErr := New(
 		context.Background(),
@@ -2387,7 +2104,7 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 		"pool reward account: pool cert reward_account: got 2 bytes, want 29",
 	)
 
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 	// Swap in the erroring wrapper. Same-package access to the unexported
 	// `metadata` field is intentional and follows the pattern used by
 	// other database/*_test.go files (e.g. batch_test.go) that
@@ -2650,6 +2367,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	newStagedDB := func(t *testing.T, logs *bytes.Buffer) *Database {
 		t.Helper()
 		db, err := newTestDatabase(t, &Config{
+			Role:    RoleIndexer,
 			DataDir: t.TempDir(),
 			Logger: slog.New(slog.NewJSONHandler(
 				logs,
@@ -2838,53 +2556,6 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	)
 }
 
-// A set-only database keeps no UTxO set in the metadata store. A Mithril
-// import detaches the live source before its gap blocks are ingested, so the
-// gap path reads the persistent mark and records only the history: no
-// output rows, no recovered inputs.
-func TestSetGapBlockTransactionKeepsNoUtxoRowsWhenSetOnly(t *testing.T) {
-	t.Parallel()
-
-	db, err := newTestDatabase(t, &Config{
-		DataDir: t.TempDir(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	defer db.Close()
-	require.NoError(t, db.SetSyncState(UtxoSetOnlySyncKey, "1", nil))
-
-	candidate := findGapConsumeCandidate(t)
-	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
-	require.NoError(t, db.SetGapBlockTransaction(
-		context.Background(),
-		candidate.consumerTx,
-		candidate.consumerPoint,
-		0,
-		nil,
-		mustBlockOffsets(t, candidate.consumerBlock),
-		nil, 0,
-	))
-
-	rows := 0
-	require.NoError(t, db.IterateLiveUtxos(
-		context.Background(), nil,
-		func(*models.Utxo) error { rows++; return nil },
-	))
-	require.Zero(t, rows, "gap ingestion wrote live utxo rows")
-	for _, in := range candidate.consumerTx.Consumed() {
-		u, err := db.Metadata().GetUtxoIncludingSpent(
-			in.Id().Bytes(), in.Index(), nil,
-		)
-		require.NoError(t, err)
-		require.Nil(t, u, "gap ingestion recovered input %s", in.String())
-	}
-	tx, err := db.Metadata().GetTransactionByHash(
-		candidate.consumerTx.Hash().Bytes(), nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, tx, "the transaction is still recorded as history")
-}
-
 func TestPhase1PersistsIndexerLayoutAndRejectsChange(t *testing.T) {
 	t.Parallel()
 
@@ -2896,7 +2567,7 @@ func TestPhase1PersistsIndexerLayoutAndRejectsChange(t *testing.T) {
 		IndexerLayout: "split",
 	})
 	require.NoError(t, err)
-	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+	gates, err := db.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "split", gates["indexer_layout"])
 	require.NoError(t, closeTestDatabase(db))

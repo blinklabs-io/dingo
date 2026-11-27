@@ -12,82 +12,102 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package dbinfo records, in a small JSON sidecar file beside a dingo data
-// directory, which metadata plugin produced the database it belongs to.
+// Package dbinfo reads and writes dingo.dbinfo, the small JSON file in a
+// data directory that holds the ledger's persisted node settings: every gate
+// database/nodesettings enforces, the metadata plugin among them.
 //
-// The metadata store itself is the single source of truth for every
-// persisted node setting, including which plugin owns the data --
-// specifically the metadata_plugin gate in node_settings_gate (see
-// database/nodesettings). This sidecar exists only so the configuration
-// layer can identify the right plugin to open *before* it has opened
-// anything: resolving a metadata provider runs its own migrations as a side
-// effect of merely starting it, so opening the wrong provider would
-// silently create a brand new, empty database beside the real one instead
-// of ever reaching the gate table that would have caught the mismatch.
+// It lives outside every store so the configuration layer can read it before
+// it opens anything. Resolving a metadata provider runs its migrations as a
+// side effect, so opening the wrong one would create an empty database
+// beside the real one; Badger takes a directory lock the real open needs a
+// moment later; a cloud blob store needs credentials. The data directory is
+// always local, whatever the blob provider: the cloud providers keep their
+// namespace marker in it too.
 //
-// A database that predates this sidecar, or one that has otherwise lost it,
-// has no way to signal that up front, so its absence is never an error --
-// it just means the caller falls back to opening its configured plugin
-// directly, the same as it always has.
+// A data directory v0.94.2 wrote holds format 1, which records only the
+// metadata plugin; its gates are still in the metadata store, and the first
+// open by this release moves them here.
 package dbinfo
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 )
 
-// FileName is the sidecar's fixed name within a data directory.
+// FileName is the file's fixed name within a data directory.
 const FileName = "dingo.dbinfo"
 
-// CurrentFormatVersion is the only FormatVersion this build writes and
-// accepts on Read.
-const CurrentFormatVersion = 1
+// CurrentFormatVersion is the format this build writes. It holds the gates.
+const CurrentFormatVersion = 2
 
-// ErrIncompleteSidecar marks a sidecar whose FormatVersion this build
-// recognises but whose MetadataPlugin is missing, JSON null, or the empty
-// string. Read returns it (wrapped with the sidecar's path) instead of a
-// zero Info and a nil error, because a zero Info is exactly what Read
-// returns for a sidecar that is simply absent -- and the caller,
-// internal/settingsresolve's checkMetadataPluginSidecar, treats "absent" as
-// "nothing to check, proceed." A sidecar file that exists but never got a
-// plugin name written into it (interrupted Write, hand-edited, or a future
-// writer bug) must not be indistinguishable from that, since proceeding
-// resolves whatever metadata plugin is configured and runs its migrations
-// as a side effect -- silently creating a fresh, empty database beside the
-// real one if the configured plugin is wrong. Callers that want the old
-// "advisory, ignore it" behavior for this case specifically should not get
-// it; see checkMetadataPluginSidecar's errors.Is handling.
+// ReleasedFormatVersion is the format v0.94.2 writes, holding only the
+// metadata plugin. Read accepts it so the first open can move the gates.
+const ReleasedFormatVersion = 1
+
+// ErrIncompleteSidecar marks a format 1 file whose metadata plugin is
+// missing, null or empty. Read returns it instead of a zero Info, which is
+// what an absent file reads as: a file that exists but never got its plugin
+// name must not let the caller open whatever plugin is configured.
 var ErrIncompleteSidecar = errors.New(
 	"dbinfo: sidecar is missing its metadata plugin",
 )
 
-// Info is the sidecar's entire content. It deliberately carries nothing
-// beyond a format version and the metadata plugin name -- no credentials,
-// connection string, or hostname -- since a data directory may be backed
-// up, copied, or inspected without any expectation that this file holds
-// anything sensitive.
+// Info is the file's content. It holds no credentials, connection strings
+// or hostnames: a data directory is copied and inspected without any
+// expectation that this file is sensitive.
 type Info struct {
-	FormatVersion  int    `json:"formatVersion"`
-	MetadataPlugin string `json:"metadataPlugin"`
+	FormatVersion int `json:"formatVersion"`
+	// MetadataPlugin is format 1's only value. Format 2 records the plugin
+	// as the metadata_plugin gate instead.
+	MetadataPlugin string `json:"metadataPlugin,omitempty"`
+	// Gates is format 2's node settings, by gate name.
+	Gates nodesettings.Values `json:"gates,omitempty"`
 }
 
-// Path returns the sidecar's path within dataDir.
+// HoldsGates reports whether the file holds the node settings, which every
+// file this build wrote does.
+func (i Info) HoldsGates() bool {
+	return i.FormatVersion == CurrentFormatVersion
+}
+
+// Plugin returns the recorded metadata plugin, or the empty string when none
+// is recorded yet.
+func (i Info) Plugin() string {
+	if i.HoldsGates() {
+		return i.Gates["metadata_plugin"]
+	}
+	return i.MetadataPlugin
+}
+
+// Path returns the file's path within dataDir.
 func Path(dataDir string) string {
 	return filepath.Join(dataDir, FileName)
 }
 
-// Write persists info to the sidecar file in dataDir via a temp-file-then-
-// rename, fsyncing the directory afterward (internal/fsyncdir) so the new
-// file's directory entry is durable across a crash and not just its own
-// content -- matching database/lifecycle/manifest.go's WriteManifest.
+// WriteGates replaces the file in dataDir with gates in the current format.
+func WriteGates(dataDir string, gates nodesettings.Values) error {
+	if gates == nil {
+		gates = nodesettings.Values{}
+	}
+	return Write(dataDir, Info{
+		FormatVersion: CurrentFormatVersion,
+		Gates:         maps.Clone(gates),
+	})
+}
+
+// Write persists info to the file in dataDir via a temp file and a rename,
+// then fsyncs the directory (internal/fsyncdir) so the new entry survives a
+// crash and not just its content. A reader sees the old file or the new one,
+// never a mix. It creates dataDir when it does not exist yet.
 //
-// Write does not stamp or validate info.FormatVersion; callers pass
-// CurrentFormatVersion themselves.
+// Write does not stamp or validate info.FormatVersion.
 func Write(dataDir string, info Info) error {
 	if dataDir == "" {
 		return errors.New("dbinfo: dataDir must not be empty")
@@ -95,6 +115,9 @@ func Write(dataDir string, info Info) error {
 	data, err := json.Marshal(info)
 	if err != nil {
 		return fmt.Errorf("marshal dbinfo: %w", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return fmt.Errorf("create data directory %q: %w", dataDir, err)
 	}
 
 	path := Path(dataDir)
@@ -104,9 +127,6 @@ func Write(dataDir string, info Info) error {
 	}
 	tmpPath := tmp.Name()
 	renamed := false
-	// Best-effort: don't leave the temp file behind for a future Write or
-	// directory listing to trip over if anything below fails before the
-	// rename. No-op once renamed, since tmpPath no longer exists.
 	defer func() {
 		if !renamed {
 			_ = os.Remove(tmpPath)
@@ -128,22 +148,13 @@ func Write(dataDir string, info Info) error {
 		return fmt.Errorf("rename temp dbinfo to %q: %w", path, err)
 	}
 	renamed = true
-
-	// A file's own fsync does not guarantee its directory entry is
-	// persisted; sync the directory itself so the rename above is durable
-	// too, not just atomic.
 	return fsyncdir.Sync(dataDir)
 }
 
-// Read reads and validates the sidecar at dataDir. A missing file returns a
-// zero Info and a nil error: the sidecar is advisory, and a database that
-// predates it (or has otherwise lost it) must still open normally. An
-// unrecognised FormatVersion is an error, since this build has no way to
-// know what a newer or unknown format actually means. A sidecar whose
-// FormatVersion this build does recognise but whose MetadataPlugin is
-// missing, JSON null, or empty returns ErrIncompleteSidecar (wrapped with
-// path) rather than a zero Info and a nil error -- see ErrIncompleteSidecar's
-// doc comment for why that distinction matters.
+// Read reads and validates the file in dataDir. A missing file returns a
+// zero Info and a nil error: a fresh data directory has none. An
+// unrecognised FormatVersion is an error, and so is a format 1 file without
+// its plugin (ErrIncompleteSidecar).
 func Read(dataDir string) (Info, error) {
 	path := Path(dataDir)
 	data, err := os.ReadFile(path)
@@ -157,14 +168,20 @@ func Read(dataDir string) (Info, error) {
 	if err := json.Unmarshal(data, &info); err != nil {
 		return Info{}, fmt.Errorf("parse dbinfo %q: %w", path, err)
 	}
-	if info.FormatVersion != CurrentFormatVersion {
+	switch info.FormatVersion {
+	case CurrentFormatVersion:
+		if info.Gates == nil {
+			info.Gates = nodesettings.Values{}
+		}
+	case ReleasedFormatVersion:
+		if info.MetadataPlugin == "" {
+			return Info{}, fmt.Errorf("dbinfo %q: %w", path, ErrIncompleteSidecar)
+		}
+	default:
 		return Info{}, fmt.Errorf(
 			"dbinfo %q: unrecognised format version %d",
 			path, info.FormatVersion,
 		)
-	}
-	if info.MetadataPlugin == "" {
-		return Info{}, fmt.Errorf("dbinfo %q: %w", path, ErrIncompleteSidecar)
 	}
 	return info, nil
 }

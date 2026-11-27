@@ -69,7 +69,23 @@ func paymentAddress() []byte {
 	return append([]byte{0x60}, bytes.Repeat([]byte{0x11}, 28)...)
 }
 
+// Payloads are the datum, script and metadata the first transaction of a
+// scenario built by NewWithPayloads carries in its witness set and auxiliary
+// data.
+var (
+	PayloadDatum  = []byte{0xd8, 0x79, 0x9f, 0x01, 0xff}
+	PayloadScript = []byte{0x01, 0x02, 0x03, 0x04}
+)
+
 func rawTx(spendTxID []byte, amount uint64) (cbor.RawMessage, error) {
+	return buildRawTx(spendTxID, amount, false)
+}
+
+func buildRawTx(
+	spendTxID []byte,
+	amount uint64,
+	payloads bool,
+) (cbor.RawMessage, error) {
 	fee := uint64(200_000)
 	body, err := cbor.Encode(map[uint]any{
 		0: cbor.Tag{Number: 258, Content: []any{[]any{spendTxID, uint64(0)}}},
@@ -79,16 +95,30 @@ func rawTx(spendTxID []byte, amount uint64) (cbor.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
+	witnesses := map[uint]any{}
+	var aux any
+	if payloads {
+		witnesses[4] = []cbor.RawMessage{PayloadDatum}
+		witnesses[6] = [][]byte{PayloadScript}
+		aux = map[uint]any{674: "closure"}
+	}
 	tx, err := cbor.Encode(
-		[]any{cbor.RawMessage(body), map[uint]any{}, nil, true},
+		[]any{cbor.RawMessage(body), witnesses, aux, true},
 	)
 	return cbor.RawMessage(tx), err
 }
 
 // New builds the scenario.
-func New() (*Scenario, error) {
+func New() (*Scenario, error) { return build(false) }
+
+// NewWithPayloads builds the scenario with a datum, a Plutus V2 script and
+// metadata on the closure's first transaction, which live only in the endorser
+// block's transaction list.
+func NewWithPayloads() (*Scenario, error) { return build(true) }
+
+func build(payloads bool) (*Scenario, error) {
 	s := &Scenario{SeedTxID: bytes.Repeat([]byte{0x71}, 32)}
-	first, err := rawTx(s.SeedTxID, seedAmount)
+	first, err := buildRawTx(s.SeedTxID, seedAmount, payloads)
 	if err != nil {
 		return nil, err
 	}
@@ -100,12 +130,30 @@ func New() (*Scenario, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.Raw = []cbor.RawMessage{first, second}
+	if err := s.endorse([]cbor.RawMessage{first, second}); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// NewWithTransactions builds the scenario with the given transactions in the
+// endorser block, in order, and no seeded UTxO.
+func NewWithTransactions(raw []cbor.RawMessage) (*Scenario, error) {
+	s := &Scenario{}
+	if err := s.endorse(raw); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// endorse puts raw in the endorser block and builds the two ranking blocks.
+func (s *Scenario) endorse(raw []cbor.RawMessage) error {
+	s.Raw = raw
 	manifest := &lcommon.LeiosEndorserBlock{}
 	for _, raw := range s.Raw {
 		tx, err := safedecode.DijkstraBlockTransaction(raw)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		s.Txs = append(s.Txs, tx)
 		manifest.TransactionReferences = append(
@@ -117,16 +165,17 @@ func New() (*Scenario, error) {
 		)
 	}
 	s.EBHash = manifest.Hash()
+	var err error
 	if s.ManifestCbor, err = manifest.MarshalCBOR(); err != nil {
-		return nil, err
+		return err
 	}
 	if s.Announcing, err = s.block(1, AnnouncingSlot, nil, false, true); err != nil {
-		return nil, err
+		return err
 	}
 	s.Certifying, err = s.block(
 		2, CertifyingSlot, s.Announcing.Hash().Bytes(), true, false,
 	)
-	return s, err
+	return err
 }
 
 func (s *Scenario) block(

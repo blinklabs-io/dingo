@@ -40,6 +40,7 @@ func TestSQLiteOverlayInsertRetainsClosureHistoryThroughBarriers(t *testing.T) {
 				txn := store.Transaction(t.Context())
 				t.Cleanup(func() { _ = txn.Rollback() })
 				acc := store.NewLeiosClosureBatchAccumulator()
+				bindTestPayloads(t, store, acc)
 				enabled, err := store.EnableLeiosClosureUtxoOverlay(
 					acc,
 					txn,
@@ -110,6 +111,7 @@ func TestRetainedOverlayBarrierFlushesBeforeAssetReads(t *testing.T) {
 			txn := store.Transaction(t.Context())
 			t.Cleanup(func() { _ = txn.Rollback() })
 			acc := store.NewLeiosClosureBatchAccumulator()
+			bindTestPayloads(t, store, acc)
 			enabled, err := store.EnableLeiosClosureUtxoOverlay(
 				acc, txn, transactions,
 			)

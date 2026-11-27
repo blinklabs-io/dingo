@@ -359,6 +359,11 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 		offset.BlockHash[:],
 	)
 	if err != nil {
+		if live, liveErr := c.db.liveUtxoFallback(
+			txId, outputIdx, err,
+		); liveErr == nil {
+			return live, nil
+		}
 		return nil, fmt.Errorf("get block for utxo extraction: %w", err)
 	}
 
@@ -643,6 +648,23 @@ func (c *TieredCborCache) ResolveUtxoCborBatch(
 
 			// Fetch block from blob store
 			blockCbor, err := c.getBlockCbor(blob, txn, group.slot, group.hash[:])
+			if err != nil && errors.Is(err, types.ErrHistoryExpired) {
+				resolved := true
+				for _, item := range group.refs {
+					live, liveErr := c.db.liveUtxoFallback(
+						item.ref.TxId[:], item.ref.OutputIdx, err,
+					)
+					if liveErr != nil {
+						resolved = false
+						break
+					}
+					// Not cached: the output may be spent before the next read.
+					result[item.ref] = live
+				}
+				if resolved {
+					continue
+				}
+			}
 			if err != nil {
 				return nil, fmt.Errorf(
 					"get block for utxo batch extraction (slot=%d, hash=%x): %w",

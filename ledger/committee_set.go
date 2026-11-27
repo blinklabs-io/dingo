@@ -295,12 +295,9 @@ func (ls *LedgerState) committeeServed(
 ) (*CommitteeState, error) {
 	r := ls.committeeReader(txn)
 	if r == nil || !ls.setServes(&ls.committeeSetLoaded, r.CommitteeLoaded) {
-		if ls.familyDrained(nodesettings.FamilyCommitteeConstitution) {
-			return &CommitteeState{}, drainedUnserved(
-				nodesettings.FamilyCommitteeConstitution,
-			)
-		}
-		return &CommitteeState{}, ls.setFamilyUnserved(nodesettings.FamilyCommitteeConstitution)
+		return &CommitteeState{}, ledgerStateUnserved(
+			nodesettings.FamilyCommitteeConstitution,
+		)
 	}
 	return ls.committeeView(r, txn)
 }
@@ -321,18 +318,16 @@ func (ls *LedgerState) stageCommittee(
 ) {
 	r := ls.committeeReader(txn)
 	if r == nil {
-		// The SQL write of a drained family was skipped, so a change the set
-		// cannot stage would be lost.
-		if ls.familyDrained(nodesettings.FamilyCommitteeConstitution) {
-			ls.failAccountStaging(
-				drainedUnserved(nodesettings.FamilyCommitteeConstitution),
-			)
-		}
+		// The set is the only copy, so a change it cannot stage would be
+		// lost.
+		ls.failAccountStaging(txn,
+			ledgerStateUnserved(nodesettings.FamilyCommitteeConstitution),
+		)
 		return
 	}
 	st, err := ls.committeeView(r, txn)
 	if err != nil {
-		ls.failAccountStaging(err)
+		ls.failAccountStaging(txn, err)
 		return
 	}
 	var out []CommitteeChange
@@ -373,24 +368,11 @@ func softDeleteMembers(
 	}
 }
 
-// committeeDrained reports whether the committee and constitution rows are
-// gone from the metadata store, so their SQL writes are skipped and the
-// staged set change is the only record.
-func (s stagingLedgerDB) committeeDrained() bool {
-	return s.ls.familyDrained(nodesettings.FamilyCommitteeConstitution)
-}
-
 func (s stagingLedgerDB) SetCommitteeMembers(
 	ctx context.Context,
 	members []*models.CommitteeMember,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.committeeDrained() {
-		err := s.LedgerDB.SetCommitteeMembers(ctx, members, txn)
-		if err != nil {
-			return err
-		}
-	}
 	s.ls.stageCommittee(txn, func(st *CommitteeState, put func(CommitteeChange)) { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		for _, m := range members {
 			if m == nil {
@@ -417,14 +399,6 @@ func (s stagingLedgerDB) SoftDeleteCommitteeMembers(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.committeeDrained() {
-		err := s.LedgerDB.SoftDeleteCommitteeMembers(
-			ctx, coldCredentials, slot, txn,
-		)
-		if err != nil {
-			return err
-		}
-	}
 	s.ls.stageCommittee(txn, func(st *CommitteeState, put func(CommitteeChange)) { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		for _, c := range coldCredentials {
 			softDeleteMembers(st, put, func(o models.CommitteeMember) bool {
@@ -441,12 +415,6 @@ func (s stagingLedgerDB) SoftDeleteAllCommitteeMembers(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.committeeDrained() {
-		err := s.LedgerDB.SoftDeleteAllCommitteeMembers(ctx, slot, txn)
-		if err != nil {
-			return err
-		}
-	}
 	s.ls.stageCommittee(txn, func(st *CommitteeState, put func(CommitteeChange)) { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		softDeleteMembers(st, put, func(models.CommitteeMember) bool { return true }, slot)
 	})
@@ -459,12 +427,6 @@ func (s stagingLedgerDB) SetCommitteeQuorum(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.committeeDrained() {
-		err := s.LedgerDB.SetCommitteeQuorum(ctx, quorum, slot, txn)
-		if err != nil {
-			return err
-		}
-	}
 	s.ls.stageCommittee(txn, func(_ *CommitteeState, put func(CommitteeChange)) { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		put(CommitteeChange{Slot: slot, Quorum: &CommitteeQuorumRow{
 			Slot: slot, Quorum: new(big.Rat).Set(quorum),
@@ -478,11 +440,6 @@ func (s stagingLedgerDB) ClearCommitteeQuorum(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.committeeDrained() {
-		if err := s.LedgerDB.ClearCommitteeQuorum(ctx, slot, txn); err != nil {
-			return err
-		}
-	}
 	s.ls.stageCommittee(txn, func(_ *CommitteeState, put func(CommitteeChange)) { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		put(CommitteeChange{Slot: slot, Quorum: &CommitteeQuorumRow{Slot: slot}})
 	})
@@ -493,11 +450,6 @@ func (s stagingLedgerDB) SetConstitution(
 	constitution *models.Constitution,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.committeeDrained() {
-		if err := s.LedgerDB.SetConstitution(constitution, txn); err != nil {
-			return err
-		}
-	}
 	s.ls.stageCommittee(txn, func(_ *CommitteeState, put func(CommitteeChange)) { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		c := *constitution
 		c.ID = 0
@@ -567,80 +519,6 @@ func (ls *LedgerState) stageCommitteeCertificate(
 	}
 	ls.stageCommittee(txn, stage)
 	return true, nil
-}
-
-func sameRat(a, b *big.Rat) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return a.Cmp(b) == 0
-}
-
-func samePtr(a, b *uint64) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
-}
-
-func sameConstitution(a, b *models.Constitution) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return a.AnchorURL == b.AnchorURL &&
-		bytes.Equal(a.AnchorHash, b.AnchorHash) &&
-		bytes.Equal(a.PolicyHash, b.PolicyHash) &&
-		a.AddedSlot == b.AddedSlot &&
-		samePtr(a.DeletedSlot, b.DeletedSlot)
-}
-
-// sameMembers compares member rows without their IDs. The metadata store
-// orders them by insertion; the set by (added slot, tag, hash), so both are
-// ordered as the set records them.
-func sameMembers(want []*models.CommitteeMember, got []models.CommitteeMember) bool {
-	rows := make([]models.CommitteeMember, 0, len(want))
-	for _, m := range want {
-		rows = append(rows, cleanMember(*m))
-	}
-	slices.SortFunc(rows, compareMembers)
-	return slices.EqualFunc(rows, got, func(a, b models.CommitteeMember) bool {
-		return a.ColdCredentialTag == b.ColdCredentialTag &&
-			bytes.Equal(a.ColdCredHash, b.ColdCredHash) &&
-			a.ExpiresEpoch == b.ExpiresEpoch &&
-			a.TermStartSlot == b.TermStartSlot &&
-			a.TermStartSlotSet == b.TermStartSlotSet &&
-			a.AddedSlot == b.AddedSlot &&
-			samePtr(a.DeletedSlot, b.DeletedSlot)
-	})
-}
-
-func sameAuth(a, b *models.AuthCommitteeHot) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return a.ColdCredentialTag == b.ColdCredentialTag &&
-		bytes.Equal(a.ColdCredential, b.ColdCredential) &&
-		a.HotCredentialTag == b.HotCredentialTag &&
-		bytes.Equal(a.HotCredential, b.HotCredential) &&
-		a.AddedSlot == b.AddedSlot
-}
-
-// sameAuths compares authorizations without their IDs, by cold credential.
-func sameAuths(want []*models.AuthCommitteeHot, got []models.AuthCommitteeHot) bool {
-	byCold := func(a, b *models.AuthCommitteeHot) int {
-		return cmp.Or(
-			cmp.Compare(a.ColdCredentialTag, b.ColdCredentialTag),
-			bytes.Compare(a.ColdCredential, b.ColdCredential),
-		)
-	}
-	w := slices.Clone(want)
-	slices.SortFunc(w, byCold)
-	g := make([]*models.AuthCommitteeHot, 0, len(got))
-	for i := range got {
-		g = append(g, &got[i])
-	}
-	slices.SortFunc(g, byCold)
-	return slices.EqualFunc(w, g, sameAuth)
 }
 
 func (s stagingLedgerDB) GetConstitution(

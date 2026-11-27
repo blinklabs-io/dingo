@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -57,7 +58,6 @@ func seedNegativeLeaderRewardRound(
 		append([]eras.EraDesc(nil), eras.Eras...),
 		eras.DijkstraEraDesc,
 	)
-	meta := db.Metadata()
 
 	poolKey := rewardCalcHash(0x11)
 	rewardAccount := rewardCalcHash(0x22)
@@ -86,16 +86,17 @@ func seedNegativeLeaderRewardRound(
 		negativeLeaderPerformance: 100,
 		negativeLeaderPotsEpoch:   200,
 	} {
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			startSlot, epoch, nil, nil, nil, nil,
 			eras.DijkstraEraDesc.Id, 1, 100, nil,
 		))
-		require.NoError(t, db.SetPParams(
+		require.NoError(t, seedDB(t, db).SetPParams(
 			pparamsCbor, startSlot, epoch, eras.DijkstraEraDesc.Id, nil,
 		))
 	}
 	for i := range uint64(10) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
+		require.NoError(t, fxMintBlock(
+			t, db,
 			context.Background(),
 			poolID,
 			i+1,
@@ -103,13 +104,13 @@ func seedNegativeLeaderRewardRound(
 			nil,
 		))
 	}
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        negativeLeaderPotsEpoch,
 		Reserves:     100_000_000,
 		Treasury:     1_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            negativeLeaderSnapshot,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -119,7 +120,7 @@ func seedNegativeLeaderRewardRound(
 		BoundarySlot:     100,
 		ProtocolVersion:  12,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      negativeLeaderSnapshot,
 			PoolKeyHash:                poolKey,
@@ -135,7 +136,7 @@ func seedNegativeLeaderRewardRound(
 			BoundarySlot:               100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:         negativeLeaderSnapshot,
 			PoolKeyHash:   poolKey,
@@ -159,12 +160,12 @@ func seedNegativeLeaderRewardRound(
 		},
 	}, nil))
 	pool := models.Pool{PoolKeyHash: poolKey}
-	require.NoError(t, db.ImportPool(context.Background(), nil, &pool, &models.PoolRegistration{
+	require.NoError(t, fxImportPool(t, db, context.Background(), nil, &pool, &models.PoolRegistration{
 		PoolID:      pool.ID,
 		PoolKeyHash: poolKey,
 		AddedSlot:   0,
 	}))
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey: member,
 		Pool:       poolKey,
 		Active:     true,
@@ -174,7 +175,7 @@ func seedNegativeLeaderRewardRound(
 		uint(lcommon.CertificateTypeStakeRegistration),
 	)
 	if accountRegistered {
-		require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+		require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: rewardAccount,
 			Pool:       poolKey,
 			Active:     true,
@@ -197,22 +198,21 @@ func TestApplyStakeRewardsNegativeLeaderRewardUnregisteredAccount(t *testing.T) 
 	t.Parallel()
 
 	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
-	meta := db.Metadata()
 	for range 2 {
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.applyStakeRewards(context.Background(),
+			return ls.engine().ApplyStakeRewards(context.Background(),
 				txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 				false,
 			)
 		}))
-		state, err := meta.GetNetworkState(nil)
+		state, err := seedDB(t, db).GetNetworkState(nil)
 		require.NoError(t, err)
 		require.NotNil(t, state)
 		require.Equal(t, uint64(100_008_334), uint64(state.Reserves))
 		require.Equal(t, uint64(991_666), uint64(state.Treasury))
 	}
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		negativeLeaderSnapshot,
 		nil,
 	)
@@ -239,7 +239,7 @@ func TestApplyStakeRewardsNegativeLeaderRewardRegisteredAccountStops(t *testing.
 	}
 	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(),
+		return ls.engine().ApplyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 			false,
 		)
@@ -252,16 +252,15 @@ func TestApplyStakeRewardsNegativeLeaderRewardRegisteredAccountStops(t *testing.
 	require.True(t, errors.Is(fatalErrs[0], rewards.ErrNegativeLeaderReward))
 	fatalMu.Unlock()
 
-	meta := db.Metadata()
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	if state != nil {
 		require.NotEqual(t, negativeLeaderBoundarySlot, state.Slot)
 	}
-	outputs, err := meta.GetRewardPoolOutputs(negativeLeaderSnapshot, nil)
+	outputs, err := seedDB(t, db).GetRewardPoolOutputs(negativeLeaderSnapshot, nil)
 	require.NoError(t, err)
 	require.Empty(t, outputs)
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(), 0, rewardAccount, false, nil,
 	)
 	require.NoError(t, err)
@@ -277,11 +276,11 @@ func TestPrecomputeStakeRewardsSkipsNegativeLeaderReward(t *testing.T) {
 	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.precomputeStakeRewards(
+		return ls.precomputeStakeRewardsForTest(
 			txn, negativeLeaderNewEpoch, 300, negativeLeaderBoundarySlot,
 		)
 	}))
-	outputs, err := db.Metadata().GetRewardPoolOutputs(
+	outputs, err := seedDB(t, db).GetRewardPoolOutputs(
 		negativeLeaderSnapshot,
 		nil,
 	)
@@ -300,7 +299,7 @@ func TestChunkedRewardPrecomputeDeclinesNegativeLeaderReward(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.False(t, handled)
-	outputs, err := db.Metadata().GetRewardPoolOutputs(
+	outputs, err := seedDB(t, db).GetRewardPoolOutputs(
 		negativeLeaderSnapshot,
 		nil,
 	)
@@ -321,22 +320,23 @@ func TestNegativeLeaderRewardExpiredRewardAccountIsGuarded(t *testing.T) {
 	// row's expiry decides.
 	ls.config.DelegatorInactivityEnabled = true
 	ls.config.DelegatorInactivity = 1
-	require.NoError(t, db.RenewAccountExpirations(
-		context.Background(),
-		[]models.StakeCredentialRef{
-			models.NewStakeCredentialRef(0, rewardAccount),
-		},
-		1,
-		nil,
-	))
+	account, err := seedDB(t, db).GetAccountByCredential(
+		context.Background(), 0, rewardAccount, true, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	account.ExpirationEpoch = 1
+	fxSeed(t, db, LedgerChanges{Accounts: []AccountChange{{
+		Slot: account.AddedSlot, Account: *account,
+	}}})
 	applyTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, applyTxn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(),
+		return ls.engine().ApplyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 			false,
 		)
 	}))
-	outputs, err := db.Metadata().GetRewardAccountOutputs(
+	outputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		negativeLeaderSnapshot,
 		nil,
 	)
@@ -354,12 +354,12 @@ func TestApplyStakeRewardsPersistsNegativeLeaderRewardDeficit(t *testing.T) {
 	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(),
+		return ls.engine().ApplyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 			false,
 		)
 	}))
-	outputs, err := db.Metadata().GetRewardPoolOutputs(
+	outputs, err := seedDB(t, db).GetRewardPoolOutputs(
 		negativeLeaderSnapshot,
 		nil,
 	)
@@ -382,7 +382,7 @@ func TestSuppressBootstrapStakeRewardsClearsNegativeLeaderRewards(t *testing.T) 
 		},
 		UnspendableDeficit: 20,
 	}
-	suppressBootstrapStakeRewards(result)
+	epochengine.SuppressBootstrapStakeRewards(result)
 	require.NoError(t, result.NegativeLeaderRewardError())
 	require.Zero(t, result.UnspendableDeficit)
 	require.Equal(t, uint64(1_000), result.Undistributed)

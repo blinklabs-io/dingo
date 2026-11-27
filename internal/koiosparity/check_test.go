@@ -198,8 +198,8 @@ func TestCheckReselectsPoolOnlyEpochMissingAccountCoverage(t *testing.T) {
 		Status: StatusPass,
 	}))
 
-	// Sanity check: pool-only mode (AccountsEnabled=false, the standalone
-	// CLI's default) must NOT change behavior — this is the existing,
+	// Sanity check: pool-only mode (AccountsEnabled=false, the library
+	// default) must NOT change behavior — this is the existing,
 	// already-correct case the fix must not regress.
 	needingPoolOnly, err := cache.GetEpochsNeedingCheck(network, false)
 	require.NoError(t, err)
@@ -375,7 +375,7 @@ func newTestDingoDB(t *testing.T) (dataDir string, gdb *testDB) {
 //   - reward_pool_input at epoch 11 (K+1): BlocksProduced alone, describing
 //     epoch 10 per rotation.go's buildRewardStateInputs.
 //   - reward_ada_pots at epoch 10 (unshifted — a point-in-time pot balance,
-//     not a delayed reward-calculation input; see ARCHITECTURE.md).
+//     not a delayed reward-calculation input; see README.md).
 //   - a decoy reward_pool_input row at epoch 10 itself with wrong values in
 //     every field, so a regression to the naive same-epoch read fails loudly.
 //

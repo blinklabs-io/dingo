@@ -25,6 +25,7 @@ import (
 	"io/fs"
 	"net"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -38,7 +39,7 @@ import (
 
 // migrationSQL contains immutable, versioned migration resources.
 //
-//go:embed v*/*/*.sql
+//go:embed v*/*/*.sql migration-manifests
 var migrationSQL embed.FS
 
 const (
@@ -112,9 +113,11 @@ const (
 	ledgerStateDrainSchemaRelease                       = "ledger-state-drain-latch"
 	immutableDBSchemaRelease                            = "immutable-db"
 	utxoAddressOrderSchemaRelease                       = "utxo-address-order-index"
-	rewardLikelihoodStateSchemaRelease                  = "reward-likelihood-state"
 	rewardJournalCredentialIndexSchemaRelease           = "reward-journal-credential-index"
 	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
+	utxoAddressPrefixIndexDropSchemaRelease             = "utxo-address-prefix-index-drop"
+	indexerOffsetsSchemaRelease                         = "indexer-cbor-offsets"
+	activePayloadIndexSchemaRelease                     = "active-payload-indexes"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -125,12 +128,17 @@ const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
 // renumbering must not silently reclassify rows this backfill already read.
 const alonzoEraID = 4
 
-// schemaVersions names every migration in ascending version order.
-var schemaVersions = []struct {
-	Version int
+// schemaVersions keeps the released sequential identifiers 1 through 75
+// unchanged and registers active-payload-indexes. Later migrations declare
+// their name, stable version, and predecessor in a manifest.
+type schemaVersion struct {
+	Version int64
 	Name    string
 	Dir     string
-}{
+	After   int64
+}
+
+var schemaVersions = []schemaVersion{
 	{Version: 1, Name: initialSchemaRelease, Dir: "v1"},
 	{Version: 2, Name: leiosKeySchemaRelease, Dir: "v2"},
 	{Version: 3, Name: tokenRegistrySchemaRelease, Dir: "v3"},
@@ -306,9 +314,144 @@ var schemaVersions = []struct {
 	{Version: 69, Name: ledgerStateDrainSchemaRelease, Dir: "v69"},
 	{Version: 70, Name: immutableDBSchemaRelease, Dir: "v70"},
 	{Version: 71, Name: utxoAddressOrderSchemaRelease, Dir: "v71"},
-	{Version: 72, Name: rewardLikelihoodStateSchemaRelease, Dir: "v72"},
-	{Version: 73, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v73"},
-	{Version: 74, Name: assetIdentityHoldingsSchemaRelease, Dir: "v74"},
+	{Version: 72, Name: rewardJournalCredentialIndexSchemaRelease, Dir: "v72"},
+	{Version: 73, Name: assetIdentityHoldingsSchemaRelease, Dir: "v73"},
+	{Version: 74, Name: utxoAddressPrefixIndexDropSchemaRelease, Dir: "v74"},
+	{Version: 75, Name: indexerOffsetsSchemaRelease, Dir: "v75"},
+	{
+		Version: StableVersion(activePayloadIndexSchemaRelease),
+		Name:    activePayloadIndexSchemaRelease,
+		Dir:     "v76",
+		After:   75,
+	},
+}
+
+func orderedSchemaVersions(versions []schemaVersion) ([]schemaVersion, error) {
+	byVersion := make(map[int64]schemaVersion, len(versions))
+	seenVersions := make(map[int64]struct{}, len(versions))
+	for _, version := range versions {
+		if version.Version <= 0 {
+			return nil, fmt.Errorf(
+				"%w: invalid migration version %d",
+				ErrInvalidRegistry,
+				version.Version,
+			)
+		}
+		if _, exists := seenVersions[version.Version]; exists {
+			return nil, fmt.Errorf(
+				"%w: duplicate version %d",
+				ErrInvalidRegistry,
+				version.Version,
+			)
+		}
+		seenVersions[version.Version] = struct{}{}
+		after := version.After
+		if version.Version <= lastSequentialVersion {
+			after = version.Version - 1
+		}
+		version.After = after
+		byVersion[version.Version] = version
+	}
+
+	children := make(map[int64][]schemaVersion, len(versions))
+	for _, version := range byVersion {
+		if version.After != 0 {
+			if _, exists := byVersion[version.After]; !exists {
+				return nil, fmt.Errorf(
+					"%w: version %d follows unregistered version %d",
+					ErrInvalidRegistry,
+					version.Version,
+					version.After,
+				)
+			}
+		}
+		children[version.After] = append(children[version.After], version)
+	}
+	for parent := range children {
+		sort.Slice(children[parent], func(i, j int) bool {
+			return children[parent][i].Version < children[parent][j].Version
+		})
+	}
+
+	roots := children[0]
+	if len(roots) != 1 {
+		return nil, fmt.Errorf(
+			"%w: migration registry must have one initial version, got %d",
+			ErrInvalidRegistry,
+			len(roots),
+		)
+	}
+	if roots[0].Version != 1 {
+		return nil, fmt.Errorf(
+			"%w: initial migration must have version 1, got %d",
+			ErrInvalidRegistry,
+			roots[0].Version,
+		)
+	}
+	ordered := make([]schemaVersion, 0, len(versions))
+	ready := append([]schemaVersion(nil), roots...)
+	for len(ready) > 0 {
+		sort.Slice(ready, func(i, j int) bool {
+			return ready[i].Version < ready[j].Version
+		})
+		version := ready[0]
+		ready = ready[1:]
+		ordered = append(ordered, version)
+		ready = append(ready, children[version.Version]...)
+	}
+	if len(ordered) != len(versions) {
+		return nil, fmt.Errorf(
+			"%w: migration predecessors contain a cycle",
+			ErrInvalidRegistry,
+		)
+	}
+	return ordered, nil
+}
+
+type schemaManifest struct {
+	Version int64  `json:"version"`
+	Name    string `json:"name"`
+	After   int64  `json:"after"`
+}
+
+func allSchemaVersions() ([]schemaVersion, error) {
+	return schemaVersionsFrom(migrationSQL, schemaVersions)
+}
+
+func schemaVersionsFrom(
+	resources fs.FS,
+	base []schemaVersion,
+) ([]schemaVersion, error) {
+	versions := append([]schemaVersion(nil), base...)
+	manifests, err := fs.Glob(resources, "migration-manifests/*.json")
+	if err != nil {
+		return nil, fmt.Errorf("list schema migration manifests: %w", err)
+	}
+	for _, manifestPath := range manifests {
+		data, err := fs.ReadFile(resources, manifestPath)
+		if err != nil {
+			return nil, fmt.Errorf("read migration manifest %s: %w", manifestPath, err)
+		}
+		var manifest schemaManifest
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			return nil, fmt.Errorf("parse migration manifest %s: %w", manifestPath, err)
+		}
+		if manifest.Version <= lastSequentialVersion {
+			return nil, fmt.Errorf(
+				"%w: migration manifest %s uses reserved version %d",
+				ErrInvalidRegistry,
+				manifestPath,
+				manifest.Version,
+			)
+		}
+		versions = append(versions, schemaVersion{
+			Version: manifest.Version,
+			Name:    manifest.Name,
+			Dir:     fmt.Sprintf("v%d", manifest.Version),
+			After:   manifest.After,
+		})
+	}
+	return versions, nil
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -329,7 +472,15 @@ func MySQLRegistry() ([]Migration, error) {
 }
 
 func registryForDialect(dialect string) ([]Migration, error) {
-	loaded := make([]SQL, 0, len(schemaVersions))
+	registeredVersions, err := allSchemaVersions()
+	if err != nil {
+		return nil, err
+	}
+	versions, err := orderedSchemaVersions(registeredVersions)
+	if err != nil {
+		return nil, err
+	}
+	loaded := make([]SQL, 0, len(versions))
 	// Every CREATE TABLE lives in the initial version, and MySQL's translation
 	// reads them to learn which columns are blobs. A later version indexing an
 	// existing blob column carries no CREATE TABLE of its own, so it is
@@ -337,7 +488,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 	// statements -- otherwise MySQL would be handed a BLOB key with no prefix
 	// length, which it rejects.
 	var wholeSchema []string
-	for _, version := range schemaVersions {
+	for _, version := range versions {
 		expand, err := loadSQL(version.Dir + "/sqlite/expand.sql")
 		if err != nil {
 			return nil, err
@@ -351,8 +502,8 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		wholeSchema = append(wholeSchema, contract...)
 	}
 
-	ret := make([]Migration, 0, len(schemaVersions))
-	for index, version := range schemaVersions {
+	ret := make([]Migration, 0, len(versions))
+	for index, version := range versions {
 		sqlForDialect := loaded[index]
 		if dialect != "sqlite" {
 			nativeExpand, nativeExpandErr := loadOptionalSQL(
@@ -374,6 +525,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 				}
 				ret = append(ret, Migration{
 					Version:          version.Version,
+					After:            version.After,
 					Name:             version.Name,
 					BackfillRevision: "none",
 					SQL: map[string]SQL{
@@ -395,6 +547,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		}
 		migration := Migration{
 			Version:          version.Version,
+			After:            version.After,
 			Name:             version.Name,
 			BackfillRevision: "none",
 			SQL: map[string]SQL{
@@ -495,6 +648,9 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BatchSize = assetIdentityHoldingsBatchSize
 		}
 		ret = append(ret, migration)
+	}
+	if err := validateRegistry(ret, dialect); err != nil {
+		return nil, err
 	}
 	return ret, nil
 }
@@ -1788,7 +1944,7 @@ const rewardSigmaCalculationVersion uint = 2
 // row is only re-stamped when it already agrees with the epoch's
 // independently-recorded epoch_summary.total_active_stake, which never
 // depended on calculation version either. A row that disagrees is left
-// stale on purpose: StaleConsensusStakeSnapshotsExist still fails closed on
+// stale on purpose: the node's startup provenance check still fails closed on
 // it, because reconstructing the correct value requires replaying that
 // epoch's stake distribution, which this offline, row-local backfill cannot
 // do.
@@ -1963,7 +2119,7 @@ func restampPoolStakeSnapshotBatch(
 // reward_snapshot rows whose total_active_stake already agrees with the same
 // epoch's epoch_summary.total_active_stake -- the value that never depended
 // on calculation version. A row that disagrees names an epoch the version
-// bump actually changed and is left stale; StaleConsensusStakeSnapshotsExist
+// bump actually changed and is left stale; the node's startup provenance check
 // still fails closed on it.
 func restampRewardSnapshotBatch(
 	ctx context.Context,
@@ -2159,6 +2315,7 @@ func translateSchemaSQLInSchema(
 				"idx_account_drep":                    "account",
 				"idx_datum_hash":                      "datum",
 				"idx_script_hash":                     "script",
+				"idx_utxo_address_address":            "utxo_address",
 			} {
 				value = strings.ReplaceAll(
 					value,

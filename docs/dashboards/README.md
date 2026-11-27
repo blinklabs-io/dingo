@@ -29,6 +29,10 @@ Before you begin, make sure you have:
 - **[Business Text
   plugin](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)**
   — required by every dashboard except Traces and Logs for the header panel
+- **Grafana HTML sanitization enabled** — keep the default `[panels]`
+  `disable_sanitize_html = false`. Business Text runs the dashboards' **After
+  content ready** JavaScript independently of this setting, and the header HTML
+  does not require the sanitizer bypass.
 - **[prometheus-node-exporter](https://github.com/prometheus/node_exporter)** —
   required only by the Resource Usage dashboard for host-level CPU, memory, and
   disk metrics
@@ -241,6 +245,15 @@ docs/dashboards/
 marcusolsson-dynamictext-panel"** Install the plugin (step 1 above) and restart
 Grafana. If running in a managed environment, add
 `marcusolsson-dynamictext-panel` to your `GF_INSTALL_PLUGINS` list.
+
+**Business Text header is visible but does not update** Re-import the dashboard
+JSON so the panel includes its **After content ready** JavaScript. If the
+dashboard is provisioned from files, replace the JSON in the provisioning
+directory instead: a UI re-import does not change the provisioned source, and
+the next provisioning update restores the old header. Do not set
+`disable_sanitize_html = true` to troubleshoot this: the setting does not
+enable that JavaScript. It disables HTML sanitization for the entire Grafana
+instance, allowing dashboard content to inject scripts into viewers' browsers.
 
 **Panels show "No data"** Check that Prometheus is scraping your Dingo node:
 open Prometheus in the browser, go to **Status → Targets**, and confirm the

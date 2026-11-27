@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo"
+	"github.com/blinklabs-io/dingo/bark"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -47,7 +48,7 @@ func newCLIDestinationRegistry() *lifecycle.DestinationRegistry {
 // configured data directory (like `load`/`mithril`) and must not be run
 // against a data directory a `dingo serve` process currently has open.
 // newDatabaseService builds the lifecycle service the offline commands share.
-// On the split layout a truncate rolls the IndexerDB back through the same
+// On the IndexerDB layout a truncate rolls the IndexerDB back through the same
 // writer the node runs.
 func newDatabaseService(
 	cfg *config.Config,
@@ -55,6 +56,7 @@ func newDatabaseService(
 	logger *slog.Logger,
 ) *dblifecycle.Service {
 	svc := dblifecycle.NewService(cfg, registry, logger)
+	svc.SetArchiveStore(bark.ArchiveStore)
 	svc.SetIndexerRollbackFactory(func(
 		consensus, indexer *database.Database,
 	) (dblifecycle.IndexerRoller, error) {
@@ -72,50 +74,62 @@ func newDatabaseService(
 func databaseCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "database",
-		Short: "Database snapshot, restore, truncate, and SCLS export maintenance commands",
+		Short: "Database snapshot, restore, and truncate maintenance commands",
 	}
 	cmd.AddCommand(databaseSnapshotCommand())
 	cmd.AddCommand(databaseRestoreCommand())
 	cmd.AddCommand(databaseTruncateCommand())
-	cmd.AddCommand(databaseExportSCLSCommand())
 	return cmd
 }
 
 func databaseSnapshotCommand() *cobra.Command {
-	var destDir string
+	var (
+		destDir    string
+		sclsOutput string
+	)
 	cmd := &cobra.Command{
 		Use:   "snapshot",
-		Short: "Capture a point-in-time snapshot of the database",
-		Args:  cobra.NoArgs,
+		Short: "Capture a native database snapshot or export SCLS",
+		Long: `Capture a point-in-time native database snapshot at --dir, or export
+the live UTxO set as an SCLS (CIP-0165) parity file at --scls. Exactly one
+output must be selected. The configured data directory must not be open in a
+running node.
+
+An SCLS export reads one snapshot of the live UTxO set and persists no
+checkpoint. It stages the file as <scls>.partial, verifies it in full, and
+hard-links it into place without replacing an existing file. A failure or an
+interrupt removes the staged file. The output directory must support hard
+links. A staged file left by a killed export is refused and must be removed
+once no export is running.
+
+Only a Conway state is exported, and only the utxo/v0 namespace. The file
+declares itself a parity export in its manifest (profile=parity,
+bootstrap=false): it is not a bootstrap artifact and a node cannot be
+restarted from it.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// An empty value passes the flag-group checks, which only
+			// test that a flag was set, and must be refused before
+			// commonRun opens the data directory.
+			for _, name := range []string{"dir", "scls"} {
+				if cmd.Flags().Changed(name) {
+					value, _ := cmd.Flags().GetString(name)
+					if value == "" {
+						return fmt.Errorf("--%s must not be empty", name)
+					}
+				}
+			}
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
 				return errors.New("no config found in context")
-			}
-			if destDir == "" {
-				return errors.New("--dir is required")
 			}
 			logger, err := commonRun(cmd.Context(), cfg)
 			if err != nil {
 				return err
 			}
-			svc := newDatabaseService(
-				cfg,
-				newCLIDestinationRegistry(),
-				logger,
+			return runDatabaseSnapshot(
+				cmd, cfg, logger, destDir, sclsOutput,
 			)
-
-			manifest, err := svc.Snapshot(cmd.Context(), destDir, "", "")
-			if err != nil {
-				return fmt.Errorf("snapshot: %w", err)
-			}
-			fmt.Printf(
-				"Snapshot written to %s (tip slot=%d, block=%d)\n",
-				destDir,
-				manifest.TipSlot,
-				manifest.TipBlockNumber,
-			)
-			return nil
 		},
 	}
 	cmd.Flags().StringVar(
@@ -124,7 +138,58 @@ func databaseSnapshotCommand() *cobra.Command {
 		"",
 		"destination directory for the snapshot (must not already exist)",
 	)
+	cmd.Flags().StringVar(
+		&sclsOutput,
+		"scls",
+		"",
+		"SCLS parity file to create (must not already exist)",
+	)
+	cmd.MarkFlagsMutuallyExclusive("dir", "scls")
+	cmd.MarkFlagsOneRequired("dir", "scls")
 	return cmd
+}
+
+func runDatabaseSnapshot(
+	cmd *cobra.Command,
+	cfg *config.Config,
+	logger *slog.Logger,
+	destDir, sclsOutput string,
+) error {
+	if cmd.Flags().Changed("scls") {
+		res, err := exportSCLS(cmd, cfg.DatabasePath, sclsOutput)
+		if err != nil {
+			return fmt.Errorf("snapshot SCLS: %w", err)
+		}
+		fmt.Printf(
+			"SCLS parity export written to %s\n"+
+				"era=%s slot=%d block=%s namespaces=%s entries=%d root=%x\n",
+			sclsOutput,
+			strings.ToLower(ledgerstate.EraName(res.Era)),
+			res.Slot,
+			hex.EncodeToString(res.BlockHash),
+			strings.Join(res.Namespaces, ","),
+			res.Entries,
+			res.Root[:],
+		)
+		return nil
+	}
+
+	svc := newDatabaseService(
+		cfg,
+		newCLIDestinationRegistry(),
+		logger,
+	)
+	manifest, err := svc.Snapshot(cmd.Context(), destDir, "", "")
+	if err != nil {
+		return fmt.Errorf("snapshot: %w", err)
+	}
+	fmt.Printf(
+		"Snapshot written to %s (tip slot=%d, block=%d)\n",
+		destDir,
+		manifest.TipSlot,
+		manifest.TipBlockNumber,
+	)
+	return nil
 }
 
 func databaseRestoreCommand() *cobra.Command {
@@ -232,66 +297,6 @@ path, not a shallower local target.`,
 	cmd.Flags().StringVar(&hash, "hash", "", "truncate target block hash (hex)")
 	cmd.Flags().
 		Uint64Var(&blockNumber, "block-number", 0, "truncate target block number")
-	return cmd
-}
-
-func databaseExportSCLSCommand() *cobra.Command {
-	var output string
-	cmd := &cobra.Command{
-		Use:   "export-scls",
-		Short: "Export the live UTxO set as an SCLS (CIP-0165) parity file",
-		Long: `Export the UTxO set under the configured data directory as an SCLS file
-(CIP-0165) at --output, which must not exist. The data directory must not be
-open in a running node.
-
-The export reads one snapshot of the live UTxO set at its tip and persists
-no checkpoint, so nothing is retained once the command ends. The file is
-staged as <output>.partial, verified in full, and hard-linked into place,
-which never replaces a file created at --output meanwhile; a failure or an
-interrupt removes the staged file. The output directory must be on a file
-system that supports hard links. A staged file left by a killed export is
-refused, not overwritten; remove it once no export is running.
-
-Only a Conway state is exported, and only the utxo/v0 namespace. The file
-declares itself a parity export in its manifest (profile=parity,
-bootstrap=false): it is not a bootstrap artifact and a node cannot be
-restarted from it.`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg := config.FromContext(cmd.Context())
-			if cfg == nil {
-				return errors.New("no config found in context")
-			}
-			if output == "" {
-				return errors.New("--output is required")
-			}
-			if _, err := commonRun(cmd.Context(), cfg); err != nil {
-				return err
-			}
-			res, err := exportSCLS(cmd, cfg.DatabasePath, output)
-			if err != nil {
-				return fmt.Errorf("export-scls: %w", err)
-			}
-			fmt.Printf(
-				"SCLS parity export written to %s\n"+
-					"era=%s slot=%d block=%s namespaces=%s entries=%d root=%x\n",
-				output,
-				strings.ToLower(ledgerstate.EraName(res.Era)),
-				res.Slot,
-				hex.EncodeToString(res.BlockHash),
-				strings.Join(res.Namespaces, ","),
-				res.Entries,
-				res.Root[:],
-			)
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(
-		&output,
-		"output",
-		"",
-		"SCLS file to create (must not already exist)",
-	)
 	return cmd
 }
 

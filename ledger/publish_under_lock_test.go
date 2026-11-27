@@ -153,8 +153,8 @@ func callGraphInlineChainPublishers(files []*ast.File) map[string]bool {
 // match here; TestChainsyncResyncPublishPathsUnderLock does not match it
 // either, since that one parses only chainsync.go and only fires on
 // ChainsyncResyncEventType. The path is a documented exception rather than a
-// checked one -- see the ledger.tx section of ARCHITECTURE.md for why it has
-// to publish under chainsyncMutex and what that requires of subscribers.
+// checked one: its synchronous subscribers must not acquire chainsyncMutex
+// because this publisher holds it while delivering the event.
 var knownNilQueuePublishersUnderLock []string
 
 // TestNoEventBusPublishWhileHoldingChainsyncMutex enforces that nothing in

@@ -361,7 +361,6 @@ func TestPoolCurrentStateWritersRefresh(t *testing.T) {
 		"transaction_write.go INSERT INTO applied_transaction: new transaction row, no pool certificate refers to it yet",
 		"transaction_write.go INSERT INTO leios_transaction_context: recordTransactionLedgerContext",
 		"transaction_write.go UPDATE applied_transaction: replay, followed by deleteSpecializedCertificates and the certificate apply",
-		"utxo_overlay.go INSERT INTO applied_transaction: new transaction row, no pool certificate refers to it yet",
 	}
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)

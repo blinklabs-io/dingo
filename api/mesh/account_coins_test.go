@@ -53,7 +53,7 @@ func TestAccountCoinsReturnsAccountsPastAnyCardinality(t *testing.T) {
 	addr := testAddress(t, lcommon.AddressTypeKeyNone, key, nil)
 	policy := testKeyHash(0xcd)
 	deps := newTestDeps()
-	deps.ledger.utxos = func([]lcommon.Address) ([]models.Utxo, error) {
+	deps.database.utxos = func([]lcommon.Address) ([]models.Utxo, error) {
 		t.Fatal("account coins must not use the bounded balance lookup")
 		return nil, nil
 	}
@@ -77,7 +77,7 @@ func TestAccountCoinsReturnsAccountsPastAnyCardinality(t *testing.T) {
 			want = append(want, base+":"+hexString(policy)+":"+hexString(a.Name))
 		}
 	}
-	deps.ledger.utxosComplete = func(
+	deps.database.utxosComplete = func(
 		context.Context,
 		[]lcommon.Address,
 	) ([]models.Utxo, error) {
@@ -164,11 +164,11 @@ func TestAccountCoinsHoldsOnePage(t *testing.T) {
 		src.ids[i] = make([]byte, 32)
 	}
 	deps := newTestDeps()
-	deps.ledger.utxos = func([]lcommon.Address) ([]models.Utxo, error) {
+	deps.database.utxos = func([]lcommon.Address) ([]models.Utxo, error) {
 		t.Fatal("account coins must not use a full-set read")
 		return nil, nil
 	}
-	deps.ledger.scan = src.scan
+	deps.database.scan = src.scan
 	h := newTestHandler(t, deps, func(c *ServerConfig) {
 		c.accountCoinsPageSize = pageSize
 	})
@@ -201,7 +201,7 @@ func TestAccountCoinsMidStreamFailureIsNotAWellFormedDocument(t *testing.T) {
 	deps := newTestDeps()
 	var failNext atomic.Bool
 	failNext.Store(true)
-	deps.ledger.scan = func(
+	deps.database.scan = func(
 		_ context.Context,
 		_ *models.UtxoWithOrderingQuery,
 		_ int,
@@ -254,7 +254,7 @@ func TestAccountCoinsFailureBeforeFirstPageIsAMeshError(t *testing.T) {
 
 	addr := testAddress(t, lcommon.AddressTypeKeyNone, testKeyHash(0x43), nil)
 	deps := newTestDeps()
-	deps.ledger.scan = func(
+	deps.database.scan = func(
 		context.Context,
 		*models.UtxoWithOrderingQuery,
 		int,

@@ -24,7 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -139,121 +138,6 @@ type asOfProbe struct {
 	epochs       []uint64
 }
 
-// requireAsOfReads reads every as-of read at slot through ldb and requires
-// each answer to be the metadata store's.
-func requireAsOfReads(
-	t *testing.T,
-	ldb, store ledgerdb.LedgerDB,
-	p asOfProbe,
-	slot uint64,
-) {
-	t.Helper()
-	ctx := t.Context()
-	label := fmt.Sprintf("slot %d", slot)
-	for _, refs := range [][]models.StakeCredentialRef{nil, p.dreps} {
-		want, err := store.GetDrepsAtSlot(ctx, refs, slot, nil)
-		require.NoError(t, err, label)
-		got, err := ldb.GetDrepsAtSlot(ctx, refs, slot, nil)
-		require.NoError(t, err, label)
-		require.Equal(
-			t,
-			drepAtRows(want),
-			drepAtRows(got),
-			"dreps at %s",
-			label,
-		)
-		wantD, err := store.GetDRepDelegatorsAtSlot(ctx, refs, slot, nil)
-		require.NoError(t, err, label)
-		gotD, err := ldb.GetDRepDelegatorsAtSlot(ctx, refs, slot, nil)
-		require.NoError(t, err, label)
-		require.Equal(
-			t, delegatorAtRows(wantD), delegatorAtRows(gotD),
-			"delegators at %s", label,
-		)
-		wantDep, err := store.GetDrepRegistrationDepositsAtSlot(
-			ctx,
-			refs,
-			slot,
-			nil,
-		)
-		require.NoError(t, err, label)
-		gotDep, err := ldb.GetDrepRegistrationDepositsAtSlot(
-			ctx,
-			refs,
-			slot,
-			nil,
-		)
-		require.NoError(t, err, label)
-		require.Equal(
-			t, depositAtRows(wantDep), depositAtRows(gotDep),
-			"DRep deposits at %s", label,
-		)
-	}
-	if len(p.accounts) > 0 {
-		want, err := store.GetAccountsByCredentialAtSlot(
-			ctx,
-			p.accounts,
-			slot,
-			nil,
-		)
-		require.NoError(t, err, label)
-		got, err := ldb.GetAccountsByCredentialAtSlot(
-			ctx,
-			p.accounts,
-			slot,
-			nil,
-		)
-		require.NoError(t, err, label)
-		require.Equal(
-			t,
-			accountAtRows(want),
-			accountAtRows(got),
-			"accounts at %s",
-			label,
-		)
-	}
-	for _, id := range p.proposals {
-		want, err := store.GetGovernanceVotesAtSlot(ctx, id, slot, nil)
-		require.NoError(t, err, label)
-		got, err := ldb.GetGovernanceVotesAtSlot(ctx, id, slot, nil)
-		require.NoError(t, err, label)
-		require.Equal(
-			t, voteAtRows(want), voteAtRows(got),
-			"votes on %d at %s", id, label,
-		)
-	}
-	if len(p.depositPools) > 0 {
-		wantH, err := store.GetPoolDepositsHeldAtSlot(p.depositPools, slot, nil)
-		require.NoError(t, err, label)
-		gotH, err := ldb.GetPoolDepositsHeldAtSlot(p.depositPools, slot, nil)
-		require.NoError(t, err, label)
-		require.Equal(
-			t, depositAtRows(wantH), depositAtRows(gotH),
-			"pool deposits at %s", label,
-		)
-	}
-	if len(p.pools) > 0 {
-		want, err := store.GetPoolRegistrationsAtSlot(p.pools, slot, nil)
-		require.NoError(t, err, label)
-		got, err := ldb.GetPoolRegistrationsAtSlot(p.pools, slot, nil)
-		require.NoError(t, err, label)
-		require.Equal(
-			t, poolRegistrationAtRows(want), poolRegistrationAtRows(got),
-			"pool registrations at %s", label,
-		)
-	}
-	for _, epoch := range p.epochs {
-		want, err := store.GetRetiringPoolsAtSlot(epoch, slot, nil)
-		require.NoError(t, err, label)
-		got, err := ldb.GetRetiringPoolsAtSlot(epoch, slot, nil)
-		require.NoError(t, err, label)
-		require.Equal(
-			t, retiringAtRows(want), retiringAtRows(got),
-			"retiring pools at epoch %d, %s", epoch, label,
-		)
-	}
-}
-
 // asOfScenario is setModeScenario over a set that has a tip, as a node's
 // does once it has applied a block: the set's history starts there.
 func asOfScenario(
@@ -261,7 +145,27 @@ func asOfScenario(
 	reads string,
 ) (ledger.BoundaryEpochStateScenario, uint64, ledgerdb.LedgerDB) {
 	t.Helper()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), HistorySlots: 1_000})
+	scenario, tip, store, _ := asOfScenarioSet(t)
+	return scenario, tip, store
+}
+
+// asOfJournalFloorScenario is asOfScenario with the set's journal pruned
+// below the scenario's tip, so the slots before it are outside the journal.
+func asOfJournalFloorScenario(t *testing.T) ledger.BoundaryEpochStateScenario {
+	t.Helper()
+	scenario, tip, _, set := asOfScenarioSet(t)
+	require.NotZero(t, tip)
+	require.NoError(t, set.PruneHistory(tip))
+	return scenario
+}
+
+func asOfScenarioSet(
+	t *testing.T,
+) (ledger.BoundaryEpochStateScenario, uint64, ledgerdb.LedgerDB, *utxoset.Set) {
+	t.Helper()
+	set, err := utxoset.Open(
+		utxoset.Config{Dir: t.TempDir(), HistorySlots: 1_000},
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
@@ -275,7 +179,7 @@ func asOfScenario(
 	// the set's journal reaches back to it.
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	require.NoError(t, set.ApplyUtxoChanges(&point, nil))
-	return scenario, point.Slot, store
+	return scenario, point.Slot, store, set
 }
 
 func slotsFrom(from, to uint64) []uint64 {
@@ -286,195 +190,176 @@ func slotsFrom(from, to uint64) []uint64 {
 	return out
 }
 
-// TestAsOfDRepAndAccountReadsFromTheLiveUtxoSet reads DReps, their delegators
-// and deposits, and accounts as of every slot a scenario of registrations,
-// vote delegations, activity and a deregistration wrote, from the live set with the
-// metadata store's as-of reads failing, and requires the answers to be the
-// store's, before and after a rollback.
-func TestAsOfDRepAndAccountReadsFromTheLiveUtxoSet(t *testing.T) {
+// TestAsOfDRepReadsFromTheLiveUtxoSet reads DReps and their deposits as of
+// the slots at which two DReps register, one updates, both retire and one
+// registers again, and after a rollback below all of them.
+func TestAsOfDRepReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	scenario, tipSlot, store := asOfScenario(t, "set")
-	reached, _ := scenario.HideStoreReads(asOfReadNames...)
+	scenario, _, _ := asOfScenario(t, "set")
 	ldb := scenario.LedgerDB()
-	start := scenario.EpochStartSlot()
-	var ref models.StakeCredentialRef
-	require.NoError(
-		t,
-		store.IterateAccounts(nil, func(a *models.Account) error {
-			if a.Active && ref.Key == nil {
-				ref = models.NewStakeCredentialRef(
-					a.CredentialTag,
-					a.StakingKey,
-				)
-			}
-			return nil
-		}),
-	)
-	require.NotNil(t, ref.Key)
-	drepKey := bytes.Repeat([]byte{0x5e}, 28)
-	scenario.VoteDelegate(ref, drepKey, 0, 3)
-	scenario.Governance(ref, 9)
+	ctx := t.Context()
 	slots := scenario.Registrations()
-	probe := asOfProbe{
-		dreps: []models.StakeCredentialRef{
-			models.NewStakeCredentialRef(0, drepKey),
-			models.NewStakeCredentialRef(0, slots.D),
-			models.NewStakeCredentialRef(0, slots.E),
-			models.NewStakeCredentialRef(0, bytes.Repeat([]byte{0x01}, 28)),
-		},
-		accounts: []models.StakeCredentialRef{
-			ref, slots.Imported,
-			models.NewStakeCredentialRef(0, slots.K),
-			models.NewStakeCredentialRef(0, slots.L),
-			models.NewStakeCredentialRef(0, slots.M),
-		},
+	refs := []models.StakeCredentialRef{
+		models.NewStakeCredentialRef(0, slots.D),
+		models.NewStakeCredentialRef(0, slots.E),
 	}
-	for _, slot := range slotsFrom(max(start, tipSlot), slots.DReReg+2) {
-		requireAsOfReads(t, ldb, store, probe, slot)
+	registered := func(slot uint64) []string {
+		t.Helper()
+		dreps, err := ldb.GetDrepsAtSlot(ctx, refs, slot, nil)
+		require.NoError(t, err, "slot %d", slot)
+		var out []string
+		for _, d := range dreps {
+			if d.Active {
+				out = append(out, string(d.Credential))
+			}
+		}
+		sort.Strings(out)
+		return out
 	}
-	require.Zero(t, reached(), "an as-of read reached the metadata store")
+	deposits := func(slot uint64) map[string]uint64 {
+		t.Helper()
+		got, err := ldb.GetDrepRegistrationDepositsAtSlot(ctx, refs, slot, nil)
+		require.NoError(t, err, "slot %d", slot)
+		return got
+	}
+	d, e := string(slots.D), string(slots.E)
+	both := []string{d, e}
+	sort.Strings(both)
+	keyD := models.DrepDepositKey(0, slots.D)
+	keyE := models.DrepDepositKey(0, slots.E)
+
+	require.Empty(t, registered(slots.DRegister-1))
+	require.Equal(t, both, registered(slots.DRegister))
+	require.Equal(t, map[string]uint64{
+		keyD: 500_000_000, keyE: 700_000_000,
+	}, deposits(slots.DRegister))
+	require.Equal(t, both, registered(slots.DUpdate))
+	require.Equal(t, both, registered(slots.DRetire-1))
+	require.Empty(t, registered(slots.DRetire))
+	require.Equal(t, []string{d}, registered(slots.DReReg))
+	require.Equal(t, uint64(600_000_000), deposits(slots.DReReg)[keyD])
+
 	scenario.RollbackBeforeBoundary()
-	for _, slot := range slotsFrom(max(start, tipSlot), scenario.RollbackSlot()) {
-		requireAsOfReads(t, ldb, store, probe, slot)
-	}
-	require.Zero(t, reached(), "an as-of read reached the metadata store")
+	require.Empty(t, registered(scenario.RollbackSlot()),
+		"the rollback undid every registration")
 }
 
-// TestAsOfVoteReadsFromTheLiveUtxoSet reads the votes on both proposals of
-// the governance scenario as of every slot it wrote, through votes cast,
-// replaced, deleted with their DRep and cast again, with the metadata
-// store's as-of vote read failing, and requires the answers to be the
-// store's, before and after a rollback.
+// TestAsOfVoteReadsFromTheLiveUtxoSet reads the votes on a proposal as of
+// the slots at which two DReps vote, one votes again, the other is
+// deregistered with its votes, and votes once more.
 func TestAsOfVoteReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	scenario, tipSlot, store := asOfScenario(t, "set")
-	reached, _ := scenario.HideStoreReads(asOfReadNames...)
+	scenario, _, _ := asOfScenario(t, "set")
 	ldb := scenario.LedgerDB()
+	ctx := t.Context()
 	slots := scenario.Proposals()
-	stored, err := store.GetAllGovernanceProposals(t.Context(), nil)
+	proposals, err := ldb.GetAllGovernanceProposals(ctx, nil)
 	require.NoError(t, err)
-	require.Len(t, stored, 2)
-	probe := asOfProbe{}
-	for _, p := range stored {
-		probe.proposals = append(probe.proposals, p.ID)
-	}
-	counted := 0
-	for _, slot := range slotsFrom(max(slots.Base, tipSlot), slots.Enact+1) {
-		if slot == slots.Deregister {
-			continue
-		}
-		requireAsOfReads(t, ldb, store, probe, slot)
-		for _, id := range probe.proposals {
-			votes, err := ldb.GetGovernanceVotesAtSlot(
-				t.Context(),
-				id,
-				slot,
-				nil,
-			)
-			require.NoError(t, err)
-			counted += len(votes)
+	require.Len(t, proposals, 2)
+	var p1 uint
+	for _, p := range proposals {
+		if bytes.Equal(p.TxHash, slots.P1) {
+			p1 = p.ID
 		}
 	}
-	require.NotZero(t, counted, "the scenario's votes were never read")
-	// The votes deleted with their DRep at Deregister are gone at it and live
-	// the slot before. The store records the deletion as a tombstone, so its
-	// answer agrees with the set's, which follows the journal.
-	before, err := ldb.GetGovernanceVotesAtSlot(
-		t.Context(),
-		stored[0].ID,
-		slots.Deregister-1,
-		nil,
-	)
-	require.NoError(t, err)
-	after, err := ldb.GetGovernanceVotesAtSlot(
-		t.Context(),
-		stored[0].ID,
-		slots.Deregister,
-		nil,
-	)
-	require.NoError(t, err)
-	storeAfter, err := store.GetGovernanceVotesAtSlot(
-		t.Context(),
-		stored[0].ID,
-		slots.Deregister,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Len(t, before, 2)
-	require.Len(t, after, 1, "the deregistration removed a vote")
-	require.Len(t, storeAfter, 1, "the store keeps the deletion")
-	require.Equal(t, voteAtRows(before)[:1], voteAtRows(after))
-	require.Equal(t, voteAtRows(after), voteAtRows(storeAfter))
-	require.Zero(t, reached(), "an as-of read reached the metadata store")
+	require.NotZero(t, p1, "the first proposal is not stored")
+	voters := func(slot uint64) []string {
+		t.Helper()
+		votes, err := ldb.GetGovernanceVotesAtSlot(ctx, p1, slot, nil)
+		require.NoError(t, err, "slot %d", slot)
+		var out []string
+		for _, v := range votes {
+			out = append(out, fmt.Sprintf(
+				"%x added=%d", v.VoterCredential, v.AddedSlot,
+			))
+		}
+		sort.Strings(out)
+		return out
+	}
+	vote := func(drep []byte, slot uint64) string {
+		return fmt.Sprintf("%x added=%d", drep, slot)
+	}
+	sorted := func(rows ...string) []string {
+		sort.Strings(rows)
+		return rows
+	}
+	require.Empty(t, voters(slots.Vote-1))
+	require.Equal(t,
+		sorted(vote(slots.D1, slots.Vote), vote(slots.D2, slots.Vote)),
+		voters(slots.Vote))
+	require.Len(t, voters(slots.Deregister-1), 2)
+	require.Len(t, voters(slots.Deregister), 1,
+		"the deregistration removed the DRep's vote")
+	for _, row := range voters(slots.Deregister) {
+		require.Contains(t, row, fmt.Sprintf("%x", slots.D1))
+	}
+	require.Len(t, voters(slots.Revote2), 2, "the DRep voted again")
+
 	scenario.RollbackBeforeBoundary()
-	for _, slot := range slotsFrom(max(slots.Base, tipSlot), scenario.RollbackSlot()) {
-		requireAsOfReads(t, ldb, store, probe, slot)
-	}
-	require.Zero(t, reached(), "an as-of read reached the metadata store")
+	require.Empty(t, voters(scenario.RollbackSlot()),
+		"the rollback undid every vote")
 }
 
-// TestAsOfPoolReadsFromTheLiveUtxoSet reads pool registrations, deposits and
-// retirements as of the slots of a pool that registers and re-registers and
-// of a pool that retires, from the live set with the metadata store's as-of reads
-// failing, and requires the answers to be the store's, before and after a
-// rollback.
+// TestAsOfPoolReadsFromTheLiveUtxoSet reads a pool's registration as of the
+// slots at which it registers and re-registers with another VRF key, and the
+// retiring pools as of the slot another pool announces its retirement.
 func TestAsOfPoolReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	scenario, tipSlot, store := asOfScenario(t, "set")
-	reached, _ := scenario.HideStoreReads(asOfReadNames...)
+	scenario, tipSlot, _ := asOfScenario(t, "set")
 	ldb := scenario.LedgerDB()
 	start := max(scenario.EpochStartSlot(), tipSlot)
-	harnessPools, err := store.ListPoolKeyHashes(nil)
-	require.NoError(t, err)
 	newPool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x6a}, 28))
-	probe := asOfProbe{
-		pools: []lcommon.PoolKeyHash{
-			newPool, lcommon.PoolKeyHash(bytes.Repeat([]byte{0x9a}, 28)),
-		},
-		depositPools: []lcommon.PoolKeyHash{newPool},
-		epochs:       []uint64{4, 5, 6, 7},
-	}
-	for _, p := range harnessPools {
-		probe.pools = append(probe.pools, lcommon.PoolKeyHash(p))
-	}
-	// The scenario writes its boundary, which reaps the retired pool, at a
-	// slot before its own certificates, so the pool states and retirements
-	// are read before it: every slot of the certificates.
-	var before []uint64
+	// The scenario's boundary reaps the retired pool, so the reads as of
+	// the certificates' slots are taken before it.
+	vrfAt := map[uint64][]byte{}
+	retiringAt := map[uint64]map[uint64][]string{}
 	slots := scenario.Pools(func() {
 		for _, slot := range slotsFrom(start, start+40) {
-			requireAsOfReads(t, ldb, store, probe, slot)
-			before = append(before, slot)
+			regs, err := ldb.GetPoolRegistrationsAtSlot(
+				[]lcommon.PoolKeyHash{newPool}, slot, nil,
+			)
+			require.NoError(t, err, "slot %d", slot)
+			require.LessOrEqual(t, len(regs), 1)
+			if len(regs) == 1 {
+				vrfAt[slot] = regs[0].VrfKeyHash
+			}
+			retiringAt[slot] = map[uint64][]string{}
+			for _, epoch := range []uint64{4, 5, 6, 7} {
+				rows, err := ldb.GetRetiringPoolsAtSlot(epoch, slot, nil)
+				require.NoError(t, err, "slot %d", slot)
+				for _, r := range rows {
+					retiringAt[slot][epoch] = append(
+						retiringAt[slot][epoch], string(r.PoolKeyHash),
+					)
+				}
+			}
 		}
-		retiring, err := ldb.GetRetiringPoolsAtSlot(5, start+40, nil)
-		require.NoError(t, err)
-		require.NotEmpty(t, retiring, "the retirement was never read")
 	})
-	require.NotEmpty(t, before)
-	require.Equal(t, slots.Retired, harnessPools[0])
-	// The registrations come from the pool's certificate history, which the
-	// reap does not touch.
-	probe.depositPools, probe.epochs = nil, nil
-	for _, slot := range slotsFrom(start, start+40) {
-		requireAsOfReads(t, ldb, store, probe, slot)
-	}
-	require.Zero(t, reached(), "an as-of read reached the metadata store")
-	scenario.RollbackBeforeBoundary()
-	for _, slot := range slotsFrom(start, scenario.RollbackSlot()) {
-		requireAsOfReads(t, ldb, store, probe, slot)
-	}
-	require.Zero(t, reached(), "an as-of read reached the metadata store")
+	require.Equal(t, newPool[:], slots.Pool)
+	require.GreaterOrEqual(t, slots.Register, start)
+	require.LessOrEqual(t, slots.Retire, start+40)
+	require.NotContains(t, vrfAt, slots.Register-1)
+	require.Equal(t, slots.VrfA, vrfAt[slots.Register])
+	require.Equal(t, slots.VrfA, vrfAt[slots.Rotate-1])
+	require.Equal(t, slots.VrfB, vrfAt[slots.Rotate])
+	// The pool retires for RetireEpoch, so it is retiring as seen from the
+	// epoch before, from the slot of its certificate on.
+	require.Empty(t, retiringAt[slots.Retire-1][slots.RetireEpoch-1])
+	require.Equal(t,
+		[]string{string(slots.Retired)},
+		retiringAt[slots.Retire][slots.RetireEpoch-1])
+	require.Empty(t, retiringAt[slots.Retire][slots.RetireEpoch])
 }
 
 // TestAsOfReadsOutsideTheJournalWindow requires reads before the set's
 // journal history to fail closed, while a slot it reaches remains readable.
 func TestAsOfReadsOutsideTheJournalWindow(t *testing.T) {
 	t.Parallel()
-	scenario, _, store := asOfScenario(t, "set")
+	scenario := asOfJournalFloorScenario(t)
 	reached, hide := scenario.HideStoreReads(asOfReadNames...)
 	ldb := scenario.LedgerDB()
 	slots := scenario.Proposals()
-	reads := asOfReadFuncs(t, ldb, store)
+	reads := asOfReadFuncs(t, ldb)
 	names := make([]string, 0, len(reads))
 	for name := range reads {
 		names = append(names, name)
@@ -504,33 +389,14 @@ func TestAsOfReadsOutsideTheJournalWindow(t *testing.T) {
 // an attached set's journal to fail without consulting metadata.
 func TestAsOfReadsFailClosedOutsideTheSetJournal(t *testing.T) {
 	t.Parallel()
-	needs := map[string]nodesettings.FamilyMask{
-		"GetDrepsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyDReps),
-		"GetDRepDelegatorsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyAccounts),
-		"GetDrepRegistrationDepositsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyDReps),
-		"GetGovernanceVotesAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyGovernance),
-		"GetPoolRegistrationsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyPoolsHistory),
-		"GetRetiringPoolsAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyPoolsHistory),
-		"GetPoolDepositsHeldAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyPoolsHistory),
-		"GetAccountsByCredentialAtSlot": nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyAccounts),
-	}
-	require.Len(t, needs, len(asOfReadNames))
 	const outside = 0
 	for _, name := range asOfReadNames {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			scenario, _, store := asOfScenario(t, "set")
+			scenario := asOfJournalFloorScenario(t)
 			reached, hide := scenario.HideStoreReads(asOfReadNames...)
 			scenario.Proposals()
-			read := asOfReadFuncs(t, scenario.LedgerDB(), store)[name]
+			read := asOfReadFuncs(t, scenario.LedgerDB())[name]
 			hide(true)
 
 			before := reached()
@@ -547,11 +413,10 @@ func TestAsOfReadsFailClosedOutsideTheSetJournal(t *testing.T) {
 func asOfReadFuncs(
 	t *testing.T,
 	ldb ledgerdb.LedgerDB,
-	store ledgerdb.LedgerDB,
 ) map[string]func(slot uint64) error {
 	t.Helper()
 	ctx := t.Context()
-	stored, err := store.GetAllGovernanceProposals(ctx, nil)
+	stored, err := ldb.GetAllGovernanceProposals(ctx, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, stored)
 	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x9a}, 28))
@@ -604,72 +469,4 @@ func asOfReadFuncs(
 			return err
 		},
 	}
-}
-
-// TestAsOfReadsUseTheLiveUtxoSet reads as-of state within the set's journal
-// and excludes a DRep written only to metadata.
-func TestAsOfReadsUseTheLiveUtxoSet(t *testing.T) {
-	t.Parallel()
-	scenario, tipSlot, store := asOfScenario(t, "set")
-	ldb := scenario.LedgerDB()
-	ctx := t.Context()
-	slots := scenario.Registrations()
-	gov := scenario.Proposals()
-	stored, err := store.GetAllGovernanceProposals(ctx, nil)
-	require.NoError(t, err)
-	require.NotEmpty(t, stored)
-	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x9a}, 28))
-
-	readAll := func(slot uint64) {
-		_, err := ldb.GetDrepsAtSlot(ctx, nil, slot, nil)
-		require.NoError(t, err)
-		_, err = ldb.GetDRepDelegatorsAtSlot(ctx, nil, slot, nil)
-		require.NoError(t, err)
-		_, err = ldb.GetDrepRegistrationDepositsAtSlot(ctx, nil, slot, nil)
-		require.NoError(t, err)
-		_, err = ldb.GetGovernanceVotesAtSlot(ctx, stored[0].ID, slot, nil)
-		require.NoError(t, err)
-		_, err = ldb.GetPoolRegistrationsAtSlot(
-			[]lcommon.PoolKeyHash{pool},
-			slot,
-			nil,
-		)
-		require.NoError(t, err)
-		_, err = ldb.GetPoolDepositsHeldAtSlot(
-			[]lcommon.PoolKeyHash{pool},
-			slot,
-			nil,
-		)
-		require.NoError(t, err)
-		_, err = ldb.GetRetiringPoolsAtSlot(1, slot, nil)
-		require.NoError(t, err)
-		_, err = ldb.GetAccountsByCredentialAtSlot(
-			ctx,
-			[]models.StakeCredentialRef{
-				models.NewStakeCredentialRef(0, slots.K),
-			},
-			slot,
-			nil,
-		)
-		require.NoError(t, err)
-	}
-
-	for _, slot := range []uint64{slots.DReReg, gov.Vote, gov.Enact} {
-		if slot >= tipSlot {
-			readAll(slot)
-		}
-	}
-
-	// A DRep written around the ledger exists for the store alone.
-	around := bytes.Repeat([]byte{0xe3}, 28)
-	require.NoError(t, scenario.DB.Metadata().InsertDrepIfAbsent(
-		0, around, gov.Enact+1, "", nil, true, nil,
-	))
-	dreps, err := ldb.GetDrepsAtSlot(ctx, nil, gov.Enact+1, nil)
-	require.NoError(t, err)
-	require.NotContains(t, drepAtRows(dreps), fmt.Sprintf(
-		"0/%x active=true added=%d last=0 expiry=0 anchor=/",
-		around,
-		gov.Enact+1,
-	), "the set has no such DRep")
 }

@@ -141,9 +141,18 @@ func (ls *LedgerState) compactRewardCreditChunk(
 	if ls.rewardInputRollbackActive.Load() != 0 {
 		return true, nil
 	}
-	// Every write commit restamps the commit timestamps, and this job runs
-	// at start and after each credited round, so it opens a write
-	// transaction only when a round is due.
+	// The job runs until the ledger is closed, and a set closed under a
+	// ledger that was not would be read after its store closed.
+	release, open := ls.holdUtxoSetOpen()
+	if !open {
+		return true, nil
+	}
+	defer release()
+	if ls.rewardCreditCompactionHook != nil {
+		ls.rewardCreditCompactionHook()
+	}
+	// This job runs at start and after each credited round, so it opens a
+	// write transaction only when a round is due.
 	due, err := ls.rewardCreditRoundDue(ctx)
 	if err != nil || !due {
 		return true, err
@@ -180,6 +189,22 @@ func (ls *LedgerState) compactRewardCreditChunk(
 		return nil
 	})
 	return done, err
+}
+
+// utxoSetHolder is a set whose Close waits for the readers holding it open.
+type utxoSetHolder interface {
+	HoldOpen() (release func(), ok bool)
+}
+
+// holdUtxoSetOpen keeps the LedgerDB set open until release is called. open
+// is false when the set has begun to close, and the caller must not read it.
+// A set that offers no hold is closed only after the ledger.
+func (ls *LedgerState) holdUtxoSetOpen() (release func(), open bool) {
+	holder, ok := ls.config.UtxoSet.(utxoSetHolder)
+	if !ok {
+		return func() {}, true
+	}
+	return holder.HoldOpen()
 }
 
 func (ls *LedgerState) rewardCreditRoundDue(ctx context.Context) (bool, error) {

@@ -199,6 +199,7 @@ func (s *Store) tombstonedPrefixes(slot uint64) ([][]byte, error) {
 	var prefixes [][]byte
 	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
 		opts.Prefix = []byte{StateJournalTag}
 		it := txn.NewIterator(opts)
 		defer it.Close()
@@ -300,34 +301,60 @@ func rowUndoCost(k, v []byte) cost {
 	}
 }
 
+// rowsCursor carries the state journal position between the transactions of one
+// rollback. below is the key of the last entry a committed transaction undid;
+// undone is the one the open transaction has undone, which the caller moves to
+// below once the transaction commits.
+type rowsCursor struct{ below, undone []byte }
+
 // rollbackRows restores every row changed after slot to its state before
-// that change, newest change first, and drops those journal entries.
-func rollbackRows(txn *badger.Txn, slot uint64) error {
-	_, err := rollbackRowsWithin(txn, slot, math.MaxInt64, math.MaxInt64)
-	return err
+// that change, newest change first, and drops those journal entries. below
+// and the returned key are rollbackRowsWithin's.
+func rollbackRows(
+	txn *badger.Txn,
+	slot uint64,
+	below []byte,
+) ([]byte, error) {
+	_, last, err := rollbackRowsWithin(
+		txn, slot, below, math.MaxInt64, math.MaxInt64,
+	)
+	return last, err
 }
 
 // rollbackRowsWithin is rollbackRows for as many of the entries, newest first,
 // as fit the budget, and at least one. It reports whether entries after slot
-// remain.
+// remain, and the key of the last entry it undid.
+//
+// below, when not nil, is the key of an entry that the caller has deleted and
+// that was the newest then; the scan starts there instead of at the top of the
+// journal, which would walk every entry deleted since. The caller must pass
+// nil when an entry newer than below may exist.
 func rollbackRowsWithin(
 	txn *badger.Txn,
 	slot uint64,
+	below []byte,
 	maxEntries, maxBytes int64,
-) (bool, error) {
+) (more bool, last []byte, err error) {
 	type entry struct{ key, value []byte }
 	entries := make([]entry, 0)
-	more := false
-	err := func() error {
+	err = func() error {
 		opts := badger.DefaultIteratorOptions
+		// Each value is copied below, so prefetching would only start a
+		// goroutine per item.
+		opts.PrefetchValues = false
 		opts.Prefix = []byte{StateJournalTag}
 		opts.Reverse = true
 		it := txn.NewIterator(opts)
 		defer it.Close()
 		var used cost
 		first := slotKey(StateJournalTag, slot+1)
-		it.Seek(append([]byte{StateJournalTag},
-			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
+		if below != nil {
+			it.Seek(below)
+		} else {
+			topSeeks.Add(1)
+			it.Seek(append([]byte{StateJournalTag},
+				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
+		}
 		for ; it.Valid(); it.Next() {
 			k := it.Item().Key()
 			if bytes.Compare(k, first) < 0 {
@@ -348,28 +375,31 @@ func rollbackRowsWithin(
 		return nil
 	}()
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	for _, e := range entries {
 		if len(e.key) < 10 || len(e.value) < 1 {
-			return false, errors.New(
+			return false, nil, errors.New(
 				"badgerutxo: malformed state journal entry",
 			)
 		}
 		if e.value[0] == tombstoneMark {
 			if err := deletePrefixKeys(txn, e.key[9:]); err != nil {
-				return false, err
+				return false, nil, err
 			}
 		} else if err := setRow(
 			txn, e.key[9:], e.value[1:], e.value[0] == 1,
 		); err != nil {
-			return false, err
+			return false, nil, err
 		}
 		if err := txn.Delete(e.key); err != nil {
-			return false, err
+			return false, nil, err
 		}
 	}
-	return more, nil
+	if len(entries) > 0 {
+		last = entries[len(entries)-1].key
+	}
+	return more, last, nil
 }
 
 // rowsAfterExceed reports whether undoing the entries after slot takes more
@@ -380,6 +410,7 @@ func rowsAfterExceed(
 	maxEntries, maxBytes int64,
 ) (bool, error) {
 	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
 	opts.Prefix = []byte{StateJournalTag}
 	it := txn.NewIterator(opts)
 	defer it.Close()
@@ -1313,7 +1344,20 @@ func (s *Store) loadFamily(
 	feed func(put func(k, v []byte) error) error,
 	invalidate ...[]byte,
 ) error {
-	if err := s.dropPrefix([]byte{tag}); err != nil {
+	return s.writeFamily(s.dropPrefix, tag, marker, name, feed, invalidate...)
+}
+
+// writeFamily replaces the rows under tag with the ones feed supplies, after
+// drop removes the held ones, and marks the family loaded.
+func (s *Store) writeFamily(
+	drop func(prefixes ...[]byte) error,
+	tag byte,
+	marker []byte,
+	name string,
+	feed func(put func(k, v []byte) error) error,
+	invalidate ...[]byte,
+) error {
+	if err := drop([]byte{tag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop %s: %w", name, err)
 	}
 	if len(invalidate) > 0 {
@@ -1376,7 +1420,7 @@ func (s *Store) LoadImportBaselines(
 		return err
 	}
 	return s.update(func(txn *badger.Txn) error {
-		return txn.Set(importBaselineDelegationsKey, markerValue(false))
+		return txn.Set(importBaselineDelegationsKey, loadedMarker)
 	})
 }
 
@@ -1386,26 +1430,10 @@ func (s *Store) ImportBaselinesLoaded() (bool, error) {
 	return s.hasMarker(importBaselinesKey)
 }
 
-// ImportBaselineDelegationsLoaded reports whether the store has settled what
-// its import baselines say about delegations: they hold them, or
-// ImportBaselineDelegationsLost says they cannot.
+// ImportBaselineDelegationsLoaded reports whether the store's import
+// baselines hold the delegations the import recorded.
 func (s *Store) ImportBaselineDelegationsLoaded() (bool, error) {
 	return s.hasMarker(importBaselineDelegationsKey)
-}
-
-// ImportBaselineDelegationsLost reports whether the import baselines were
-// written before the store kept their delegations, and the metadata store had
-// drained the rows they come from.
-func (s *Store) ImportBaselineDelegationsLost() (bool, error) {
-	return s.markerLost(importBaselineDelegationsKey)
-}
-
-// MarkImportBaselineDelegationsLost records that the import baselines have no
-// delegations and no source to take them from.
-func (s *Store) MarkImportBaselineDelegationsLost() error {
-	return s.update(func(txn *badger.Txn) error {
-		return txn.Set(importBaselineDelegationsKey, markerValue(true))
-	})
 }
 
 // RowsAfter calls fn with the key and value of at most limit rows under

@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -35,23 +36,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// seedAddressUtxoAt stores the body of an output of amount paying addr, for a
+// test that commits the output's lifecycle to the set itself.
 func seedAddressUtxoAt(
 	t *testing.T,
 	db *database.Database,
 	addr lcommon.Address,
 	txIdSeed byte,
-	addedSlot uint64,
 	amount uint64,
 ) []byte {
 	t.Helper()
 	txId := bytes.Repeat([]byte{txIdSeed}, 32)
-	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
-		TxId:       txId,
-		OutputIdx:  0,
-		PaymentKey: addr.PaymentKeyHash().Bytes(),
-		AddedSlot:  addedSlot,
-		Amount:     dbtypes.Uint64(amount),
-	}))
 	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
 		OutputAddress: addr,
 		OutputAmount:  amount,
@@ -100,22 +95,10 @@ func TestQueryShelleyUtxoByAddress_PinnedPointAnswersAtThatPoint(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	spentLater := seedAddressUtxoAt(t, db, addr, 0x01, 100, 1_000_000)
-	seedAddressUtxoAt(t, db, addr, 0x02, 100, 2_000_000)
-	seedAddressUtxoAt(t, db, addr, 0x03, 600, 3_000_000)
-	spentBefore := seedAddressUtxoAt(t, db, addr, 0x04, 100, 4_000_000)
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(
-		t.Context(),
-		nil,
-		[]dbtypes.UtxoKey{{TxId: spentLater, OutputIdx: 0}},
-		500,
-	))
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(
-		t.Context(),
-		nil,
-		[]dbtypes.UtxoKey{{TxId: spentBefore, OutputIdx: 0}},
-		200,
-	))
+	spentLater := seedAddressUtxoAt(t, db, addr, 0x01, 1_000_000)
+	seedAddressUtxoAt(t, db, addr, 0x02, 2_000_000)
+	seedAddressUtxoAt(t, db, addr, 0x03, 3_000_000)
+	spentBefore := seedAddressUtxoAt(t, db, addr, 0x04, 4_000_000)
 	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
 		100: {{Added: []UtxoOutput{
 			{Ref: models.UtxoId{Hash: spentLater}, Cbor: queryTestOutputCBOR(t, db, spentLater, 0)},
@@ -151,7 +134,6 @@ func TestQueryShelleyUtxoByAddress_PinnedBeforeSetHistoryRejected(
 
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
-	// The default stability window is 50_000, so the floor is 150_000.
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(200_000, repeatedBytes(32, 0x0B)),
 	}, nil))
@@ -163,18 +145,29 @@ func TestQueryShelleyUtxoByAddress_PinnedBeforeSetHistoryRejected(
 	)
 	require.NoError(t, err)
 
-	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+	set := attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+		100_000: {},
 		150_000: {},
 		200_000: {},
 	})
+	// The node drops the set's history one stability window behind the tip:
+	// 50_000 slots by default, so everything before the block at 150_000.
+	pruner, ok := set.(interface{ PruneHistory(slot uint64) error })
+	require.True(t, ok, "the fixture's set must prune its history")
+	require.NoError(t, pruner.PruneHistory(150_000))
+
+	// The oldest record kept is the block at 150_000, which restores the set
+	// its parent at 100_000 left. Nothing restores what came before that.
 	_, err = ls.queryShelleyUtxoByAddress(
-		[]ledger.Address{addr}, QueryPoint{Slot: 149_999}, nil,
+		[]ledger.Address{addr}, QueryPoint{Slot: 99_999}, nil,
 	)
 	require.ErrorIs(t, err, ErrUtxoAsOfUnavailable)
-	_, err = ls.queryShelleyUtxoByAddress(
-		[]ledger.Address{addr}, QueryPoint{Slot: 150_000}, nil,
-	)
-	require.NoError(t, err)
+	for _, slot := range []uint64{100_000, 149_999, 150_000} {
+		_, err = ls.queryShelleyUtxoByAddress(
+			[]ledger.Address{addr}, QueryPoint{Slot: slot}, nil,
+		)
+		require.NoError(t, err, "slot %d", slot)
+	}
 }
 
 func accountState(t *testing.T, result any) olocalstatequery.AccountState {
@@ -196,7 +189,7 @@ func TestPinnedUtxoAddressAndRefQueriesFailClosedWithoutSet(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	txID := seedAddressUtxoAt(t, db, addr, 0x66, 100, 1_000_000)
+	txID := seedAddressUtxoAt(t, db, addr, 0x66, 1_000_000)
 	at := QueryPoint{Slot: 300, Hash: bytes.Repeat([]byte{0x33}, 32)}
 
 	_, err = ls.queryShelleyUtxoByAddress(
@@ -215,8 +208,8 @@ func TestQueryShelleyAccountState_PinnedPointReadsRowInEffect(t *testing.T) {
 
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
-	require.NoError(t, db.Metadata().SetNetworkState(10, 900, 100, nil))
-	require.NoError(t, db.Metadata().SetNetworkState(20, 800, 500, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(10, 900, 100, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(20, 800, 500, nil))
 
 	for _, tc := range []struct {
 		at       QueryPoint
@@ -241,7 +234,7 @@ func TestQueryShelleyAccountState_PinnedBeforeFirstRowRejected(t *testing.T) {
 
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
-	require.NoError(t, db.Metadata().SetNetworkState(10, 900, 100, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(10, 900, 100, nil))
 
 	_, err := ls.queryShelleyAccountState(t.Context(), QueryPoint{Slot: 99}, nil)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
@@ -266,11 +259,11 @@ func newStakeSnapshotsLedger(
 	require.NoError(t, err)
 	var snapshots []*models.PoolStakeSnapshot
 	for epoch := uint64(3); epoch <= 6; epoch++ {
-		require.NoError(t, db.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			epoch*100, epoch, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
 		))
 		if epoch == 3 {
-			require.NoError(t, db.SetPParams(
+			require.NoError(t, seedDB(t, db).SetPParams(
 				pinnedCbor, epoch*100, epoch, conwayEraId, nil,
 			))
 		}
@@ -283,7 +276,7 @@ func newStakeSnapshotsLedger(
 			CapturedSlot:   epoch * 100,
 		})
 	}
-	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(snapshots, nil))
+	require.NoError(t, seedDB(t, db).SavePoolStakeSnapshots(snapshots, nil))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
 	}, nil))
@@ -410,11 +403,10 @@ func TestQuery_PinnedPointReachesUtxoByAddressAccountStateAndStakeSnapshots(
 	ls := newStakeSnapshotsLedger(t, pool, 10, 10)
 	db := ls.db
 	hash := repeatedBytes(32, 0x55)
-	seedBlockAtSlot(t, ls, 550, hash)
 	at := QueryPoint{Slot: 550, Hash: hash}
 
-	require.NoError(t, db.Metadata().SetNetworkState(10, 900, 100, nil))
-	require.NoError(t, db.Metadata().SetNetworkState(20, 800, 600, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(10, 900, 100, nil))
+	require.NoError(t, seedDB(t, db).SetNetworkState(20, 800, 600, nil))
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
 		lcommon.AddressNetworkTestnet,
@@ -422,15 +414,20 @@ func TestQuery_PinnedPointReachesUtxoByAddressAccountStateAndStakeSnapshots(
 		nil,
 	)
 	require.NoError(t, err)
-	spent := seedAddressUtxoAt(t, db, addr, 0x05, 100, 5_000_000)
-	require.NoError(t, db.MarkUtxosDeletedAtSlot(
-		t.Context(),
-		nil,
-		[]dbtypes.UtxoKey{{TxId: spent, OutputIdx: 0}},
-		600,
-	))
+	spent := seedAddressUtxoAt(t, db, addr, 0x05, 5_000_000)
 
-	attachQueryUtxoLifecycle(t, ls, db, spent, 0, 100, 600)
+	// The set journals blocks in chain order: the output's block, the pinned
+	// block, then the block that spends the output.
+	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+		100: {{Added: []UtxoOutput{{
+			Ref:  models.UtxoId{Hash: spent},
+			Cbor: queryTestOutputCBOR(t, db, spent, 0),
+		}}}},
+	})
+	seedBlockAtSlot(t, ls, 550, hash)
+	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+		600: {{Removed: []models.UtxoId{{Hash: spent}}}},
+	})
 	result, err := ls.Query(
 		t.Context(),
 		shelleyLeafQuery(&olocalstatequery.ShelleyUtxoByAddressQuery{
@@ -471,7 +468,7 @@ func TestVerifyPointQueryable_RejectsPointWhoseGoSnapshotIsPruned(
 	t.Parallel()
 
 	ls := newStakeSnapshotsLedger(t, repeatedBytes(28, 0x26), 10, 10)
-	require.NoError(t, ls.db.Metadata().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, seedDB(t, ls.db).SetNetworkState(0, 0, 0, nil))
 	pruned := repeatedBytes(32, 0x61)
 	retained := repeatedBytes(32, 0x62)
 	seedBlockAtSlot(t, ls, 450, pruned)
@@ -502,20 +499,16 @@ func newStakePoolsLedger(t *testing.T) (*LedgerState, []byte, []byte) {
 		hash []byte
 		slot uint64
 	}{{early, 100}, {late, 600}} {
-		require.NoError(t, db.Metadata().ImportPool(
-			&models.Pool{
-				PoolKeyHash: p.hash,
-				VrfKeyHash:  repeatedBytes(32, p.hash[0]),
-			},
-			&models.PoolRegistration{
-				PoolKeyHash: p.hash,
-				VrfKeyHash:  repeatedBytes(32, p.hash[0]),
-				AddedSlot:   p.slot,
-				Pledge:      dbtypes.Uint64(1),
-				Cost:        dbtypes.Uint64(1),
-			},
-			nil,
-		))
+		require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{
+			PoolKeyHash: p.hash,
+			VrfKeyHash:  repeatedBytes(32, p.hash[0]),
+		}, &models.PoolRegistration{
+			PoolKeyHash: p.hash,
+			VrfKeyHash:  repeatedBytes(32, p.hash[0]),
+			AddedSlot:   p.slot,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		}))
 	}
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
@@ -631,6 +624,19 @@ func seedAccountTxAt(
 	build func(tx *mockledger.MockTransaction),
 ) {
 	t.Helper()
+	tx, point := accountTxAt(t, stakeKey, slot, build)
+	fxStageTx(t, db, tx, point, deposits, 9)
+}
+
+// accountTxAt builds the transaction seedAccountTxAt stages and the point of
+// the block that holds it.
+func accountTxAt(
+	t *testing.T,
+	stakeKey []byte,
+	slot uint64,
+	build func(tx *mockledger.MockTransaction),
+) (lcommon.Transaction, ocommon.Point) {
+	t.Helper()
 	txId := make([]byte, 32)
 	copy(txId, stakeKey[:4])
 	txId[30], txId[31] = byte(slot>>8), byte(slot)
@@ -653,15 +659,7 @@ func seedAccountTxAt(
 	require.NoError(t, err)
 	blockHash := make([]byte, 32)
 	copy(blockHash, txId)
-	require.NoError(t, db.SetTransactionMetadataOnly(
-		context.Background(),
-		tx,
-		ocommon.NewPoint(slot, blockHash),
-		0,
-		deposits,
-		nil,
-		9,
-	))
+	return tx, ocommon.NewPoint(slot, blockHash)
 }
 
 func stakeDeposits(
@@ -805,13 +803,13 @@ func TestQueryShelleyStakeDelegDeposits_ImportedBaseline(t *testing.T) {
 	ls := newPoolDistr2Ledger(t, db)
 	key := repeatedBytes(28, 0x45)
 	deposit := dbtypes.Uint64(2_000_000)
-	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+	fxImportAccount(t, db, &models.Account{
 		StakingKey:    key,
 		CredentialTag: 0,
 		Active:        true,
 		AddedSlot:     200,
 		ImportDeposit: &deposit,
-	}, nil))
+	})
 	cred := stakeQueryCred(key)
 	creds := []olocalstatequery.StakeCredential{cred}
 
@@ -849,13 +847,13 @@ func TestQueryShelleyStakeDelegDeposits_SameSlotDeregistrationSupersedesBaseline
 	ls := newPoolDistr2Ledger(t, db)
 	key := repeatedBytes(28, 0x46)
 	deposit := dbtypes.Uint64(2_000_000)
-	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+	fxImportAccount(t, db, &models.Account{
 		StakingKey:    key,
 		CredentialTag: 0,
 		Active:        true,
 		AddedSlot:     200,
 		ImportDeposit: &deposit,
-	}, nil))
+	})
 	seedStakeCertAt(t, db, key, false, 200, 2_000_000)
 	creds := []olocalstatequery.StakeCredential{stakeQueryCred(key)}
 
@@ -927,15 +925,25 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_PinnedPointAnswersAtTha
 	seedStakeCertAt(t, db, moved, true, 100, 2_000_000)
 	seedStakeCertAt(t, db, left, true, 100, 2_000_000)
 	seedPoolDelegationAt(t, db, moved, firstPool, 200)
-	require.NoError(t, db.AddAccountRewardByCredential(
+	require.NoError(t, seedDB(t, db).AddAccountRewardByCredential(
 		context.Background(), 0, moved, 5_000_000, 300, repeatedBytes(32, 0xC1), nil,
 	))
 	seedPoolDelegationAt(t, db, moved, secondPool, 400)
 	seedStakeCertAt(t, db, left, false, 450, 2_000_000)
-	require.NoError(t, db.Metadata().ApplyAccountRewardWithdrawal(
-		0, moved, 5_000_000, 500, repeatedBytes(32, 0xC3), nil,
-	))
-	require.NoError(t, db.AddAccountRewardByCredential(
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		moved,
+	)
+	require.NoError(t, err)
+	seedAccountTxAt(t, db, moved, 500, nil,
+		func(tx *mockledger.MockTransaction) {
+			tx.WithWithdrawals(map[*lcommon.Address]uint64{
+				&rewardAddr: 5_000_000,
+			})
+		})
+	require.NoError(t, seedDB(t, db).AddAccountRewardByCredential(
 		context.Background(), 0, moved, 1_000_000, 600, repeatedBytes(32, 0xC2), nil,
 	))
 	movedCred, leftCred := stakeQueryCred(moved), stakeQueryCred(left)
@@ -1116,7 +1124,7 @@ func TestQueryShelleyFilteredVoteDelegatees_PinnedPointKeepsPV10Clear(
 	}
 	seedStakeCertAt(t, db, key, true, 100, 2_000_000)
 	seedVoteDelegationAt(t, db, key, drep, 200)
-	cleared, err := db.ClearDanglingDRepDelegations(context.Background(), 300, nil)
+	cleared, err := seedDB(t, db).ClearDanglingDRepDelegations(context.Background(), 300, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, cleared)
 	seedPoolDelegationAt(t, db, key, repeatedBytes(28, 0xA5), 400)
@@ -1176,7 +1184,7 @@ func TestQueryShelleyFilteredDelegations_PinnedPointImportedBaseline(
 		Type:       lcommon.DrepTypeAddrKeyHash,
 		Credential: repeatedBytes(28, 0xD2),
 	}, 200)
-	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+	fxImportAccount(t, db, &models.Account{
 		StakingKey:    key,
 		CredentialTag: 0,
 		Pool:          importedPool,
@@ -1186,7 +1194,7 @@ func TestQueryShelleyFilteredDelegations_PinnedPointImportedBaseline(
 		Active:        true,
 		AddedSlot:     200,
 		ImportDeposit: &deposit,
-	}, nil))
+	})
 	seedPoolDelegationAt(t, db, key, laterPool, 400)
 	abstain := lcommon.Drep{Type: lcommon.DrepTypeAbstain}
 	seedVoteDelegationAt(t, db, key, abstain, 410)
@@ -1287,7 +1295,7 @@ func TestVerifyPointQueryable_RejectsPointBelowMithrilTrustBoundary(
 	t.Parallel()
 
 	ls := newStakeSnapshotsLedger(t, repeatedBytes(28, 0x27), 10, 10)
-	require.NoError(t, ls.db.Metadata().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, seedDB(t, ls.db).SetNetworkState(0, 0, 0, nil))
 	below := QueryPoint{Slot: 550, Hash: repeatedBytes(32, 0x63)}
 	boundary := QueryPoint{Slot: 560, Hash: repeatedBytes(32, 0x64)}
 	seedBlockAtSlot(t, ls, below.Slot, below.Hash)
@@ -1323,7 +1331,7 @@ func seedProposalAt(
 		GovActionCbor: govAction,
 		AddedSlot:     addedSlot,
 	}
-	require.NoError(t, db.SetGovernanceProposal(t.Context(), proposal, nil))
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(t.Context(), proposal, nil))
 	return proposal
 }
 
@@ -1357,14 +1365,14 @@ func TestQueryShelleyGetProposals_PinnedPointAnswersAtThatPoint(
 	dropped := seedProposalAt(t, db, 0x81, 100)
 	seedProposalAt(t, db, 0x91, 300)
 	voter := repeatedBytes(28, 0x75)
-	require.NoError(t, db.SetGovernanceVote(t.Context(), &models.GovernanceVote{
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(t.Context(), &models.GovernanceVote{
 		ProposalID:      enacted.ID,
 		VoterType:       models.VoterTypeDRep,
 		VoterCredential: voter,
 		Vote:            models.VoteYes,
 		AddedSlot:       150,
 	}, nil))
-	require.NoError(t, db.SetGovernanceVote(t.Context(), &models.GovernanceVote{
+	require.NoError(t, seedDB(t, db).SetGovernanceVote(t.Context(), &models.GovernanceVote{
 		ProposalID:      enacted.ID,
 		VoterType:       models.VoterTypeDRep,
 		VoterCredential: voter,
@@ -1376,10 +1384,10 @@ func TestQueryShelleyGetProposals_PinnedPointAnswersAtThatPoint(
 	droppedEpoch, droppedSlot := uint64(4), uint64(400)
 	dropped.ExpiredEpoch, dropped.ExpiredSlot = &expiredEpoch, &expiredSlot
 	dropped.DroppedEpoch, dropped.DroppedSlot = &droppedEpoch, &droppedSlot
-	require.NoError(t, db.SetGovernanceProposal(t.Context(), dropped, nil))
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(t.Context(), dropped, nil))
 	enactedEpoch, enactedSlot := uint64(5), uint64(500)
 	enacted.EnactedEpoch, enacted.EnactedSlot = &enactedEpoch, &enactedSlot
-	require.NoError(t, db.SetGovernanceProposal(t.Context(), enacted, nil))
+	require.NoError(t, seedDB(t, db).SetGovernanceProposal(t.Context(), enacted, nil))
 
 	cred := olocalstatequery.StakeCredential{
 		Tag:   0,
@@ -1461,7 +1469,7 @@ func seedDRepAt(
 		})
 	switch cert.(type) {
 	case *lcommon.RegistrationDrepCertificate, *lcommon.UpdateDrepCertificate:
-		require.NoError(t, db.UpdateDRepActivity(t.Context(), 0, drep, epoch, 20, slot, nil))
+		require.NoError(t, seedDB(t, db).UpdateDRepActivity(t.Context(), 0, drep, epoch, 20, slot, nil))
 	}
 }
 
@@ -1517,7 +1525,7 @@ func TestQueryShelleyDRepState_PinnedPointAnswersAtThatPoint(t *testing.T) {
 		DrepCredential: lateCred,
 		Amount:         500_000_000,
 	}, 350, 3, 500_000_000)
-	require.NoError(t, db.UpdateDRepActivity(t.Context(), 0, retiring, 4, 20, 400, nil))
+	require.NoError(t, seedDB(t, db).UpdateDRepActivity(t.Context(), 0, retiring, 4, 20, 400, nil))
 	seedVoteDelegationAt(t, db, later, drep, 450)
 	seedVoteDelegationAt(
 		t, db, moved, lcommon.Drep{Type: lcommon.DrepTypeAbstain}, 550,
@@ -1527,7 +1535,7 @@ func TestQueryShelleyDRepState_PinnedPointAnswersAtThatPoint(t *testing.T) {
 		Amount:         500_000_000,
 	}, 600, 6, 500_000_000)
 	// A vote renews the second DRep's expiry without touching its row.
-	require.NoError(t, db.UpdateDRepActivity(t.Context(), 0, late, 6, 20, 650, nil))
+	require.NoError(t, seedDB(t, db).UpdateDRepActivity(t.Context(), 0, late, 6, 20, 650, nil))
 
 	retiringKey := olocalstatequery.StakeCredential{
 		Tag:   0,
@@ -1624,8 +1632,8 @@ func TestQueryShelleyDRepState_PinnedPointAnswersAtThatPoint(t *testing.T) {
 }
 
 // TestRestoreDrepStateAtSlot_RestoresExpiryFromHistory covers rollback of a
-// DRep's expiry: a vote renews it without a certificate or a drep.added_slot
-// change, and a registration's expiry used to be reset to 0 on rollback.
+// DRep's expiry: a vote renews it without a certificate, and a rollback
+// returns the expiry the last surviving block left, not zero.
 func TestRestoreDrepStateAtSlot_RestoresExpiryFromHistory(t *testing.T) {
 	t.Parallel()
 
@@ -1634,28 +1642,62 @@ func TestRestoreDrepStateAtSlot_RestoresExpiryFromHistory(t *testing.T) {
 		rollbackTo uint64
 		want       uint64
 	}{
-		{name: "past a vote only", rollbackTo: 350, want: 23},
-		{name: "past an update certificate", rollbackTo: 250, want: 21},
+		{name: "past a vote only", rollbackTo: 300, want: 23},
+		{name: "past an update certificate", rollbackTo: 100, want: 21},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			db := newTestDB(t)
+			ls := newPoolDistr2Ledger(t, db)
 			key := repeatedBytes(28, 0xD7)
 			cred := lcommon.Credential{
 				CredType:   lcommon.CredentialTypeAddrKeyHash,
 				Credential: lcommon.NewBlake2b224(key),
 			}
-			seedDRepAt(t, db, key, &lcommon.RegistrationDrepCertificate{
+			// Each block is the DRep's activity in epoch, after the
+			// certificate the block carries, if any.
+			block := func(
+				slot, epoch uint64,
+				cert lcommon.Certificate,
+				deposits map[int]uint64,
+			) {
+				t.Helper()
+				fxBlock(t, ls, fxPoint(slot), func(
+					ldb ledgerdb.LedgerDB, txn ledgerdb.Txn,
+				) error {
+					if cert != nil {
+						tx, point := accountTxAt(t, key, slot,
+							func(tx *mockledger.MockTransaction) {
+								tx.WithCertificates(cert)
+							})
+						if err := ls.stageAccountTransaction(
+							txn, tx, slot, 0, point.Hash,
+							database.BatchedTxIngestOpts{ProtocolMajor: 9},
+							deposits,
+						); err != nil {
+							return err
+						}
+					}
+					return ldb.UpdateDRepActivity(
+						t.Context(), 0, key, epoch, 20, slot, txn,
+					)
+				})
+			}
+			fxTip(t, ls, fxPoint(50))
+			block(100, 1, &lcommon.RegistrationDrepCertificate{
 				DrepCredential: cred,
 				Amount:         500_000_000,
-			}, 100, 1, 500_000_000)
-			seedDRepAt(t, db, key, &lcommon.UpdateDrepCertificate{
+			}, map[int]uint64{0: 500_000_000})
+			block(300, 3, &lcommon.UpdateDrepCertificate{
 				DrepCredential: cred,
-			}, 300, 3, 0)
-			require.NoError(t, db.UpdateDRepActivity(t.Context(), 0, key, 4, 20, 400, nil))
+			}, nil)
+			block(400, 4, nil, nil)
+			drep, err := seedDB(t, db).GetDrepByCredential(t.Context(), 0, key, true, nil)
+			require.NoError(t, err)
+			require.Equal(t, uint64(24), drep.ExpiryEpoch)
 
-			require.NoError(t, db.RestoreDrepStateAtSlot(t.Context(), tc.rollbackTo, nil))
-			drep, err := db.GetDrepByCredential(t.Context(), 0, key, true, nil)
+			fxRollback(t, ls, fxPoint(tc.rollbackTo))
+			drep, err = seedDB(t, db).GetDrepByCredential(t.Context(), 0, key, true, nil)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, drep.ExpiryEpoch)
 		})

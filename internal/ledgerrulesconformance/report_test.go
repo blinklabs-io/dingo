@@ -498,3 +498,49 @@ func TestReportJSONFields(t *testing.T) {
 		t.Fatalf("implementation = %v", got["implementation"])
 	}
 }
+
+// A rejection that maps to no listed predicate has no value the scenario's
+// schema admits, so the report leaves the fixture out and the scenario scores
+// it as missing, while the report still counts it as failed.
+func TestRecordLeavesAnUnmappedFixtureOutOfTheReport(t *testing.T) {
+	t.Parallel()
+	var report Report
+	report.record(CaseOutcome{ID: "00001", Result: "pass"}, nil)
+	report.record(
+		CaseOutcome{ID: "00002", Result: unmappedLedgerResult},
+		&Failure{ID: "00002"},
+	)
+	report.record(
+		CaseOutcome{ID: "00003", Result: "BadInputsUTxO"},
+		&Failure{ID: "00003"},
+	)
+	if len(report.Scenarios) != 2 ||
+		report.Scenarios[0].ID != "00001" ||
+		report.Scenarios[1].ID != "00003" {
+		t.Fatalf("scenarios = %+v", report.Scenarios)
+	}
+	if report.Totals != (Totals{Total: 3, Passed: 1, Failed: 2}) {
+		t.Fatalf("totals = %+v", report.Totals)
+	}
+}
+
+func TestReportJSONIncludesTheDatasetCommit(t *testing.T) {
+	t.Parallel()
+	const commit = "53467f05047cd6f5c05a81adb56058826d2e05a2"
+	data, err := json.Marshal(Report{
+		SchemaVersion: schemaVersion,
+		Scenario:      "ledger-rules",
+		DatasetCommit: commit,
+		Scenarios:     []CaseOutcome{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["dataset_commit"] != commit {
+		t.Fatalf("dataset_commit = %v, want %s", got["dataset_commit"], commit)
+	}
+}

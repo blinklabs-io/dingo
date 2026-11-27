@@ -43,26 +43,23 @@ func TestLedgerProcessBlockRecordsCounterAboveMaxInt64(
 			TrustedReplay: true,
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	var issuerVkey lcommon.IssuerVkey
 	for i := range issuerVkey {
 		issuerVkey[i] = byte(i + 1)
 	}
 	pkh := lcommon.PoolKeyHash(issuerVkey.Hash())
-	require.NoError(t, db.Metadata().ImportPool(
-		&models.Pool{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  make([]byte, 32),
-		},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  make([]byte, 32),
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
+	require.NoError(t, fxImportPool(t, db, t.Context(), nil, &models.Pool{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  make([]byte, 32),
+	}, &models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  make([]byte, 32),
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	}))
 
 	block := &babbage.BabbageBlock{
 		BlockHeader: &babbage.BabbageBlockHeader{
@@ -100,7 +97,7 @@ func TestLedgerProcessBlockRecordsCounterAboveMaxInt64(
 		})
 	require.NoError(t, err)
 
-	sequence, found, err := db.LatestPoolOpCertSequence(
+	sequence, found, err := seedDB(t, db).LatestPoolOpCertSequence(
 		context.Background(), pkh, nil,
 	)
 	require.NoError(t, err)

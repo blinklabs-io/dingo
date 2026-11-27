@@ -22,7 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -172,38 +171,6 @@ func TestLeiosBoundaryStakeReadsFollowTheEffectiveOrder(t *testing.T) {
 	}
 }
 
-// With every graduated family drained, the statement guard armed and the
-// store's reads hidden, the four reads over the same closures are answered
-// without a read of the store.
-func TestLeiosBoundaryStakeReadsAnswerFromTheSetOnceEveryFamilyIsDrained(
-	t *testing.T,
-) {
-	t.Parallel()
-	h := newP5Harness(t, nil, nil)
-	s := h.scenario
-	s.ConfigureLeiosValidator()
-	fixture, err := h.store.GetBlockNoncesInSlotRange(0, math.MaxInt64, nil)
-	require.NoError(t, err)
-	s.StageNoncesInSet(fixture)
-	s.AddSetStake(bytes.Repeat([]byte{0x71}, 28), 20_000_000)
-	s.AddSetStake(bytes.Repeat([]byte{0x72}, 28), 20_000_000)
-	s.CertifyLeios()
-	slots := s.CertifiedBoundaryStake(false)
-
-	s.InstallDrainedSources()
-	drainEveryGraduatedFamily(t, h)
-	requireEveryGraduatedFamilyDrained(t, h)
-	reached, hide := s.HideStoreReads(boundaryStakeReads...)
-	hide(true)
-	for _, slot := range []uint64{slots.Snapshot, slots.Current} {
-		got, err := readLeiosBoundary(t, s.LedgerDB(), slots.Pools, slot)
-		require.NoError(t, err, "slot %d", slot)
-		requireLeiosBoundaryFigures(t, slots, got, slot == slots.Current)
-	}
-	require.Zero(t, reached(), "a read reached the metadata store")
-	require.Empty(t, h.guard.Trips(), "a drained table was read")
-}
-
 // A closure applied through LedgerDelta.apply, as block processing applies
 // one, reaches the set with the slot it takes effect at: its created and
 // spent outputs as closure effects, and its registrations, delegations and
@@ -281,9 +248,6 @@ func TestLeiosBoundaryStakeRefusesAClosureWithdrawalAcrossTheSnapshot(
 	require.NoError(t, err)
 	require.Equal(t, before, reached(), "a served read reached the store")
 
-	h.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-	)
 	_, err = readLeiosBoundary(t, h.scenario.LedgerDB(), s.Pools, s.Snapshot)
 	require.ErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable)
 	require.Equal(t, before, reached(), "a refused read reached the store")
@@ -325,13 +289,10 @@ func TestLeiosBoundaryStakeRefusesAClosureThatWithdrawsAndDelegates(
 		require.ErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable)
 		require.Zero(t, reached(), "the read reached the metadata store")
 	})
-	t.Run("a drained set refuses what it cannot derive", func(t *testing.T) {
+	t.Run("the set refuses what it cannot derive", func(t *testing.T) {
 		t.Parallel()
 		h := newLeiosBoundaryHarnessWith(t, "set", opts)
 		s := h.slots
-		h.scenario.DrainFamilies(
-			nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-		)
 		reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 		hide(true)
 		_, err := readLeiosBoundary(
@@ -375,9 +336,6 @@ func TestLeiosBoundaryStakeServesASupersededClosureWitnessUnderExpiry(
 		)
 		return stakes, inputs, err
 	}
-	h.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
-	)
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
 	_, inputs, err := read(h.scenario.LedgerDB(), s.Snapshot)
@@ -389,31 +347,4 @@ func TestLeiosBoundaryStakeServesASupersededClosureWitnessUnderExpiry(
 	_, _, err = read(h.scenario.LedgerDB(), s.KApplied+1)
 	require.ErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable,
 		"the closure witness is the store's pick before the ordinary one")
-}
-
-// A set loaded from the metadata store holds the closure withdrawals the set
-// that followed the ledger kept as it applied them.
-func TestClosureWithdrawalWitnessesLoadFromTheMetadataStore(t *testing.T) {
-	t.Parallel()
-	h := newLeiosBoundaryHarnessWith(t, "set",
-		ledger.CertifiedBoundaryOptions{GWithdraws: true})
-	s := h.slots
-	type slots struct{ applied, effective uint64 }
-	each := func(set *utxoset.Set) []slots {
-		var out []slots
-		require.NoError(t, set.EachWithdrawalWitness(s.G,
-			func(applied, effective uint64) error {
-				out = append(out, slots{applied, effective})
-				return nil
-			}))
-		return out
-	}
-	want := []slots{{s.GApplied, s.GEff}}
-	require.Equal(t, want, each(h.set), "the staged set")
-
-	loaded, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = loaded.Close() })
-	require.NoError(t, loaded.LoadLedgerState(t.Context(), h.store))
-	require.Equal(t, want, each(loaded), "the loaded set")
 }

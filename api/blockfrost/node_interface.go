@@ -324,6 +324,17 @@ type BlockfrostNode interface {
 		params PaginationParams,
 	) ([]MetadataTransactionCBORInfo, int, error)
 
+	// MetadataLabels returns the paginated transaction metadata labels in
+	// use with their transaction counts, along with the number of labels.
+	MetadataLabels(
+		ctx context.Context,
+		params PaginationParams,
+	) ([]MetadataLabelInfo, int, error)
+
+	// XpubAddress derives the address for an account extended public key,
+	// role and index on the node's network.
+	XpubAddress(xpub []byte, role uint32, index uint32) (string, error)
+
 	// Transaction returns summary details for a transaction hash.
 	Transaction(ctx context.Context, hash []byte) (TransactionInfo, error)
 
@@ -889,6 +900,13 @@ type AddressTransactionInfo struct {
 type MetadataTransactionJSONInfo struct {
 	TxHash       string
 	JSONMetadata json.RawMessage
+}
+
+// MetadataLabelInfo is a transaction metadata label in use and the number of
+// transactions carrying it.
+type MetadataLabelInfo struct {
+	Label uint64
+	Count uint64
 }
 
 // MetadataTransactionCBORInfo holds metadata label query

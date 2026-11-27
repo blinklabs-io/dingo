@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -86,33 +86,40 @@ func RegisterTruncateMetrics(reg prometheus.Registerer) error {
 	return nil
 }
 
-// TruncateAfterSlot reverts all metadata rows and blob-referenced UTxO/
-// transaction CBOR added strictly after point.Slot: certificates, account
-// reward deltas, account/pool/DRep delegation state, protocol parameters,
-// governance proposals/votes, constitutions, committee state, epochs,
-// reward state, block nonces, network state/donations, and UTxOs/
-// transactions. UTxOs spent after point.Slot are restored as unspent. It
-// then sets the tip to point and returns the resulting tip and block nonce.
+// rollbackScope says which stores a rollback to a point reverts.
+type rollbackScope uint8
+
+const (
+	// rollbackChain moves the ledger's database to the point. Its ledger
+	// state is in the LedgerDB, which rolls back from its own journal, so
+	// only block-store state is reverted and no SQL statement is issued.
+	rollbackChain rollbackScope = iota
+	// rollbackRows reverts the metadata rows above the point and leaves the
+	// tip where it is.
+	rollbackRows
+	// rollbackStoredLedger reverts the metadata rows above the point and
+	// moves the tip, for a v0.94.2 database whose ledger state is still in
+	// its metadata store.
+	rollbackStoredLedger
+)
+
+// TruncateAfterSlot moves the ledger's database back to point: it removes
+// the block-store state recorded for blocks after point.Slot (the offsets of
+// the transactions the LedgerDB indexed, when SetLiveUtxoSource named it,
+// Leios certification markers and pins, the history-expiry cursor), sets the
+// tip to point and returns the
+// resulting tip and block nonce. The ledger state itself is in the LedgerDB,
+// whose own rollback the caller stages on the same transaction; this issues
+// no SQL statement.
 //
-// mithrilFloor floors the UTxO/transaction deletion slot at the Mithril
-// ledger boundary, if any (pass 0 if there is none). UTxOs produced by
-// gap blocks during Mithril bootstrap are written via
-// SetGapBlockTransaction without advancing the ledger tip, so their
-// added_slot values can be well above the persisted tip; deleting below
-// the Mithril boundary would bulk-delete every gap-block-produced UTxO,
-// leaving the chain unable to validate the first post-gap block that
-// consumes one of them. The Mithril snapshot is the trust anchor and is
-// never rewound past, so the authoritative deletion slot is point.Slot or
-// mithrilFloor, whichever is later.
+// mithrilFloor floors the transaction offset deletion at the Mithril ledger
+// boundary, if any (pass 0 if there is none): gap blocks applied during a
+// Mithril bootstrap record offsets above the ledger tip, and the snapshot is
+// never rewound past.
 //
-// This is the shared metadata+blob truncation sweep used by both live
-// ledger rollback (ledger.LedgerState.rollback, bounded by the security
-// parameter) and offline/live database truncation (database/lifecycle,
-// which may go far deeper for CIP-0135 disaster recovery). It performs no
-// in-memory cache updates of its own — callers that hold additional
-// in-memory state (epoch cache, era, protocol parameters, chain tip)
-// must reload it themselves from the database after this returns
-// successfully.
+// It performs no in-memory cache updates of its own: callers that hold
+// in-memory state (epoch cache, era, protocol parameters, chain tip) reload
+// it after this returns.
 //
 // If txn is nil, a new read-write transaction is opened and committed
 // internally; otherwise the caller is responsible for committing txn.
@@ -122,7 +129,31 @@ func (d *Database) TruncateAfterSlot(
 	mithrilFloor uint64,
 	txn *Txn,
 ) (retTip ochainsync.Tip, retNonce []byte, retErr error) {
-	return d.rollbackAfterSlot(ctx, point, mithrilFloor, txn, true)
+	return d.rollbackAfterSlot(ctx, point, mithrilFloor, txn, rollbackChain)
+}
+
+// RevertStoredLedgerAfterSlot reverts a v0.94.2 database whose ledger state
+// is still in its metadata store to point, before that state moves into the
+// LedgerDB: every metadata row and blob-referenced UTxO/transaction CBOR
+// added strictly after point.Slot is removed (certificates, account reward
+// deltas, account/pool/DRep delegation state, protocol parameters,
+// governance, epochs, reward state, block nonces, network state, UTxOs and
+// transactions), UTxOs spent after point.Slot are restored as unspent, and
+// the tip is set to point. txn must carry both a metadata and a blob handle
+// (Database.Transaction), so the rows and the block-store state
+// commit together; a nil txn opens and commits one.
+//
+// mithrilFloor floors the UTxO/transaction deletion slot as it does for
+// TruncateAfterSlot.
+func (d *Database) RevertStoredLedgerAfterSlot(
+	ctx context.Context,
+	point ocommon.Point,
+	mithrilFloor uint64,
+	txn *Txn,
+) (ochainsync.Tip, []byte, error) {
+	return d.rollbackAfterSlot(
+		ctx, point, mithrilFloor, txn, rollbackStoredLedger,
+	)
 }
 
 // RollbackMetadataAfterSlot reverts slot-scoped metadata after point while
@@ -134,7 +165,7 @@ func (d *Database) RollbackMetadataAfterSlot(
 	mithrilFloor uint64,
 	txn *Txn,
 ) error {
-	_, _, err := d.rollbackAfterSlot(ctx, point, mithrilFloor, txn, false)
+	_, _, err := d.rollbackAfterSlot(ctx, point, mithrilFloor, txn, rollbackRows)
 	return err
 }
 
@@ -143,7 +174,7 @@ func (d *Database) rollbackAfterSlot(
 	point ocommon.Point,
 	mithrilFloor uint64,
 	txn *Txn,
-	updateTip bool,
+	scope rollbackScope,
 ) (retTip ochainsync.Tip, retNonce []byte, retErr error) {
 	started := time.Now()
 	// Set only when this call opened and committed its own transaction.
@@ -203,238 +234,23 @@ func (d *Database) rollbackAfterSlot(
 			}
 		}()
 	}
+	if scope != rollbackChain && txn.Metadata() == nil {
+		return ochainsync.Tip{}, nil, fmt.Errorf(
+			"%w: reverting metadata rows needs a metadata transaction",
+			types.ErrNilTxn,
+		)
+	}
 
 	if err := d.lowerHistoryExpiryCursor(point.Slot, txn); err != nil {
 		return ochainsync.Tip{}, nil, err
 	}
-
-	// Restore pool state before deleting any certificates: unlike account
-	// restoration (which reads the Account row's own denormalized
-	// AddedSlot field, independent of certificate rows),
-	// RestorePoolStateAtSlot detects which pools need their denormalized
-	// pledge/cost/margin/VRF/reward-account fields reverted by querying
-	// PoolRegistration rows with added_slot > slot -- the very rows
-	// DeleteCertificatesAfterSlot removes. Restoring first while those
-	// rows still exist lets it correctly identify affected pools and
-	// reload their fields from the surviving prior registration; deleting
-	// certificates first (as this used to) leaves that query finding
-	// nothing, silently keeping every re-registered pool's stale,
-	// discarded values.
-	if err := d.RestorePoolStateAtSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"restore pool state after rollback: %w",
-			err,
-		)
-	}
-	// Delete certificates (they reference transactions)
-	if err := d.DeleteCertificatesAfterSlot(
-		ctx,
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete certificates after rollback: %w",
-			err,
-		)
-	}
-	// Revert reward-account changes before account restoration can delete
-	// accounts registered after the rollback slot.
-	if !d.FamilyDrained(nodesettings.FamilyAccounts) {
-		if err := d.DeleteAccountRewardsAfterSlot(
-			ctx,
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"delete account reward deltas after rollback: %w",
-				err,
-			)
-		}
-		// Restore account delegation state
-		if err := d.RestoreAccountStateAtSlot(
-			ctx,
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"restore account state after rollback: %w",
-				err,
-			)
-		}
-	}
-	// Restore DRep state
-	if !d.FamilyDrained(nodesettings.FamilyDReps) {
-		if err := d.RestoreDrepStateAtSlot(
-			ctx,
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"restore DRep state after rollback: %w",
-				err,
-			)
-		}
-	}
-	// Delete rolled-back protocol parameters and updates. A drained family
-	// has no rows; the set drops its own in the same rollback.
-	if !d.pparamsDrained() {
-		if err := d.DeletePParamsAfterSlot(
-			ctx,
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"delete protocol params after rollback: %w",
-				err,
-			)
-		}
-		if err := d.DeletePParamUpdatesAfterSlot(
-			ctx,
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"delete protocol param updates after rollback: %w",
-				err,
-			)
-		}
-	}
-	// Delete rolled-back governance proposals and votes. A drained family
-	// has no rows, and the set drops its own in the same rollback.
-	if !d.FamilyDrained(nodesettings.FamilyGovernance) {
-		if err := d.DeleteGovernanceProposalsAfterSlot(
-			ctx,
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"delete governance proposals after rollback: %w",
-				err,
-			)
-		}
-		if err := d.DeleteGovernanceVotesAfterSlot(
-			ctx,
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"delete governance votes after rollback: %w",
-				err,
-			)
-		}
-	}
-	// A drained committee family has no rows to roll back; the set drops its
-	// own in the same rollback.
-	if !d.FamilyDrained(nodesettings.FamilyCommitteeConstitution) {
-		// Delete rolled-back constitutions
-		if err := d.DeleteConstitutionsAfterSlot(
-			ctx,
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"delete constitutions after rollback: %w",
-				err,
-			)
-		}
-		// Delete rolled-back committee state
-		if err := d.DeleteCommitteeMembersAfterSlot(
-			ctx,
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"delete committee state after rollback: %w",
-				err,
-			)
-		}
-	}
-	// Delete epoch entries whose nonces were computed from rolled-back
-	// blocks. Epochs starting after the rollback slot used blocks that no
-	// longer exist, so their nonces are stale and must be recomputed
-	// during re-sync.
-	if !d.FamilyDrained(nodesettings.FamilyEpochs) {
-		if err := d.DeleteEpochsAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"delete epochs after rollback: %w",
-				err,
-			)
-		}
-	}
-	// An epoch row survives a rollback that stays inside its epoch, so an era
-	// translation applied mid-epoch must be undone explicitly.
-	if err := d.revertMidEpochEraSwitchAfterSlot(point.Slot, txn); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"revert mid-epoch era switch after rollback: %w",
-			err,
-		)
-	}
-	// Pool stake snapshots and epoch summaries are keyed by epoch number, not
-	// slot, so DeleteEpochsAfterSlot does not reach them. Drop those of every
-	// epoch the rollback rewound past: a restored ledger snapshot has no
-	// distribution for an epoch whose boundary it never crossed, and a
-	// competing fork that does not reach that epoch must not leave one behind
-	// for leader-schedule, stake-distribution or epoch API reads.
-	if err := d.deleteEpochKeyedStateAfterRemainingEpochs(
-		point.Slot,
-		txn,
-	); err != nil {
+	if err := d.lowerHistoryExpiryHeld(point.Slot, txn); err != nil {
 		return ochainsync.Tip{}, nil, err
 	}
-	// Delete reward-state rows captured at epoch boundaries that no
-	// longer exist on the selected chain.
-	if err := d.DeleteRewardStateAfterSlot(
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete reward state after rollback: %w",
-			err,
-		)
-	}
-	// Delete block nonce rows from the abandoned fork. Epoch nonces are
-	// derived from slot-range block_nonce lookups, so same-slot
-	// competitors and later fork rows must not survive rollback.
-	if err := d.deleteBlockNoncesAfterPointUnlessDrained(
-		point,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"delete block nonces after rollback: %w",
-			err,
-		)
-	}
-	// Delete rolled-back network state records
-	if !d.FamilyDrained(nodesettings.FamilyNetworkDonations) {
-		if err := d.DeleteNetworkStateAfterSlot(
-			ctx,
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"delete network state after rollback: %w",
-				err,
-			)
-		}
-	}
-	// Delete rolled-back treasury donation records
-	if !d.FamilyDrained(nodesettings.FamilyNetworkDonations) {
-		if err := d.DeleteNetworkDonationsAfterSlot(
-			ctx,
-			point.Slot,
-			txn,
-		); err != nil {
-			return ochainsync.Tip{}, nil, fmt.Errorf(
-				"delete network donations after rollback: %w",
-				err,
-			)
+
+	if scope != rollbackChain {
+		if err := d.revertLedgerRowsAfterSlot(ctx, point, txn); err != nil {
+			return ochainsync.Tip{}, nil, err
 		}
 	}
 	// Before the UTxO deletes, which can exhaust the blob transaction's
@@ -461,45 +277,51 @@ func (d *Database) rollbackAfterSlot(
 			)
 		}
 	})
-	// Delete rolled-back UTxOs (blob offsets and metadata).
-	//
-	// Floor the deletion slot at mithrilFloor. UTxOs produced by gap
-	// blocks during Mithril bootstrap are written via
-	// SetGapBlockTransaction without advancing the ledger tip, so their
-	// added_slot values are well above the persisted ledger tip. A
-	// rollback whose target is below the Mithril boundary would
-	// otherwise bulk-delete every gap-block-produced UTxO, leaving the
-	// chain unable to validate the first post-gap block that consumes
-	// one of them. The Mithril snapshot is the trust anchor — we never
-	// rewind below it — so the authoritative deletion slot is the
-	// rollback target or the Mithril boundary, whichever is later.
 	deleteSlot := max(mithrilFloor, point.Slot)
-	if err := d.UtxosDeleteRolledback(ctx, deleteSlot, txn); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"remove rolled-back UTxOs: %w",
-			err,
-		)
-	}
-	// Delete rolled-back transaction offsets and metadata
-	if err := d.TransactionsDeleteRolledback(ctx, deleteSlot, txn); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"remove rolled-back transactions: %w",
-			err,
-		)
-	}
-	// Restore spent UTxOs. Use the same floored slot as the delete calls
-	// above so gap-block transactions and the UTxOs they consumed stay
-	// in sync: preserving a tx at slot S while restoring its consumed
-	// UTxO at deleted_slot=S would leave the tx pointing at a live UTxO
-	// it claims to have spent.
-	if err := d.UtxosUnspend(ctx, deleteSlot, txn); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"restore spent UTxOs after rollback: %w",
-			err,
-		)
+	if scope == rollbackChain {
+		if err := d.deleteIndexedTransactionOffsets(deleteSlot, txn); err != nil {
+			return ochainsync.Tip{}, nil, err
+		}
+	} else {
+		// Delete rolled-back UTxOs (blob offsets and metadata).
+		//
+		// Floor the deletion slot at mithrilFloor. UTxOs produced by gap
+		// blocks during Mithril bootstrap are written via
+		// SetGapBlockTransaction without advancing the ledger tip, so their
+		// added_slot values are well above the persisted ledger tip. A
+		// rollback whose target is below the Mithril boundary would
+		// otherwise bulk-delete every gap-block-produced UTxO, leaving the
+		// chain unable to validate the first post-gap block that consumes
+		// one of them. The Mithril snapshot is the trust anchor — we never
+		// rewind below it — so the authoritative deletion slot is the
+		// rollback target or the Mithril boundary, whichever is later.
+		if err := d.UtxosDeleteRolledback(ctx, deleteSlot, txn); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"remove rolled-back UTxOs: %w",
+				err,
+			)
+		}
+		// Delete rolled-back transaction offsets and metadata
+		if err := d.TransactionsDeleteRolledback(ctx, deleteSlot, txn); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"remove rolled-back transactions: %w",
+				err,
+			)
+		}
+		// Restore spent UTxOs. Use the same floored slot as the delete calls
+		// above so gap-block transactions and the UTxOs they consumed stay
+		// in sync: preserving a tx at slot S while restoring its consumed
+		// UTxO at deleted_slot=S would leave the tx pointing at a live UTxO
+		// it claims to have spent.
+		if err := d.UtxosUnspend(ctx, deleteSlot, txn); err != nil {
+			return ochainsync.Tip{}, nil, fmt.Errorf(
+				"restore spent UTxOs after rollback: %w",
+				err,
+			)
+		}
 	}
 
-	if !updateTip {
+	if scope == rollbackRows {
 		if owned {
 			if err := txn.Commit(); err != nil {
 				return ochainsync.Tip{}, nil, fmt.Errorf(
@@ -617,6 +439,12 @@ func (d *Database) rollbackAfterSlot(
 			err,
 		)
 	}
+	if scope == rollbackStoredLedger {
+		if err := d.lowerMetadataTipRow(newTip, txn); err != nil {
+			return ochainsync.Tip{}, nil, err
+		}
+	}
+	txn.markTipRevert()
 
 	if owned {
 		if err := txn.Commit(); err != nil {
@@ -631,11 +459,252 @@ func (d *Database) rollbackAfterSlot(
 	return newTip, newNonce, nil
 }
 
+// revertLedgerRowsAfterSlot reverts the ledger-state rows the metadata store
+// holds for blocks after point.
+func (d *Database) revertLedgerRowsAfterSlot(
+	ctx context.Context,
+	point ocommon.Point,
+	txn *Txn,
+) error {
+	// Restore pool state before deleting any certificates: unlike account
+	// restoration (which reads the Account row's own denormalized
+	// AddedSlot field, independent of certificate rows),
+	// RestorePoolStateAtSlot detects which pools need their denormalized
+	// pledge/cost/margin/VRF/reward-account fields reverted by querying
+	// PoolRegistration rows with added_slot > slot -- the very rows
+	// DeleteCertificatesAfterSlot removes. Restoring first while those
+	// rows still exist lets it correctly identify affected pools and
+	// reload their fields from the surviving prior registration; deleting
+	// certificates first (as this used to) leaves that query finding
+	// nothing, silently keeping every re-registered pool's stale,
+	// discarded values.
+	if err := d.RestorePoolStateAtSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"restore pool state after rollback: %w",
+			err,
+		)
+	}
+	// Delete certificates (they reference transactions)
+	if err := d.DeleteCertificatesAfterSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete certificates after rollback: %w",
+			err,
+		)
+	}
+	// Revert reward-account changes before account restoration can delete
+	// accounts registered after the rollback slot.
+	if err := d.DeleteAccountRewardsAfterSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete account reward deltas after rollback: %w",
+			err,
+		)
+	}
+	// Restore account delegation state
+	if err := d.RestoreAccountStateAtSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"restore account state after rollback: %w",
+			err,
+		)
+	}
+	// Restore DRep state
+	if err := d.RestoreDrepStateAtSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"restore DRep state after rollback: %w",
+			err,
+		)
+	}
+	if err := d.DeletePParamsAfterSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete protocol params after rollback: %w",
+			err,
+		)
+	}
+	if err := d.DeletePParamUpdatesAfterSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete protocol param updates after rollback: %w",
+			err,
+		)
+	}
+	if err := d.DeleteGovernanceProposalsAfterSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete governance proposals after rollback: %w",
+			err,
+		)
+	}
+	if err := d.DeleteGovernanceVotesAfterSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete governance votes after rollback: %w",
+			err,
+		)
+	}
+	if err := d.DeleteConstitutionsAfterSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete constitutions after rollback: %w",
+			err,
+		)
+	}
+	// Delete rolled-back committee state
+	if err := d.DeleteCommitteeMembersAfterSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete committee state after rollback: %w",
+			err,
+		)
+	}
+	// Delete epoch entries whose nonces were computed from rolled-back
+	// blocks. Epochs starting after the rollback slot used blocks that no
+	// longer exist, so their nonces are stale and must be recomputed
+	// during re-sync.
+	if err := d.DeleteEpochsAfterSlot(
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete epochs after rollback: %w",
+			err,
+		)
+	}
+	// An epoch row survives a rollback that stays inside its epoch, so an era
+	// translation applied mid-epoch must be undone explicitly.
+	if err := d.revertMidEpochEraSwitchAfterSlot(point.Slot, txn); err != nil {
+		return fmt.Errorf(
+			"revert mid-epoch era switch after rollback: %w",
+			err,
+		)
+	}
+	// Pool stake snapshots and epoch summaries are keyed by epoch number, not
+	// slot, so DeleteEpochsAfterSlot does not reach them. Drop those of every
+	// epoch the rollback rewound past: a restored ledger snapshot has no
+	// distribution for an epoch whose boundary it never crossed, and a
+	// competing fork that does not reach that epoch must not leave one behind
+	// for leader-schedule, stake-distribution or epoch API reads.
+	if err := d.deleteEpochKeyedStateAfterRemainingEpochs(
+		point.Slot,
+		txn,
+	); err != nil {
+		return err
+	}
+	// Delete reward-state rows captured at epoch boundaries that no
+	// longer exist on the selected chain.
+	if err := d.DeleteRewardStateAfterSlot(
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete reward state after rollback: %w",
+			err,
+		)
+	}
+	// Delete block nonce rows from the abandoned fork. Epoch nonces are
+	// derived from slot-range block_nonce lookups, so same-slot
+	// competitors and later fork rows must not survive rollback.
+	if err := d.deleteStoredBlockNoncesAfterPoint(
+		point,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete block nonces after rollback: %w",
+			err,
+		)
+	}
+	// Delete rolled-back network state records
+	if err := d.DeleteNetworkStateAfterSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete network state after rollback: %w",
+			err,
+		)
+	}
+	// Delete rolled-back treasury donation records
+	if err := d.DeleteNetworkDonationsAfterSlot(
+		ctx,
+		point.Slot,
+		txn,
+	); err != nil {
+		return fmt.Errorf(
+			"delete network donations after rollback: %w",
+			err,
+		)
+	}
+	return nil
+}
+
+// deleteIndexedTransactionOffsets removes the offsets of the transactions
+// the LedgerDB indexed after slot. A blob delete failure leaves unreachable
+// objects, which are counted and logged, and does not stop the rollback.
+func (d *Database) deleteIndexedTransactionOffsets(
+	slot uint64,
+	txn *Txn,
+) error {
+	if d.txIndex == nil {
+		return nil
+	}
+	hashes, err := d.txIndex.TxHashesAfterSlot(nil, slot)
+	if err != nil {
+		return fmt.Errorf(
+			"list indexed transactions after slot %d: %w", slot, err,
+		)
+	}
+	if blobErr := deleteTxBlobs(d, hashes, txn); blobErr != nil {
+		d.logger.Error(
+			"rolled-back transaction blob delete left unreachable objects",
+			"error", blobErr,
+			"slot", slot,
+			"transactions", len(hashes),
+		)
+	}
+	return nil
+}
+
 // deleteEpochKeyedStateAfterRemainingEpochs deletes the pool stake snapshot
 // and epoch summary rows of every epoch above the newest epoch a rollback to
-// slot leaves. A drained epochs family answers that epoch from the source; a
-// drained summaries family has no rows to delete and the set drops its own in
-// the same rollback.
+// slot leaves.
 func (d *Database) deleteEpochKeyedStateAfterRemainingEpochs(
 	slot uint64,
 	txn *Txn,
@@ -656,9 +725,6 @@ func (d *Database) deleteEpochKeyedStateAfterRemainingEpochs(
 			"delete pool stake snapshots after rollback: %w",
 			err,
 		)
-	}
-	if d.FamilyDrained(nodesettings.FamilySummaries) {
-		return nil
 	}
 	if err := store.DeleteEpochSummariesAfterEpoch(
 		lastEpoch,

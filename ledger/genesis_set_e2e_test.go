@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -238,8 +237,7 @@ func TestGenesisStateIsComputedInTheSet(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
 			scenario := ledger.NewGenesisScenarioForTest(t, set)
-			store := dbadapter.New(scenario.DB)
-			require.NoError(t, set.LoadLedgerState(t.Context(), store))
+			ledger.AdoptLiveSetForTest(t, scenario.DB, set)
 			hidden := slices.Clone(genesisReadBackNames)
 			if reads == "set" {
 				hidden = append(hidden,
@@ -249,53 +247,53 @@ func TestGenesisStateIsComputedInTheSet(t *testing.T) {
 			reached := scenario.HideStoreReads(hidden...)
 			scenario.CreateGenesis()
 			var staker []byte
-			require.NoError(
-				t,
-				store.IterateAccounts(nil, func(a *models.Account) error {
-					staker = a.StakingKey
-					return nil
-				}),
-			)
+			require.NoError(t, set.Accounts(func(a *models.Account) error {
+				staker = a.StakingKey
+				return nil
+			}))
 			require.NotNil(t, staker, "genesis staking made no account")
 			dreps, delegs := genesisGovernance(staker)
 			scenario.SetGenesisGovernance(dreps, delegs)
 			require.Zero(t, reached(),
 				"the genesis writes read the metadata store back")
 
-			txn := store.Begin(t.Context(), false)
-			defer txn.Release()
-			accounts := requireAccountsMatch(t, set, store, txn)
-			require.Equal(t, len(delegs), accounts)
-			nd, nl := requireDrepStateMatches(t, set, store, txn)
-			require.Equal(t, len(dreps), nd)
-			require.Equal(t, 2, nl, "the two delegations to a credential DRep")
-			require.Positive(t, requireGenesisPoolsMatch(t, set, store, txn))
-			for cred := range dreps {
-				want, err := store.GetDrepLastRegistrationDeposit(
-					t.Context(), uint8(cred.CredType), cred.Credential[:], txn,
-				)
-				require.NoError(t, err)
-				require.NotNil(t, want)
-				got, err := set.DRepDeposit(
-					uint8(cred.CredType),
-					cred.Credential[:],
-				)
-				require.NoError(t, err)
-				require.Equal(
-					t,
-					want,
-					got,
-					"deposit of DRep %x",
-					cred.Credential[:],
-				)
+			pool := bytes.Repeat([]byte{0xb1}, 28)
+			otherPool := bytes.Repeat([]byte{0xb2}, 28)
+			accounts := map[string]*models.Account{}
+			require.NoError(t, set.Accounts(func(a *models.Account) error {
+				c := *a
+				accounts[string(a.StakingKey)] = &c
+				return nil
+			}))
+			require.Len(t, accounts, len(delegs))
+			cred := func(seed byte) string {
+				return string(bytes.Repeat([]byte{seed}, 28))
 			}
+			require.Equal(t, pool, accounts[cred(0xc1)].Pool)
+			require.Equal(t,
+				bytes.Repeat([]byte{0xd1}, 28), accounts[cred(0xc1)].Drep)
+			require.Empty(t, accounts[cred(0xc2)].Pool)
+			require.Equal(t,
+				bytes.Repeat([]byte{0xd2}, 28), accounts[cred(0xc2)].Drep)
+			require.Equal(t, pool, accounts[cred(0xc4)].Pool)
+			require.Equal(t, otherPool, accounts[string(staker)].Pool,
+				"the delegation upserts the account genesis staking wrote")
 
-			baselines, witnesses := requireGenesisReadsMatch(t, scenario, store)
-			require.Equal(t, 1, baselines,
-				"only the Shelley genesis staker has an import baseline")
-			require.Equal(t, len(delegs), witnesses,
-				"each Conway genesis delegation is a witness at slot 0")
-
+			held := 0
+			require.NoError(t, set.Dreps(func(*models.Drep) error {
+				held++
+				return nil
+			}))
+			require.Equal(t, len(dreps), held)
+			for c, state := range dreps {
+				got, err := set.DRepDeposit(
+					uint8(c.CredType), c.Credential[:],
+				)
+				require.NoError(t, err)
+				require.NotNil(t, got)
+				require.Equal(t, state.Deposit, *got,
+					"deposit of DRep %x", c.Credential[:])
+			}
 		})
 	}
 }
@@ -311,13 +309,12 @@ func TestGenesisSeedStagesTheExpiryHistoryOfADRepTheSetHolds(t *testing.T) {
 	scenario := ledger.NewGenesisScenarioForTest(
 		t, set,
 	)
-	store := dbadapter.New(scenario.DB)
-	require.NoError(t, set.LoadLedgerState(t.Context(), store))
+	ledger.AdoptLiveSetForTest(t, scenario.DB, set)
 	scenario.CreateGenesis()
 	var staker []byte
 	require.NoError(
 		t,
-		store.IterateAccounts(nil, func(a *models.Account) error {
+		set.Accounts(func(a *models.Account) error {
 			staker = a.StakingKey
 			return nil
 		}),

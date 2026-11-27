@@ -155,7 +155,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"SkipRewardLiveStakeBackfillCheck",
 		"skip-reward-live-stake-backfill-check",
-		"skip the reward_live_stake startup consistency check (advanced/diagnostic use only, unsafe to leave enabled permanently)",
+		"no effect; accepted so existing configurations still load",
 	),
 	boolFlag(
 		"Tracing",
@@ -947,7 +947,7 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"BackfillBatchSize",
 		"backfill-batch-size",
-		"API-mode metadata backfill block batch size",
+		"accepted for configuration compatibility; has no effect",
 	),
 	boolFlag(
 		"BlockPipelineEnabled",
@@ -983,7 +983,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"LedgerApplyRowBatchingEnabled",
 		"ledger-apply-row-batching-enabled",
-		"in core storage mode, write the deltas of blocks that are not validated with multi-row batched inserts instead of per-row statements, as API mode always does (not consensus-affecting; default off)",
+		"accepted for released configurations; has no effect",
 	),
 
 	boolFlag(
@@ -1063,6 +1063,11 @@ var flagSpecs = []flagSpec{
 		"shelley-kes-agent-profile",
 		"",
 		"remote KES agent profile to sign for, named when the agent admits a session",
+	),
+	boolFlag(
+		"ShelleyKESAgentShared",
+		"shelley-kes-agent-shared",
+		"require a live upstream before using this sign-mode KES agent because another producer shares it",
 	),
 	durationFlag(
 		"ShelleyKeyWatchInterval",

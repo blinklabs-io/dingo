@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -81,7 +82,7 @@ func TestValidatePeerChainSelectionHeaderCryptoAfterRollbackAcrossEpochBoundary(
 		t,
 		cm.PrimaryChain().AddLocalBlock(context.Background(), anchor.block),
 	)
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		anchorPoint.Hash, anchorPoint.Slot, anchorNonce, false, nil,
 	))
 
@@ -111,6 +112,7 @@ func TestValidatePeerChainSelectionHeaderCryptoAfterRollbackAcrossEpochBoundary(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 	ls.config.PeerHeaderLookupFunc = func(
 		_ ouroboros.ConnectionId,
 		hash []byte,
@@ -133,7 +135,7 @@ func TestValidatePeerChainSelectionHeaderCryptoAfterRollbackAcrossEpochBoundary(
 
 	extraEntropy, err := ls.recordedExtraEntropyForEpoch(6, eras.BabbageEraDesc.Id)
 	require.NoError(t, err)
-	forkEpochNonce, err := assembleEpochNonce(
+	forkEpochNonce, err := epochengine.AssembleEpochNonce(
 		forkCandidate, ls.epochCache[0].LastEpochBlockNonce, extraEntropy,
 	)
 	require.NoError(t, err)

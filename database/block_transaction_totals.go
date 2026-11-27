@@ -37,6 +37,9 @@ func (d *Database) GetBlockTransactionTotals(
 		txn = d.TransactionContext(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetBlockTransactionTotals"); err != nil {
+		return models.BlockTransactionTotals{}, err
+	}
 	store := d.transactionStore()
 	if projection, ok := store.(metadata.BlockTransactionTotalsStore); ok {
 		return projection.GetBlockTransactionTotals(blockHash, txn.Metadata())

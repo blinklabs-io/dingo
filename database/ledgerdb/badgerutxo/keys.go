@@ -187,6 +187,27 @@ const (
 	// clears, each by the slot it was recorded at:
 	// T <slot:8 BE> <kind:1> ...
 	DRepHistoryTag = 'T'
+	// GovernanceBoundaryTag keys the governance state of each Conway epoch
+	// boundary: # <epoch:8 BE>, valued with the boundary slot (8 bytes BE)
+	// and the encoded snapshot. Each row is journaled at its boundary slot.
+	GovernanceBoundaryTag = '#'
+	// InactivityTag keys the one-time CIP-0163 delegator inactivity
+	// activation: 0 <kind:1> ..., kind 0 the epoch it ran at and kind 1 a
+	// credential it stamped.
+	InactivityTag = '0'
+	// RatifyPendingTag keys the record of a boundary whose ratification
+	// decision is not written yet, the only row under it.
+	RatifyPendingTag = '1'
+	// RewardLikelihoodTag keys the non-myopic pool-ranking state a reward
+	// update installs: 2 <kind:1> <epoch:8 BE> [<pool:28>].
+	RewardLikelihoodTag = '2'
+	// TxIndexTag keys the transaction index, every transaction the ledger has
+	// applied on its chain: 3 <tx hash:32>, valued with the slot of the block
+	// the transaction was applied in (8 bytes BE), its position in that
+	// block (4 bytes BE), its era id (1 byte), whether it is phase-2 valid
+	// (1 byte) and the block's hash. A Leios closure transaction records the
+	// ranking block that certified its endorser block.
+	TxIndexTag = '3'
 )
 
 // MarkerPrefix starts every marker key. No row family tag may equal it.
@@ -249,6 +270,11 @@ var (
 	syncMarkersKey        = []byte("mpmarkok")
 	syntheticV2Key        = []byte("mpmarkv")
 	syntheticV2ClearedKey = []byte("mpmarke")
+	// inactivityKey is set once the store holds the delegator inactivity
+	// activation, and ratifyPendingKey once it holds the pending
+	// ratification record, up to its tip.
+	inactivityKey    = []byte("minactivity")
+	ratifyPendingKey = []byte("mratifypend")
 	// networkStateKey is set once the store holds every network state and
 	// donation row up to its tip.
 	networkStateKey = []byte("mnet")
@@ -265,8 +291,7 @@ var (
 	// rewardSeqKey holds the next reward record sequence number.
 	rewardSeqKey = []byte("mrwseq")
 	// rewardRecordsKey is set once the store holds the reward records of the
-	// metadata store's journal up to its tip, or marks them lost when the
-	// journal was drained before they could be read.
+	// journal up to its tip.
 	rewardRecordsKey = []byte("mrwrecs")
 	// rewardConsumerKey is present while a reader that copies the reward
 	// records needs them; rewardConsumedKey holds the sequence number below
@@ -281,6 +306,13 @@ var (
 	// rewardIndexedKey is set once every record has a number and an entry.
 	rewardSeqIndexPrefix = []byte("mrwq")
 	rewardIndexedKey     = []byte("mrwindexed")
+	// addressIndexPrefix keys the output index, a derived row family under
+	// the marker namespace (see address_index.go); addressIndexedKey is set
+	// once every live output has its index rows, and addressIndexAfterKey
+	// holds the last output a build wrote.
+	addressIndexPrefix   = []byte("mai")
+	addressIndexedKey    = []byte("mxaidone")
+	addressIndexAfterKey = []byte("mxaiafter")
 	drepsKey             = []byte("mdreps")
 	poolsKey             = []byte("mpools")
 	// poolHistoryKey is set once the store holds every pool certificate event
@@ -302,7 +334,7 @@ var (
 	// up to its tip, and witnessSlotsKey once it holds every witness slot.
 	importBaselinesKey = []byte("mbaseline")
 	// importBaselineDelegationsKey is set once the import baselines carry the
-	// delegations the import recorded, or marked lost when they cannot.
+	// delegations the import recorded.
 	importBaselineDelegationsKey = []byte("mbasedelegs")
 	// witnessSlotsKey is set once the witness rows carry the effective slot
 	// of a closure's witness. legacyWitnessSlotsKey marked rows without it,
@@ -322,10 +354,12 @@ var (
 	// s is exact only when s+1 is at least the floor. Pruning and every
 	// row load raise it before they drop journal entries.
 	journalFloorKey = []byte("mjfloor")
-	// mergeKey is set by a catch-up bootstrap and cleared once the families'
-	// snapshot rows are merged into the set, so a start that finds it knows
-	// the set is not yet the complete copy of the ledger state.
-	mergeKey = []byte("mmerge")
+	// importKey marks a ledger-state import in progress. Its value is the
+	// snapshot point followed by one byte, set once the snapshot's outputs
+	// are all in the set. It is written before the import changes a row and
+	// removed by EndImport, so a set that holds it is never a complete ledger
+	// state.
+	importKey = []byte("mimport")
 	// loadFloorKey holds the tip slot plus one at the last load of a row
 	// family a rollback undoes through the state journal, from rows with no
 	// entries before it. A rollback below it, other than to the tip, would
@@ -334,9 +368,8 @@ var (
 	// exportFloorKey holds the lowest slot, as a big-endian uint64, from
 	// which the state journal names every account and DRep row by the slot
 	// its AddedSlot says: an entry sits at the slot of the change that set
-	// it. Rows a load or a merge wrote carry older slots than their entries,
-	// and a store from before the key had both, so a store that opens
-	// without it takes the tip plus one.
+	// it. Rows a load wrote carry older slots than their entries, so a store
+	// that opens without the key takes the tip plus one.
 	exportFloorKey = []byte("mexportfloor")
 	// rewardBlocksKey is set once the store holds the block counts and fees
 	// of every epoch reward calculation can still read, up to its tip, with
@@ -356,6 +389,9 @@ var (
 	// closureUtxoKey is set once the store holds every closure output effect
 	// up to its tip.
 	closureUtxoKey = []byte("mclosureutxo")
+	// txIndexKey is set once the store holds the transaction index up to its
+	// tip.
+	txIndexKey = []byte("mtxindex")
 	// rewardInputsKey is set once the store holds the reward inputs of every
 	// epoch reward calculation can still read, up to its tip.
 	rewardInputsKey = []byte("mrewardin")

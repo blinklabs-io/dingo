@@ -15,7 +15,6 @@
 package database
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -31,24 +30,10 @@ func (d *Database) GetMidnightCandidates(
 	if err != nil {
 		return nil, fmt.Errorf("parse Midnight candidate address: %w", err)
 	}
+	if err := d.requireStore("GetMidnightCandidates"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetMidnightCandidates(addr, nil)
-}
-
-// InsertMidnightGovernanceDatum inserts a new governance datum row.
-// Always inserts — never overwrites — so the latest datum is found by
-// querying with ORDER BY block_number DESC.
-func (d *Database) InsertMidnightGovernanceDatum(
-	ctx context.Context,
-	datum *models.MidnightGovernanceDatum,
-) error {
-	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
-		if err := d.metadata.InsertMidnightGovernanceDatum(
-			txn.Metadata(), datum,
-		); err != nil {
-			return fmt.Errorf("insert midnight governance datum: %w", err)
-		}
-		return nil
-	})
 }
 
 // GetLatestMidnightGovernanceDatum returns the newest datum of datumType at or
@@ -57,6 +42,9 @@ func (d *Database) GetLatestMidnightGovernanceDatum(
 	datumType string,
 	blockNumber uint64,
 ) (*models.MidnightGovernanceDatum, error) {
+	if err := d.requireStore("GetLatestMidnightGovernanceDatum"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetLatestMidnightGovernanceDatum(
 		datumType,
 		blockNumber,
@@ -67,24 +55,10 @@ func (d *Database) GetLatestMidnightGovernanceDatum(
 // GetLatestMidnightAriadneParams returns the most recently stored Ariadne
 // parameters row (ordered by epoch DESC), or nil if none exist.
 func (d *Database) GetLatestMidnightAriadneParams() (*models.MidnightAriadneParams, error) {
+	if err := d.requireStore("GetLatestMidnightAriadneParams"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetLatestMidnightAriadneParams(nil)
-}
-
-// UpsertMidnightAriadneParams inserts or updates the Ariadne params row for
-// the given epoch. If a row for that epoch already exists, its datum is
-// updated with the new value.
-func (d *Database) UpsertMidnightAriadneParams(
-	ctx context.Context,
-	params *models.MidnightAriadneParams,
-) error {
-	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
-		if err := d.metadata.UpsertMidnightAriadneParams(
-			txn.Metadata(), params,
-		); err != nil {
-			return fmt.Errorf("upsert midnight ariadne params: %w", err)
-		}
-		return nil
-	})
 }
 
 // GetMidnightAriadneParamsAtOrBeforeEpoch returns the newest Ariadne params
@@ -92,6 +66,9 @@ func (d *Database) UpsertMidnightAriadneParams(
 func (d *Database) GetMidnightAriadneParamsAtOrBeforeEpoch(
 	epoch uint64,
 ) (*models.MidnightAriadneParams, error) {
+	if err := d.requireStore("GetMidnightAriadneParamsAtOrBeforeEpoch"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetMidnightAriadneParamsAtOrBeforeEpoch(epoch, nil)
 }
 
@@ -100,6 +77,9 @@ func (d *Database) GetMidnightAriadneParamsAtOrBeforeEpoch(
 func (d *Database) GetMidnightEpochCandidatesByEpoch(
 	epoch uint64,
 ) (*models.MidnightEpochCandidates, error) {
+	if err := d.requireStore("GetMidnightEpochCandidatesByEpoch"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetMidnightEpochCandidatesByEpoch(epoch, nil)
 }
 
@@ -108,24 +88,11 @@ func (d *Database) GetMidnightEpochCandidatesByEpoch(
 func (d *Database) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
 	txHashes [][]byte,
 ) ([]models.MidnightCommitteeCandidateRegistration, error) {
+	if err := d.requireStore("GetMidnightCommitteeCandidateRegistrationsByTxHashes"); err != nil {
+		return nil, err
+	}
 	return d.metadata.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
 		txHashes,
 		nil,
 	)
-}
-
-// UpsertMidnightEpochCandidates inserts or replaces the committee-candidate
-// snapshot for the given epoch.
-func (d *Database) UpsertMidnightEpochCandidates(
-	ctx context.Context,
-	ec *models.MidnightEpochCandidates,
-) error {
-	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
-		if err := d.metadata.UpsertMidnightEpochCandidates(
-			txn.Metadata(), ec,
-		); err != nil {
-			return fmt.Errorf("upsert midnight epoch candidates: %w", err)
-		}
-		return nil
-	})
 }

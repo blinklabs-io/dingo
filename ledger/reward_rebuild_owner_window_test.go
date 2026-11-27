@@ -21,10 +21,10 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/stretchr/testify/require"
@@ -41,19 +41,16 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersAtSnapshotWindow(
 	t.Parallel()
 
 	ls, db, snapshotEpoch, capturedOwner := captureOwnerWindowRewardInputs(t)
-	meta := db.Metadata()
-	rewardSnapshot, err := meta.GetRewardSnapshot(snapshotEpoch, "mark", nil)
+	rewardSnapshot, err := seedDB(t, db).GetRewardSnapshot(snapshotEpoch, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, rewardSnapshot)
-	poolInputs, err := meta.GetRewardPoolInputs(snapshotEpoch, nil)
+	poolInputs, err := seedDB(t, db).GetRewardPoolInputs(snapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolInputs, 1)
-	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
-		context.Background(), snapshotEpoch+1, nil,
-	))
+	pruneRewardStakeInputsBefore(t, db, snapshotEpoch+1)
 
-	rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
-		dbadapter.New(db), nil, snapshotEpoch, rewardSnapshot, poolInputs,
+	rebuilt, err := ls.engine().RebuildPrunedRewardStakeInputs(
+		seedDB(t, db), nil, snapshotEpoch, rewardSnapshot, poolInputs,
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, rebuilt,
@@ -77,29 +74,26 @@ func TestEnsureRewardStakeInputsReadyReportsRejectedReconstruction(
 	t.Parallel()
 
 	ls, db, snapshotEpoch, _ := captureOwnerWindowRewardInputs(t)
-	meta := db.Metadata()
-	rewardSnapshot, err := meta.GetRewardSnapshot(snapshotEpoch, "mark", nil)
+	rewardSnapshot, err := seedDB(t, db).GetRewardSnapshot(snapshotEpoch, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, rewardSnapshot)
 	require.Positive(t, rewardSnapshot.TotalDelegators)
-	poolInputs, err := meta.GetRewardPoolInputs(snapshotEpoch, nil)
+	poolInputs, err := seedDB(t, db).GetRewardPoolInputs(snapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolInputs, 1)
 	// Far beyond the reconstruction tolerance, so the rebuilt rows cannot be
 	// folded into the retained total.
 	poolInputs[0].DelegatedStake += types.Uint64(1_000_000_000_000)
-	require.NoError(t, meta.SaveRewardPoolInputs(poolInputs, nil))
-	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
-		context.Background(), snapshotEpoch+1, nil,
-	))
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs(poolInputs, nil))
+	pruneRewardStakeInputsBefore(t, db, snapshotEpoch+1)
 	require.NoError(t, markRewardStakeInputsPending(
-		dbadapter.New(db), nil, snapshotEpoch, rewardSnapshot.BoundarySlot,
+		seedDB(t, db), nil, snapshotEpoch, rewardSnapshot.BoundarySlot,
 	))
 
 	txn := db.Transaction(context.Background(), true)
 	defer func() { _ = txn.Rollback() }()
-	err = ls.ensureRewardStakeInputsReady(txn, snapshotEpoch)
-	require.ErrorIs(t, err, errRewardStakeInputsUnrecoverable)
+	err = ls.engine().EnsureRewardStakeInputsReady(txn, snapshotEpoch)
+	require.ErrorIs(t, err, epochengine.ErrRewardStakeInputsUnrecoverable)
 	require.ErrorContains(t, err,
 		"reconstruction disagrees with the retained reward_pool_input totals",
 	)
@@ -122,7 +116,6 @@ func captureOwnerWindowRewardInputs(
 		reRegisterSlot = endedEpoch*epochLength + 50
 	)
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 	poolHash := bytes.Repeat([]byte{0xd2}, 28)
 	ownerKey := bytes.Repeat([]byte{0x81}, 28)
 	addedOwnerKey := bytes.Repeat([]byte{0x82}, 28)
@@ -158,17 +151,16 @@ func captureOwnerWindowRewardInputs(
 			RewardAccount: ownerKey,
 		}
 	}
-	require.NoError(t, db.ImportPool(
+	require.NoError(t, fxImportPool(t, db,
 		context.Background(), nil, newPool(), registration(10, ownerKey),
 	))
-	require.NoError(t, db.ImportPool(
-		context.Background(), nil, newPool(),
-		registration(reRegisterSlot, ownerKey, addedOwnerKey),
-	))
+	fxReregisterPool(
+		t, db, registration(reRegisterSlot, ownerKey, addedOwnerKey),
+	)
 	// The added owner's stake is far above the reconstruction tolerance, so a
 	// wrong owner set cannot be folded away.
 	for i, key := range [][]byte{ownerKey, addedOwnerKey, delegatorKey} {
-		require.NoError(t, db.CreateAccount(
+		require.NoError(t, seedCreateAccount(t, db,
 			context.Background(), nil, &models.Account{
 				StakingKey: key,
 				Pool:       poolHash,
@@ -176,24 +168,19 @@ func captureOwnerWindowRewardInputs(
 				Active:     true,
 			},
 		))
-		require.NoError(t, db.CreateUtxo(
-			context.Background(), nil, &models.Utxo{
-				TxId:       bytes.Repeat([]byte{byte(0x20 + i)}, 32),
-				OutputIdx:  0,
-				StakingKey: key,
-				Amount:     types.Uint64(50_000_000),
-				AddedSlot:  0,
-			},
-		))
+		seedTestStakedOutput(
+			t, ls, bytes.Repeat([]byte{byte(0x20 + i)}, 32), 0, key,
+			50_000_000,
+		)
 	}
 	for epoch := range endedEpoch + 1 {
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			epoch*epochLength, epoch, nil, nil, nil, nil,
 			eras.ShelleyEraDesc.Id, 1, uint(epochLength), nil,
 		))
 	}
 
-	mgr := snapshot.NewManager(dbadapter.New(db), newTestEventBus(t, nil), nil)
+	mgr := snapshot.NewManager(ls.ledgerDB(), newTestEventBus(t, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   endedEpoch,
 		NewEpoch:        snapshotEpoch,
@@ -206,16 +193,16 @@ func captureOwnerWindowRewardInputs(
 	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
 		context.Background(), captureTxn, evt,
 	))
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, ls.ledgerDB().SetEpoch(
 		boundarySlot, snapshotEpoch, nil, nil, nil, nil,
-		eras.ShelleyEraDesc.Id, 1, uint(epochLength), captureTxn.Metadata(),
+		eras.ShelleyEraDesc.Id, 1, uint(epochLength), captureTxn,
 	))
 	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
 		context.Background(), captureTxn, evt,
 	))
 	require.NoError(t, captureTxn.Commit())
 
-	captured, err := meta.GetRewardStakeInputs(snapshotEpoch, nil)
+	captured, err := seedDB(t, db).GetRewardStakeInputs(snapshotEpoch, nil)
 	require.NoError(t, err)
 	capturedOwner := make(map[string]bool, len(captured))
 	for _, input := range captured {
@@ -245,12 +232,11 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersForEpochZero(
 		epochLength   = uint64(100)
 	)
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 	poolHash := bytes.Repeat([]byte{0xd3}, 28)
 	ownerKey := bytes.Repeat([]byte{0x91}, 28)
 	delegatorKey := bytes.Repeat([]byte{0x92}, 28)
 
-	require.NoError(t, db.ImportPool(
+	require.NoError(t, fxImportPool(t, db,
 		context.Background(), nil,
 		&models.Pool{
 			PoolKeyHash:   poolHash,
@@ -274,7 +260,7 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersForEpochZero(
 		},
 	))
 	for i, key := range [][]byte{ownerKey, delegatorKey} {
-		require.NoError(t, db.CreateAccount(
+		require.NoError(t, seedCreateAccount(t, db,
 			context.Background(), nil, &models.Account{
 				StakingKey: key,
 				Pool:       poolHash,
@@ -282,22 +268,17 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersForEpochZero(
 				Active:     true,
 			},
 		))
-		require.NoError(t, db.CreateUtxo(
-			context.Background(), nil, &models.Utxo{
-				TxId:       bytes.Repeat([]byte{byte(0x40 + i)}, 32),
-				OutputIdx:  0,
-				StakingKey: key,
-				Amount:     types.Uint64(50_000_000),
-				AddedSlot:  0,
-			},
-		))
+		seedTestStakedOutput(
+			t, ls, bytes.Repeat([]byte{byte(0x40 + i)}, 32), 0, key,
+			50_000_000,
+		)
 	}
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, snapshotEpoch, nil, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, uint(epochLength), nil,
 	))
 
-	mgr := snapshot.NewManager(dbadapter.New(db), newTestEventBus(t, nil), nil)
+	mgr := snapshot.NewManager(ls.ledgerDB(), newTestEventBus(t, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   snapshotEpoch,
 		NewEpoch:        snapshotEpoch,
@@ -315,7 +296,7 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersForEpochZero(
 	))
 	require.NoError(t, captureTxn.Commit())
 
-	captured, err := meta.GetRewardStakeInputs(snapshotEpoch, nil)
+	captured, err := seedDB(t, db).GetRewardStakeInputs(snapshotEpoch, nil)
 	require.NoError(t, err)
 	capturedOwner := make(map[string]bool, len(captured))
 	for _, input := range captured {
@@ -326,18 +307,16 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersForEpochZero(
 		string(delegatorKey): false,
 	}, capturedOwner)
 
-	rewardSnapshot, err := meta.GetRewardSnapshot(snapshotEpoch, "mark", nil)
+	rewardSnapshot, err := seedDB(t, db).GetRewardSnapshot(snapshotEpoch, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, rewardSnapshot)
-	poolInputs, err := meta.GetRewardPoolInputs(snapshotEpoch, nil)
+	poolInputs, err := seedDB(t, db).GetRewardPoolInputs(snapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolInputs, 1)
-	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
-		context.Background(), snapshotEpoch+1, nil,
-	))
+	pruneRewardStakeInputsBefore(t, db, snapshotEpoch+1)
 
-	rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
-		dbadapter.New(db), nil, snapshotEpoch, rewardSnapshot, poolInputs,
+	rebuilt, err := ls.engine().RebuildPrunedRewardStakeInputs(
+		ls.ledgerDB(), nil, snapshotEpoch, rewardSnapshot, poolInputs,
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, rebuilt,

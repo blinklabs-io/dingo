@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -44,6 +45,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -74,13 +76,13 @@ func TestNegativeLeaderRewardApplicationRespectsExpiredAccountGuard(t *testing.T
 	}}
 	require.ErrorIs(
 		t,
-		negativeLeaderRewardApplicationError(negative, nil),
+		epochengine.NegativeLeaderRewardApplicationError(negative, nil),
 		rewards.ErrNegativeLeaderReward,
 	)
 	guarded := map[string]struct{}{
 		models.NewStakeCredentialRef(credential.Tag, credential.Hash[:]).MapKey(): {},
 	}
-	require.NoError(t, negativeLeaderRewardApplicationError(negative, guarded))
+	require.NoError(t, epochengine.NegativeLeaderRewardApplicationError(negative, guarded))
 }
 
 const (
@@ -97,7 +99,6 @@ const (
 // earlier on missing epoch metadata.
 func seedRetentionRewardEpochs(t *testing.T, db *database.Database) {
 	t.Helper()
-	meta := db.Metadata()
 	pparams := &shelley.ShelleyProtocolParameters{
 		NOpt:             10,
 		A0:               rewardCalcRat(1, 2),
@@ -117,19 +118,19 @@ func seedRetentionRewardEpochs(t *testing.T, db *database.Database) {
 		{100, retentionPerformanceEpoch},
 		{200, retentionPotsEpoch},
 	} {
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			epoch.startSlot, epoch.id, nil, nil, nil, nil,
 			eras.ShelleyEraDesc.Id, 1, 100, nil,
 		), "set epoch %d", epoch.id)
 	}
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor,
 		100,
 		retentionPerformanceEpoch,
 		eras.ShelleyEraDesc.Id,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        retentionPotsEpoch,
 		Reserves:     100_000_000,
 		CapturedSlot: 300,
@@ -148,7 +149,7 @@ func TestApplyStakeRewardsHaltsWhenRequiredRewardBasisIsMissing(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.engine().ApplyStakeRewards(
 			context.Background(),
 			txn, retentionNewEpoch, retentionBoundarySlot,
 			false,
@@ -171,7 +172,6 @@ func TestApplyStakeRewardsHaltsOnUnrecoverablePrunedStakeInputs(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	poolKey := rewardCalcHash(0x11)
 	rewardAccount := rewardCalcHash(0x22)
@@ -180,7 +180,7 @@ func TestApplyStakeRewardsHaltsOnUnrecoverablePrunedStakeInputs(t *testing.T) {
 
 	// Snapshot and pool input survive retention, and the snapshot still claims
 	// two delegators whose credential rows have aged out.
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            retentionRewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -190,7 +190,7 @@ func TestApplyStakeRewardsHaltsOnUnrecoverablePrunedStakeInputs(t *testing.T) {
 		BoundarySlot:     100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      retentionRewardSnapshotEpoch,
 			PoolKeyHash:                poolKey,
@@ -211,7 +211,7 @@ func TestApplyStakeRewardsHaltsOnUnrecoverablePrunedStakeInputs(t *testing.T) {
 
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: rewardAccount,
 			Pool:       poolKey,
 			Active:     true,
@@ -220,16 +220,16 @@ func TestApplyStakeRewardsHaltsOnUnrecoverablePrunedStakeInputs(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(),
+		return ls.engine().ApplyStakeRewards(context.Background(),
 			txn, retentionNewEpoch, retentionBoundarySlot,
 			false,
 		)
 	})
-	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, err, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 	require.ErrorIs(t, err, errHaltLedgerPipeline)
 
 	// Nothing was credited and no outputs were persisted for the skipped epoch.
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		rewardAccount,
@@ -244,13 +244,13 @@ func TestApplyStakeRewardsHaltsOnUnrecoverablePrunedStakeInputs(t *testing.T) {
 		"skipped epoch must not credit rewards",
 	)
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(
 		retentionRewardSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
 	require.Empty(t, poolOutputs, "skipped epoch must not persist pool outputs")
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		retentionRewardSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
@@ -259,13 +259,11 @@ func TestApplyStakeRewardsHaltsOnUnrecoverablePrunedStakeInputs(t *testing.T) {
 		accountOutputs,
 		"skipped epoch must not persist account outputs",
 	)
-
-	var deltas int64
-	require.NoError(t, rewardCalcSQLDB(t, db).QueryRow(
-		"SELECT COUNT(*) FROM account_reward_delta WHERE added_slot = ?",
-		retentionBoundarySlot,
-	).Scan(&deltas))
-	require.Zero(t, deltas, "skipped epoch must not record reward deltas")
+	applied, err := seedDB(t, db).HasAppliedRewardCreditRound(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.False(t, applied, "skipped epoch must not record a reward round")
 }
 
 // TestApplyStakeRewardsAcceptsZeroDelegatorSnapshot guards the skip predicate
@@ -276,10 +274,9 @@ func TestApplyStakeRewardsAcceptsZeroDelegatorSnapshot(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	seedRetentionRewardEpochs(t, db)
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            retentionRewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 0,
@@ -292,7 +289,7 @@ func TestApplyStakeRewardsAcceptsZeroDelegatorSnapshot(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(),
+		return ls.engine().ApplyStakeRewards(context.Background(),
 			txn, retentionNewEpoch, retentionBoundarySlot,
 			false,
 		)
@@ -310,8 +307,7 @@ func seedPrunedStakeInputSnapshot(
 	poolKey, rewardAccount []byte,
 ) {
 	t.Helper()
-	meta := db.Metadata()
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            retentionRewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -321,7 +317,7 @@ func seedPrunedStakeInputSnapshot(
 		BoundarySlot:     100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      retentionRewardSnapshotEpoch,
 			PoolKeyHash:                poolKey,
@@ -339,7 +335,7 @@ func seedPrunedStakeInputSnapshot(
 	}, nil))
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: rewardAccount,
 			Pool:       poolKey,
 			Active:     true,
@@ -367,12 +363,12 @@ func TestApplyStakeRewardsReportsUnavailablePrunedStakeInputs(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(),
+		return ls.engine().ApplyStakeRewards(context.Background(),
 			txn, retentionNewEpoch, retentionBoundarySlot,
 			false,
 		)
 	})
-	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, err, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 	require.ErrorIs(t, err, errHaltLedgerPipeline)
 
 	out := logs.String()
@@ -393,7 +389,7 @@ func TestApplyStakeRewardsReportsUnavailablePrunedStakeInputs(t *testing.T) {
 
 // TestSkippedPrunedStakeInputsSuppressedDuringPrecompute proves the retention
 // skip honors reportSkips like its three siblings in
-// calculateStakeRewardApplication. The opportunistic precompute pass reads the
+// CalculateStakeRewardApplication. The opportunistic precompute pass reads the
 // same possibly-not-yet-retained inputs ahead of the real boundary and can
 // miss while the round is still unapplied -- reportSkips exists precisely so
 // that miss is not logged or counted as a skipped round the authoritative
@@ -414,7 +410,7 @@ func TestSkippedPrunedStakeInputsSuppressedDuringPrecompute(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		retentionNewEpoch,
@@ -446,7 +442,6 @@ func seedRetentionReconstructionFixture(
 	t.Helper()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 	poolHash := bytes.Repeat([]byte{0xd1}, 28)
 	ownerKey := bytes.Repeat([]byte{0x71}, 28)
 	delegatorKey := bytes.Repeat([]byte{0x72}, 28)
@@ -473,13 +468,13 @@ func seedRetentionReconstructionFixture(
 	}
 	require.NoError(
 		t,
-		db.ImportPool(context.Background(), nil, pool, reg),
+		fxImportPool(t, db, context.Background(), nil, pool, reg),
 		"import pool",
 	)
 	for i, key := range [][]byte{ownerKey, delegatorKey} {
 		require.NoError(
 			t,
-			db.CreateAccount(context.Background(), nil, &models.Account{
+			seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 				StakingKey: key,
 				Pool:       poolHash,
 				AddedSlot:  0,
@@ -488,33 +483,25 @@ func seedRetentionReconstructionFixture(
 			"create account %d",
 			i,
 		)
-		require.NoError(
-			t,
-			db.CreateUtxo(context.Background(), nil, &models.Utxo{
-				TxId:       bytes.Repeat([]byte{byte(0x10 + i)}, 32),
-				OutputIdx:  0,
-				StakingKey: key,
-				Amount:     types.Uint64(20_000_000),
-				AddedSlot:  0,
-			}),
-			"create utxo %d",
-			i,
+		seedTestStakedOutput(
+			t, ls, bytes.Repeat([]byte{byte(0x10 + i)}, 32), 0, key,
+			20_000_000,
 		)
 	}
-	require.NoError(t, db.AddAccountRewardByCredential(
+	require.NoError(t, seedDB(t, db).AddAccountRewardByCredential(
 		context.Background(),
 		0, ownerKey, 2_000_000, 10, bytes.Repeat([]byte{0xa1}, 32), nil,
 	))
-	require.NoError(t, db.AddAccountRewardByCredential(
+	require.NoError(t, seedDB(t, db).AddAccountRewardByCredential(
 		context.Background(),
 		0, delegatorKey, 3_000_000, 10, bytes.Repeat([]byte{0xa2}, 32), nil,
 	))
 
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nil, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, 100, nil,
 	))
-	mgr := snapshot.NewManager(dbadapter.New(db), newTestEventBus(t, nil), nil)
+	mgr := snapshot.NewManager(ls.ledgerDB(), newTestEventBus(t, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        retentionRewardSnapshotEpoch,
@@ -527,16 +514,16 @@ func seedRetentionReconstructionFixture(
 	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
 		context.Background(), captureTxn, evt,
 	))
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, ls.ledgerDB().SetEpoch(
 		100, retentionRewardSnapshotEpoch, nil, nil, nil, nil,
-		eras.ShelleyEraDesc.Id, 1, 100, captureTxn.Metadata(),
+		eras.ShelleyEraDesc.Id, 1, 100, captureTxn,
 	))
 	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
 		context.Background(), captureTxn, evt,
 	))
 	require.NoError(t, captureTxn.Commit())
 
-	capturedStakeInputs, err := meta.GetRewardStakeInputs(
+	capturedStakeInputs, err := seedDB(t, db).GetRewardStakeInputs(
 		retentionRewardSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
@@ -544,11 +531,8 @@ func seedRetentionReconstructionFixture(
 		t, capturedStakeInputs,
 		"the legitimate capture must have produced real per-credential rows",
 	)
-	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
-		context.Background(),
-		retentionRewardSnapshotEpoch+1, nil,
-	))
-	prunedStakeInputs, err := meta.GetRewardStakeInputs(
+	pruneRewardStakeInputsBefore(t, db, retentionRewardSnapshotEpoch+1)
+	prunedStakeInputs, err := seedDB(t, db).GetRewardStakeInputs(
 		retentionRewardSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
@@ -562,7 +546,7 @@ func seedRetentionReconstructionFixture(
 	var poolID lcommon.PoolKeyHash
 	copy(poolID[:], poolHash)
 	for i := range uint64(10) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
+		require.NoError(t, fxMintBlock(t, db,
 			context.Background(),
 			poolID, i+1, 140+i, nil,
 		))
@@ -581,7 +565,6 @@ func TestAsyncPrecomputeReconstructsPrunedInputsInWritePhase(t *testing.T) {
 	t.Parallel()
 
 	fixture := seedRetentionReconstructionFixture(t)
-	meta := fixture.db.Metadata()
 	err := fixture.ls.precomputeStakeRewardsAfterEpochTransition(
 		event.EpochTransitionEvent{
 			PreviousEpoch: retentionPerformanceEpoch,
@@ -591,12 +574,12 @@ func TestAsyncPrecomputeReconstructsPrunedInputsInWritePhase(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	rebuilt, err := meta.GetRewardStakeInputs(
+	rebuilt, err := seedDB(t, fixture.db).GetRewardStakeInputs(
 		retentionRewardSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, rebuilt, len(fixture.capturedStakeInputs))
-	poolOutputs, err := meta.GetRewardPoolOutputs(
+	poolOutputs, err := seedDB(t, fixture.db).GetRewardPoolOutputs(
 		retentionRewardSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
@@ -609,10 +592,9 @@ func TestRewardPrecomputeCalculationCarriesReconstructedInputsWithoutWriting(
 	t.Parallel()
 
 	fixture := seedRetentionReconstructionFixture(t)
-	meta := fixture.db.Metadata()
 	readTxn := fixture.db.Transaction(context.Background(), false)
 	require.NoError(t, readTxn.Do(func(txn *database.Txn) error {
-		app, ok, err := fixture.ls.precomputeStakeRewardsCalculate(
+		app, ok, err := fixture.ls.engine().PrecomputeStakeRewardsCalculate(
 			txn,
 			retentionNewEpoch,
 			200,
@@ -623,19 +605,19 @@ func TestRewardPrecomputeCalculationCarriesReconstructedInputsWithoutWriting(
 		require.NotNil(t, app)
 		require.Len(
 			t,
-			app.reconstructedStakeInputs,
+			app.ReconstructedStakeInputs,
 			len(fixture.capturedStakeInputs),
 		)
-		persisted, err := meta.GetRewardStakeInputs(
+		persisted, err := fixture.ls.ledgerDB().GetRewardStakeInputs(
 			retentionRewardSnapshotEpoch,
-			txn.Metadata(),
+			txn,
 		)
 		require.NoError(t, err)
 		require.Empty(t, persisted)
 		return nil
 	}))
 
-	persisted, err := meta.GetRewardStakeInputs(
+	persisted, err := seedDB(t, fixture.db).GetRewardStakeInputs(
 		retentionRewardSnapshotEpoch,
 		nil,
 	)
@@ -711,7 +693,7 @@ func TestReconstructedRewardStakeTieBreaksAreDeterministic(t *testing.T) {
 			pools = append(pools, &pool)
 		}
 
-		got := ls.reconcileRebuiltRewardStakeInputs(
+		got := ls.engine().ReconcileRebuiltRewardStakeInputs(
 			rows,
 			pools,
 			retentionRewardSnapshotEpoch,
@@ -764,11 +746,10 @@ func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
 	fixture := seedRetentionReconstructionFixture(t)
 	ls := fixture.ls
 	db := fixture.db
-	meta := db.Metadata()
 	ownerKey := fixture.ownerKey
 	delegatorKey := fixture.delegatorKey
 
-	beforeOwner, err := db.GetAccountByCredential(
+	beforeOwner, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		ownerKey,
@@ -776,7 +757,7 @@ func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	beforeDelegator, err := db.GetAccountByCredential(
+	beforeDelegator, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0, delegatorKey, false, nil,
 	)
@@ -784,7 +765,7 @@ func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(),
+		return ls.engine().ApplyStakeRewards(context.Background(),
 			txn, retentionNewEpoch, retentionBoundarySlot,
 			false,
 		)
@@ -792,7 +773,7 @@ func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
 		"reconstruct and apply, not skip")
 	settleRewardCredits(t, ls)
 
-	afterOwner, err := db.GetAccountByCredential(
+	afterOwner, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		ownerKey,
@@ -800,12 +781,12 @@ func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	afterDelegator, err := db.GetAccountByCredential(
+	afterDelegator, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0, delegatorKey, false, nil,
 	)
 	require.NoError(t, err)
-	poolOutputs, err := meta.GetRewardPoolOutputs(
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(
 		retentionRewardSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
@@ -838,7 +819,7 @@ func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
 	// re-population, asserted below, is what proves the reconstruction
 	// considered the delegator rather than dropping it.
 
-	rebuiltStakeInputs, err := meta.GetRewardStakeInputs(
+	rebuiltStakeInputs, err := seedDB(t, db).GetRewardStakeInputs(
 		retentionRewardSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
@@ -853,7 +834,6 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -882,7 +862,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			0,
 			1,
 			nil,
@@ -897,7 +877,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			100,
 			performanceEpoch,
 			nil,
@@ -912,7 +892,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			200,
 			potsEpoch,
 			nil,
@@ -926,7 +906,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 		),
 	)
 	for i := range uint64(10) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
+		require.NoError(t, fxMintBlock(t, db,
 			context.Background(),
 			poolID,
 			i+1,
@@ -934,19 +914,19 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 			nil,
 		))
 	}
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor,
 		100,
 		performanceEpoch,
 		eras.ShelleyEraDesc.Id,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -956,7 +936,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 		BoundarySlot:     100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      rewardSnapshotEpoch,
 			PoolKeyHash:                poolKey,
@@ -972,7 +952,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 			BoundarySlot:               100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -998,7 +978,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	pool := models.Pool{PoolKeyHash: poolKey}
 	require.NoError(
 		t,
-		db.ImportPool(
+		fxImportPool(t, db,
 			context.Background(),
 			nil,
 			&pool,
@@ -1011,7 +991,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: rewardAccount,
 			Pool:       poolKey,
 			Active:     true,
@@ -1019,7 +999,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: member,
 			Pool:       poolKey,
 			Active:     true,
@@ -1046,11 +1026,11 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	rewardOwner, err := db.GetAccountByCredential(
+	rewardOwner, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		rewardAccount,
@@ -1061,7 +1041,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.NotNil(t, rewardOwner)
 	require.Equal(t, uint64(46_283), uint64(rewardOwner.Reward))
 
-	rewardMember, err := db.GetAccountByCredential(
+	rewardMember, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		member,
@@ -1072,7 +1052,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.NotNil(t, rewardMember)
 	require.Equal(t, uint64(37_049), uint64(rewardMember.Reward))
 
-	liveInputs, err := meta.GetLiveStakeInputsForPools(
+	liveInputs, err := seedDB(t, db).GetLiveStakeInputsForPools(
 		[][]byte{poolKey},
 		0, // gate off
 		nil,
@@ -1086,43 +1066,42 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.Equal(t, uint64(46_283), liveStakeByKey[string(rewardAccount)])
 	require.Equal(t, uint64(37_049), liveStakeByKey[string(member)])
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, uint64(99_916_668), uint64(state.Reserves))
 	require.Equal(t, uint64(0), uint64(state.Treasury))
 
-	pots, err := meta.GetRewardAdaPots(potsEpoch, nil)
+	pots, err := seedDB(t, db).GetRewardAdaPots(potsEpoch, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots)
 	require.Equal(t, uint64(1_000_000), uint64(pots.Rewards))
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolOutputs, 1)
 	require.Equal(t, uint64(83_333), uint64(poolOutputs[0].TotalReward))
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, accountOutputs, 2)
+	applied, err := seedDB(t, db).HasAppliedRewardCreditRound(
+		rewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, applied, "the round must be recorded as applied")
 
-	var deltas int64
-	require.NoError(t, rewardCalcSQLDB(t, db).QueryRow(
-		"SELECT COUNT(*) FROM account_reward_delta WHERE added_slot = ?",
-		boundarySlot,
-	).Scan(&deltas))
-	require.Equal(t, int64(2), deltas)
-
+	// Applying the same round again credits nothing more.
 	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	rewardOwner, err = db.GetAccountByCredential(
+	rewardOwner, err = seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		rewardAccount,
@@ -1131,7 +1110,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(46_283), uint64(rewardOwner.Reward))
-	rewardMember, err = db.GetAccountByCredential(
+	rewardMember, err = seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		member,
@@ -1140,7 +1119,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(37_049), uint64(rewardMember.Reward))
-	liveInputs, err = meta.GetLiveStakeInputsForPools(
+	liveInputs, err = seedDB(t, db).GetLiveStakeInputsForPools(
 		[][]byte{poolKey},
 		0, // gate off
 		nil,
@@ -1153,11 +1132,6 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	}
 	require.Equal(t, uint64(46_283), liveStakeByKey[string(rewardAccount)])
 	require.Equal(t, uint64(37_049), liveStakeByKey[string(member)])
-	require.NoError(t, rewardCalcSQLDB(t, db).QueryRow(
-		"SELECT COUNT(*) FROM account_reward_delta WHERE added_slot = ?",
-		boundarySlot,
-	).Scan(&deltas))
-	require.Equal(t, int64(2), deltas)
 }
 
 // guardExpiredLeaderResult captures the post-application state a Task 10
@@ -1177,7 +1151,7 @@ type guardExpiredLeaderResult struct {
 // to gateEnabled, and returns the resulting network state and reward balances.
 //
 // It is the shared harness for the Task 10 reward-crediting guard. newEpoch is
-// 5, so stakeRewardEpochsForApplication maps it to snapshot epoch 2: an
+// 5, so epochengine.StakeRewardEpochsForApplication maps it to snapshot epoch 2: an
 // ExpirationEpoch of 1 is nonzero and strictly before 2 (expired), while an
 // unset (0) expiration is active. This is the same snapshot epoch Task 8 uses
 // to build the reward basis, so the guard and the basis agree on which snapshot
@@ -1189,7 +1163,6 @@ func applyGuardExpiredLeaderScenario(
 	t.Helper()
 	ls, db := newRewardCalculationTestLedger(t)
 	ls.config.DelegatorInactivityEnabled = gateEnabled
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(5)
@@ -1218,7 +1191,7 @@ func applyGuardExpiredLeaderScenario(
 
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			100,
 			performanceEpoch,
 			nil,
@@ -1233,7 +1206,7 @@ func applyGuardExpiredLeaderScenario(
 	)
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			200,
 			potsEpoch,
 			nil,
@@ -1247,7 +1220,7 @@ func applyGuardExpiredLeaderScenario(
 		),
 	)
 	for i := range uint64(10) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
+		require.NoError(t, fxMintBlock(t, db,
 			context.Background(),
 			poolID,
 			i+1,
@@ -1255,19 +1228,19 @@ func applyGuardExpiredLeaderScenario(
 			nil,
 		))
 	}
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor,
 		100,
 		performanceEpoch,
 		eras.ShelleyEraDesc.Id,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -1277,7 +1250,7 @@ func applyGuardExpiredLeaderScenario(
 		BoundarySlot:     100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      rewardSnapshotEpoch,
 			PoolKeyHash:                poolKey,
@@ -1293,7 +1266,7 @@ func applyGuardExpiredLeaderScenario(
 			BoundarySlot:               100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -1319,7 +1292,7 @@ func applyGuardExpiredLeaderScenario(
 	pool := models.Pool{PoolKeyHash: poolKey}
 	require.NoError(
 		t,
-		db.ImportPool(
+		fxImportPool(t, db,
 			context.Background(),
 			nil,
 			&pool,
@@ -1334,7 +1307,7 @@ func applyGuardExpiredLeaderScenario(
 	// ExpirationEpoch 1 is nonzero and strictly before 2.
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:      rewardAccount,
 			Pool:            poolKey,
 			Active:          true,
@@ -1344,7 +1317,7 @@ func applyGuardExpiredLeaderScenario(
 	// The member delegator is active (unset expiration).
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:      member,
 			Pool:            poolKey,
 			Active:          true,
@@ -1372,11 +1345,11 @@ func applyGuardExpiredLeaderScenario(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	rewardOwner, err := db.GetAccountByCredential(
+	rewardOwner, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		rewardAccount,
@@ -1385,7 +1358,7 @@ func applyGuardExpiredLeaderScenario(
 	)
 	require.NoError(t, err)
 	require.NotNil(t, rewardOwner)
-	rewardMember, err := db.GetAccountByCredential(
+	rewardMember, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		member,
@@ -1395,11 +1368,11 @@ func applyGuardExpiredLeaderScenario(
 	require.NoError(t, err)
 	require.NotNil(t, rewardMember)
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -1433,12 +1406,12 @@ func applyGuardExpiredLeaderScenario(
 }
 
 // TestStakeRewardEpochHelpersDivergeAtBootstrapRound pins the divergence that
-// let the Byron guard in applyStakeRewards miss the round it exists to catch.
+// let the Byron guard in ApplyStakeRewards miss the round it exists to catch.
 //
 // The guard must resolve its epochs through the same helper as the path it
-// guards (calculateStakeRewardApplication at :190,
-// precomputedStakeRewardApplication at :670). Resolved through
-// stakeRewardEpochsForNewEpoch instead, the guard reports nothing to guard at
+// guards (CalculateStakeRewardApplication at :190,
+// PrecomputedStakeRewardApplication at :670). Resolved through
+// epochengine.StakeRewardEpochsForNewEpoch instead, the guard reports nothing to guard at
 // newEpoch == 2 while the application path resolves the bootstrap round
 // against performance epoch 0 -- which is Byron on every network the Byron
 // prefix affects, and therefore has no persisted pparams.
@@ -1449,17 +1422,17 @@ func TestStakeRewardEpochHelpersDivergeAtBootstrapRound(t *testing.T) {
 	t.Parallel()
 
 	for _, newEpoch := range []uint64{1, 2} {
-		_, ok := stakeRewardEpochsForNewEpoch(newEpoch)
+		_, ok := epochengine.StakeRewardEpochsForNewEpoch(newEpoch)
 		require.False(
 			t,
 			ok,
-			"stakeRewardEpochsForNewEpoch must still report no round at "+
+			"epochengine.StakeRewardEpochsForNewEpoch must still report no round at "+
 				"bootstrap epoch %d; the guard compensates by using the "+
 				"application helper instead",
 			newEpoch,
 		)
 
-		app, ok := stakeRewardEpochsForApplication(newEpoch)
+		app, ok := epochengine.StakeRewardEpochsForApplication(newEpoch)
 		require.True(
 			t,
 			ok,
@@ -1469,14 +1442,14 @@ func TestStakeRewardEpochHelpersDivergeAtBootstrapRound(t *testing.T) {
 		require.Equal(
 			t,
 			uint64(0),
-			app.performance,
+			app.Performance,
 			"bootstrap round %d resolves against the performance epoch "+
 				"with no pparams",
 			newEpoch,
 		)
 		require.True(
 			t,
-			app.bootstrap,
+			app.Bootstrap,
 			"newEpoch %d is a bootstrap round",
 			newEpoch,
 		)
@@ -1485,17 +1458,17 @@ func TestStakeRewardEpochHelpersDivergeAtBootstrapRound(t *testing.T) {
 	// From epoch 3 up the two helpers agree, which is what made guarding on
 	// either of them look equivalent.
 	for newEpoch := uint64(3); newEpoch < 8; newEpoch++ {
-		narrow, narrowOK := stakeRewardEpochsForNewEpoch(newEpoch)
-		wide, wideOK := stakeRewardEpochsForApplication(newEpoch)
+		narrow, narrowOK := epochengine.StakeRewardEpochsForNewEpoch(newEpoch)
+		wide, wideOK := epochengine.StakeRewardEpochsForApplication(newEpoch)
 		require.Equal(t, narrowOK, wideOK, "newEpoch %d", newEpoch)
 		require.Equal(t, narrow, wide, "newEpoch %d", newEpoch)
 	}
 }
 
 // TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch drives the
-// production guard at the one epoch where stakeRewardEpochsForApplication and
-// stakeRewardEpochsForNewEpoch differ. Without the application helper in the
-// guard, the bootstrap round reaches rewardParameters and fails because Byron
+// production guard at the one epoch where epochengine.StakeRewardEpochsForApplication and
+// epochengine.StakeRewardEpochsForNewEpoch differ. Without the application helper in the
+// guard, the bootstrap round reaches RewardParameters and fails because Byron
 // legitimately has no persisted protocol parameters.
 func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 	t *testing.T,
@@ -1503,9 +1476,8 @@ func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0,
 		0,
 		nil,
@@ -1517,7 +1489,7 @@ func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 		21_600,
 		nil,
 	))
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		21_600,
 		1,
 		nil,
@@ -1529,12 +1501,12 @@ func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 		21_600,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        1,
 		Reserves:     100_000_000,
 		CapturedSlot: 21_600,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:        0,
 		SnapshotType: "mark",
 		CapturedSlot: 0,
@@ -1543,7 +1515,7 @@ func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 2, 43_200, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 2, 43_200, false)
 	}))
 	settleRewardCredits(t, ls)
 }
@@ -1559,9 +1531,8 @@ func TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch(
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0,
 		0,
 		nil,
@@ -1573,13 +1544,13 @@ func TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch(
 		21_600,
 		nil,
 	))
-	require.NoError(t, meta.SetNetworkState(0, 100_000_000, 0, nil))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 100_000_000, 0, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        0,
 		Reserves:     100_000_000,
 		CapturedSlot: 0,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:        0,
 		SnapshotType: "mark",
 		CapturedSlot: 0,
@@ -1588,11 +1559,11 @@ func TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 1, 21_600, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 1, 21_600, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, uint64(0), uint64(state.Treasury))
@@ -1670,7 +1641,7 @@ func TestGuardedExpiredRewardCredentialsUsesSnapshotWitnessHistory(
 	cred := renewTestCred(0x71)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: cred, Active: true, ExpirationEpoch: 2 + inactivity,
 		}),
 	)
@@ -1680,16 +1651,16 @@ func TestGuardedExpiredRewardCredentialsUsesSnapshotWitnessHistory(
 	seedRollbackCertificate(
 		t, db, 250, rollbackStakeRegistrationCertificate(cred),
 	)
-	app := &stakeRewardApplication{
-		epochs:               stakeRewardEpochs{snapshot: 92},
-		snapshotCapturedSlot: 199,
-		accountOutputs: []*models.RewardAccountOutput{{
+	app := &epochengine.StakeRewardApplication{
+		Epochs:               epochengine.StakeRewardEpochs{Snapshot: 92},
+		SnapshotCapturedSlot: 199,
+		AccountOutputs: []*models.RewardAccountOutput{{
 			StakingKey: cred, CredentialTag: 0,
 		}},
 	}
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		guarded, err := ls.guardedExpiredRewardCredentials(context.Background(), txn, app)
+		guarded, err := ls.engine().GuardedExpiredRewardCredentials(context.Background(), txn, app)
 		if err != nil {
 			return err
 		}
@@ -1706,7 +1677,6 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -1739,7 +1709,7 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			100,
 			performanceEpoch,
 			nil,
@@ -1754,7 +1724,7 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			200,
 			potsEpoch,
 			nil,
@@ -1770,7 +1740,7 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 	for i := range uint64(5) {
 		require.NoError(
 			t,
-			db.UpdatePoolOpCertSequence(
+			fxMintBlock(t, db,
 				context.Background(),
 				poolIDA,
 				i+1,
@@ -1780,7 +1750,7 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 		)
 		require.NoError(
 			t,
-			db.UpdatePoolOpCertSequence(
+			fxMintBlock(t, db,
 				context.Background(),
 				poolIDB,
 				i+1,
@@ -1789,19 +1759,19 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 			),
 		)
 	}
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor,
 		100,
 		performanceEpoch,
 		eras.ShelleyEraDesc.Id,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 2_000,
@@ -1811,7 +1781,7 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 		BoundarySlot:     100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      rewardSnapshotEpoch,
 			PoolKeyHash:                poolA,
@@ -1837,7 +1807,7 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 			BoundarySlot:               100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:        rewardSnapshotEpoch,
 			PoolKeyHash:  poolA,
@@ -1860,7 +1830,7 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 	for _, stakingKey := range [][]byte{sharedRewardAccount, memberA, memberB} {
 		require.NoError(
 			t,
-			db.CreateAccount(context.Background(), nil, &models.Account{
+			seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 				StakingKey: stakingKey,
 				Active:     true,
 			}),
@@ -1869,11 +1839,11 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -1891,7 +1861,7 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 	require.Equal(t, 2, sharedLeaderOutputs)
 	require.Greater(t, sharedLeaderTotal, uint64(0))
 
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		sharedRewardAccount,
@@ -1910,20 +1880,14 @@ func TestCalculateStakeRewardsRejectsPersistedStakeInputMismatch(t *testing.T) {
 	poolKey := rewardCalcHash(0x4a)
 	rewardAccount := rewardCalcHash(0x5a)
 
-	rows := rewardCalcExecRows(
-		t,
-		db,
-		`UPDATE reward_stake_input SET stake = '499'
-WHERE epoch = ? AND pool_key_hash = ? AND staking_key = ?`,
-		uint64(1),
-		poolKey,
-		rewardAccount,
+	fxEditRewardStakeInput(
+		t, db, 1, poolKey, rewardAccount,
+		func(in *models.RewardStakeInput) { in.Stake = 499 },
 	)
-	require.Equal(t, int64(1), rows)
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,
@@ -1945,19 +1909,14 @@ func TestCalculateStakeRewardsRejectsPersistedOwnerStakeInputMismatch(
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	poolKey := rewardCalcHash(0x4a)
 
-	rows := rewardCalcExecRows(
-		t,
-		db,
-		`UPDATE reward_pool_input SET owner_stake = '499'
-WHERE epoch = ? AND pool_key_hash = ?`,
-		uint64(1),
-		poolKey,
+	fxEditRewardPoolInput(
+		t, db, 1, poolKey,
+		func(in *models.RewardPoolInput) { in.OwnerStake = 499 },
 	)
-	require.Equal(t, int64(1), rows)
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,
@@ -1979,19 +1938,14 @@ func TestCalculateStakeRewardsRejectsPersistedDelegatorCountMismatch(
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	poolKey := rewardCalcHash(0x4a)
 
-	rows := rewardCalcExecRows(
-		t,
-		db,
-		`UPDATE reward_pool_input SET delegator_count = 1
-WHERE epoch = ? AND pool_key_hash = ?`,
-		uint64(1),
-		poolKey,
+	fxEditRewardPoolInput(
+		t, db, 1, poolKey,
+		func(in *models.RewardPoolInput) { in.DelegatorCount = 1 },
 	)
-	require.Equal(t, int64(1), rows)
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,
@@ -2010,19 +1964,14 @@ func TestCalculateStakeRewardsRejectsPersistedPoolCountMismatch(t *testing.T) {
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 
-	rows := rewardCalcExecRows(
-		t,
-		db,
-		`UPDATE reward_snapshot SET total_pool_count = 2
-WHERE epoch = ? AND snapshot_type = ?`,
-		uint64(1),
-		"mark",
+	fxEditRewardSnapshot(
+		t, db, 1,
+		func(snapshot *models.RewardSnapshot) { snapshot.TotalPoolCount = 2 },
 	)
-	require.Equal(t, int64(1), rows)
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,
@@ -2044,19 +1993,14 @@ func TestCalculateStakeRewardsRejectsPersistedPoolInputSnapshotSlotMismatch(
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	poolKey := rewardCalcHash(0x4a)
 
-	rows := rewardCalcExecRows(
-		t,
-		db,
-		`UPDATE reward_pool_input SET captured_slot = 99
-WHERE epoch = ? AND pool_key_hash = ?`,
-		uint64(1),
-		poolKey,
+	fxEditRewardPoolInput(
+		t, db, 1, poolKey,
+		func(in *models.RewardPoolInput) { in.CapturedSlot = 99 },
 	)
-	require.Equal(t, int64(1), rows)
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,
@@ -2079,20 +2023,14 @@ func TestCalculateStakeRewardsRejectsPersistedStakeInputSnapshotSlotMismatch(
 	poolKey := rewardCalcHash(0x4a)
 	member := rewardCalcHash(0x6a)
 
-	rows := rewardCalcExecRows(
-		t,
-		db,
-		`UPDATE reward_stake_input SET boundary_slot = 99
-WHERE epoch = ? AND pool_key_hash = ? AND staking_key = ?`,
-		uint64(1),
-		poolKey,
-		member,
+	fxEditRewardStakeInput(
+		t, db, 1, poolKey, member,
+		func(in *models.RewardStakeInput) { in.BoundarySlot = 99 },
 	)
-	require.Equal(t, int64(1), rows)
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,
@@ -2200,7 +2138,7 @@ func TestValidateRewardCalculatorInputsRejectsMalformedPoolInput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			poolInput := validPoolInput()
 			tc.mutate(poolInput)
-			err := validateRewardCalculatorInputs(
+			err := epochengine.ValidateRewardCalculatorInputs(
 				snapshot,
 				[]*models.RewardPoolInput{poolInput},
 				stakeInputs,
@@ -2219,18 +2157,21 @@ func TestCalculateStakeRewardsRejectsUnknownPersistedStakeInputPool(
 	unknownPool := rewardCalcHash(0x7a)
 	stakingKey := rewardCalcHash(0x8a)
 
-	rewardCalcExecRows(t, db, `
-INSERT INTO reward_stake_input (
-    epoch, pool_key_hash, credential_tag, staking_key, stake, owner,
-    registered, captured_slot, boundary_slot
-) VALUES (1, ?, 0, ?, '1', FALSE, TRUE, 100, 100)`,
-		unknownPool,
-		stakingKey,
-	)
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs(
+		[]*models.RewardStakeInput{{
+			Epoch:        1,
+			PoolKeyHash:  unknownPool,
+			StakingKey:   stakingKey,
+			Stake:        1,
+			Registered:   true,
+			CapturedSlot: 100,
+			BoundarySlot: 100,
+		}}, nil,
+	))
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,
@@ -2248,7 +2189,6 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -2278,7 +2218,7 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			100,
 			performanceEpoch,
 			nil,
@@ -2293,7 +2233,7 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			200,
 			potsEpoch,
 			nil,
@@ -2307,7 +2247,7 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 		),
 	)
 	for i := range uint64(10) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
+		require.NoError(t, fxMintBlock(t, db,
 			context.Background(),
 			poolID,
 			i+1,
@@ -2315,19 +2255,19 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 			nil,
 		))
 	}
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor,
 		100,
 		performanceEpoch,
 		eras.ShelleyEraDesc.Id,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		CapturedSlot: precomputeSlot,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -2337,7 +2277,7 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 		BoundarySlot:     100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      rewardSnapshotEpoch,
 			PoolKeyHash:                poolKey,
@@ -2353,7 +2293,7 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 			BoundarySlot:               100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -2378,14 +2318,14 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 	}, nil))
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: rewardAccount,
 			Active:     true,
 		}),
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: member,
 			Active:     true,
 		}),
@@ -2411,7 +2351,7 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.precomputeStakeRewards(
+		return ls.precomputeStakeRewardsForTest(
 			txn,
 			newEpoch,
 			precomputeSlot,
@@ -2419,13 +2359,13 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 		)
 	}))
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolOutputs, 1)
 	require.Equal(t, precomputeSlot, poolOutputs[0].CapturedSlot)
 	require.Equal(t, boundarySlot, poolOutputs[0].BoundarySlot)
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -2436,7 +2376,7 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 		require.Equal(t, boundarySlot, output.BoundarySlot)
 	}
 
-	rewardOwner, err := db.GetAccountByCredential(
+	rewardOwner, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		rewardAccount,
@@ -2449,11 +2389,11 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 
 	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	rewardOwner, err = db.GetAccountByCredential(
+	rewardOwner, err = seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		rewardAccount,
@@ -2464,7 +2404,7 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 	require.NotNil(t, rewardOwner)
 	require.Equal(t, uint64(46_283), uint64(rewardOwner.Reward))
 
-	rewardMember, err := db.GetAccountByCredential(
+	rewardMember, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		member,
@@ -2482,7 +2422,6 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -2509,7 +2448,7 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			100,
 			performanceEpoch,
 			nil,
@@ -2524,7 +2463,7 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 	)
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			200,
 			potsEpoch,
 			nil,
@@ -2544,7 +2483,7 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 	for i := range uint64(10) {
 		require.NoError(
 			t,
-			db.UpdatePoolOpCertSequence(
+			fxMintBlock(t, db,
 				context.Background(),
 				poolID,
 				i+1,
@@ -2553,20 +2492,20 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 			),
 		)
 	}
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor,
 		100,
 		performanceEpoch,
 		eras.ShelleyEraDesc.Id,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      1_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -2576,7 +2515,7 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 		BoundarySlot:     100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      rewardSnapshotEpoch,
 			PoolKeyHash:                poolKey,
@@ -2592,7 +2531,7 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 			BoundarySlot:               100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -2615,7 +2554,7 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 			BoundarySlot:  100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 		{
 			Epoch:             rewardSnapshotEpoch,
 			PoolKeyHash:       poolKey,
@@ -2631,7 +2570,7 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 	}, nil))
 	require.NoError(
 		t,
-		meta.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+		seedDB(t, db).SaveRewardAccountOutputs([]*models.RewardAccountOutput{
 			{
 				Epoch:         rewardSnapshotEpoch,
 				CredentialTag: 0,
@@ -2658,14 +2597,14 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: rewardAccount,
 			Active:     true,
 		}),
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: member,
 			Active:     true,
 		}),
@@ -2674,11 +2613,11 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	rewardOwner, err := db.GetAccountByCredential(
+	rewardOwner, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		rewardAccount,
@@ -2689,7 +2628,7 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 	require.NotNil(t, rewardOwner)
 	require.Equal(t, uint64(46_283), uint64(rewardOwner.Reward))
 
-	rewardMember, err := db.GetAccountByCredential(
+	rewardMember, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		member,
@@ -2700,18 +2639,18 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 	require.NotNil(t, rewardMember)
 	require.Equal(t, uint64(0), uint64(rewardMember.Reward))
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, uint64(99_916_668), uint64(state.Reserves))
 	require.Equal(t, uint64(37_049), uint64(state.Treasury))
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolOutputs, 1)
 	require.Equal(t, uint64(37_049), uint64(poolOutputs[0].Unspendable))
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -2728,7 +2667,6 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -2756,7 +2694,7 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			100,
 			performanceEpoch,
 			nil,
@@ -2771,7 +2709,7 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			200,
 			potsEpoch,
 			nil,
@@ -2785,7 +2723,7 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 		),
 	)
 	for i := range uint64(10) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
+		require.NoError(t, fxMintBlock(t, db,
 			context.Background(),
 			poolID,
 			i+1,
@@ -2793,19 +2731,19 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 			nil,
 		))
 	}
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor,
 		100,
 		performanceEpoch,
 		eras.ShelleyEraDesc.Id,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 500,
@@ -2815,7 +2753,7 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 		BoundarySlot:     100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      rewardSnapshotEpoch,
 			PoolKeyHash:                poolKey,
@@ -2831,7 +2769,7 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 			BoundarySlot:               100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -2846,7 +2784,7 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 	}, nil))
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    sharedStakeHash,
 			CredentialTag: 0,
 			Reward:        7,
@@ -2855,7 +2793,7 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    sharedStakeHash,
 			CredentialTag: 1,
 			Active:        true,
@@ -2865,11 +2803,11 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	keyAccount, err := db.GetAccountByCredential(
+	keyAccount, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		sharedStakeHash,
@@ -2880,7 +2818,7 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 	require.NotNil(t, keyAccount)
 	require.Equal(t, uint64(7), uint64(keyAccount.Reward))
 
-	scriptAccount, err := db.GetAccountByCredential(
+	scriptAccount, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		1,
 		sharedStakeHash,
@@ -2892,7 +2830,7 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 	require.False(t, scriptAccount.Active)
 	require.Equal(t, uint64(0), uint64(scriptAccount.Reward))
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -2903,12 +2841,12 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 	require.False(t, accountOutputs[0].Spendable)
 	require.Greater(t, uint64(accountOutputs[0].Amount), uint64(0))
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolOutputs, 1)
 	require.Equal(t, accountOutputs[0].Amount, poolOutputs[0].Unspendable)
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, accountOutputs[0].Amount, state.Treasury)
@@ -2920,7 +2858,6 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(
 	t.Parallel()
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -2930,7 +2867,7 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(
 	)
 	poolKey := rewardCalcHash(0x4a)
 	sharedStakeHash := rewardCalcHash(0x77)
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      1_000_000,
@@ -2938,7 +2875,7 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(
 	}, nil))
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    sharedStakeHash,
 			CredentialTag: 0,
 			Reward:        7,
@@ -2947,7 +2884,7 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    sharedStakeHash,
 			CredentialTag: 1,
 			Active:        true,
@@ -2962,27 +2899,17 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(
 	// holding the entire 1000 delegated stake, MemberReward = TotalReward = 6666.
 	// The account is inactive, so that reward is unspendable and flows to the
 	// treasury without merging into the shared credential's active tag-0 account.
-	rewardCalcExecRows(
-		t,
-		db,
-		"DELETE FROM reward_stake_input WHERE epoch = ? AND pool_key_hash = ?",
-		rewardSnapshotEpoch,
-		poolKey,
+	require.NoError(t, seedDB(t, db).DeleteRewardInputsForEpoch(
+		rewardSnapshotEpoch, nil,
+	))
+	fxEditRewardSnapshot(
+		t, db, rewardSnapshotEpoch,
+		func(snapshot *models.RewardSnapshot) {
+			snapshot.TotalActiveStake = 1_000
+			snapshot.TotalDelegators = 1
+		},
 	)
-	rewardCalcExecRows(
-		t,
-		db,
-		"DELETE FROM reward_pool_input WHERE epoch = ? AND pool_key_hash = ?",
-		rewardSnapshotEpoch,
-		poolKey,
-	)
-	rewardCalcExecRows(t, db, `
-UPDATE reward_snapshot
-SET total_active_stake = '1000', total_delegators = 1
-WHERE epoch = ? AND snapshot_type = 'mark'`,
-		rewardSnapshotEpoch,
-	)
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      rewardSnapshotEpoch,
 			PoolKeyHash:                poolKey,
@@ -2997,7 +2924,7 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 			BoundarySlot:               100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -3009,7 +2936,7 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 			BoundarySlot:  100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 		{
 			Epoch:             rewardSnapshotEpoch,
 			PoolKeyHash:       poolKey,
@@ -3023,7 +2950,7 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 	}, nil))
 	require.NoError(
 		t,
-		meta.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+		seedDB(t, db).SaveRewardAccountOutputs([]*models.RewardAccountOutput{
 			{
 				Epoch:         rewardSnapshotEpoch,
 				CredentialTag: 1,
@@ -3040,11 +2967,11 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	keyAccount, err := db.GetAccountByCredential(
+	keyAccount, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		sharedStakeHash,
@@ -3055,7 +2982,7 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 	require.NotNil(t, keyAccount)
 	require.Equal(t, uint64(7), uint64(keyAccount.Reward))
 
-	scriptAccount, err := db.GetAccountByCredential(
+	scriptAccount, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		1,
 		sharedStakeHash,
@@ -3067,7 +2994,7 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 	require.False(t, scriptAccount.Active)
 	require.Equal(t, uint64(0), uint64(scriptAccount.Reward))
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -3077,12 +3004,12 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 	require.Equal(t, sharedStakeHash, accountOutputs[0].StakingKey)
 	require.False(t, accountOutputs[0].Spendable)
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolOutputs, 1)
 	require.Equal(t, uint64(6666), uint64(poolOutputs[0].Unspendable))
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, uint64(6666), uint64(state.Treasury))
@@ -3092,7 +3019,6 @@ func TestPrecomputedStakeRewardsRequireCompletePoolOutputs(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -3101,13 +3027,13 @@ func TestPrecomputedStakeRewardsRequireCompletePoolOutputs(t *testing.T) {
 		boundarySlot        = uint64(400)
 	)
 
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      1_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -3120,7 +3046,7 @@ func TestPrecomputedStakeRewardsRequireCompletePoolOutputs(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(
+	app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 		context.Background(),
 		txn,
 		newEpoch,
@@ -3135,7 +3061,6 @@ func TestPrecomputedStakeRewardsRejectOutputsWithoutStakeInputs(t *testing.T) {
 	t.Parallel()
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -3145,13 +3070,13 @@ func TestPrecomputedStakeRewardsRejectOutputsWithoutStakeInputs(t *testing.T) {
 	)
 	poolKey := rewardCalcHash(0x4a)
 
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      1_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -3162,16 +3087,23 @@ func TestPrecomputedStakeRewardsRejectOutputsWithoutStakeInputs(t *testing.T) {
 			BoundarySlot:  boundarySlot,
 		},
 	}, nil))
-	rewardCalcExecRows(
-		t,
-		db,
-		"DELETE FROM reward_stake_input WHERE epoch = ?",
-		rewardSnapshotEpoch,
+	poolInputs, err := seedDB(t, db).GetRewardPoolInputs(
+		rewardSnapshotEpoch, nil,
 	)
+	require.NoError(t, err)
+	require.NoError(t, seedDB(t, db).DeleteRewardInputsForEpoch(
+		rewardSnapshotEpoch, nil,
+	))
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs(poolInputs, nil))
+	stakeInputs, err := seedDB(t, db).GetRewardStakeInputs(
+		rewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, stakeInputs)
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(
+	app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 		context.Background(),
 		txn,
 		newEpoch,
@@ -3186,7 +3118,6 @@ func TestPrecomputedStakeRewardsRejectOutputsWithoutPoolInputs(t *testing.T) {
 	t.Parallel()
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -3196,13 +3127,13 @@ func TestPrecomputedStakeRewardsRejectOutputsWithoutPoolInputs(t *testing.T) {
 	)
 	poolKey := rewardCalcHash(0x4a)
 
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      1_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -3212,16 +3143,23 @@ func TestPrecomputedStakeRewardsRejectOutputsWithoutPoolInputs(t *testing.T) {
 			BoundarySlot:  boundarySlot,
 		},
 	}, nil))
-	rewardCalcExecRows(
-		t,
-		db,
-		"DELETE FROM reward_pool_input WHERE epoch = ?",
-		rewardSnapshotEpoch,
+	stakeInputs, err := seedDB(t, db).GetRewardStakeInputs(
+		rewardSnapshotEpoch, nil,
 	)
+	require.NoError(t, err)
+	require.NoError(t, seedDB(t, db).DeleteRewardInputsForEpoch(
+		rewardSnapshotEpoch, nil,
+	))
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs(stakeInputs, nil))
+	poolInputs, err := seedDB(t, db).GetRewardPoolInputs(
+		rewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, poolInputs)
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(
+	app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 		context.Background(),
 		txn,
 		newEpoch,
@@ -3236,7 +3174,6 @@ func TestPrecomputedStakeRewardsRejectExtraPoolOutputs(t *testing.T) {
 	t.Parallel()
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -3247,13 +3184,13 @@ func TestPrecomputedStakeRewardsRejectExtraPoolOutputs(t *testing.T) {
 	poolKey := rewardCalcHash(0x4a)
 	stalePoolKey := rewardCalcHash(0x4b)
 
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      1_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -3274,7 +3211,7 @@ func TestPrecomputedStakeRewardsRejectExtraPoolOutputs(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(
+	app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 		context.Background(),
 		txn,
 		newEpoch,
@@ -3291,7 +3228,6 @@ func TestPrecomputedStakeRewardsRejectPoolOutputOutsideSnapshotInputs(
 	t.Parallel()
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -3301,13 +3237,13 @@ func TestPrecomputedStakeRewardsRejectPoolOutputOutsideSnapshotInputs(
 	)
 	stalePoolKey := rewardCalcHash(0x4b)
 
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      1_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   stalePoolKey,
@@ -3320,7 +3256,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputOutsideSnapshotInputs(
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(
+	app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 		context.Background(),
 		txn,
 		newEpoch,
@@ -3337,7 +3273,6 @@ func TestPrecomputedStakeRewardsRejectPoolOutputOwnerStakeMismatch(
 	t.Parallel()
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -3347,13 +3282,13 @@ func TestPrecomputedStakeRewardsRejectPoolOutputOwnerStakeMismatch(
 	)
 	poolKey := rewardCalcHash(0x4a)
 
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      1_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -3367,7 +3302,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputOwnerStakeMismatch(
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(
+	app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 		context.Background(),
 		txn,
 		newEpoch,
@@ -3382,7 +3317,6 @@ func TestPrecomputedStakeRewardsRequireCompleteAccountOutputs(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -3392,13 +3326,13 @@ func TestPrecomputedStakeRewardsRequireCompleteAccountOutputs(t *testing.T) {
 	)
 	poolKey := rewardCalcHash(0x18)
 
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      1_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -3408,7 +3342,7 @@ func TestPrecomputedStakeRewardsRequireCompleteAccountOutputs(t *testing.T) {
 		BoundarySlot:     100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -3421,7 +3355,7 @@ func TestPrecomputedStakeRewardsRequireCompleteAccountOutputs(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(
+	app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 		context.Background(),
 		txn,
 		newEpoch,
@@ -3483,11 +3417,10 @@ func TestPrecomputedStakeRewardsRejectOutputsOutsideApplicationBoundary(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ls, db := seedRewardPrecomputeTimingState(t, 7)
-			meta := db.Metadata()
 			poolKey := rewardCalcHash(0x4a)
 			member := rewardCalcHash(0x6a)
 
-			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+			require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 				Epoch:        potsEpoch,
 				Reserves:     100_000_000,
 				Rewards:      1_000,
@@ -3495,7 +3428,7 @@ func TestPrecomputedStakeRewardsRejectOutputsOutsideApplicationBoundary(
 			}, nil))
 			require.NoError(
 				t,
-				meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+				seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 					{
 						Epoch:             rewardSnapshotEpoch,
 						PoolKeyHash:       poolKey,
@@ -3509,7 +3442,7 @@ func TestPrecomputedStakeRewardsRejectOutputsOutsideApplicationBoundary(
 			)
 			require.NoError(
 				t,
-				meta.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+				seedDB(t, db).SaveRewardAccountOutputs([]*models.RewardAccountOutput{
 					{
 						Epoch:         rewardSnapshotEpoch,
 						CredentialTag: 0,
@@ -3526,7 +3459,7 @@ func TestPrecomputedStakeRewardsRejectOutputsOutsideApplicationBoundary(
 
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
-			app, ok, err := ls.precomputedStakeRewardApplication(
+			app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 				context.Background(),
 				txn,
 				newEpoch,
@@ -3547,7 +3480,7 @@ func TestPrecomputedRewardOutputsRequirePerPoolAccountTotals(t *testing.T) {
 	accountA := rewardCalcHash(0x1b)
 	accountB := rewardCalcHash(0x1c)
 
-	ok, err := precomputedRewardOutputsComplete(
+	ok, err := epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash:       poolA,
@@ -3574,7 +3507,7 @@ func TestPrecomputedRewardOutputsRequirePerPoolAccountTotals(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	ok, err = precomputedRewardOutputsComplete(
+	ok, err = epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash:   poolA,
@@ -3601,7 +3534,7 @@ func TestPrecomputedRewardOutputsRequirePerPoolAccountTotals(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	ok, err = precomputedRewardOutputsComplete(
+	ok, err = epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash:       poolA,
@@ -3617,7 +3550,7 @@ func TestPrecomputedRewardOutputsRequirePerPoolAccountTotals(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	ok, err = precomputedRewardOutputsComplete(
+	ok, err = epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash:       poolA,
@@ -3658,7 +3591,7 @@ func TestPrecomputedRewardOutputsRequirePoolBreakdownTotals(t *testing.T) {
 	leaderA := rewardCalcHash(0x1b)
 	memberA := rewardCalcHash(0x1c)
 
-	ok, err := precomputedRewardOutputsComplete(
+	ok, err := epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash:       poolA,
@@ -3687,7 +3620,7 @@ func TestPrecomputedRewardOutputsRequirePoolBreakdownTotals(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	ok, err = precomputedRewardOutputsComplete(
+	ok, err = epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash:       poolA,
@@ -3703,7 +3636,7 @@ func TestPrecomputedRewardOutputsRequirePoolBreakdownTotals(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	ok, err = precomputedRewardOutputsComplete(
+	ok, err = epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash:       poolA,
@@ -3739,7 +3672,7 @@ func TestPrecomputedRewardOutputsRejectMalformedRows(t *testing.T) {
 	poolA := rewardCalcHash(0x19)
 	accountA := rewardCalcHash(0x1b)
 
-	ok, err := precomputedRewardOutputsComplete(
+	ok, err := epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash: poolA[:27],
@@ -3759,7 +3692,7 @@ func TestPrecomputedRewardOutputsRejectMalformedRows(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	ok, err = precomputedRewardOutputsComplete(
+	ok, err = epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash: poolA,
@@ -3779,7 +3712,7 @@ func TestPrecomputedRewardOutputsRejectMalformedRows(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	ok, err = precomputedRewardOutputsComplete(
+	ok, err = epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash: poolA,
@@ -3799,7 +3732,7 @@ func TestPrecomputedRewardOutputsRejectMalformedRows(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	ok, err = precomputedRewardOutputsComplete(
+	ok, err = epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash:   poolA,
@@ -3829,7 +3762,7 @@ func TestPrecomputedRewardOutputsRejectDuplicateAccountIdentities(
 	poolA := rewardCalcHash(0x19)
 	accountA := rewardCalcHash(0x1b)
 
-	ok, err := precomputedRewardOutputsComplete(
+	ok, err := epochengine.PrecomputedRewardOutputsComplete(
 		[]*models.RewardPoolOutput{
 			{
 				PoolKeyHash: poolA,
@@ -3875,7 +3808,7 @@ func TestPrecomputedRewardAccountOutputsMatchPoolInputs(t *testing.T) {
 	// With no stake inputs there is nothing to prove pool membership, so a
 	// member reward output cannot be validated and the precomputed outputs are
 	// rejected (the leader output alone would match).
-	require.False(t, precomputedRewardAccountOutputsMatchInputs(
+	require.False(t, epochengine.PrecomputedRewardAccountOutputsMatchInputs(
 		poolInputs,
 		nil,
 		[]*models.RewardAccountOutput{
@@ -3896,7 +3829,7 @@ func TestPrecomputedRewardAccountOutputsMatchPoolInputs(t *testing.T) {
 		},
 	))
 
-	require.False(t, precomputedRewardAccountOutputsMatchInputs(
+	require.False(t, epochengine.PrecomputedRewardAccountOutputsMatchInputs(
 		poolInputs,
 		nil,
 		[]*models.RewardAccountOutput{
@@ -3910,7 +3843,7 @@ func TestPrecomputedRewardAccountOutputsMatchPoolInputs(t *testing.T) {
 		},
 	))
 
-	require.False(t, precomputedRewardAccountOutputsMatchInputs(
+	require.False(t, epochengine.PrecomputedRewardAccountOutputsMatchInputs(
 		poolInputs,
 		nil,
 		[]*models.RewardAccountOutput{
@@ -3957,7 +3890,7 @@ func TestPrecomputedRewardAccountOutputsMatchStakeInputs(t *testing.T) {
 		},
 	}
 
-	require.True(t, precomputedRewardAccountOutputsMatchInputs(
+	require.True(t, epochengine.PrecomputedRewardAccountOutputsMatchInputs(
 		poolInputs,
 		stakeInputs,
 		[]*models.RewardAccountOutput{
@@ -3978,7 +3911,7 @@ func TestPrecomputedRewardAccountOutputsMatchStakeInputs(t *testing.T) {
 		},
 	))
 
-	require.False(t, precomputedRewardAccountOutputsMatchInputs(
+	require.False(t, epochengine.PrecomputedRewardAccountOutputsMatchInputs(
 		poolInputs,
 		stakeInputs,
 		[]*models.RewardAccountOutput{
@@ -3992,7 +3925,7 @@ func TestPrecomputedRewardAccountOutputsMatchStakeInputs(t *testing.T) {
 		},
 	))
 
-	require.False(t, precomputedRewardAccountOutputsMatchInputs(
+	require.False(t, epochengine.PrecomputedRewardAccountOutputsMatchInputs(
 		poolInputs,
 		stakeInputs,
 		[]*models.RewardAccountOutput{
@@ -4096,7 +4029,7 @@ func TestPrecomputedRewardAccountAmountsMatchInputs(t *testing.T) {
 	}
 
 	check := func(outs []*models.RewardAccountOutput) bool {
-		return precomputedRewardAccountAmountsMatchInputs(
+		return epochengine.PrecomputedRewardAccountAmountsMatchInputs(
 			poolInputs, poolOutputs, stakeInputs, outs, rewards.Parameters{},
 		)
 	}
@@ -4152,14 +4085,14 @@ func TestPrecomputedRewardAccountAmountsMatchInputs(t *testing.T) {
 		memberOut(memberA, wantFloorA),
 		memberOut(memberB, wantFloorB),
 	}
-	require.True(t, precomputedRewardAccountAmountsMatchInputs(
+	require.True(t, epochengine.PrecomputedRewardAccountAmountsMatchInputs(
 		poolInputs,
 		poolOutputs,
 		stakeInputs,
 		floorOutputs,
 		rewards.Parameters{MinPoolMargin: minPoolMargin},
 	))
-	require.False(t, precomputedRewardAccountAmountsMatchInputs(
+	require.False(t, epochengine.PrecomputedRewardAccountAmountsMatchInputs(
 		poolInputs,
 		poolOutputs,
 		stakeInputs,
@@ -4170,7 +4103,7 @@ func TestPrecomputedRewardAccountAmountsMatchInputs(t *testing.T) {
 	// Guard the invariant this fix relies on: the pre-existing membership check
 	// accepts the redistributed set, so the amount check is the only gate that
 	// catches it.
-	require.True(t, precomputedRewardAccountOutputsMatchInputs(
+	require.True(t, epochengine.PrecomputedRewardAccountOutputsMatchInputs(
 		poolInputs, stakeInputs,
 		[]*models.RewardAccountOutput{
 			leaderOut(leaderReward), memberOut(memberA, wantA+wantB),
@@ -4230,7 +4163,7 @@ func TestPrecomputedRewardPoolRewardsMatchInputs(t *testing.T) {
 	require.NotZero(t, expected.LeaderReward)
 
 	check := func(outs []*models.RewardPoolOutput) bool {
-		ok, err := precomputedRewardPoolRewardsMatchInputs(
+		ok, err := epochengine.PrecomputedRewardPoolRewardsMatchInputs(
 			poolInputs,
 			outs,
 			blockCounts,
@@ -4285,7 +4218,6 @@ func TestPrecomputedStakeRewardsRejectPoolRewardMismatch(t *testing.T) {
 	t.Parallel()
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -4298,7 +4230,7 @@ func TestPrecomputedStakeRewardsRejectPoolRewardMismatch(t *testing.T) {
 	rewardAccount := rewardCalcHash(0x5a)
 	member := rewardCalcHash(0x6a)
 
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      1_000_000,
@@ -4358,24 +4290,24 @@ func TestPrecomputedStakeRewardsRejectPoolRewardMismatch(t *testing.T) {
 			BoundarySlot:  boundarySlot,
 		},
 	}
-	require.NoError(t, meta.SaveRewardPoolOutputs(poolOutputs, nil))
-	require.NoError(t, meta.SaveRewardAccountOutputs(accountOutputs, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs(poolOutputs, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardAccountOutputs(accountOutputs, nil))
 
 	// Guard the premise: the pre-existing per-account amount and completeness
 	// checks accept this internally consistent but inflated precompute, so the
 	// pool-reward re-derivation is the only gate that rejects it.
-	poolInputs, err := meta.GetRewardPoolInputs(rewardSnapshotEpoch, nil)
+	poolInputs, err := seedDB(t, db).GetRewardPoolInputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
-	stakeInputs, err := meta.GetRewardStakeInputs(rewardSnapshotEpoch, nil)
+	stakeInputs, err := seedDB(t, db).GetRewardStakeInputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
-	require.True(t, precomputedRewardAccountAmountsMatchInputs(
+	require.True(t, epochengine.PrecomputedRewardAccountAmountsMatchInputs(
 		poolInputs,
 		poolOutputs,
 		stakeInputs,
 		accountOutputs,
 		rewards.Parameters{},
 	))
-	complete, err := precomputedRewardOutputsComplete(
+	complete, err := epochengine.PrecomputedRewardOutputsComplete(
 		poolOutputs,
 		accountOutputs,
 		false,
@@ -4385,7 +4317,7 @@ func TestPrecomputedStakeRewardsRejectPoolRewardMismatch(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(
+	app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 		context.Background(),
 		txn,
 		newEpoch,
@@ -4400,14 +4332,13 @@ func TestSaveStakeRewardOutputsReplacesEpochRows(t *testing.T) {
 	t.Parallel()
 
 	_, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 	const rewardSnapshotEpoch = uint64(9)
 	poolA := rewardCalcHash(0x41)
 	poolB := rewardCalcHash(0x42)
 	accountA := rewardCalcHash(0x51)
 	accountB := rewardCalcHash(0x52)
 
-	require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 		{
 			Epoch:       rewardSnapshotEpoch,
 			PoolKeyHash: poolA,
@@ -4421,7 +4352,7 @@ func TestSaveStakeRewardOutputsReplacesEpochRows(t *testing.T) {
 	}, nil))
 	require.NoError(
 		t,
-		meta.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+		seedDB(t, db).SaveRewardAccountOutputs([]*models.RewardAccountOutput{
 			{
 				Epoch:         rewardSnapshotEpoch,
 				CredentialTag: 0,
@@ -4445,19 +4376,19 @@ func TestSaveStakeRewardOutputsReplacesEpochRows(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	defer func() { _ = txn.Rollback() }()
-	require.NoError(t, saveStakeRewardOutputs(
-		dbadapter.New(db),
+	require.NoError(t, epochengine.SaveStakeRewardOutputs(
+		seedDB(t, db),
 		txn,
-		&stakeRewardApplication{
-			epochs: stakeRewardEpochs{snapshot: rewardSnapshotEpoch},
-			poolOutputs: []*models.RewardPoolOutput{
+		&epochengine.StakeRewardApplication{
+			Epochs: epochengine.StakeRewardEpochs{Snapshot: rewardSnapshotEpoch},
+			PoolOutputs: []*models.RewardPoolOutput{
 				{
 					Epoch:       rewardSnapshotEpoch,
 					PoolKeyHash: poolA,
 					TotalReward: 10,
 				},
 			},
-			accountOutputs: []*models.RewardAccountOutput{
+			AccountOutputs: []*models.RewardAccountOutput{
 				{
 					Epoch:         rewardSnapshotEpoch,
 					CredentialTag: 0,
@@ -4472,12 +4403,12 @@ func TestSaveStakeRewardOutputsReplacesEpochRows(t *testing.T) {
 	))
 	require.NoError(t, txn.Commit())
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolOutputs, 1)
 	require.Equal(t, poolA, poolOutputs[0].PoolKeyHash)
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -4504,8 +4435,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 		"within available accepts and accounts undistributed",
 		func(t *testing.T) {
 			ls, db := seedRewardPrecomputeTimingState(t, 7)
-			meta := db.Metadata()
-			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+			require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 				Epoch:        potsEpoch,
 				Reserves:     100_000_000,
 				Rewards:      1_000_000,
@@ -4520,7 +4450,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 			// full path.
 			require.NoError(
 				t,
-				meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+				seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 					{
 						Epoch:             rewardSnapshotEpoch,
 						PoolKeyHash:       poolKey,
@@ -4537,7 +4467,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 			)
 			require.NoError(
 				t,
-				meta.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+				seedDB(t, db).SaveRewardAccountOutputs([]*models.RewardAccountOutput{
 					{
 						Epoch:         rewardSnapshotEpoch,
 						CredentialTag: 0,
@@ -4565,7 +4495,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
-			app, ok, err := ls.precomputedStakeRewardApplication(
+			app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 				context.Background(),
 				txn,
 				newEpoch,
@@ -4574,13 +4504,13 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 			require.NoError(t, err)
 			require.True(t, ok)
 			require.NotNil(t, app)
-			require.Equal(t, uint64(1_000_000), app.availableRewards)
-			require.Equal(t, uint64(83_332), app.effectiveRewards)
-			require.Equal(t, uint64(916_668), app.undistributed)
+			require.Equal(t, uint64(1_000_000), app.AvailableRewards)
+			require.Equal(t, uint64(83_332), app.EffectiveRewards)
+			require.Equal(t, uint64(916_668), app.Undistributed)
 
 			// The fit check accepts pool rewards summing to exactly the available
 			// pot; the "above available" subtest rejects anything past it.
-			fits, err := precomputedRewardPoolOutputsFitAvailable(
+			fits, err := epochengine.PrecomputedRewardPoolOutputsFitAvailable(
 				[]*models.RewardPoolOutput{{TotalReward: 1_000_000}},
 				1_000_000,
 			)
@@ -4591,8 +4521,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 
 	t.Run("above available", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 7)
-		meta := db.Metadata()
-		require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 			Epoch:        potsEpoch,
 			Reserves:     100_000_000,
 			Rewards:      1_000_000,
@@ -4600,7 +4529,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 		}, nil))
 		require.NoError(
 			t,
-			meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+			seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 				{
 					Epoch:         rewardSnapshotEpoch,
 					PoolKeyHash:   poolKey,
@@ -4614,7 +4543,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 
 		txn := db.Transaction(context.Background(), false)
 		defer func() { _ = txn.Rollback() }()
-		app, ok, err := ls.precomputedStakeRewardApplication(
+		app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 			context.Background(),
 			txn,
 			newEpoch,
@@ -4640,8 +4569,7 @@ func TestPrecomputedStakeRewardsRejectPoolInputsMismatchingSnapshot(
 
 	poolKey := rewardCalcHash(0x4a)
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 999,
@@ -4651,13 +4579,13 @@ func TestPrecomputedStakeRewardsRejectPoolInputsMismatchingSnapshot(
 		BoundarySlot:     100,
 		ProtocolVersion:  7,
 	}, nil))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      1_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 		{
 			Epoch:        rewardSnapshotEpoch,
 			PoolKeyHash:  poolKey,
@@ -4668,7 +4596,7 @@ func TestPrecomputedStakeRewardsRejectPoolInputsMismatchingSnapshot(
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(
+	app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 		context.Background(),
 		txn,
 		newEpoch,
@@ -4705,7 +4633,7 @@ func TestPrecomputedRewardPoolInputsRejectMalformedRows(t *testing.T) {
 		}
 	}
 
-	valid, err := precomputedRewardPoolInputsMatchSnapshot(
+	valid, err := epochengine.PrecomputedRewardPoolInputsMatchSnapshot(
 		snapshot,
 		[]*models.RewardPoolInput{validInput()},
 	)
@@ -4780,7 +4708,7 @@ func TestPrecomputedRewardPoolInputsRejectMalformedRows(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			input := validInput()
 			tc.mutate(input)
-			ok, err := precomputedRewardPoolInputsMatchSnapshot(
+			ok, err := epochengine.PrecomputedRewardPoolInputsMatchSnapshot(
 				snapshot,
 				[]*models.RewardPoolInput{input},
 			)
@@ -4790,7 +4718,7 @@ func TestPrecomputedRewardPoolInputsRejectMalformedRows(t *testing.T) {
 	}
 
 	snapshot.TotalPoolCount = 2
-	ok, err := precomputedRewardPoolInputsMatchSnapshot(
+	ok, err := epochengine.PrecomputedRewardPoolInputsMatchSnapshot(
 		snapshot,
 		[]*models.RewardPoolInput{validInput()},
 	)
@@ -4830,8 +4758,7 @@ func TestPrecomputedStakeRewardsRejectImpossibleRewardPot(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ls, db := seedRewardPrecomputeTimingState(t, 7)
-			meta := db.Metadata()
-			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+			require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 				Epoch:        potsEpoch,
 				Reserves:     types.Uint64(tc.reserves),
 				Fees:         types.Uint64(tc.fees),
@@ -4840,7 +4767,7 @@ func TestPrecomputedStakeRewardsRejectImpossibleRewardPot(t *testing.T) {
 			}, nil))
 			require.NoError(
 				t,
-				meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+				seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 					{
 						Epoch:        rewardSnapshotEpoch,
 						PoolKeyHash:  poolKey,
@@ -4852,7 +4779,7 @@ func TestPrecomputedStakeRewardsRejectImpossibleRewardPot(t *testing.T) {
 
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
-			app, ok, err := ls.precomputedStakeRewardApplication(
+			app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 				context.Background(),
 				txn,
 				newEpoch,
@@ -4878,9 +4805,8 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 
 	t.Run("pre-babbage waits", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 6)
-		meta := db.Metadata()
-		prefilterSlot, err := ls.rewardPrefilterSlot(
-			dbadapter.New(db),
+		prefilterSlot, err := ls.engine().RewardPrefilterSlot(
+			ls.ledgerDB(),
 			nil,
 			potsEpoch,
 		)
@@ -4889,7 +4815,7 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.precomputeStakeRewards(
+			return ls.precomputeStakeRewardsForTest(
 				txn,
 				newEpoch,
 				capturedSlot,
@@ -4897,19 +4823,19 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 			)
 		}))
 
-		poolOutputs, err := meta.GetRewardPoolOutputs(
+		poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(
 			rewardSnapshotEpoch,
 			nil,
 		)
 		require.NoError(t, err)
 		require.Empty(t, poolOutputs)
-		accountOutputs, err := meta.GetRewardAccountOutputs(
+		accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 			rewardSnapshotEpoch,
 			nil,
 		)
 		require.NoError(t, err)
 		require.Empty(t, accountOutputs)
-		pots, err := meta.GetRewardAdaPots(potsEpoch, nil)
+		pots, err := seedDB(t, db).GetRewardAdaPots(potsEpoch, nil)
 		require.NoError(t, err)
 		require.NotNil(t, pots)
 		require.Equal(t, uint64(0), uint64(pots.Rewards))
@@ -4923,7 +4849,7 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 		actualCapturedSlot := prefilterSlot + 7
 		ls.maybeQueueStakeRewardPrecomputeRetry(actualCapturedSlot)
 		ls.rewardPrecomputeWG.Wait()
-		poolOutputs, err = meta.GetRewardPoolOutputs(
+		poolOutputs, err = seedDB(t, db).GetRewardPoolOutputs(
 			rewardSnapshotEpoch,
 			nil,
 		)
@@ -4936,9 +4862,8 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 		"pre-babbage precomputes at first just-right slot",
 		func(t *testing.T) {
 			ls, db := seedRewardPrecomputeTimingState(t, 6)
-			meta := db.Metadata()
-			prefilterSlot, err := ls.rewardPrefilterSlot(
-				dbadapter.New(db),
+			prefilterSlot, err := ls.engine().RewardPrefilterSlot(
+				ls.ledgerDB(),
 				nil,
 				potsEpoch,
 			)
@@ -4964,7 +4889,7 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 
 			txn := db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				return ls.precomputeStakeRewards(
+				return ls.precomputeStakeRewardsForTest(
 					txn,
 					newEpoch,
 					prefilterSlot,
@@ -4972,19 +4897,19 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 				)
 			}))
 
-			poolOutputs, err := meta.GetRewardPoolOutputs(
+			poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(
 				rewardSnapshotEpoch,
 				nil,
 			)
 			require.NoError(t, err)
 			require.Len(t, poolOutputs, 1)
-			accountOutputs, err := meta.GetRewardAccountOutputs(
+			accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 				rewardSnapshotEpoch,
 				nil,
 			)
 			require.NoError(t, err)
 			require.Len(t, accountOutputs, 2)
-			pots, err := meta.GetRewardAdaPots(potsEpoch, nil)
+			pots, err := seedDB(t, db).GetRewardAdaPots(potsEpoch, nil)
 			require.NoError(t, err)
 			require.NotNil(t, pots)
 			require.Equal(t, uint64(100_000), uint64(pots.Rewards))
@@ -4993,9 +4918,8 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 
 	t.Run("babbage precomputes immediately", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 7)
-		meta := db.Metadata()
-		prefilterSlot, err := ls.rewardPrefilterSlot(
-			dbadapter.New(db),
+		prefilterSlot, err := ls.engine().RewardPrefilterSlot(
+			ls.ledgerDB(),
 			nil,
 			potsEpoch,
 		)
@@ -5004,7 +4928,7 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.precomputeStakeRewards(
+			return ls.precomputeStakeRewardsForTest(
 				txn,
 				newEpoch,
 				capturedSlot,
@@ -5012,19 +4936,19 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 			)
 		}))
 
-		poolOutputs, err := meta.GetRewardPoolOutputs(
+		poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(
 			rewardSnapshotEpoch,
 			nil,
 		)
 		require.NoError(t, err)
 		require.Len(t, poolOutputs, 1)
-		accountOutputs, err := meta.GetRewardAccountOutputs(
+		accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 			rewardSnapshotEpoch,
 			nil,
 		)
 		require.NoError(t, err)
 		require.Len(t, accountOutputs, 2)
-		pots, err := meta.GetRewardAdaPots(potsEpoch, nil)
+		pots, err := seedDB(t, db).GetRewardAdaPots(potsEpoch, nil)
 		require.NoError(t, err)
 		require.NotNil(t, pots)
 		require.Equal(t, uint64(100_000), uint64(pots.Rewards))
@@ -5037,7 +4961,6 @@ func TestRewardPrecomputeEpochTransitionStoresNextBoundaryOutputs(
 	t.Parallel()
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 
 	const (
 		rewardSnapshotEpoch = uint64(1)
@@ -5058,7 +4981,7 @@ func TestRewardPrecomputeEpochTransitionStoresNextBoundaryOutputs(
 	))
 	ls.rewardPrecomputeWG.Wait()
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -5067,7 +4990,7 @@ func TestRewardPrecomputeEpochTransitionStoresNextBoundaryOutputs(
 	require.Equal(t, eventBoundarySlot, poolOutputs[0].CapturedSlot)
 	require.Equal(t, applicationBoundary, poolOutputs[0].BoundarySlot)
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -5078,7 +5001,7 @@ func TestRewardPrecomputeEpochTransitionStoresNextBoundaryOutputs(
 		require.Equal(t, applicationBoundary, output.BoundarySlot)
 	}
 
-	pots, err := meta.GetRewardAdaPots(potsEpoch, nil)
+	pots, err := seedDB(t, db).GetRewardAdaPots(potsEpoch, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots)
 	require.Equal(t, uint64(100_000), uint64(pots.Rewards))
@@ -5097,12 +5020,11 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 
 	seedOutputs := func(t *testing.T, db *database.Database) {
 		t.Helper()
-		meta := db.Metadata()
 		poolKey := rewardCalcHash(0x4a)
 		rewardAccount := rewardCalcHash(0x5a)
 		member := rewardCalcHash(0x6a)
 
-		require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 			Epoch:        potsEpoch,
 			Reserves:     100_000_000,
 			Rewards:      1_000_000,
@@ -5110,7 +5032,7 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		}, nil))
 		require.NoError(
 			t,
-			meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+			seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 				{
 					Epoch:             rewardSnapshotEpoch,
 					PoolKeyHash:       poolKey,
@@ -5126,7 +5048,7 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		)
 		require.NoError(
 			t,
-			meta.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+			seedDB(t, db).SaveRewardAccountOutputs([]*models.RewardAccountOutput{
 				{
 					Epoch:         rewardSnapshotEpoch,
 					CredentialTag: 0,
@@ -5155,8 +5077,8 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 
 	t.Run("pre-babbage rejects", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 6)
-		prefilterSlot, err := ls.rewardPrefilterSlot(
-			dbadapter.New(db),
+		prefilterSlot, err := ls.engine().RewardPrefilterSlot(
+			ls.ledgerDB(),
 			nil,
 			potsEpoch,
 		)
@@ -5166,7 +5088,7 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 
 		txn := db.Transaction(context.Background(), false)
 		defer func() { _ = txn.Rollback() }()
-		app, ok, err := ls.precomputedStakeRewardApplication(
+		app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 			context.Background(),
 			txn,
 			newEpoch,
@@ -5179,8 +5101,8 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 
 	t.Run("babbage accepts", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 7)
-		prefilterSlot, err := ls.rewardPrefilterSlot(
-			dbadapter.New(db),
+		prefilterSlot, err := ls.engine().RewardPrefilterSlot(
+			ls.ledgerDB(),
 			nil,
 			potsEpoch,
 		)
@@ -5190,7 +5112,7 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 
 		txn := db.Transaction(context.Background(), false)
 		defer func() { _ = txn.Rollback() }()
-		app, ok, err := ls.precomputedStakeRewardApplication(
+		app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 			context.Background(),
 			txn,
 			newEpoch,
@@ -5199,15 +5121,15 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, ok)
 		require.NotNil(t, app)
-		require.True(t, app.precomputed)
+		require.True(t, app.Precomputed)
 		require.Equal(
 			t,
-			rewards.Efficiency(app.totalBlocks, app.params),
-			app.rewardEfficiency,
+			rewards.Efficiency(app.TotalBlocks, app.Params),
+			app.RewardEfficiency,
 			"reused reward outputs must retain efficiency attribution",
 		)
-		require.Equal(t, uint64(100), app.snapshotCapturedSlot)
-		require.Equal(t, uint64(100), app.snapshotBoundarySlot)
+		require.Equal(t, uint64(100), app.SnapshotCapturedSlot)
+		require.Equal(t, uint64(100), app.SnapshotBoundarySlot)
 		require.NoError(t, txn.Rollback())
 
 		// Exercise the application-time expiry guard with a renewal after the
@@ -5237,19 +5159,19 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		seedRollbackCertificate(
 			t, db, 150, rollbackStakeRegistrationCertificate(rewardAccount),
 		)
-		require.NoError(t, db.RenewAccountExpirations(
-			context.Background(),
+		ls.stageAccountExpirations(
+			nil,
 			[]models.StakeCredentialRef{
 				models.NewStakeCredentialRef(0, rewardAccount),
 			},
 			2,
-			nil,
-		))
-		app.epochs.snapshot = 2
+			150,
+		)
+		app.Epochs.Snapshot = 2
 
 		guardTxn := db.Transaction(context.Background(), false)
 		require.NoError(t, guardTxn.Do(func(txn *database.Txn) error {
-			guarded, err := ls.guardedExpiredRewardCredentials(context.Background(), txn, app)
+			guarded, err := ls.engine().GuardedExpiredRewardCredentials(context.Background(), txn, app)
 			if err != nil {
 				return err
 			}
@@ -5267,7 +5189,6 @@ func TestPrecomputedStakeRewardsRejectMissingBabbageLeaderOutput(t *testing.T) {
 	t.Parallel()
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -5278,13 +5199,13 @@ func TestPrecomputedStakeRewardsRejectMissingBabbageLeaderOutput(t *testing.T) {
 	poolKey := rewardCalcHash(0x4a)
 	member := rewardCalcHash(0x6a)
 
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		Rewards:      100_000,
 		CapturedSlot: 200,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 		{
 			Epoch:             rewardSnapshotEpoch,
 			PoolKeyHash:       poolKey,
@@ -5299,7 +5220,7 @@ func TestPrecomputedStakeRewardsRejectMissingBabbageLeaderOutput(t *testing.T) {
 	}, nil))
 	require.NoError(
 		t,
-		meta.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+		seedDB(t, db).SaveRewardAccountOutputs([]*models.RewardAccountOutput{
 			{
 				Epoch:         rewardSnapshotEpoch,
 				CredentialTag: 0,
@@ -5316,7 +5237,7 @@ func TestPrecomputedStakeRewardsRejectMissingBabbageLeaderOutput(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(
+	app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 		context.Background(),
 		txn,
 		newEpoch,
@@ -5355,13 +5276,12 @@ func TestPrecomputedStakeRewardsCheckPreBabbageMissingLeaderPrefilter(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ls, db := seedRewardPrecomputeTimingState(t, 6)
-			meta := db.Metadata()
 			poolKey := rewardCalcHash(0x4a)
 			rewardAccount := rewardCalcHash(0x5a)
 			member := rewardCalcHash(0x6a)
 
-			prefilterSlot, err := ls.rewardPrefilterSlot(
-				dbadapter.New(db),
+			prefilterSlot, err := ls.engine().RewardPrefilterSlot(
+				ls.ledgerDB(),
 				nil,
 				potsEpoch,
 			)
@@ -5379,7 +5299,7 @@ func TestPrecomputedStakeRewardsCheckPreBabbageMissingLeaderPrefilter(
 				)
 			}
 
-			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+			require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 				Epoch: potsEpoch,
 				// Reserves imply an incentives-derived reward pot of
 				// 1_000_000 (Rho 1/100 of 100_000_000), which the reuse
@@ -5391,7 +5311,7 @@ func TestPrecomputedStakeRewardsCheckPreBabbageMissingLeaderPrefilter(
 			}, nil))
 			require.NoError(
 				t,
-				meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
+				seedDB(t, db).SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 					{
 						Epoch:             rewardSnapshotEpoch,
 						PoolKeyHash:       poolKey,
@@ -5407,7 +5327,7 @@ func TestPrecomputedStakeRewardsCheckPreBabbageMissingLeaderPrefilter(
 			)
 			require.NoError(
 				t,
-				meta.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+				seedDB(t, db).SaveRewardAccountOutputs([]*models.RewardAccountOutput{
 					{
 						Epoch:         rewardSnapshotEpoch,
 						CredentialTag: 0,
@@ -5424,7 +5344,7 @@ func TestPrecomputedStakeRewardsCheckPreBabbageMissingLeaderPrefilter(
 
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
-			app, ok, err := ls.precomputedStakeRewardApplication(
+			app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 				context.Background(),
 				txn,
 				newEpoch,
@@ -5434,7 +5354,7 @@ func TestPrecomputedStakeRewardsCheckPreBabbageMissingLeaderPrefilter(
 			require.Equal(t, tc.expectPrecomputedReward, ok)
 			if tc.expectPrecomputedReward {
 				require.NotNil(t, app)
-				require.True(t, app.precomputed)
+				require.True(t, app.Precomputed)
 			} else {
 				require.Nil(t, app)
 			}
@@ -5448,7 +5368,6 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -5477,7 +5396,7 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			100,
 			performanceEpoch,
 			nil,
@@ -5492,7 +5411,7 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 	)
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			200,
 			potsEpoch,
 			nil,
@@ -5506,7 +5425,7 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 		),
 	)
 	for i := range uint64(10) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
+		require.NoError(t, fxMintBlock(t, db,
 			context.Background(),
 			poolID,
 			i+1,
@@ -5514,19 +5433,19 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 			nil,
 		))
 	}
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor,
 		100,
 		performanceEpoch,
 		eras.ShelleyEraDesc.Id,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -5536,7 +5455,7 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 		BoundarySlot:     100,
 		ProtocolVersion:  6,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      rewardSnapshotEpoch,
 			PoolKeyHash:                poolKey,
@@ -5552,7 +5471,7 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 			BoundarySlot:               100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -5577,7 +5496,7 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 	}, nil))
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: rewardAccount,
 			Active:     true,
 		}),
@@ -5623,11 +5542,11 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -5637,7 +5556,7 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 	require.False(t, accountOutputs[0].Spendable)
 	require.Greater(t, uint64(accountOutputs[0].Amount), uint64(0))
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolOutputs, 1)
 	require.Equal(
@@ -5647,12 +5566,12 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 	)
 	require.Greater(t, uint64(poolOutputs[0].Undistributed), uint64(0))
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, uint64(accountOutputs[0].Amount), uint64(state.Treasury))
 
-	rewardOwner, err := db.GetAccountByCredential(
+	rewardOwner, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		rewardAccount,
@@ -5668,7 +5587,6 @@ func TestApplyStakeRewardsPrefilterUsesBeginningOfRUPDSlot(t *testing.T) {
 	t.Parallel()
 
 	ls, db := seedRewardPrecomputeTimingState(t, 6)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -5678,8 +5596,8 @@ func TestApplyStakeRewardsPrefilterUsesBeginningOfRUPDSlot(t *testing.T) {
 	)
 	rewardAccount := rewardCalcHash(0x5a)
 	member := rewardCalcHash(0x6a)
-	prefilterSlot, err := ls.rewardPrefilterSlot(
-		dbadapter.New(db),
+	prefilterSlot, err := ls.engine().RewardPrefilterSlot(
+		ls.ledgerDB(),
 		nil,
 		potsEpoch,
 	)
@@ -5708,11 +5626,11 @@ func TestApplyStakeRewardsPrefilterUsesBeginningOfRUPDSlot(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
@@ -5721,7 +5639,7 @@ func TestApplyStakeRewardsPrefilterUsesBeginningOfRUPDSlot(t *testing.T) {
 	require.Equal(t, rewardAccount, accountOutputs[0].StakingKey)
 	require.False(t, accountOutputs[0].Spendable)
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolOutputs, 1)
 	require.Equal(t, accountOutputs[0].Amount, poolOutputs[0].LeaderReward)
@@ -5732,7 +5650,7 @@ func TestApplyStakeRewardsPrefilterUsesBeginningOfRUPDSlot(t *testing.T) {
 	)
 	require.Equal(t, accountOutputs[0].Amount, poolOutputs[0].Unspendable)
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, uint64(accountOutputs[0].Amount), uint64(state.Treasury))
@@ -5742,7 +5660,6 @@ func TestApplyStakeRewardsAccountsEmptySnapshotPots(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	const (
 		newEpoch            = uint64(4)
@@ -5766,7 +5683,7 @@ func TestApplyStakeRewardsAccountsEmptySnapshotPots(t *testing.T) {
 
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			100,
 			performanceEpoch,
 			nil,
@@ -5781,7 +5698,7 @@ func TestApplyStakeRewardsAccountsEmptySnapshotPots(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		meta.SetEpoch(
+		seedDB(t, db).SetEpoch(
 			200,
 			potsEpoch,
 			nil,
@@ -5794,21 +5711,21 @@ func TestApplyStakeRewardsAccountsEmptySnapshotPots(t *testing.T) {
 			nil,
 		),
 	)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor,
 		100,
 		performanceEpoch,
 		eras.ShelleyEraDesc.Id,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Treasury:     10,
 		Reserves:     100_000_000,
 		Fees:         2_000,
 		CapturedSlot: 300,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:           rewardSnapshotEpoch,
 		SnapshotType:    "mark",
 		CapturedSlot:    100,
@@ -5818,17 +5735,17 @@ func TestApplyStakeRewardsAccountsEmptySnapshotPots(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, ls)
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, uint64(100_001_600), uint64(state.Reserves))
 	require.Equal(t, uint64(410), uint64(state.Treasury))
 
-	pots, err := meta.GetRewardAdaPots(potsEpoch, nil)
+	pots, err := seedDB(t, db).GetRewardAdaPots(potsEpoch, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots)
 	require.Equal(t, uint64(2_000), uint64(pots.Rewards))
@@ -5838,24 +5755,24 @@ func TestStakeRewardEpochsForNewEpochMatchDelayedUpdate(t *testing.T) {
 	t.Parallel()
 
 	for _, newEpoch := range []uint64{0, 1, 2} {
-		_, ok := stakeRewardEpochsForNewEpoch(newEpoch)
+		_, ok := epochengine.StakeRewardEpochsForNewEpoch(newEpoch)
 		require.False(t, ok, "epoch %d has no delayed reward update", newEpoch)
 	}
 
-	epochs, ok := stakeRewardEpochsForNewEpoch(4)
+	epochs, ok := epochengine.StakeRewardEpochsForNewEpoch(4)
 	require.True(t, ok)
-	require.Equal(t, stakeRewardEpochs{
-		snapshot:    1,
-		performance: 2,
-		pots:        3,
+	require.Equal(t, epochengine.StakeRewardEpochs{
+		Snapshot:    1,
+		Performance: 2,
+		Pots:        3,
 	}, epochs)
 
-	epochs, ok = stakeRewardEpochsForNewEpoch(211)
+	epochs, ok = epochengine.StakeRewardEpochsForNewEpoch(211)
 	require.True(t, ok)
-	require.Equal(t, stakeRewardEpochs{
-		snapshot:    208,
-		performance: 209,
-		pots:        210,
+	require.Equal(t, epochengine.StakeRewardEpochs{
+		Snapshot:    208,
+		Performance: 209,
+		Pots:        210,
 	}, epochs)
 }
 
@@ -5876,7 +5793,6 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	const (
 		performanceEpoch = uint64(2)
@@ -5905,7 +5821,7 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 	calculationPParamsCbor, err := cbor.Encode(calculationPParams)
 	require.NoError(t, err)
 
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		100,
 		performanceEpoch,
 		nil,
@@ -5917,7 +5833,7 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 		100,
 		nil,
 	))
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		200,
 		potsEpoch,
 		nil,
@@ -5929,14 +5845,14 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 		1_000,
 		nil,
 	))
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		performancePParamsCbor,
 		100,
 		performanceEpoch,
 		eras.ShelleyEraDesc.Id,
 		nil,
 	))
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		calculationPParamsCbor,
 		200,
 		potsEpoch,
@@ -5946,7 +5862,7 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	_, params, performanceDecentralization, err := ls.rewardParameters(
+	_, params, err := ls.engine().RewardParameters(
 		txn,
 		performanceEpoch,
 		potsEpoch,
@@ -5970,13 +5886,6 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 		big.NewRat(1, 2),
 		params.Decentralization,
 		"d comes from the performance epoch",
-	)
-	require.Equal(
-		t,
-		params.Decentralization,
-		performanceDecentralization,
-		"the block-count decentralization is the same value the "+
-			"calculation uses",
 	)
 }
 
@@ -6011,15 +5920,14 @@ func TestRewardParametersUsesDijkstraLeverageAtFirstEraRound(t *testing.T) {
 	require.NoError(t, err)
 	calculationCBOR, err := cbor.Encode(calculationPParams)
 	require.NoError(t, err)
-	meta := db.Metadata()
-	require.NoError(t, meta.SetEpoch(100, 2, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1, 100, nil))
-	require.NoError(t, meta.SetEpoch(200, 3, nil, nil, nil, nil, eras.DijkstraEraDesc.Id, 1, 1_000, nil))
-	require.NoError(t, db.SetPParams(performanceCBOR, 100, 2, eras.ConwayEraDesc.Id, nil))
-	require.NoError(t, db.SetPParams(calculationCBOR, 200, 3, eras.DijkstraEraDesc.Id, nil))
+	require.NoError(t, seedDB(t, db).SetEpoch(100, 2, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1, 100, nil))
+	require.NoError(t, seedDB(t, db).SetEpoch(200, 3, nil, nil, nil, nil, eras.DijkstraEraDesc.Id, 1, 1_000, nil))
+	require.NoError(t, seedDB(t, db).SetPParams(performanceCBOR, 100, 2, eras.ConwayEraDesc.Id, nil))
+	require.NoError(t, seedDB(t, db).SetPParams(calculationCBOR, 200, 3, eras.DijkstraEraDesc.Id, nil))
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	_, params, _, err := ls.rewardParameters(
+	_, params, err := ls.engine().RewardParameters(
 		txn, 2, 3, &models.RewardAdaPots{Reserves: 100_000_000},
 	)
 	require.NoError(t, err)
@@ -6043,7 +5951,7 @@ func TestRewardParametersBabbageDefaultsDecentralizationAndForgoesPrefilter(
 		ProtocolMinor: 0,
 	}
 
-	params, err := rewardParametersFromPParams(
+	params, err := epochengine.RewardParametersFromPParams(
 		pparams,
 		ls.config.CardanoNodeConfig,
 		100,
@@ -6068,7 +5976,7 @@ func TestRewardParametersRejectIncompletePParams(t *testing.T) {
 		ProtocolMinor:    0,
 	}
 
-	_, err := rewardParametersFromPParams(
+	_, err := epochengine.RewardParametersFromPParams(
 		pparams,
 		ls.config.CardanoNodeConfig,
 		100,
@@ -6081,7 +5989,7 @@ func TestApplyPledgeLeveragePreDijkstraUsesExperimentalConfig(t *testing.T) {
 	t.Parallel()
 
 	params := rewards.Parameters{}
-	applyPledgeLeveragePParams(&params, &shelley.ShelleyProtocolParameters{}, LedgerStateConfig{
+	epochengine.ApplyPledgeLeveragePParams(&params, &shelley.ShelleyProtocolParameters{}, epochengine.Config{
 		PledgeLeverageEnabled: true,
 		PledgeLeverage:        100,
 	})
@@ -6093,10 +6001,10 @@ func TestApplyPledgeLeverageDijkstraPParamOverridesConfig(t *testing.T) {
 	t.Parallel()
 
 	params := rewards.Parameters{}
-	applyPledgeLeveragePParams(
+	epochengine.ApplyPledgeLeveragePParams(
 		&params,
 		&dijkstra.DijkstraProtocolParameters{MaxPledgeLeverage: rewardCalcRat(5, 1)},
-		LedgerStateConfig{PledgeLeverageEnabled: true, PledgeLeverage: 100},
+		epochengine.Config{PledgeLeverageEnabled: true, PledgeLeverage: 100},
 	)
 	require.True(t, params.PledgeLeverageEnabled)
 	require.Equal(t, big.NewRat(5, 1), params.PledgeLeverage)
@@ -6106,10 +6014,10 @@ func TestApplyPledgeLeverageDijkstraNilIgnoresConfig(t *testing.T) {
 	t.Parallel()
 
 	params := rewards.Parameters{}
-	applyPledgeLeveragePParams(
+	epochengine.ApplyPledgeLeveragePParams(
 		&params,
 		&dijkstra.DijkstraProtocolParameters{},
-		LedgerStateConfig{PledgeLeverageEnabled: true, PledgeLeverage: 100},
+		epochengine.Config{PledgeLeverageEnabled: true, PledgeLeverage: 100},
 	)
 	require.False(t, params.PledgeLeverageEnabled)
 	require.Nil(t, params.PledgeLeverage)
@@ -6119,7 +6027,6 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	const performanceEpoch = uint64(2)
 	poolKey := rewardCalcHash(0x71)
@@ -6129,7 +6036,7 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 	var otherPoolID lcommon.PoolKeyHash
 	copy(otherPoolID[:], otherPoolKey)
 
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		100,
 		performanceEpoch,
 		nil,
@@ -6142,7 +6049,7 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 		nil,
 	))
 	for i := range uint64(3) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
+		require.NoError(t, fxMintBlock(t, db,
 			context.Background(),
 			poolID,
 			i+1,
@@ -6151,7 +6058,7 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 		))
 	}
 	for i := range uint64(2) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
+		require.NoError(t, fxMintBlock(t, db,
 			context.Background(),
 			otherPoolID,
 			i+1,
@@ -6160,14 +6067,13 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 		))
 	}
 
-	counts, total, known, err := ls.rewardBlockCounts(
-		dbadapter.New(db),
+	counts, total, known, err := ls.engine().RewardBlockCounts(
+		ls.ledgerDB(),
 		nil,
 		performanceEpoch,
 		[]*models.RewardPoolInput{
 			{PoolKeyHash: poolKey},
 		},
-		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, known)
@@ -6178,9 +6084,6 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 func TestRewardBlockCountsSkipsOverlaySlots(t *testing.T) {
 	t.Parallel()
 
-	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
-
 	const performanceEpoch = uint64(2)
 	poolKey := rewardCalcHash(0x73)
 	otherPoolKey := rewardCalcHash(0x74)
@@ -6189,62 +6092,74 @@ func TestRewardBlockCountsSkipsOverlaySlots(t *testing.T) {
 	var otherPoolID lcommon.PoolKeyHash
 	copy(otherPoolID[:], otherPoolKey)
 
-	require.NoError(t, meta.SetEpoch(
-		100,
-		performanceEpoch,
-		nil,
-		nil,
-		nil,
-		nil,
-		eras.ShelleyEraDesc.Id,
-		1,
-		100,
-		nil,
-	))
-	for _, slot := range []uint64{100, 101, 102, 103} {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
-			context.Background(),
-			poolID,
-			slot,
-			slot,
-			nil,
-		))
+	half := big.NewRat(1, 2)
+	require.True(t, epochengine.RewardIsOverlaySlot(100, half, 100))
+	require.False(t, epochengine.RewardIsOverlaySlot(100, half, 101))
+	require.True(t, epochengine.RewardIsOverlaySlot(100, half, 102))
+	require.False(t, epochengine.RewardIsOverlaySlot(100, half, 103))
+
+	// The set classifies each block against the overlay schedule when the
+	// block is applied, under the d then in force, so the round's counts
+	// follow d without the round being handed it.
+	for _, tc := range []struct {
+		name      string
+		d         *big.Rat
+		wantPool  uint64
+		wantTotal uint64
+	}{
+		{name: "half the slots are overlay", d: half, wantPool: 2, wantTotal: 3},
+		{name: "fully decentralized", d: new(big.Rat), wantPool: 4, wantTotal: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ls, db := newRewardCalculationTestLedger(t)
+			require.NoError(t, seedDB(t, db).SetEpoch(
+				100, performanceEpoch, nil, nil, nil, nil,
+				eras.ShelleyEraDesc.Id, 1, 100, nil,
+			))
+			ls.currentEpoch = models.Epoch{
+				EpochId:       performanceEpoch,
+				StartSlot:     100,
+				EraId:         eras.ShelleyEraDesc.Id,
+				SlotLength:    1,
+				LengthInSlots: 100,
+			}
+			ls.epochCache = []models.Epoch{ls.currentEpoch}
+			ls.currentPParams = &shelley.ShelleyProtocolParameters{
+				Decentralization: &cbor.Rat{Rat: tc.d},
+			}
+			ls.publishSnapshotsLocked()
+			for _, slot := range []uint64{100, 101, 102, 103} {
+				require.NoError(t, ls.ledgerDB().UpdatePoolOpCertSequence(
+					context.Background(), poolID, slot, slot, nil,
+				))
+			}
+			require.NoError(t, ls.ledgerDB().UpdatePoolOpCertSequence(
+				context.Background(), otherPoolID, 105, 105, nil,
+			))
+			require.False(t, ls.utxoSetFailed.Load())
+
+			counts, total, known, err := ls.engine().RewardBlockCounts(
+				ls.ledgerDB(),
+				nil,
+				performanceEpoch,
+				[]*models.RewardPoolInput{
+					{PoolKeyHash: poolKey},
+				},
+			)
+			require.NoError(t, err)
+			require.True(t, known)
+			require.Equal(t, tc.wantPool, counts[string(poolKey)])
+			require.Equal(t, tc.wantTotal, total)
+		})
 	}
-	require.NoError(t, db.UpdatePoolOpCertSequence(
-		context.Background(),
-		otherPoolID,
-		105,
-		105,
-		nil,
-	))
-
-	decentralization := big.NewRat(1, 2)
-	require.True(t, rewardIsOverlaySlot(100, decentralization, 100))
-	require.False(t, rewardIsOverlaySlot(100, decentralization, 101))
-	require.True(t, rewardIsOverlaySlot(100, decentralization, 102))
-	require.False(t, rewardIsOverlaySlot(100, decentralization, 103))
-
-	counts, total, known, err := ls.rewardBlockCounts(
-		dbadapter.New(db),
-		nil,
-		performanceEpoch,
-		[]*models.RewardPoolInput{
-			{PoolKeyHash: poolKey},
-		},
-		decentralization,
-	)
-	require.NoError(t, err)
-	require.True(t, known)
-	require.Equal(t, uint64(2), counts[string(poolKey)])
-	require.Equal(t, uint64(3), total)
 }
 
 func TestRewardPrefilterSlotUsesRUPDRandomnessWindow(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		1_000,
 		3,
 		nil,
@@ -6257,7 +6172,7 @@ func TestRewardPrefilterSlotUsesRUPDRandomnessWindow(t *testing.T) {
 		nil,
 	))
 
-	slot, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 3)
+	slot, err := ls.engine().RewardPrefilterSlot(ls.ledgerDB(), nil, 3)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1_401), slot)
 	require.Equal(
@@ -6265,7 +6180,7 @@ func TestRewardPrefilterSlotUsesRUPDRandomnessWindow(t *testing.T) {
 		uint64(300),
 		ls.nonceStabilityWindow(eras.ShelleyEraDesc.Id),
 	)
-	require.Equal(t, uint64(400), ls.rewardUpdateStabilityWindow())
+	require.Equal(t, uint64(400), ls.engine().RewardUpdateStabilityWindow())
 }
 
 func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
@@ -6283,7 +6198,7 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 	}
 	pparamsCbor, err := cbor.Encode(pparams)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor,
 		0,
 		0,
@@ -6366,16 +6281,15 @@ func TestProcessEpochRolloverRequiresPostRUPDBlockForRewardUpdate(
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ls, db := newPreviewRewardPotsTestLedger(t)
-			meta := db.Metadata()
 			require.Equal(
 				t,
 				rupdStartAfterSlot,
-				ls.rewardUpdateStabilityWindow(),
+				ls.engine().RewardUpdateStabilityWindow(),
 			)
-			require.NoError(t, meta.SetNetworkState(
+			require.NoError(t, seedDB(t, db).SetNetworkState(
 				0, previewGenesisReserves, 0, nil,
 			))
-			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+			require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 				Epoch:        tc.endedEpoch,
 				Reserves:     types.Uint64(previewGenesisReserves),
 				CapturedSlot: tc.endedEpoch * previewEpochLength,
@@ -6385,7 +6299,7 @@ func TestProcessEpochRolloverRequiresPostRUPDBlockForRewardUpdate(
 			require.NoError(t, db.SetTip(ochainsync.Tip{
 				Point: ocommon.NewPoint(tc.lastBlockSlot, blockHash),
 			}, nil))
-			currentEpoch, err := meta.GetEpoch(tc.endedEpoch, nil)
+			currentEpoch, err := seedDB(t, db).GetEpoch(tc.endedEpoch, nil)
 			require.NoError(t, err)
 			require.NotNil(t, currentEpoch)
 			pparams := &alonzo.AlonzoProtocolParameters{
@@ -6410,7 +6324,7 @@ func TestProcessEpochRolloverRequiresPostRUPDBlockForRewardUpdate(
 				return err
 			}))
 
-			state, err := meta.GetNetworkState(nil)
+			state, err := seedDB(t, db).GetNetworkState(nil)
 			require.NoError(t, err)
 			require.NotNil(t, state)
 			if got := uint64(state.Treasury); got != tc.wantTreasury {
@@ -6430,7 +6344,7 @@ func TestProcessEpochRolloverRequiresPostRUPDBlockForRewardUpdate(
 // (precomputeStakeRewardsAfterEpochTransition) into a read-only calculation
 // transaction plus a short write transaction produces byte-identical reward
 // output rows and ADA pots to the single read-write-transaction
-// precomputeStakeRewards path used directly by other tests in this file.
+// precomputeStakeRewardsForTest path used directly by other tests in this file.
 // This guards the read/write split introduced to stop the async precompute
 // from holding SQLite's single writer for the entire calculation.
 func TestPrecomputeStakeRewardsAsyncPathMatchesSingleTransactionPath(
@@ -6448,33 +6362,31 @@ func TestPrecomputeStakeRewardsAsyncPathMatchesSingleTransactionPath(
 
 	// Reference: the original single read-write-transaction path.
 	lsRef, dbRef := seedRewardPrecomputeTimingState(t, 7)
-	metaRef := dbRef.Metadata()
 	refTxn := dbRef.Transaction(context.Background(), true)
 	require.NoError(t, refTxn.Do(func(txn *database.Txn) error {
-		return lsRef.precomputeStakeRewards(
+		return lsRef.precomputeStakeRewardsForTest(
 			txn,
 			newEpoch,
 			eventBoundarySlot,
 			applicationBoundary,
 		)
 	}))
-	refPoolOutputs, err := metaRef.GetRewardPoolOutputs(
+	refPoolOutputs, err := seedDB(t, dbRef).GetRewardPoolOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
 	require.NoError(t, err)
-	refAccountOutputs, err := metaRef.GetRewardAccountOutputs(
+	refAccountOutputs, err := seedDB(t, dbRef).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
 	require.NoError(t, err)
-	refPots, err := metaRef.GetRewardAdaPots(potsEpoch, nil)
+	refPots, err := seedDB(t, dbRef).GetRewardAdaPots(potsEpoch, nil)
 	require.NoError(t, err)
 
 	// Under test: the split async EventBus path, driven the same way the
 	// EventBus itself would (handleRewardPrecomputeEpochTransition).
 	lsSplit, dbSplit := seedRewardPrecomputeTimingState(t, 7)
-	metaSplit := dbSplit.Metadata()
 	lsSplit.handleRewardPrecomputeEpochTransition(event.NewEvent(
 		event.EpochTransitionEventType,
 		event.EpochTransitionEvent{
@@ -6486,17 +6398,17 @@ func TestPrecomputeStakeRewardsAsyncPathMatchesSingleTransactionPath(
 		},
 	))
 	lsSplit.rewardPrecomputeWG.Wait()
-	splitPoolOutputs, err := metaSplit.GetRewardPoolOutputs(
+	splitPoolOutputs, err := seedDB(t, dbSplit).GetRewardPoolOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
 	require.NoError(t, err)
-	splitAccountOutputs, err := metaSplit.GetRewardAccountOutputs(
+	splitAccountOutputs, err := seedDB(t, dbSplit).GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
 		nil,
 	)
 	require.NoError(t, err)
-	splitPots, err := metaSplit.GetRewardAdaPots(potsEpoch, nil)
+	splitPots, err := seedDB(t, dbSplit).GetRewardAdaPots(potsEpoch, nil)
 	require.NoError(t, err)
 
 	require.NotEmpty(t, refPoolOutputs)
@@ -6552,9 +6464,9 @@ func rewardCalcNormalizeAccountOutputs(
 // TestStakeRewardPrecomputeSnapshotGuardOK exercises the guard that protects
 // the write phase of the split async precompute
 // (precomputeStakeRewardsAfterEpochTransition) from persisting a computed
-// stakeRewardApplication whose reward_snapshot row has moved since the
+// epochengine.StakeRewardApplication whose reward_snapshot row has moved since the
 // read-only calculation ran. It runs the real read phase
-// (precomputeStakeRewardsCalculate) to obtain an app the same way the
+// (PrecomputeStakeRewardsCalculate) to obtain an app the same way the
 // production code does, then simulates the world changing between the read
 // and write phases (a rollback replacing or removing the mark snapshot) and
 // checks that the guard rejects the stale app -- so a caller honoring it
@@ -6574,12 +6486,12 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 		t *testing.T,
 		ls *LedgerState,
 		db *database.Database,
-	) *stakeRewardApplication {
+	) *epochengine.StakeRewardApplication {
 		t.Helper()
-		var app *stakeRewardApplication
+		var app *epochengine.StakeRewardApplication
 		readTxn := db.Transaction(context.Background(), false)
 		require.NoError(t, readTxn.Do(func(txn *database.Txn) error {
-			computed, ok, err := ls.precomputeStakeRewardsCalculate(
+			computed, ok, err := ls.engine().PrecomputeStakeRewardsCalculate(
 				txn,
 				newEpoch,
 				capturedSlot,
@@ -6598,22 +6510,21 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 		"matching snapshot passes and is safe to persist",
 		func(t *testing.T) {
 			ls, db := seedRewardPrecomputeTimingState(t, 7)
-			meta := db.Metadata()
 			app := calculate(t, ls, db)
-			require.Equal(t, uint64(100), app.snapshotCapturedSlot)
-			require.Equal(t, uint64(100), app.snapshotBoundarySlot)
+			require.Equal(t, uint64(100), app.SnapshotCapturedSlot)
+			require.Equal(t, uint64(100), app.SnapshotBoundarySlot)
 
 			writeTxn := db.Transaction(context.Background(), true)
 			require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-				ok, err := stakeRewardPrecomputeSnapshotGuardOK(
-					dbadapter.New(db),
+				ok, err := epochengine.StakeRewardPrecomputeSnapshotGuardOK(
+					ls.ledgerDB(),
 					txn,
 					app,
 				)
 				require.NoError(t, err)
 				require.True(t, ok)
-				return ls.saveStakeRewardPrecompute(
-					dbadapter.New(db),
+				return ls.engine().SaveStakeRewardPrecompute(
+					ls.ledgerDB(),
 					txn,
 					app,
 					newEpoch,
@@ -6622,13 +6533,13 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 				)
 			}))
 
-			poolOutputs, err := meta.GetRewardPoolOutputs(
+			poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(
 				rewardSnapshotEpoch,
 				nil,
 			)
 			require.NoError(t, err)
 			require.Len(t, poolOutputs, 1)
-			accountOutputs, err := meta.GetRewardAccountOutputs(
+			accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 				rewardSnapshotEpoch,
 				nil,
 			)
@@ -6641,14 +6552,13 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 		"snapshot replaced between read and write is dropped",
 		func(t *testing.T) {
 			ls, db := seedRewardPrecomputeTimingState(t, 7)
-			meta := db.Metadata()
 			app := calculate(t, ls, db)
 
 			// Simulate the world moving on between the read and write phases: a
 			// rollback replaces the mark snapshot for the same epoch with
 			// different captured/boundary slots (e.g. it was recaptured at a
 			// different point after a reorg).
-			require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+			require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 				Epoch:            rewardSnapshotEpoch,
 				SnapshotType:     "mark",
 				TotalActiveStake: 1_000,
@@ -6661,8 +6571,8 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 
 			writeTxn := db.Transaction(context.Background(), true)
 			require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-				ok, err := stakeRewardPrecomputeSnapshotGuardOK(
-					dbadapter.New(db),
+				ok, err := epochengine.StakeRewardPrecomputeSnapshotGuardOK(
+					ls.ledgerDB(),
 					txn,
 					app,
 				)
@@ -6671,13 +6581,13 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 				return nil
 			}))
 
-			poolOutputs, err := meta.GetRewardPoolOutputs(
+			poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(
 				rewardSnapshotEpoch,
 				nil,
 			)
 			require.NoError(t, err)
 			require.Empty(t, poolOutputs)
-			accountOutputs, err := meta.GetRewardAccountOutputs(
+			accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(
 				rewardSnapshotEpoch,
 				nil,
 			)
@@ -6689,17 +6599,24 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 	t.Run(
 		"snapshot removed between read and write is dropped",
 		func(t *testing.T) {
-			ls, db := seedRewardPrecomputeTimingState(t, 7)
-			meta := db.Metadata()
+			ls, db := newRewardCalculationTestLedger(t)
+			fxTip(t, ls, fxPoint(50))
+			seedRewardPrecomputeTimingInputs(t, db, 7)
 			app := calculate(t, ls, db)
 
-			// Simulate a rollback deleting the snapshot outright.
-			require.NoError(t, meta.DeleteRewardStateAfterSlot(0, nil))
+			// A rollback below the slot the snapshot was captured at
+			// removes it outright.
+			fxRollback(t, ls, fxPoint(50))
+			snapshot, err := seedDB(t, db).GetRewardSnapshot(
+				rewardSnapshotEpoch, "mark", nil,
+			)
+			require.NoError(t, err)
+			require.Nil(t, snapshot)
 
 			writeTxn := db.Transaction(context.Background(), true)
 			require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-				ok, err := stakeRewardPrecomputeSnapshotGuardOK(
-					dbadapter.New(db),
+				ok, err := epochengine.StakeRewardPrecomputeSnapshotGuardOK(
+					ls.ledgerDB(),
 					txn,
 					app,
 				)
@@ -6708,7 +6625,7 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 				return nil
 			}))
 
-			poolOutputs, err := meta.GetRewardPoolOutputs(
+			poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(
 				rewardSnapshotEpoch,
 				nil,
 			)
@@ -6730,8 +6647,8 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 
 			writeTxn := db.Transaction(context.Background(), true)
 			require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-				ok, err := stakeRewardPrecomputeSnapshotGuardOK(
-					dbadapter.New(db),
+				ok, err := epochengine.StakeRewardPrecomputeSnapshotGuardOK(
+					ls.ledgerDB(),
 					txn,
 					app,
 				)
@@ -6747,7 +6664,7 @@ func TestRewardPrefilterAccountsSkipsHistoryWhenNotRequired(t *testing.T) {
 	t.Parallel()
 
 	activeAccounts := map[string]struct{}{"active": {}}
-	accounts, err := rewardPrefilterAccounts(
+	accounts, err := epochengine.RewardPrefilterAccounts(
 		rewardAccountHistoryMustNotRun{},
 		nil,
 		nil,
@@ -6789,12 +6706,11 @@ func TestStakeRewardPrecomputeSnapshotGuardRejectsSameSlotContentChange(
 	)
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	meta := db.Metadata()
 
-	var app *stakeRewardApplication
+	var app *epochengine.StakeRewardApplication
 	readTxn := db.Transaction(context.Background(), false)
 	require.NoError(t, readTxn.Do(func(txn *database.Txn) error {
-		computed, ok, err := ls.precomputeStakeRewardsCalculate(
+		computed, ok, err := ls.engine().PrecomputeStakeRewardsCalculate(
 			txn,
 			newEpoch,
 			capturedSlot,
@@ -6806,14 +6722,14 @@ func TestStakeRewardPrecomputeSnapshotGuardRejectsSameSlotContentChange(
 		return nil
 	}))
 	require.NotNil(t, app)
-	require.Equal(t, uint64(100), app.snapshotCapturedSlot)
-	require.Equal(t, uint64(100), app.snapshotBoundarySlot)
+	require.Equal(t, uint64(100), app.SnapshotCapturedSlot)
+	require.Equal(t, uint64(100), app.SnapshotBoundarySlot)
 
 	// Re-save the mark snapshot with identical captured/boundary slots but a
 	// different active-stake total and epoch nonce, mimicking a rollback that
 	// re-derived the same-slot snapshot with different content. A slot-only
 	// guard would accept this and persist the stale precomputed rewards.
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 2_000,
@@ -6824,7 +6740,7 @@ func TestStakeRewardPrecomputeSnapshotGuardRejectsSameSlotContentChange(
 		EpochNonce:       []byte{0xAB, 0xCD},
 		ProtocolVersion:  7,
 	}, nil))
-	changedSnapshot, err := meta.GetRewardSnapshot(
+	changedSnapshot, err := seedDB(t, db).GetRewardSnapshot(
 		rewardSnapshotEpoch,
 		"mark",
 		nil,
@@ -6836,8 +6752,8 @@ func TestStakeRewardPrecomputeSnapshotGuardRejectsSameSlotContentChange(
 
 	writeTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-		ok, err := stakeRewardPrecomputeSnapshotGuardOK(
-			dbadapter.New(db),
+		ok, err := epochengine.StakeRewardPrecomputeSnapshotGuardOK(
+			ls.ledgerDB(),
 			txn,
 			app,
 		)
@@ -6846,7 +6762,7 @@ func TestStakeRewardPrecomputeSnapshotGuardRejectsSameSlotContentChange(
 		return nil
 	}))
 
-	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Empty(t, poolOutputs)
 }
@@ -6893,6 +6809,57 @@ func newRewardCalculationTestLedger(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	return ls, db
+}
+
+// newLoadedRewardCalculationTestLedger is newRewardCalculationTestLedger over
+// a database that load fills through its LedgerDB set, which the seeding
+// helpers open.
+func newLoadedRewardCalculationTestLedger(
+	t testing.TB,
+	load func(db *database.Database),
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	return newRewardCalculationTestLedgerOn(t, db, load)
+}
+
+// newReleasedRewardCalculationTestLedger is newRewardCalculationTestLedger
+// over the ledger's database of a data directory whose v0.94.2 metadata store
+// load fills, after that state moved into the LedgerDB set.
+func newReleasedRewardCalculationTestLedger(
+	t testing.TB,
+	load func(db *database.Database),
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	db := fxReleasedLedgerDB(t, t.TempDir(), load)
+	return newRewardCalculationTestLedgerOn(
+		t, db, func(*database.Database) {},
+	)
+}
+
+func newRewardCalculationTestLedgerOn(
+	t testing.TB,
+	db *database.Database,
+	load func(db *database.Database),
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	cfg := newRewardCalculationTestNodeConfig(t)
+	load(db)
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	fxAttachLedgerDB(t, ls)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	return ls, db
 }
@@ -6904,15 +6871,14 @@ func seedEmptyRewardBasisForRollover(
 	pparams lcommon.ProtocolParameters,
 ) {
 	t.Helper()
-	epochs, ok := stakeRewardEpochsForApplication(currentEpoch.EpochId + 1)
+	epochs, ok := epochengine.StakeRewardEpochsForApplication(currentEpoch.EpochId + 1)
 	require.True(t, ok)
-	meta := db.Metadata()
 	for _, epochID := range []uint64{
-		epochs.snapshot,
-		epochs.performance,
-		epochs.pots,
+		epochs.Snapshot,
+		epochs.Performance,
+		epochs.Pots,
 	} {
-		epoch, err := meta.GetEpoch(epochID, nil)
+		epoch, err := seedDB(t, db).GetEpoch(epochID, nil)
 		require.NoError(t, err)
 		if epoch != nil {
 			continue
@@ -6920,7 +6886,7 @@ func seedEmptyRewardBasisForRollover(
 		delta := currentEpoch.EpochId - epochID
 		startSlot := currentEpoch.StartSlot -
 			delta*uint64(currentEpoch.LengthInSlots)
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			startSlot,
 			epochID,
 			nil, nil, nil, nil,
@@ -6932,32 +6898,32 @@ func seedEmptyRewardBasisForRollover(
 	}
 	encoded, err := cbor.Encode(pparams)
 	require.NoError(t, err)
-	performanceEpoch, err := meta.GetEpoch(epochs.performance, nil)
+	performanceEpoch, err := seedDB(t, db).GetEpoch(epochs.Performance, nil)
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		encoded,
 		performanceEpoch.StartSlot,
-		epochs.performance,
+		epochs.Performance,
 		currentEpoch.EraId,
 		nil,
 	))
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	var treasury, reserves types.Uint64
 	if state != nil {
 		treasury = state.Treasury
 		reserves = state.Reserves
 	}
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
-		Epoch:        epochs.pots,
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        epochs.Pots,
 		Treasury:     treasury,
 		Reserves:     reserves,
 		CapturedSlot: currentEpoch.StartSlot,
 	}, nil))
-	require.NoError(t, meta.DeleteRewardInputsForEpoch(epochs.snapshot, nil))
-	require.NoError(t, meta.DeleteRewardOutputsForEpoch(epochs.snapshot, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
-		Epoch:        epochs.snapshot,
+	require.NoError(t, seedDB(t, db).DeleteRewardInputsForEpoch(epochs.Snapshot, nil))
+	require.NoError(t, seedDB(t, db).DeleteRewardOutputsForEpoch(epochs.Snapshot, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:        epochs.Snapshot,
 		SnapshotType: "mark",
 		CapturedSlot: currentEpoch.StartSlot,
 		BoundarySlot: currentEpoch.StartSlot,
@@ -7002,7 +6968,6 @@ func seedRewardPrecomputeTimingInputs(
 	protocolMajor uint,
 ) {
 	t.Helper()
-	meta := db.Metadata()
 
 	const (
 		rewardSnapshotEpoch = uint64(1)
@@ -7027,7 +6992,7 @@ func seedRewardPrecomputeTimingInputs(
 	pparamsCbor, err := cbor.Encode(pparams)
 	require.NoError(t, err)
 
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		100,
 		performanceEpoch,
 		nil,
@@ -7039,7 +7004,7 @@ func seedRewardPrecomputeTimingInputs(
 		100,
 		nil,
 	))
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		200,
 		potsEpoch,
 		nil,
@@ -7052,7 +7017,7 @@ func seedRewardPrecomputeTimingInputs(
 		nil,
 	))
 	for i := range uint64(10) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(
+		require.NoError(t, fxMintBlock(t, db,
 			context.Background(),
 			poolID,
 			i+1,
@@ -7060,19 +7025,19 @@ func seedRewardPrecomputeTimingInputs(
 			nil,
 		))
 	}
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor,
 		100,
 		performanceEpoch,
 		eras.ShelleyEraDesc.Id,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
 		CapturedSlot: 200,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -7082,7 +7047,7 @@ func seedRewardPrecomputeTimingInputs(
 		BoundarySlot:     100,
 		ProtocolVersion:  protocolMajor,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{
 		{
 			Epoch:                      rewardSnapshotEpoch,
 			PoolKeyHash:                poolKey,
@@ -7098,7 +7063,7 @@ func seedRewardPrecomputeTimingInputs(
 			BoundarySlot:               100,
 		},
 	}, nil))
-	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
@@ -7123,14 +7088,14 @@ func seedRewardPrecomputeTimingInputs(
 	}, nil))
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: rewardAccount,
 			Active:     true,
 		}),
 	)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: member,
 			Active:     true,
 		}),
@@ -7198,15 +7163,7 @@ func rewardCalcSetAccountActiveByCredential(
 	active bool,
 ) {
 	t.Helper()
-	rows := rewardCalcExecRows(
-		t,
-		db,
-		"UPDATE account SET active = ? WHERE credential_tag = ? AND staking_key = ?",
-		active,
-		credentialTag,
-		stakingKey,
-	)
-	require.Equal(t, int64(1), rows)
+	fxSetAccountActive(t, db, credentialTag, stakingKey, active)
 }
 
 func rewardCalcSeedStakeCert(
@@ -7219,42 +7176,11 @@ func rewardCalcSeedStakeCert(
 	certType uint,
 ) {
 	t.Helper()
-	raw := rewardCalcSQLDB(t, db)
-	hash := make([]byte, 32)
-	binary.BigEndian.PutUint64(hash[24:], uint64(id))
-	txRes, err := testutil.ExecTransactionInsert(raw,
-		`
-INSERT INTO "transaction" (hash, slot, block_index)
-VALUES (?, ?, 0)`,
-		hash, slot,
-	)
-	require.NoError(t, err)
-	txID, err := txRes.LastInsertId()
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO certs (
-    id, transaction_id, cert_index, slot, cert_type
-) VALUES (?, ?, 0, ?, ?)`,
-		id, txID, slot, certType,
-	)
-	require.NoError(t, err)
 	switch certType {
 	case uint(lcommon.CertificateTypeStakeRegistration):
-		_, err = raw.Exec(`
-INSERT INTO stake_registration (
-    id, staking_key, credential_tag, certificate_id, added_slot
-) VALUES (?, ?, ?, ?, ?)`,
-			id, stakingKey, credentialTag, id, slot,
-		)
-		require.NoError(t, err)
+		fxStakeCert(t, db, id, credentialTag, stakingKey, slot, true)
 	case uint(lcommon.CertificateTypeStakeDeregistration):
-		_, err = raw.Exec(`
-INSERT INTO stake_deregistration (
-    id, staking_key, credential_tag, certificate_id, added_slot
-) VALUES (?, ?, ?, ?, ?)`,
-			id, stakingKey, credentialTag, id, slot,
-		)
-		require.NoError(t, err)
+		fxStakeCert(t, db, id, credentialTag, stakingKey, slot, false)
 	default:
 		t.Fatalf("unsupported cert type %d", certType)
 	}
@@ -7265,12 +7191,12 @@ INSERT INTO stake_deregistration (
 func TestMinPoolMarginRat(t *testing.T) {
 	t.Parallel()
 
-	require.Nil(t, minPoolMarginRat(0))
-	require.Zero(t, big.NewRat(150, 10_000).Cmp(minPoolMarginRat(150)))
-	require.Zero(t, big.NewRat(1, 1).Cmp(minPoolMarginRat(10_000)))
+	require.Nil(t, epochengine.MinPoolMarginRat(0))
+	require.Zero(t, big.NewRat(150, 10_000).Cmp(epochengine.MinPoolMarginRat(150)))
+	require.Zero(t, big.NewRat(1, 1).Cmp(epochengine.MinPoolMarginRat(10_000)))
 }
 
-// applyMinPoolMarginConfig sets the floor only when the value is nonzero AND the
+// epochengine.ApplyMinPoolMarginConfig sets the floor only when the value is nonzero AND the
 // calculation era is Dijkstra or later; otherwise it leaves the field nil.
 func TestApplyMinPoolMarginConfig(t *testing.T) {
 	t.Parallel()
@@ -7299,9 +7225,9 @@ func TestApplyMinPoolMarginConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			params := rewards.Parameters{ProtocolMajorVersion: 9}
-			applyMinPoolMarginConfig(
+			epochengine.ApplyMinPoolMarginConfig(
 				&params,
-				LedgerStateConfig{MinPoolMargin: tt.bp},
+				epochengine.Config{MinPoolMargin: tt.bp},
 				tt.eraID,
 			)
 			if tt.wantRat == nil {
@@ -7401,7 +7327,7 @@ func TestPrecomputedRewardPoolRewardsMatchInputsFullPot(t *testing.T) {
 	require.NoError(t, err)
 
 	check := func(p rewards.Parameters, outs []*models.RewardPoolOutput) bool {
-		ok, err := precomputedRewardPoolRewardsMatchInputs(
+		ok, err := epochengine.PrecomputedRewardPoolRewardsMatchInputs(
 			poolInputs,
 			outs,
 			blockCounts,
@@ -7522,12 +7448,12 @@ func TestRewardCalculatorInputsAllowExcludedPoolStake(t *testing.T) {
 	}
 
 	// 40 lovelace of the boundary's active stake belongs to an excluded pool.
-	require.NoError(t, validateRewardCalculatorInputs(
+	require.NoError(t, epochengine.ValidateRewardCalculatorInputs(
 		snapshot(140),
 		poolInputs,
 		stakeInputs,
 	))
-	match, err := precomputedRewardPoolInputsMatchSnapshot(
+	match, err := epochengine.PrecomputedRewardPoolInputsMatchSnapshot(
 		snapshot(140),
 		poolInputs,
 	)
@@ -7536,7 +7462,7 @@ func TestRewardCalculatorInputsAllowExcludedPoolStake(t *testing.T) {
 
 	// Rows summing to more than the declared active stake still fail: the row
 	// set and the snapshot then describe different boundaries.
-	err = validateRewardCalculatorInputs(
+	err = epochengine.ValidateRewardCalculatorInputs(
 		snapshot(99),
 		poolInputs,
 		stakeInputs,
@@ -7546,7 +7472,7 @@ func TestRewardCalculatorInputsAllowExcludedPoolStake(t *testing.T) {
 		err,
 		"reward pool input total delegated stake 100 exceeds snapshot active stake 99",
 	)
-	match, err = precomputedRewardPoolInputsMatchSnapshot(
+	match, err = epochengine.PrecomputedRewardPoolInputsMatchSnapshot(
 		snapshot(99),
 		poolInputs,
 	)
@@ -7610,12 +7536,12 @@ func TestRewardCalculatorInputsExactWithTrackedExcludedStake(t *testing.T) {
 
 	// 100 (rows) + 40 (tracked excluded) == 140 (declared total): exact match
 	// passes, matching the one-legitimately-excluded-pool case.
-	require.NoError(t, validateRewardCalculatorInputs(
+	require.NoError(t, epochengine.ValidateRewardCalculatorInputs(
 		snapshot(140, 40),
 		poolInputsWithStake(100),
 		stakeInputsWithStake(100),
 	))
-	match, err := precomputedRewardPoolInputsMatchSnapshot(
+	match, err := epochengine.PrecomputedRewardPoolInputsMatchSnapshot(
 		snapshot(140, 40),
 		poolInputsWithStake(100),
 	)
@@ -7626,7 +7552,7 @@ func TestRewardCalculatorInputsExactWithTrackedExcludedStake(t *testing.T) {
 	// shrunk to 50 instead of 100 -- as if every pool's stake had been halved.
 	// 50+40=90 != 140, so this must now be rejected even though 50 <= 140
 	// would have passed the old non-exceeding bound silently.
-	err = validateRewardCalculatorInputs(
+	err = epochengine.ValidateRewardCalculatorInputs(
 		snapshot(140, 40),
 		poolInputsWithStake(50),
 		stakeInputsWithStake(50),
@@ -7636,7 +7562,7 @@ func TestRewardCalculatorInputsExactWithTrackedExcludedStake(t *testing.T) {
 		err,
 		"reward pool input total delegated stake 50 does not match snapshot active stake 140 minus excluded active stake 40",
 	)
-	match, err = precomputedRewardPoolInputsMatchSnapshot(
+	match, err = epochengine.PrecomputedRewardPoolInputsMatchSnapshot(
 		snapshot(140, 40),
 		poolInputsWithStake(50),
 	)
@@ -7646,7 +7572,7 @@ func TestRewardCalculatorInputsExactWithTrackedExcludedStake(t *testing.T) {
 	// A tracked exclusion of exactly zero still demands an exact match: no
 	// slack remains once the snapshot affirmatively says nothing was
 	// excluded.
-	err = validateRewardCalculatorInputs(
+	err = epochengine.ValidateRewardCalculatorInputs(
 		snapshot(140, 0),
 		poolInputsWithStake(100),
 		stakeInputsWithStake(100),
@@ -7665,8 +7591,8 @@ func TestRewardCalculatorInputsExactWithTrackedExcludedStake(t *testing.T) {
 // sum to no more than the declared active stake. TotalDelegators has no
 // equivalent slack — unlike TotalActiveStake, the reward_pool_input rows are
 // the only source of delegator counts, so the total must match exactly
-// (validateRewardCalculatorInputs, reward_calculation.go; and
-// precomputedRewardPoolInputsMatchSnapshot). This pins that a mismatch in
+// (epochengine.ValidateRewardCalculatorInputs, reward_calculation.go; and
+// epochengine.PrecomputedRewardPoolInputsMatchSnapshot). This pins that a mismatch in
 // either direction is rejected rather than silently tolerated the way
 // TotalActiveStake's exclusion slack might suggest.
 func TestRewardCalculatorInputsRejectsDelegatorCountMismatch(t *testing.T) {
@@ -7708,12 +7634,12 @@ func TestRewardCalculatorInputsRejectsDelegatorCountMismatch(t *testing.T) {
 	}
 
 	// Matching delegator count passes.
-	require.NoError(t, validateRewardCalculatorInputs(
+	require.NoError(t, epochengine.ValidateRewardCalculatorInputs(
 		snapshot(1),
 		poolInputs,
 		stakeInputs,
 	))
-	match, err := precomputedRewardPoolInputsMatchSnapshot(
+	match, err := epochengine.PrecomputedRewardPoolInputsMatchSnapshot(
 		snapshot(1),
 		poolInputs,
 	)
@@ -7721,7 +7647,7 @@ func TestRewardCalculatorInputsRejectsDelegatorCountMismatch(t *testing.T) {
 	require.True(t, match)
 
 	// Snapshot claims more delegators than the rows carry.
-	err = validateRewardCalculatorInputs(
+	err = epochengine.ValidateRewardCalculatorInputs(
 		snapshot(2),
 		poolInputs,
 		stakeInputs,
@@ -7731,7 +7657,7 @@ func TestRewardCalculatorInputsRejectsDelegatorCountMismatch(t *testing.T) {
 		err,
 		"reward pool input total delegator count 1 does not match snapshot delegator count 2",
 	)
-	match, err = precomputedRewardPoolInputsMatchSnapshot(
+	match, err = epochengine.PrecomputedRewardPoolInputsMatchSnapshot(
 		snapshot(2),
 		poolInputs,
 	)
@@ -7739,7 +7665,7 @@ func TestRewardCalculatorInputsRejectsDelegatorCountMismatch(t *testing.T) {
 	require.False(t, match)
 
 	// Snapshot claims fewer delegators than the rows carry.
-	err = validateRewardCalculatorInputs(
+	err = epochengine.ValidateRewardCalculatorInputs(
 		snapshot(0),
 		poolInputs,
 		stakeInputs,
@@ -7749,7 +7675,7 @@ func TestRewardCalculatorInputsRejectsDelegatorCountMismatch(t *testing.T) {
 		err,
 		"reward pool input total delegator count 1 does not match snapshot delegator count 0",
 	)
-	match, err = precomputedRewardPoolInputsMatchSnapshot(
+	match, err = epochengine.PrecomputedRewardPoolInputsMatchSnapshot(
 		snapshot(0),
 		poolInputs,
 	)
@@ -7761,12 +7687,11 @@ func TestRewardCalculatorInputsRejectsDelegatorCountMismatch(t *testing.T) {
 // account rows, so a test can read account.Reward as the balance.
 func settleRewardCredits(t *testing.T, ls *LedgerState) {
 	t.Helper()
-	meta := ls.db.Metadata()
-	rounds, err := meta.GetPendingRewardCreditRounds(nil)
+	rounds, err := seedDB(t, ls.db).GetPendingRewardCreditRounds(nil)
 	require.NoError(t, err)
 	credited := make(map[string]models.StakeCredentialRef)
 	for _, round := range rounds {
-		outputs, err := meta.GetRewardAccountOutputs(round.SnapshotEpoch, nil)
+		outputs, err := seedDB(t, ls.db).GetRewardAccountOutputs(round.SnapshotEpoch, nil)
 		require.NoError(t, err)
 		for _, output := range outputs {
 			if output.Spendable && !output.Guarded {
@@ -7794,15 +7719,15 @@ func epochBoundaryBenchPartialPrecomputeT(
 ) {
 	b.Helper()
 	evt := epochBoundaryBenchPrecomputeEvent()
-	round, ok, err := f.ls.resolveStakeRewardPrecomputeRound(
+	round, ok, err := f.ls.engine().ResolveStakeRewardPrecomputeRound(
 		evt.NewEpoch+1,
 		evt.BoundarySlot,
 		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch+1),
 	)
 	require.NoError(b, err)
 	require.True(b, ok)
-	chunks := (len(round.poolInputs) + f.ls.rewardPrecomputeChunkSize() - 1) /
-		f.ls.rewardPrecomputeChunkSize()
+	chunks := (len(round.PoolInputs) + f.ls.engine().RewardPrecomputeChunkSize() - 1) /
+		f.ls.engine().RewardPrecomputeChunkSize()
 	for range chunks / 2 {
 		done, err := f.ls.stakeRewardPrecomputeChunkStep(round)
 		require.NoError(b, err)
@@ -7813,7 +7738,6 @@ func epochBoundaryBenchPartialPrecomputeT(
 func (ls *LedgerState) waitEpochBoundaryBenchBackground() {
 	_ = ls.WaitEpochBoundaryJob(context.Background())
 	ls.ratificationWG.Wait()
-	ls.deferredStakeInputsWG.Wait()
 	ls.rewardCreditCompactionWG.Wait()
 }
 
@@ -7989,19 +7913,25 @@ func newEpochBoundaryBenchFixture(
 			dataDir, os.DirFS(filepath.Join(template, "data")),
 		))
 	}
-	db, err := dbtest.NewDatabase(tb, &database.Config{DataDir: dataDir})
-	require.NoError(tb, err)
-	tb.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	f := &epochBoundaryBenchFixture{
-		db:      db,
 		shape:   shape,
 		pparams: epochBoundaryBenchPParams(),
 		epochs:  epochBoundaryBenchEpochs(),
 		phases:  &epochBoundaryPhaseRecorder{},
 	}
-	if templateDir == "" {
-		f.seed(tb)
-	}
+	f.db = fxReleasedLedgerDB(tb, dataDir, func(released *database.Database) {
+		if templateDir == "" {
+			f.db = released
+			f.seed(tb)
+		}
+		fxStoreUtxoRowBodies(tb, released)
+	})
+	closing := f.db
+	tb.Cleanup(func() {
+		db := closing
+		closing = nil
+		_ = dbtest.CloseDatabase(db)
+	})
 	f.wire(tb)
 	return f
 }
@@ -8023,7 +7953,9 @@ func epochBoundaryBenchTemplate(
 	dataDir := filepath.Join(dir, "data")
 	require.NoError(tb, os.RemoveAll(dataDir))
 	require.NoError(tb, os.MkdirAll(dataDir, 0o755))
-	db, err := dbtest.NewDatabase(tb, &database.Config{DataDir: dataDir})
+	db, err := dbtest.NewReleasedDatabase(
+		tb, &database.Config{DataDir: dataDir},
+	)
 	require.NoError(tb, err)
 	f := &epochBoundaryBenchFixture{
 		db:      db,
@@ -8036,6 +7968,9 @@ func epochBoundaryBenchTemplate(
 	require.NoError(tb, os.WriteFile(ready, []byte(want), 0o644))
 }
 
+// seed writes the fixture's ledger state into a v0.94.2 database's metadata
+// store, which the migration moves into the set: the row volume seedBulk
+// writes has no set writer.
 func (f *epochBoundaryBenchFixture) seed(tb testing.TB) {
 	tb.Helper()
 	start := time.Now()
@@ -8047,6 +7982,53 @@ func (f *epochBoundaryBenchFixture) seed(tb testing.TB) {
 		"seeded: bulk %.1fs, governance %.1fs",
 		bulk.Sub(start).Seconds(), time.Since(bulk).Seconds(),
 	)
+}
+
+// fxStoreUtxoRowBodies gives every live UTxO row of db's metadata store a
+// Shelley output paying the row's amount to its staking key, the body the
+// set needs to take the row over.
+func fxStoreUtxoRowBodies(tb testing.TB, db *database.Database) {
+	tb.Helper()
+	var rows []models.Utxo
+	require.NoError(tb, db.IterateLiveUtxoRefs(
+		tb.Context(), nil, func(u *models.Utxo) error {
+			rows = append(rows, models.Utxo{
+				TxId:       bytes.Clone(u.TxId),
+				OutputIdx:  u.OutputIdx,
+				StakingKey: bytes.Clone(u.StakingKey),
+				Amount:     u.Amount,
+			})
+			return nil
+		},
+	))
+	require.NoError(tb, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+		for _, r := range rows {
+			addrType := lcommon.AddressTypeKeyNone
+			if len(r.StakingKey) > 0 {
+				addrType = lcommon.AddressTypeKeyKey
+			}
+			addr, err := lcommon.NewAddressFromParts(
+				uint8(addrType), lcommon.AddressNetworkTestnet,
+				bytes.Repeat([]byte{0x37}, lcommon.AddressHashSize),
+				r.StakingKey,
+			)
+			if err != nil {
+				return err
+			}
+			encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+				OutputAddress: addr, OutputAmount: uint64(r.Amount),
+			})
+			if err != nil {
+				return err
+			}
+			if err := db.Blob().SetUtxo(
+				txn.Blob(), r.TxId, r.OutputIdx, encoded,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
 }
 
 func (f *epochBoundaryBenchFixture) wire(tb testing.TB) {
@@ -8062,8 +8044,9 @@ func (f *epochBoundaryBenchFixture) wire(tb testing.TB) {
 			Logger:            slog.New(f.phases),
 		},
 	}
+	fxAttachLedgerDB(tb, f.ls)
 	mgr := snapshot.NewManager(
-		dbadapter.New(db),
+		f.ls.ledgerDB(),
 		nil,
 		slog.New(slog.NewTextHandler(
 			io.Discard, nil,
@@ -8136,16 +8119,16 @@ func (f *epochBoundaryBenchFixture) seedEpochs(tb testing.TB) {
 	require.NoError(tb, err)
 	for epoch := uint64(0); epoch <= epochBoundaryBenchEndedEpoch; epoch++ {
 		e := f.epochs[epoch]
-		require.NoError(tb, f.db.SetEpoch(
+		require.NoError(tb, dbadapter.New(f.db).SetEpoch(
 			e.StartSlot, epoch, e.Nonce, e.EvolvingNonce, e.CandidateNonce,
 			e.LastEpochBlockNonce, e.EraId, e.SlotLength, e.LengthInSlots,
 			nil,
 		))
-		require.NoError(tb, f.db.SetPParams(
+		require.NoError(tb, dbadapter.New(f.db).SetPParams(
 			pparamsCbor, e.StartSlot, epoch, eras.ConwayEraDesc.Id, nil,
 		))
 	}
-	require.NoError(tb, f.db.Metadata().SetNetworkState(
+	require.NoError(tb, dbadapter.New(f.db).SetNetworkState(
 		epochBoundaryBenchTreasury,
 		epochBoundaryBenchReserves,
 		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch),
@@ -8442,15 +8425,15 @@ VALUES (?, ?, ?, ?, '0', ?)`,
 		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch),
 	)
 	require.NoError(tb, err)
-	_, err = tx.Exec(
-		`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
-		make([]byte, 32),
-		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch+1)-1,
-		10_000_000,
-	)
-	require.NoError(tb, err)
 	dbtest.RefreshPoolCurrentState(tb, tx)
 	require.NoError(tb, tx.Commit())
+	require.NoError(tb, f.db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch+1)-1,
+			make([]byte, 32),
+		),
+		BlockNumber: 10_000_000,
+	}, nil))
 }
 
 func (f *epochBoundaryBenchFixture) seedGovernance(tb testing.TB) {
@@ -8500,8 +8483,8 @@ VALUES (?, ?, ?, 1)`,
 			AddedSlot:    1,
 		})
 	}
-	require.NoError(tb, f.db.SetCommitteeMembers(context.Background(), members, nil))
-	require.NoError(tb, f.db.SetCommitteeQuorum(context.Background(), big.NewRat(2, 3), 1, nil))
+	require.NoError(tb, dbadapter.New(f.db).SetCommitteeMembers(context.Background(), members, nil))
+	require.NoError(tb, dbadapter.New(f.db).SetCommitteeQuorum(context.Background(), big.NewRat(2, 3), 1, nil))
 
 	for i := range shape.proposals {
 		returnKey := epochBoundaryBenchHash(0x30, uint64(i)*997+1)
@@ -8547,9 +8530,9 @@ VALUES (?, ?, ?, 1)`,
 				epochBoundaryBenchEndedEpoch,
 			) + 100,
 		}
-		require.NoError(tb, f.db.SetGovernanceProposal(context.Background(), proposal, nil))
+		require.NoError(tb, dbadapter.New(f.db).SetGovernanceProposal(context.Background(), proposal, nil))
 		vote := func(voterType uint8, cred []byte, choice uint8) {
-			require.NoError(tb, f.db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+			require.NoError(tb, dbadapter.New(f.db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 				ProposalID:      proposal.ID,
 				VoterType:       voterType,
 				VoterCredential: cred,
@@ -8646,106 +8629,11 @@ func epochBoundaryDumpShape() epochBoundaryBenchShape {
 	return shape
 }
 
-// dumpEpochBoundaryState renders every table an epoch boundary writes, in a
-// stable order and without surrogate keys, so the same boundary on two code
-// versions can be compared byte for byte.
-func dumpEpochBoundaryState(t *testing.T, raw *sql.DB) string {
-	t.Helper()
-	queries := []struct{ name, query string }{
-		{"account", `SELECT credential_tag, hex(staking_key), reward, active,
-    hex(pool), hex(drep), drep_type FROM account
-ORDER BY credential_tag, staking_key`},
-		{"account_reward_delta", `SELECT credential_tag, hex(staking_key),
-    hex(tx_hash), amount, previous_reward, added_slot, withdrawal,
-    post_snapshot FROM account_reward_delta
-ORDER BY credential_tag, staking_key, tx_hash, added_slot, withdrawal`},
-		{"reward_live_stake", `SELECT credential_tag, hex(staking_key),
-    hex(pool_key_hash), utxo_stake, reward_stake, total_stake, registered,
-    pool_delegation_slot, updated_slot, calculation_version
-FROM reward_live_stake ORDER BY credential_tag, staking_key`},
-		{"network_state", `SELECT slot, treasury, reserves FROM network_state
-ORDER BY slot`},
-		{"reward_ada_pots", `SELECT epoch, treasury, reserves, fees, rewards,
-    captured_slot FROM reward_ada_pots ORDER BY epoch`},
-		{"reward_pool_output", `SELECT epoch, hex(pool_key_hash),
-    apparent_performance, optimal_reward, total_reward, leader_reward,
-    member_reward_total, owner_stake, undistributed, unspendable,
-    boundary_slot FROM reward_pool_output ORDER BY epoch, pool_key_hash`},
-		{"reward_account_output", `SELECT epoch, credential_tag,
-    hex(staking_key), hex(pool_key_hash), reward_type, amount, spendable,
-    guarded, boundary_slot FROM reward_account_output
-ORDER BY epoch, credential_tag, staking_key, pool_key_hash, reward_type`},
-		{
-			"pool_stake_snapshot",
-			`SELECT epoch, snapshot_type, hex(pool_key_hash),
-    total_stake, delegator_count, captured_slot, calculation_version,
-    reward_account_auto_vote, reward_account_auto_vote_resolved
-FROM pool_stake_snapshot ORDER BY epoch, snapshot_type, pool_key_hash`,
-		},
-		{"reward_snapshot", `SELECT epoch, snapshot_type, total_active_stake,
-    total_pool_count, total_delegators, captured_slot, boundary_slot,
-    hex(epoch_nonce), protocol_version, authoritative, calculation_version,
-    excluded_active_stake FROM reward_snapshot
-ORDER BY epoch, snapshot_type`},
-		{"reward_pool_input", `SELECT epoch, hex(pool_key_hash), margin,
-    hex(reward_account), pledge, delegated_stake, owner_stake, cost,
-    delegator_count, captured_slot, boundary_slot FROM reward_pool_input
-ORDER BY epoch, pool_key_hash`},
-		{
-			"reward_stake_input",
-			`SELECT epoch, hex(pool_key_hash), credential_tag,
-    hex(staking_key), stake, owner, registered, captured_slot, boundary_slot
-FROM reward_stake_input
-ORDER BY epoch, pool_key_hash, credential_tag, staking_key`,
-		},
-		{"epoch_summary", `SELECT epoch, total_active_stake, total_pool_count,
-    total_delegators, hex(epoch_nonce), boundary_slot, snapshot_ready
-FROM epoch_summary ORDER BY epoch`},
-		{"governance_proposal", `SELECT hex(tx_hash), action_index,
-    enacted_epoch, enacted_slot, ratified_epoch, ratified_slot, expired_epoch,
-    expired_slot FROM governance_proposal ORDER BY tx_hash, action_index`},
-		{"drep", `SELECT credential_tag, hex(credential), active,
-    last_activity_epoch, expiry_epoch FROM drep
-ORDER BY credential_tag, credential`},
-		{"epoch", `SELECT epoch_id, start_slot, hex(nonce), hex(evolving_nonce),
-    hex(candidate_nonce), era_id FROM epoch ORDER BY epoch_id`},
-	}
-	var sb strings.Builder
-	for _, q := range queries {
-		rows, err := raw.Query(q.query)
-		require.NoError(t, err, q.name)
-		cols, err := rows.Columns()
-		require.NoError(t, err)
-		fmt.Fprintf(&sb, "== %s\n", q.name)
-		for rows.Next() {
-			values := make([]any, len(cols))
-			ptrs := make([]any, len(cols))
-			for i := range values {
-				ptrs[i] = &values[i]
-			}
-			require.NoError(t, rows.Scan(ptrs...))
-			for i, v := range values {
-				if b, ok := v.([]byte); ok {
-					v = string(b)
-				}
-				if i > 0 {
-					sb.WriteString("|")
-				}
-				fmt.Fprintf(&sb, "%v", v)
-			}
-			sb.WriteString("\n")
-		}
-		require.NoError(t, rows.Err())
-		require.NoError(t, rows.Close())
-	}
-	return sb.String()
-}
-
 // dumpDRepVotingPower renders every DRep's voting power as governance reads it
 // at the end of the boundary.
 func dumpDRepVotingPower(t *testing.T, f *epochBoundaryBenchFixture) string {
 	t.Helper()
-	dreps, err := f.db.GetActiveDreps(context.Background(), nil)
+	dreps, err := seedDB(t, f.db).GetActiveDreps(context.Background(), nil)
 	require.NoError(t, err)
 	refs := make([]models.StakeCredentialRef, 0, len(dreps))
 	for _, drep := range dreps {
@@ -8753,9 +8641,9 @@ func dumpDRepVotingPower(t *testing.T, f *epochBoundaryBenchFixture) string {
 			drep.CredentialTag, drep.Credential,
 		))
 	}
-	powers, err := f.db.GetDRepVotingPowerBatch(context.Background(), refs, 0, nil)
+	powers, err := seedDB(t, f.db).GetDRepVotingPowerBatch(context.Background(), refs, 0, nil)
 	require.NoError(t, err)
-	byType, err := f.db.GetDRepVotingPowerByType(context.Background(),
+	byType, err := seedDB(t, f.db).GetDRepVotingPowerByType(context.Background(),
 		[]uint64{
 			models.DrepTypeAlwaysAbstain, models.DrepTypeAlwaysNoConfidence,
 		}, 0, nil,
@@ -8772,32 +8660,6 @@ func dumpDRepVotingPower(t *testing.T, f *epochBoundaryBenchFixture) string {
 		byType[models.DrepTypeAlwaysNoConfidence],
 	))
 	return strings.Join(lines, "\n") + "\n"
-}
-
-// deregisterEpochBoundaryDelegators deregisters every step-th of the first
-// delegators delegators.
-func deregisterEpochBoundaryDelegators(
-	t *testing.T,
-	raw *sql.DB,
-	delegators, step int,
-) {
-	t.Helper()
-	for d := 0; d < delegators; d += step {
-		key := epochBoundaryBenchHash(0x30, uint64(d)+1)
-		slot := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch) + 1_000 +
-			uint64(d)
-		for _, stmt := range []string{
-			`UPDATE account SET active = 0, pool = NULL, added_slot = ?
-WHERE credential_tag = 0 AND staking_key = ?`,
-			`UPDATE reward_live_stake SET registered = 0, pool_key_hash = NULL,
-    updated_slot = ? WHERE credential_tag = 0 AND staking_key = ?`,
-			`INSERT INTO deregistration (added_slot, staking_key, credential_tag,
-    amount) VALUES (?, ?, 0, '2000000')`,
-		} {
-			_, err := raw.Exec(stmt, slot, key)
-			require.NoError(t, err)
-		}
-	}
 }
 
 func smallEpochBoundaryBenchShape() epochBoundaryBenchShape {
@@ -8823,18 +8685,18 @@ func TestEpochRolloverMarkSnapshotIncludesSameBoundaryRewards(t *testing.T) {
 	require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
 		epochBoundaryBenchPrecomputeEvent(),
 	))
-	before, err := f.db.Metadata().GetRewardStakeInputs(
+	before, err := seedDB(t, f.db).GetRewardStakeInputs(
 		epochBoundaryBenchEndedEpoch, nil,
 	)
 	require.NoError(t, err)
-	outputs, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
+	outputs, err := seedDB(t, f.db).GetRewardAccountOutputs(8, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, outputs)
 
 	f.rollover(t)
 	f.ls.waitEpochBoundaryBenchBackground()
 
-	after, err := f.db.Metadata().GetRewardStakeInputs(
+	after, err := seedDB(t, f.db).GetRewardStakeInputs(
 		epochBoundaryBenchEndedEpoch+1, nil,
 	)
 	require.NoError(t, err)
@@ -8874,16 +8736,17 @@ func TestBoundaryRechecksRegistrationChangedAfterPrecompute(t *testing.T) {
 			epochBoundaryBenchPrecomputeEvent(),
 		))
 		if deregister {
-			raw, err := dbtest.RawSQLiteMetadata(t, f.db)
-			require.NoError(t, err)
-			deregisterEpochBoundaryDelegators(
-				t, raw, shape.delegators, deregisterStep,
-			)
-			require.NoError(t, raw.Close())
+			for d := 0; d < shape.delegators; d += deregisterStep {
+				fxDeregisterStake(
+					t, f.db, epochBoundaryBenchHash(0x30, uint64(d)+1),
+					epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch)+
+						1_000+uint64(d),
+				)
+			}
 		}
 		f.rollover(t)
 		f.ls.waitEpochBoundaryBenchBackground()
-		state, err := f.db.Metadata().GetNetworkState(nil)
+		state, err := seedDB(t, f.db).GetNetworkState(nil)
 		require.NoError(t, err)
 		return f, uint64(state.Treasury)
 	}
@@ -8894,7 +8757,7 @@ func TestBoundaryRechecksRegistrationChangedAfterPrecompute(t *testing.T) {
 	for d := 0; d < shape.delegators; d += deregisterStep {
 		deregistered[string(epochBoundaryBenchHash(0x30, uint64(d)+1))] = true
 	}
-	outputs, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
+	outputs, err := seedDB(t, f.db).GetRewardAccountOutputs(8, nil)
 	require.NoError(t, err)
 	var moved uint64
 	for _, output := range outputs {
@@ -8909,7 +8772,7 @@ func TestBoundaryRechecksRegistrationChangedAfterPrecompute(t *testing.T) {
 	}
 	require.NotZero(t, moved, "fixture must deregister a rewarded delegator")
 	for key := range deregistered {
-		account, err := f.db.GetAccountByCredential(context.Background(), 0, []byte(key), true, nil)
+		account, err := seedDB(t, f.db).GetAccountByCredential(context.Background(), 0, []byte(key), true, nil)
 		require.NoError(t, err)
 		require.Equal(
 			t, stakeRewardSeedReward(key), uint64(account.Reward),
@@ -8933,7 +8796,6 @@ func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	seedEligiblePreviewGoRewardBasis(t, db)
 
 	currentParams := mithrilRewardConwayPParams()
 	previousParams := *currentParams
@@ -8945,7 +8807,7 @@ func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
 
 	eraBounds := make([]ledgerstate.EraBound, ledgerstate.EraConway+1)
 	nonce := make([]byte, 32)
-	require.NoError(t, importLedgerStateForTest(
+	require.NoError(t, fxImportLedgerState(
 		t, ls,
 		ledgerstate.ImportConfig{
 			Database: db,
@@ -8973,7 +8835,10 @@ func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
 			},
 		},
 	))
-	require.NoError(t, db.Metadata().SaveRewardAdaPots(
+	// The import replaces the set, so the reward basis the node captured
+	// goes in after it.
+	seedEligiblePreviewGoRewardBasis(t, db)
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(
 		&models.RewardAdaPots{
 			Epoch:        1397,
 			Reserves:     100_000_000,
@@ -8981,17 +8846,17 @@ func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
 		},
 		nil,
 	))
-	prefilterSlot, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 1397)
+	prefilterSlot, err := ls.engine().RewardPrefilterSlot(ls.ledgerDB(), nil, 1397)
 	require.NoError(t, err)
 	require.LessOrEqual(t, prefilterSlot, uint64(1_397_799))
 
-	epochs, ok := stakeRewardEpochsForNewEpoch(1398)
+	epochs, ok := epochengine.StakeRewardEpochsForNewEpoch(1398)
 	require.True(t, ok)
-	require.Equal(t, uint64(1395), epochs.snapshot)
-	require.Equal(t, uint64(1396), epochs.performance)
-	require.Equal(t, uint64(1397), epochs.pots)
+	require.Equal(t, uint64(1395), epochs.Snapshot)
+	require.Equal(t, uint64(1396), epochs.Performance)
+	require.Equal(t, uint64(1397), epochs.Pots)
 
-	currentEpoch, err := db.Metadata().GetEpoch(1397, nil)
+	currentEpoch, err := seedDB(t, db).GetEpoch(1397, nil)
 	require.NoError(t, err)
 	require.NotNil(t, currentEpoch)
 	ls.currentEpoch = *currentEpoch
@@ -9012,11 +8877,11 @@ func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
 	}))
 	require.NotNil(t, rollover)
 	require.Equal(t, uint64(1398), rollover.NewCurrentEpoch.EpochId)
-	poolOutputs, err := db.Metadata().GetRewardPoolOutputs(1395, nil)
+	poolOutputs, err := seedDB(t, db).GetRewardPoolOutputs(1395, nil)
 	require.NoError(t, err)
 	require.Len(t, poolOutputs, 1)
 	require.Positive(t, uint64(poolOutputs[0].TotalReward))
-	accountOutputs, err := db.Metadata().GetRewardAccountOutputs(1395, nil)
+	accountOutputs, err := seedDB(t, db).GetRewardAccountOutputs(1395, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, accountOutputs)
 	var credited uint64
@@ -9043,15 +8908,14 @@ func seedEligiblePreviewGoRewardBasis(
 	copy(poolID[:], poolKey)
 
 	for i := range uint64(10) {
-		require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(),
+		require.NoError(t, fxMintBlock(t, db, context.Background(),
 			poolID,
 			i+1,
 			1_396_640+i,
 			nil,
 		))
 	}
-	meta := db.Metadata()
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:            rewardSnapshotEpoch,
 		SnapshotType:     "mark",
 		TotalActiveStake: 1_000,
@@ -9061,7 +8925,7 @@ func seedEligiblePreviewGoRewardBasis(
 		BoundarySlot:     boundarySlot,
 		ProtocolVersion:  10,
 	}, nil))
-	require.NoError(t, meta.SaveRewardPoolInputs(
+	require.NoError(t, seedDB(t, db).SaveRewardPoolInputs(
 		[]*models.RewardPoolInput{{
 			Epoch:                      rewardSnapshotEpoch,
 			PoolKeyHash:                poolKey,
@@ -9078,7 +8942,7 @@ func seedEligiblePreviewGoRewardBasis(
 		}},
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardStakeInputs(
+	require.NoError(t, seedDB(t, db).SaveRewardStakeInputs(
 		[]*models.RewardStakeInput{
 			{
 				Epoch:         rewardSnapshotEpoch,
@@ -9106,13 +8970,13 @@ func seedEligiblePreviewGoRewardBasis(
 	))
 
 	pool := models.Pool{PoolKeyHash: poolKey}
-	require.NoError(t, db.ImportPool(context.Background(), nil, &pool, &models.PoolRegistration{
+	require.NoError(t, fxImportPool(t, db, context.Background(), nil, &pool, &models.PoolRegistration{
 		PoolID:      pool.ID,
 		PoolKeyHash: poolKey,
 		AddedSlot:   boundarySlot,
 	}))
 	for _, account := range [][]byte{rewardAccount, member} {
-		require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+		require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey: account,
 			Pool:       poolKey,
 			Active:     true,
@@ -9156,9 +9020,6 @@ func mithrilRewardConwayPParams() *conway.ConwayProtocolParameters {
 func TestRewardBlockCountsMergesImportedCountsAcrossTheAnchor(t *testing.T) {
 	t.Parallel()
 
-	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
-
 	const (
 		performanceEpoch = uint64(2)
 		epochStartSlot   = uint64(100)
@@ -9172,67 +9033,88 @@ func TestRewardBlockCountsMergesImportedCountsAcrossTheAnchor(t *testing.T) {
 	copy(poolID[:], poolKey)
 	copy(otherPoolID[:], otherPoolKey)
 
-	require.NoError(t, meta.SetEpoch(
-		epochStartSlot,
-		performanceEpoch,
-		nil, nil, nil, nil,
-		eras.ShelleyEraDesc.Id,
-		1,
-		epochLength,
-		nil,
-	))
-	require.NoError(t, meta.SetSyncState(
-		mithrilLedgerSlotSyncKey,
-		strconv.FormatUint(anchorSlot, 10),
-		nil,
-	))
-	// Blocks this node applied itself, all strictly above the anchor.
-	for _, slot := range []uint64{160, 170} {
-		require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(), poolID, slot, slot, nil))
-	}
-	require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(), otherPoolID, 180, 180, nil))
-	// Blocks the snapshot reports for the same epoch, minted at or below the
-	// anchor. retiredPoolKey is not one of the pools asked about, but its
-	// blocks still belong to the epoch total that every pool's beta divides by.
-	require.NoError(t, meta.SaveImportedPoolBlockCounts(
-		[]models.ImportedPoolBlockCount{
-			{
-				Epoch:          performanceEpoch,
-				PoolKeyHash:    poolKey,
-				BlocksProduced: 5,
-				CapturedSlot:   anchorSlot,
-			},
-			{
-				Epoch:          performanceEpoch,
-				PoolKeyHash:    otherPoolKey,
-				BlocksProduced: 3,
-				CapturedSlot:   anchorSlot,
-			},
-			{
-				Epoch:          performanceEpoch,
-				PoolKeyHash:    retiredPoolKey,
-				BlocksProduced: 2,
-				CapturedSlot:   anchorSlot,
-			},
+	ls, _ := newLoadedRewardCalculationTestLedger(
+		t,
+		func(db *database.Database) {
+			require.NoError(t, seedDB(t, db).SetEpoch(
+				epochStartSlot,
+				performanceEpoch,
+				nil, nil, nil, nil,
+				eras.ShelleyEraDesc.Id,
+				1,
+				epochLength,
+				nil,
+			))
+			require.NoError(t, db.SetImportedLedgerStateBoundary(
+				ocommon.Point{Slot: anchorSlot}, nil,
+			))
+			// Blocks the snapshot reports for the epoch, minted at or below the
+			// anchor. retiredPoolKey is not one of the pools asked about, but its
+			// blocks still belong to the epoch total that every pool's beta divides by.
+			fxImportRewardBlocks(
+				t,
+				db,
+				anchorSlot,
+				[]models.ImportedPoolBlockCount{
+					{
+						Epoch:          performanceEpoch,
+						PoolKeyHash:    poolKey,
+						BlocksProduced: 5,
+						CapturedSlot:   anchorSlot,
+					},
+					{
+						Epoch:          performanceEpoch,
+						PoolKeyHash:    otherPoolKey,
+						BlocksProduced: 3,
+						CapturedSlot:   anchorSlot,
+					},
+					{
+						Epoch:          performanceEpoch,
+						PoolKeyHash:    retiredPoolKey,
+						BlocksProduced: 2,
+						CapturedSlot:   anchorSlot,
+					},
+				},
+				map[uint64]uint64{performanceEpoch: 5 + 3 + 2},
+			)
+			// Blocks this node applied itself, all strictly above the anchor.
+			for _, slot := range []uint64{160, 170} {
+				require.NoError(
+					t,
+					fxMintBlock(
+						t,
+						db,
+						context.Background(),
+						poolID,
+						slot,
+						slot,
+						nil,
+					),
+				)
+			}
+			require.NoError(
+				t,
+				fxMintBlock(
+					t,
+					db,
+					context.Background(),
+					otherPoolID,
+					180,
+					180,
+					nil,
+				),
+			)
 		},
-		nil,
-	))
-	require.NoError(t, meta.SaveImportedEpochBlockTotal(
-		performanceEpoch,
-		5+3+2,
-		anchorSlot,
-		nil,
-	))
+	)
 
-	counts, total, known, err := ls.rewardBlockCounts(
-		dbadapter.New(db),
+	counts, total, known, err := ls.engine().RewardBlockCounts(
+		ls.ledgerDB(),
 		nil,
 		performanceEpoch,
 		[]*models.RewardPoolInput{
 			{PoolKeyHash: poolKey},
 			{PoolKeyHash: otherPoolKey},
 		},
-		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, known)
@@ -9248,9 +9130,6 @@ func TestRewardBlockCountsMergesImportedCountsAcrossTheAnchor(t *testing.T) {
 func TestRewardBlockCountsUnknownWhenAnchorHidesTheEpoch(t *testing.T) {
 	t.Parallel()
 
-	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
-
 	const (
 		performanceEpoch = uint64(2)
 		epochStartSlot   = uint64(100)
@@ -9258,28 +9137,31 @@ func TestRewardBlockCountsUnknownWhenAnchorHidesTheEpoch(t *testing.T) {
 	)
 	poolKey := rewardCalcHash(0x84)
 
-	require.NoError(t, meta.SetEpoch(
-		epochStartSlot,
-		performanceEpoch,
-		nil, nil, nil, nil,
-		eras.ShelleyEraDesc.Id,
-		1,
-		epochLength,
-		nil,
-	))
-	// The anchor sits past the end of the epoch, so none of it is observable.
-	require.NoError(t, meta.SetSyncState(
-		mithrilLedgerSlotSyncKey,
-		strconv.FormatUint(epochStartSlot+epochLength, 10),
-		nil,
-	))
+	ls, _ := newLoadedRewardCalculationTestLedger(
+		t,
+		func(db *database.Database) {
+			require.NoError(t, seedDB(t, db).SetEpoch(
+				epochStartSlot,
+				performanceEpoch,
+				nil, nil, nil, nil,
+				eras.ShelleyEraDesc.Id,
+				1,
+				epochLength,
+				nil,
+			))
+			// The anchor sits past the end of the epoch, so none of it is observable.
+			require.NoError(t, db.SetImportedLedgerStateBoundary(
+				ocommon.Point{Slot: epochStartSlot + epochLength}, nil,
+			))
+			fxImportRewardBlocks(t, db, epochStartSlot+epochLength, nil, nil)
+		},
+	)
 
-	_, _, known, err := ls.rewardBlockCounts(
-		dbadapter.New(db),
+	_, _, known, err := ls.engine().RewardBlockCounts(
+		ls.ledgerDB(),
 		nil,
 		performanceEpoch,
 		[]*models.RewardPoolInput{{PoolKeyHash: poolKey}},
-		nil,
 	)
 	require.NoError(t, err)
 	require.False(
@@ -9294,14 +9176,13 @@ func TestRewardBlockCountsAcceptsObservableZero(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 	const (
 		performanceEpoch = uint64(2)
 		epochStartSlot   = uint64(100)
 		epochLength      = 100
 	)
 	poolKey := rewardCalcHash(0x85)
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epochStartSlot,
 		performanceEpoch,
 		nil, nil, nil, nil,
@@ -9311,12 +9192,11 @@ func TestRewardBlockCountsAcceptsObservableZero(t *testing.T) {
 		nil,
 	))
 
-	counts, total, known, err := ls.rewardBlockCounts(
-		dbadapter.New(db),
+	counts, total, known, err := ls.engine().RewardBlockCounts(
+		ls.ledgerDB(),
 		nil,
 		performanceEpoch,
 		[]*models.RewardPoolInput{{PoolKeyHash: poolKey}},
-		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, known)
@@ -9330,9 +9210,6 @@ func TestRewardBlockCountsAcceptsObservableZero(t *testing.T) {
 func TestRewardBlockCountsIgnoresImportedCountsAboveTheAnchor(t *testing.T) {
 	t.Parallel()
 
-	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
-
 	const (
 		performanceEpoch = uint64(2)
 		epochStartSlot   = uint64(100)
@@ -9342,45 +9219,43 @@ func TestRewardBlockCountsIgnoresImportedCountsAboveTheAnchor(t *testing.T) {
 	var poolID lcommon.PoolKeyHash
 	copy(poolID[:], poolKey)
 
-	require.NoError(t, meta.SetEpoch(
-		epochStartSlot,
-		performanceEpoch,
-		nil, nil, nil, nil,
-		eras.ShelleyEraDesc.Id,
-		1,
-		epochLength,
-		nil,
-	))
-	require.NoError(t, meta.SetSyncState(
-		mithrilLedgerSlotSyncKey,
-		strconv.FormatUint(epochStartSlot-1, 10),
-		nil,
-	))
-	require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(), poolID, 1, 120, nil))
-	require.NoError(t, meta.SaveImportedPoolBlockCounts(
-		[]models.ImportedPoolBlockCount{
-			{
-				Epoch:          performanceEpoch,
-				PoolKeyHash:    poolKey,
-				BlocksProduced: 7,
-				CapturedSlot:   epochStartSlot - 1,
-			},
+	ls, _ := newLoadedRewardCalculationTestLedger(
+		t,
+		func(db *database.Database) {
+			require.NoError(t, seedDB(t, db).SetEpoch(
+				epochStartSlot,
+				performanceEpoch,
+				nil, nil, nil, nil,
+				eras.ShelleyEraDesc.Id,
+				1,
+				epochLength,
+				nil,
+			))
+			require.NoError(t, db.SetImportedLedgerStateBoundary(
+				ocommon.Point{Slot: epochStartSlot - 1}, nil,
+			))
+			fxImportRewardBlocks(
+				t, db, epochStartSlot-1,
+				[]models.ImportedPoolBlockCount{{
+					Epoch:          performanceEpoch,
+					PoolKeyHash:    poolKey,
+					BlocksProduced: 7,
+					CapturedSlot:   epochStartSlot - 1,
+				}},
+				map[uint64]uint64{performanceEpoch: 7},
+			)
+			require.NoError(
+				t,
+				fxMintBlock(t, db, context.Background(), poolID, 1, 120, nil),
+			)
 		},
-		nil,
-	))
-	require.NoError(t, meta.SaveImportedEpochBlockTotal(
-		performanceEpoch,
-		7,
-		epochStartSlot-1,
-		nil,
-	))
+	)
 
-	counts, total, known, err := ls.rewardBlockCounts(
-		dbadapter.New(db),
+	counts, total, known, err := ls.engine().RewardBlockCounts(
+		ls.ledgerDB(),
 		nil,
 		performanceEpoch,
 		[]*models.RewardPoolInput{{PoolKeyHash: poolKey}},
-		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, known)
@@ -9395,19 +9270,27 @@ func TestRewardBlockCountsIgnoresImportedCountsAboveTheAnchor(t *testing.T) {
 func TestStakeRewardRoundRejectsHiddenBlockCounts(t *testing.T) {
 	t.Parallel()
 
-	ls, db := seedRewardPrecomputeTimingState(t, 7)
+	ls, db := newLoadedRewardCalculationTestLedger(
+		t, func(db *database.Database) {
+			seedRewardPrecomputeTimingInputs(t, db, 7)
+			// The set takes over the reward inputs of the epochs the
+			// store holds a row of.
+			require.NoError(t, seedDB(t, db).SetEpoch(
+				0, 1, nil, nil, nil, nil,
+				eras.ShelleyEraDesc.Id, 1, 100, nil,
+			))
+			require.NoError(t, db.SetImportedLedgerStateBoundary(
+				ocommon.Point{Slot: 199}, nil,
+			))
+			fxImportRewardBlocks(t, db, 199, nil, nil)
+		},
+	)
 	var logs bytes.Buffer
 	ls.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 
-	require.NoError(t, db.Metadata().SetSyncState(
-		mithrilLedgerSlotSyncKey,
-		"199",
-		nil,
-	))
-
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,
@@ -9415,7 +9298,7 @@ func TestStakeRewardRoundRejectsHiddenBlockCounts(t *testing.T) {
 		1_200,
 		true,
 	)
-	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, err, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 	require.False(
 		t,
 		ok,
@@ -9442,9 +9325,8 @@ func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil,
 	))
 	pparamsCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameters{
@@ -9456,30 +9338,28 @@ func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
 		ProtocolMajor:    7,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor, 0, 0, eras.ShelleyEraDesc.Id, nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        0,
 		Reserves:     100_000_000,
 		CapturedSlot: 0,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch:           0,
 		SnapshotType:    "mark",
 		CapturedSlot:    0,
 		BoundarySlot:    0,
 		ProtocolVersion: 7,
 	}, nil))
-	require.NoError(t, meta.SetSyncState(
-		mithrilLedgerSlotSyncKey,
-		"50",
-		nil,
+	require.NoError(t, db.SetImportedLedgerStateBoundary(
+		ocommon.Point{Slot: 50}, nil,
 	))
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		1,
@@ -9495,46 +9375,46 @@ func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
 			"has to move the pots",
 	)
 	require.NotNil(t, app)
-	assert.True(t, app.epochs.bootstrap)
-	assert.Empty(t, app.poolOutputs)
-	assert.Empty(t, app.accountOutputs)
+	assert.True(t, app.Epochs.Bootstrap)
+	assert.Empty(t, app.PoolOutputs)
+	assert.Empty(t, app.AccountOutputs)
 }
 
 // TestStakeRewardEpochsForInitialApplication pins the two bootstrap rounds.
 // The round into epoch 1 reads genesis pots and empty previous block counts;
 // the round into epoch 2 reads epoch 1's pots and epoch 0's blocks. Both have
 // genesis Go distributions. Byron-prefix networks are suppressed by
-// applyStakeRewards' Byron performance-epoch guard, not by this helper.
+// ApplyStakeRewards' Byron performance-epoch guard, not by this helper.
 func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
 	t.Parallel()
 
-	_, ok := stakeRewardEpochsForApplication(0)
+	_, ok := epochengine.StakeRewardEpochsForApplication(0)
 	require.False(t, ok, "epoch 0 is not a boundary and applies no rewards")
 
-	epochs, ok := stakeRewardEpochsForApplication(1)
+	epochs, ok := epochengine.StakeRewardEpochsForApplication(1)
 	require.True(t, ok)
-	require.Equal(t, stakeRewardEpochs{
-		snapshot:    0,
-		performance: 0,
-		pots:        0,
-		bootstrap:   true,
+	require.Equal(t, epochengine.StakeRewardEpochs{
+		Snapshot:    0,
+		Performance: 0,
+		Pots:        0,
+		Bootstrap:   true,
 	}, epochs)
 
-	epochs, ok = stakeRewardEpochsForApplication(2)
+	epochs, ok = epochengine.StakeRewardEpochsForApplication(2)
 	require.True(t, ok)
-	require.Equal(t, stakeRewardEpochs{
-		snapshot:    0,
-		performance: 0,
-		pots:        1,
-		bootstrap:   true,
+	require.Equal(t, epochengine.StakeRewardEpochs{
+		Snapshot:    0,
+		Performance: 0,
+		Pots:        1,
+		Bootstrap:   true,
 	}, epochs)
 
-	epochs, ok = stakeRewardEpochsForApplication(3)
+	epochs, ok = epochengine.StakeRewardEpochsForApplication(3)
 	require.True(t, ok)
-	require.Equal(t, stakeRewardEpochs{
-		snapshot:    0,
-		performance: 1,
-		pots:        2,
+	require.Equal(t, epochengine.StakeRewardEpochs{
+		Snapshot:    0,
+		Performance: 1,
+		Pots:        2,
 	}, epochs)
 }
 
@@ -9542,14 +9422,14 @@ func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
-	require.NoError(t, db.Metadata().SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:   1,
 		Rewards: types.Uint64(1_000),
 	}, nil))
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(
+	app, ok, err := ls.engine().PrecomputedStakeRewardApplication(
 		context.Background(),
 		txn,
 		2,
@@ -9559,7 +9439,7 @@ func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
 	require.False(t, ok)
 	require.Nil(t, app)
 
-	app, ok, err = ls.precomputeStakeRewardsCalculate(txn, 2, 100, 200)
+	app, ok, err = ls.engine().PrecomputeStakeRewardsCalculate(txn, 2, 100, 200)
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Nil(t, app)
@@ -9596,56 +9476,55 @@ func newPrototypeGenesisRewardLedger(
 	pp.ProtocolVersion = lcommon.ProtocolParametersProtocolVersion{Major: 10}
 	encoded, err := cbor.Encode(&pp)
 	require.NoError(t, err)
-	meta := db.Metadata()
 	for epoch := range uint64(3) {
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			epoch*500, epoch, nil, nil, nil, nil,
 			eras.ConwayEraDesc.Id, 1, 500, nil,
 		))
-		require.NoError(t, db.SetPParams(
+		require.NoError(t, seedDB(t, db).SetPParams(
 			encoded, epoch*500, epoch, eras.ConwayEraDesc.Id, nil,
 		))
 	}
-	require.NoError(t, meta.SetNetworkState(0, 2_000_000_000_000, 0, nil))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 2_000_000_000_000, 0, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch: 0, Reserves: 2_000_000_000_000,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch: 0, SnapshotType: "mark", ProtocolVersion: 10,
 		TotalActiveStake: 2_000_000_000_000,
 		TotalPoolCount:   2, TotalDelegators: 2,
 	}, nil))
+	var minted []fxMinted
 	for _, key := range []byte{0x11, 0x22} {
 		poolKey := rewardCalcHash(key)
 		poolID := seedLiveStakeFixture(
 			t, db, poolKey, bytes.Repeat([]byte{key}, 32),
 			1_000_000_000_000, 0,
 		)
-		require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
+		seedTestStakedOutput(
+			t, ls, append(bytes.Clone(poolKey), 0, 0, 0, 0), 0, poolKey,
+			1_000_000_000_000,
+		)
+		require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{{
 			Epoch: 0, PoolKeyHash: poolKey, RewardAccount: poolKey,
 			Margin:         &types.Rat{Rat: big.NewRat(0, 1)},
 			DelegatedStake: 1_000_000_000_000, DelegatorCount: 1,
 		}}, nil))
 		require.NoError(
 			t,
-			meta.SaveRewardStakeInputs([]*models.RewardStakeInput{{
+			seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{{
 				Epoch: 0, PoolKeyHash: poolKey, StakingKey: poolKey,
 				Stake: 1_000_000_000_000, Registered: true,
 			}}, nil),
 		)
 		for i := range uint64(90) {
-			require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(),
-				poolID, i+1, 1+2*i+uint64(key), nil,
-			))
+			minted = append(minted, fxMinted{
+				pool: poolID, sequence: i + 1, slot: 1 + 2*i + uint64(key),
+			})
 		}
 	}
-	_, err = testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
-INSERT INTO "transaction" (
-    hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
-		[]byte("genesis-performance-tx"), []byte("genesis-performance-block"))
-	require.NoError(t, err)
+	fxMintBlocks(t, db, minted)
+	fxSeedFee(t, db, 60, 400_000)
 	return ls, db
 }
 
@@ -9658,28 +9537,27 @@ func TestStakeRewardsGenesisWarmingNeedsPrototypeNetwork(t *testing.T) {
 
 	ls, db := newPrototypeGenesisRewardLedger(t, false)
 	require.True(t, ls.config.EnableDijkstra)
-	meta := db.Metadata()
 
-	ended, err := meta.GetEpoch(0, nil)
+	ended, err := seedDB(t, db).GetEpoch(0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, ended)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := ls.applyStakeRewards(context.Background(), txn, 1, 500, false); err != nil {
+		if err := ls.engine().ApplyStakeRewards(context.Background(), txn, 1, 500, false); err != nil {
 			return err
 		}
-		return ls.saveRewardAdaPotsForEpoch(txn, 1, *ended, 500)
+		return ls.engine().SaveRewardAdaPotsForEpoch(txn, 1, *ended, 500)
 	}))
 
 	readTxn := db.Transaction(t.Context(), false)
-	app, ok, err := ls.calculateStakeRewardApplication(
+	app, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		readTxn, 2, 1000, 1000, true,
 	)
 	require.NoError(t, readTxn.Rollback())
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Empty(t, app.accountOutputs,
+	assert.Empty(t, app.AccountOutputs,
 		"bootstrap rounds pay no stake rewards without genesis warming")
 }
 
@@ -9690,7 +9568,6 @@ func TestStakeRewardsGenesisWarmingNeedsPrototypeNetwork(t *testing.T) {
 func TestApplyStakeRewardsPrototypeGenesisPerformance(t *testing.T) {
 	t.Parallel()
 	ls, db := newPrototypeGenesisRewardLedger(t, true)
-	meta := db.Metadata()
 
 	for _, tc := range []struct {
 		epoch    uint64
@@ -9703,7 +9580,7 @@ func TestApplyStakeRewardsPrototypeGenesisPerformance(t *testing.T) {
 	} {
 		if tc.epoch == 2 {
 			readTxn := db.Transaction(t.Context(), false)
-			app, ok, err := ls.calculateStakeRewardApplication(
+			app, ok, err := ls.engine().CalculateStakeRewardApplication(
 				context.Background(),
 				readTxn,
 				2,
@@ -9716,30 +9593,30 @@ func TestApplyStakeRewardsPrototypeGenesisPerformance(t *testing.T) {
 			require.True(t, ok)
 			require.NotEmpty(
 				t,
-				app.accountOutputs,
+				app.AccountOutputs,
 				"genesis staking must receive rewards from epoch 0's blocks",
 			)
 		}
 
 		boundary := tc.epoch * 500
-		ended, err := meta.GetEpoch(tc.epoch-1, nil)
+		ended, err := seedDB(t, db).GetEpoch(tc.epoch-1, nil)
 		require.NoError(t, err)
 		require.NotNil(t, ended)
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			if err := ls.applyStakeRewards(context.Background(), txn, tc.epoch, boundary, false); err != nil {
+			if err := ls.engine().ApplyStakeRewards(context.Background(), txn, tc.epoch, boundary, false); err != nil {
 				return err
 			}
-			return ls.saveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
+			return ls.engine().SaveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
 		}))
-		state, err := meta.GetNetworkState(nil)
+		state, err := seedDB(t, db).GetNetworkState(nil)
 		require.NoError(t, err)
 		require.NotNil(t, state)
 		require.Equal(t, tc.treasury, uint64(state.Treasury),
 			"treasury at boundary into epoch %d", tc.epoch)
 		require.Equal(t, tc.reserves, uint64(state.Reserves),
 			"reserves at boundary into epoch %d", tc.epoch)
-		pots, err := meta.GetRewardAdaPots(tc.epoch, nil)
+		pots, err := seedDB(t, db).GetRewardAdaPots(tc.epoch, nil)
 		require.NoError(t, err)
 		require.NotNil(t, pots)
 		require.Equal(t, state.Treasury, pots.Treasury)
@@ -9769,16 +9646,13 @@ func TestApplyStakeRewardsPrototypeGenesisPerformance(t *testing.T) {
 // including the anchor block) and a CapturedSlot at the anchor. The node's
 // locally stored transactions for that epoch only cover slots after the
 // anchor -- plus, once the historical backfill has run, slots at or
-// before it too. saveRewardAdaPotsForEpoch must sum the local fees strictly
+// before it too. SaveRewardAdaPotsForEpoch must sum the local fees strictly
 // after the anchor and add the imported amount, not sum the whole epoch:
 // summing the whole epoch either silently drops the pre-anchor fees or
 // double-counts them once backfill has stored
 // pre-anchor transactions locally.
 func TestSaveRewardAdaPotsForEpochUsesImportedPreAnchorFees(t *testing.T) {
 	t.Parallel()
-	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
-
 	const (
 		endedEpoch           = uint64(5)
 		epochStartSlot       = uint64(1000)
@@ -9790,36 +9664,32 @@ func TestSaveRewardAdaPotsForEpochUsesImportedPreAnchorFees(t *testing.T) {
 		newEpochBoundarySlot = uint64(1100)
 	)
 
-	// Simulates seedImportedRewardBasis's write for the anchor epoch: the
-	// pots row this epoch's own boundary would have produced, had the node
-	// been running, carrying the pre-anchor fee pot the import derived from
-	// State.Fees - snapshots.Fee.
-	importedFees := types.Uint64(importedPreAnchor)
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
-		Epoch:             endedEpoch,
-		CapturedSlot:      anchorSlot,
-		ImportedEpochFees: &importedFees,
-	}, nil))
+	// The state a Mithril import leaves in the metadata store, which the
+	// set takes over as it opens.
+	ls, db := newLoadedRewardCalculationTestLedger(t, func(db *database.Database) {
+		require.NoError(t, seedDB(t, db).SetEpoch(
+			epochStartSlot, endedEpoch, nil, nil, nil, nil,
+			eras.ShelleyEraDesc.Id, 1, epochLengthInSlots, nil,
+		))
+		// Simulates seedImportedRewardBasis's write for the anchor epoch: the
+		// pots row this epoch's own boundary would have produced, had the node
+		// been running, carrying the pre-anchor fee pot the import derived from
+		// State.Fees - snapshots.Fee.
+		importedFees := types.Uint64(importedPreAnchor)
+		require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
+			Epoch:             endedEpoch,
+			CapturedSlot:      anchorSlot,
+			ImportedEpochFees: &importedFees,
+		}, nil))
 
-	// A transaction at the anchor slot itself: excluded, because the
-	// imported amount already accounts for fees up to and including the
-	// anchor block. Sum range is (CapturedSlot, epochEnd].
-	rewardCalcExecRows(t, db, `
-INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (1, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
-		[]byte("pre-anchor-backfill-tx"), []byte("pre-anchor-block"),
-		anchorSlot, strconv.FormatUint(preAnchorBackfillFee, 10),
-	)
-	// A transaction after the anchor: included.
-	rewardCalcExecRows(t, db, `
-INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (2, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
-		[]byte("post-anchor-tx"), []byte("post-anchor-block"),
-		anchorSlot+30, strconv.FormatUint(postAnchorFee, 10),
+		// The anchor block's fees, which the node applied before the import
+		// replaced its reward blocks: excluded, because the imported amount
+		// already accounts for fees up to and including the anchor block.
+		fxSeedEpochFee(t, db, endedEpoch, anchorSlot, preAnchorBackfillFee)
+		fxImportRewardBlocks(t, db, anchorSlot, nil, nil)
+		// A transaction after the anchor: included.
+		fxSeedEpochFee(t, db, endedEpoch, anchorSlot+30, postAnchorFee)
+	},
 	)
 
 	ended := models.Epoch{
@@ -9829,10 +9699,10 @@ INSERT INTO "transaction" (
 	}
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.saveRewardAdaPotsForEpoch(txn, endedEpoch+1, ended, newEpochBoundarySlot)
+		return ls.engine().SaveRewardAdaPotsForEpoch(txn, endedEpoch+1, ended, newEpochBoundarySlot)
 	}))
 
-	pots, err := meta.GetRewardAdaPots(endedEpoch+1, nil)
+	pots, err := seedDB(t, db).GetRewardAdaPots(endedEpoch+1, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots)
 	require.Equal(
@@ -9880,34 +9750,43 @@ func TestSaveRewardAdaPotsForEpochImportedAnchorAtEpochEdges(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ls, db := newRewardCalculationTestLedger(t)
-			meta := db.Metadata()
-			importedFees := types.Uint64(importedPreAnchor)
-			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
-				Epoch:             endedEpoch,
-				CapturedSlot:      tc.anchorSlot,
-				ImportedEpochFees: &importedFees,
-			}, nil))
-			// A backfilled copy of the anchor block's transaction, already
-			// counted in ImportedEpochFees.
-			rewardCalcExecRows(t, db, `
-INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (1, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
-				[]byte("anchor-tx"), []byte("anchor-block"),
-				tc.anchorSlot, strconv.FormatUint(anchorBlockFee, 10),
+			ls, db := newLoadedRewardCalculationTestLedger(
+				t,
+				func(db *database.Database) {
+					require.NoError(t, seedDB(t, db).SetEpoch(
+						epochStartSlot, endedEpoch, nil, nil, nil, nil,
+						eras.ShelleyEraDesc.Id, 1, epochLengthInSlots, nil,
+					))
+					importedFees := types.Uint64(importedPreAnchor)
+					require.NoError(
+						t,
+						seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
+							Epoch:             endedEpoch,
+							CapturedSlot:      tc.anchorSlot,
+							ImportedEpochFees: &importedFees,
+						}, nil),
+					)
+					// The anchor block's fees, already counted in
+					// ImportedEpochFees, which the import replaces.
+					fxSeedEpochFee(
+						t,
+						db,
+						endedEpoch,
+						tc.anchorSlot,
+						anchorBlockFee,
+					)
+					fxImportRewardBlocks(t, db, tc.anchorSlot, nil, nil)
+					if tc.laterSlot != 0 {
+						fxSeedEpochFee(
+							t,
+							db,
+							endedEpoch,
+							tc.laterSlot,
+							laterFee,
+						)
+					}
+				},
 			)
-			if tc.laterSlot != 0 {
-				rewardCalcExecRows(t, db, `
-INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (2, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
-					[]byte("later-tx"), []byte("later-block"),
-					tc.laterSlot, strconv.FormatUint(laterFee, 10),
-				)
-			}
 			ended := models.Epoch{
 				EpochId:       endedEpoch,
 				StartSlot:     epochStartSlot,
@@ -9915,9 +9794,9 @@ INSERT INTO "transaction" (
 			}
 			txn := db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				return ls.saveRewardAdaPotsForEpoch(txn, endedEpoch+1, ended, epochEndSlot+1)
+				return ls.engine().SaveRewardAdaPotsForEpoch(txn, endedEpoch+1, ended, epochEndSlot+1)
 			}))
-			pots, err := meta.GetRewardAdaPots(endedEpoch+1, nil)
+			pots, err := seedDB(t, db).GetRewardAdaPots(endedEpoch+1, nil)
 			require.NoError(t, err)
 			require.NotNil(t, pots)
 			require.Equal(t, tc.want, uint64(pots.Fees))
@@ -9935,10 +9814,9 @@ INSERT INTO "transaction" (
 // expectedBlocks denominator reduction and inflates every reward of the
 // round (Prime Mainnet performance epoch 39).
 //
-// Block counts are the exception: BBODY accumulated the performance epoch's
-// BlocksMade under that epoch's curPParams, so incrBlocks skipped overlay
-// slots with the Alonzo d. The d returned for block counting must stay the
-// performance epoch's.
+// Block counts are the exception and take no d from here: BBODY accumulated
+// the performance epoch's BlocksMade under that epoch's curPParams, and the
+// set skipped overlay slots the same way when each block was applied.
 func TestRewardParametersDecentralizationIsZeroWhenCalculatedInBabbage(
 	t *testing.T,
 ) {
@@ -9974,7 +9852,6 @@ func TestRewardParametersDecentralizationIsZeroWhenCalculatedInBabbage(
 			t.Parallel()
 
 			ls, db := newRewardCalculationTestLedger(t)
-			meta := db.Metadata()
 			pparams := &alonzo.AlonzoProtocolParameters{
 				NOpt:             10,
 				A0:               rewardCalcRat(0, 1),
@@ -9985,22 +9862,22 @@ func TestRewardParametersDecentralizationIsZeroWhenCalculatedInBabbage(
 			}
 			pparamsCbor, err := cbor.Encode(pparams)
 			require.NoError(t, err)
-			require.NoError(t, meta.SetEpoch(
+			require.NoError(t, seedDB(t, db).SetEpoch(
 				100, performanceEpoch, nil, nil, nil, nil,
 				eras.AlonzoEraDesc.Id, 1, 100, nil,
 			))
-			require.NoError(t, meta.SetEpoch(
+			require.NoError(t, seedDB(t, db).SetEpoch(
 				200, potsEpoch, nil, nil, nil, nil,
 				tc.calcEra, 1, 1_000, nil,
 			))
-			require.NoError(t, db.SetPParams(
+			require.NoError(t, seedDB(t, db).SetPParams(
 				pparamsCbor, 100, performanceEpoch,
 				eras.AlonzoEraDesc.Id, nil,
 			))
 
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
-			_, params, performanceD, err := ls.rewardParameters(
+			_, params, err := ls.engine().RewardParameters(
 				txn,
 				performanceEpoch,
 				potsEpoch,
@@ -10009,8 +9886,6 @@ func TestRewardParametersDecentralizationIsZeroWhenCalculatedInBabbage(
 			require.NoError(t, err)
 			require.Zero(t, tc.expectedDRat.Cmp(params.Decentralization),
 				"d = %s, want %s", params.Decentralization, tc.expectedDRat)
-			require.Zero(t, big.NewRat(7, 10).Cmp(performanceD),
-				"block-count d = %s, want 7/10", performanceD)
 			require.Equal(t, big.NewRat(1, 5), params.TreasuryExpansion,
 				"tau still comes from the performance epoch")
 		})
@@ -10217,23 +10092,23 @@ func TestRollbackRewardPrecomputeDropsAbandonedPrefilterHistory(
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	nonce := testHashBytes("reward-epoch")
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		200, 3, nonce, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, 1_000, nil,
 	))
 	cfg := seed.config
 	cfg.Database = db
 	cfg.ChainManager = cm
-	cfg.UtxoSet = NewMemLiveSetForTest()
+	cfg.UtxoSet = OpenLiveSetForTest(t, db)
 	ls, err := NewLedgerState(cfg)
 	require.NoError(t, err)
 	ls.metrics.init(prometheus.NewRegistry())
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
-	epoch, err := db.Metadata().GetEpoch(3, nil)
+	epoch, err := seedDB(t, db).GetEpoch(3, nil)
 	require.NoError(t, err)
 	ls.currentEpoch = *epoch
 	ls.currentEra = eras.ShelleyEraDesc
-	cutoff, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 3)
+	cutoff, err := ls.engine().RewardPrefilterSlot(ls.ledgerDB(), nil, 3)
 	require.NoError(t, err)
 	member := rewardCalcHash(0x6a)
 	// member is registered before the epoch; the abandoned chain deregisters
@@ -10241,10 +10116,6 @@ func TestRollbackRewardPrecomputeDropsAbandonedPrefilterHistory(
 	rewardCalcSeedStakeCert(
 		t, db, 21, member, 0, 150,
 		uint(lcommon.CertificateTypeStakeRegistration),
-	)
-	rewardCalcSeedStakeCert(
-		t, db, 22, member, 0, cutoff-5,
-		uint(lcommon.CertificateTypeStakeDeregistration),
 	)
 	ancestor := chain.RawBlock{
 		Slot: cutoff - 10, Hash: testHashBytes("prefilter-ancestor"),
@@ -10255,11 +10126,20 @@ func TestRollbackRewardPrecomputeDropsAbandonedPrefilterHistory(
 		PrevHash:    ancestor.Hash,
 		BlockNumber: 2, Type: 1, Cbor: []byte{0x80},
 	}
+	// The set journals the ancestor as a tip before the abandoned chain's
+	// deregistration, so the rollback to it has a point to return to and
+	// undoes the certificate.
+	fxTip(t, ls, ocommon.NewPoint(ancestor.Slot, ancestor.Hash))
+	rewardCalcSeedStakeCert(
+		t, db, 22, member, 0, cutoff-5,
+		uint(lcommon.CertificateTypeStakeDeregistration),
+	)
+	fxTip(t, ls, ocommon.NewPoint(abandoned.Slot, abandoned.Hash))
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(),
 		[]chain.RawBlock{ancestor, abandoned},
 	))
 	for _, block := range []chain.RawBlock{ancestor, abandoned} {
-		require.NoError(t, db.SetBlockNonce(
+		require.NoError(t, seedBlockNonce(t, db,
 			block.Hash, block.Slot, nonce, true, nil,
 		))
 	}
@@ -10284,7 +10164,7 @@ func TestRollbackRewardPrecomputeDropsAbandonedPrefilterHistory(
 	))
 	ls.rewardPrecomputeWG.Wait()
 
-	outputs, err := db.Metadata().GetRewardAccountOutputs(1, nil)
+	outputs, err := seedDB(t, db).GetRewardAccountOutputs(1, nil)
 	require.NoError(t, err)
 	require.Empty(t, outputs,
 		"no output computed from the abandoned history may survive")
@@ -10309,32 +10189,32 @@ func TestRollbackRewardPrecomputeDropsAbandonedPrefilterHistory(
 		"the replacement must use the surviving registration history")
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		want, ok, err := ls.calculateStakeRewardApplication(
+		want, ok, err := ls.engine().CalculateStakeRewardApplication(
 			context.Background(),
 			txn, 4, replacement.Slot, 1_200, false,
 		)
 		require.NoError(t, err)
 		require.True(t, ok)
-		poolOutputs, err := db.Metadata().GetRewardPoolOutputs(
-			1, txn.Metadata(),
+		poolOutputs, err := ls.ledgerDB().GetRewardPoolOutputs(
+			1, txn,
 		)
 		require.NoError(t, err)
-		accountOutputs, err := db.Metadata().GetRewardAccountOutputs(
-			1, txn.Metadata(),
+		accountOutputs, err := ls.ledgerDB().GetRewardAccountOutputs(
+			1, txn,
 		)
 		require.NoError(t, err)
 		require.Equal(t,
-			rewardPoolOutputAmounts(want.poolOutputs),
+			rewardPoolOutputAmounts(want.PoolOutputs),
 			rewardPoolOutputAmounts(poolOutputs),
 		)
 		require.Equal(t,
-			rewardAccountOutputAmounts(want.accountOutputs),
+			rewardAccountOutputAmounts(want.AccountOutputs),
 			rewardAccountOutputAmounts(accountOutputs),
 		)
-		pots, err := db.Metadata().GetRewardAdaPots(3, txn.Metadata())
+		pots, err := ls.ledgerDB().GetRewardAdaPots(3, txn)
 		require.NoError(t, err)
-		require.Equal(t, want.totalRewardPot, uint64(pots.Rewards))
-		_, reusable, err := ls.precomputedStakeRewardApplication(
+		require.Equal(t, want.TotalRewardPot, uint64(pots.Rewards))
+		_, reusable, err := ls.engine().PrecomputedStakeRewardApplication(
 			context.Background(),
 			txn, 4, 1_200,
 		)
@@ -10346,7 +10226,7 @@ func TestRollbackRewardPrecomputeDropsAbandonedPrefilterHistory(
 		)
 		return nil
 	}))
-	account, err := db.GetAccountByCredential(context.Background(), 0, member, true, nil)
+	account, err := seedDB(t, db).GetAccountByCredential(context.Background(), 0, member, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	require.Zero(t, uint64(account.Reward),
@@ -10359,7 +10239,7 @@ func rewardOutputsPayKey(
 	stakingKey []byte,
 ) bool {
 	t.Helper()
-	outputs, err := db.Metadata().GetRewardAccountOutputs(1, nil)
+	outputs, err := seedDB(t, db).GetRewardAccountOutputs(1, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, outputs)
 	for _, output := range outputs {
@@ -10588,6 +10468,7 @@ func newPreviewRewardPotsTestLedger(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	fxAttachLedgerDB(t, ls)
 
 	// Preview's genesis protocol parameters: rho 0.003, tau 0.2, d 1.
 	pparams := &alonzo.AlonzoProtocolParameters{
@@ -10609,14 +10490,13 @@ func newPreviewRewardPotsTestLedger(
 	decentralizedCbor, err := cbor.Encode(&decentralizedPParams)
 	require.NoError(t, err)
 
-	meta := db.Metadata()
 	for _, epoch := range []uint64{0, 1, 2} {
 		epochPParamsCbor := pparamsCbor
 		if epoch >= 2 {
 			epochPParamsCbor = decentralizedCbor
 		}
 		startSlot := epoch * previewEpochLength
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			startSlot,
 			epoch,
 			nil,
@@ -10628,7 +10508,7 @@ func newPreviewRewardPotsTestLedger(
 			uint(previewEpochLength),
 			nil,
 		))
-		require.NoError(t, db.SetPParams(
+		require.NoError(t, seedDB(t, db).SetPParams(
 			epochPParamsCbor,
 			startSlot,
 			epoch,
@@ -10638,7 +10518,7 @@ func newPreviewRewardPotsTestLedger(
 		// Preview has no stake delegated to non-overlay pools in these
 		// epochs, so the mark snapshot is empty. Epoch 0's is seeded at
 		// startup by snapshot.Manager.CaptureGenesisSnapshot.
-		require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 			Epoch:           epoch,
 			SnapshotType:    "mark",
 			CapturedSlot:    startSlot,
@@ -10658,10 +10538,9 @@ func TestApplyStakeRewardsPreviewEpoch1Pots(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newPreviewRewardPotsTestLedger(t)
-	meta := db.Metadata()
 
-	require.NoError(t, meta.SetNetworkState(0, previewGenesisReserves, 0, nil))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, previewGenesisReserves, 0, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        0,
 		Treasury:     0,
 		Reserves:     types.Uint64(previewGenesisReserves),
@@ -10671,10 +10550,10 @@ func TestApplyStakeRewardsPreviewEpoch1Pots(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 1, previewEpochLength, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 1, previewEpochLength, false)
 	}))
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, previewEpoch1Treasury, uint64(state.Treasury))
@@ -10689,12 +10568,11 @@ func TestApplyStakeRewardsPreviewEpoch2Pots(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newPreviewRewardPotsTestLedger(t)
-	meta := db.Metadata()
 
-	require.NoError(t, meta.SetNetworkState(
+	require.NoError(t, seedDB(t, db).SetNetworkState(
 		previewEpoch1Treasury, previewEpoch1Reserves, previewEpochLength, nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        1,
 		Treasury:     types.Uint64(previewEpoch1Treasury),
 		Reserves:     types.Uint64(previewEpoch1Reserves),
@@ -10704,10 +10582,10 @@ func TestApplyStakeRewardsPreviewEpoch2Pots(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 2, 2*previewEpochLength, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 2, 2*previewEpochLength, false)
 	}))
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, previewEpoch2Treasury, uint64(state.Treasury))
@@ -10726,10 +10604,9 @@ func TestApplyStakeRewardsPreviewGenesisToEpoch2(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newPreviewRewardPotsTestLedger(t)
-	meta := db.Metadata()
 
-	require.NoError(t, meta.SetNetworkState(0, previewGenesisReserves, 0, nil))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, previewGenesisReserves, 0, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        0,
 		Treasury:     0,
 		Reserves:     types.Uint64(previewGenesisReserves),
@@ -10738,24 +10615,10 @@ func TestApplyStakeRewardsPreviewGenesisToEpoch2(t *testing.T) {
 	}, nil))
 
 	// Preview's two epoch-0 transactions.
-	_, err := testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
-INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (1, ?, ?, 60, 5, '200000', '0', '0', 0, TRUE)`,
-		[]byte("preview-tx-0"), []byte("preview-block-0"),
-	)
-	require.NoError(t, err)
-	_, err = testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
-INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (2, ?, ?, 320, 5, '237793', '0', '0', 0, TRUE)`,
-		[]byte("preview-tx-1"), []byte("preview-block-1"),
-	)
-	require.NoError(t, err)
+	fxSeedFee(t, db, 60, 200_000)
+	fxSeedFee(t, db, 320, 237_793)
 
-	epoch0, err := meta.GetEpoch(0, nil)
+	epoch0, err := seedDB(t, db).GetEpoch(0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, epoch0)
 
@@ -10763,16 +10626,16 @@ INSERT INTO "transaction" (
 	// ADA pots the way processEpochRollover does.
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := ls.applyStakeRewards(context.Background(),
+		if err := ls.engine().ApplyStakeRewards(context.Background(),
 			txn, 1, previewEpochLength,
 			false,
 		); err != nil {
 			return err
 		}
-		return ls.saveRewardAdaPotsForEpoch(txn, 1, *epoch0, previewEpochLength)
+		return ls.engine().SaveRewardAdaPotsForEpoch(txn, 1, *epoch0, previewEpochLength)
 	}))
 
-	pots1, err := meta.GetRewardAdaPots(1, nil)
+	pots1, err := seedDB(t, db).GetRewardAdaPots(1, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots1)
 	require.Equal(t, previewEpoch1Treasury, uint64(pots1.Treasury))
@@ -10782,10 +10645,10 @@ INSERT INTO "transaction" (
 	// Boundary into epoch 2, reading the row the previous boundary wrote.
 	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 2, 2*previewEpochLength, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 2, 2*previewEpochLength, false)
 	}))
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, previewEpoch2Treasury, uint64(state.Treasury))
@@ -10807,15 +10670,14 @@ func TestApplyStakeRewardsPreviewEpoch3Pots(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newPreviewRewardPotsTestLedger(t)
-	meta := db.Metadata()
 
-	require.NoError(t, meta.SetNetworkState(
+	require.NoError(t, seedDB(t, db).SetNetworkState(
 		previewEpoch2Treasury,
 		previewEpoch2Reserves,
 		2*previewEpochLength,
 		nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        2,
 		Treasury:     types.Uint64(previewEpoch2Treasury),
 		Reserves:     types.Uint64(previewEpoch2Reserves),
@@ -10825,10 +10687,10 @@ func TestApplyStakeRewardsPreviewEpoch3Pots(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 3, 3*previewEpochLength, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 3, 3*previewEpochLength, false)
 	}))
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, previewEpoch3Treasury, uint64(state.Treasury))
@@ -10857,10 +10719,10 @@ func TestUnavailableStakeRewardBasisIsReportedAndRejected(t *testing.T) {
 		},
 	}
 
-	err := ls.requiredStakeRewardBasisUnavailable(
+	err := ls.engine().RequiredStakeRewardBasisUnavailable(
 		true, 1386, "missing ADA pots", "pots_epoch", 1385,
 	)
-	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, err, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 
 	logs := buf.String()
 	require.NotEmpty(t, logs)
@@ -10885,14 +10747,14 @@ func TestUnavailableStakeRewardBasisSurvivesNilDependencies(t *testing.T) {
 
 	ls := &LedgerState{}
 	require.NotPanics(t, func() {
-		err := ls.requiredStakeRewardBasisUnavailable(
+		err := ls.engine().RequiredStakeRewardBasisUnavailable(
 			true,
 			1386,
 			"missing reward snapshot",
 			"reward_snapshot_epoch",
 			1383,
 		)
-		require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+		require.ErrorIs(t, err, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 	})
 }
 
@@ -10926,31 +10788,44 @@ func TestMissingRewardSnapshotReportsImportedSeedFailure(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ls, db := newRewardCalculationTestLedger(t)
+			// What a v0.94.2 ledger-state import left in the metadata
+			// store, which the set takes over as it opens: the release
+			// recorded a failed basis there, and no later one writes it.
+			ls, db := newReleasedRewardCalculationTestLedger(
+				t, func(db *database.Database) {
+					released := dbadapter.New(db)
+					for _, epoch := range []uint64{
+						rewardSnapshotEpoch, potsEpoch,
+					} {
+						require.NoError(t, released.SetEpoch(
+							epoch*100, epoch, nil, nil, nil, nil,
+							eras.ShelleyEraDesc.Id, 1, 100, nil,
+						))
+					}
+					require.NoError(t, released.SaveRewardAdaPots(
+						&models.RewardAdaPots{
+							Epoch:        potsEpoch,
+							CapturedSlot: 300,
+						},
+						nil,
+					))
+					if tc.seedFailure {
+						require.NoError(t, db.Metadata().SaveRewardSeedFailure(
+							rewardSnapshotEpoch,
+							"mark",
+							failureReason,
+							100,
+							nil,
+						))
+					}
+				},
+			)
 			var logs bytes.Buffer
 			ls.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 
-			meta := db.Metadata()
-			require.NoError(t, meta.SaveRewardAdaPots(
-				&models.RewardAdaPots{
-					Epoch:        potsEpoch,
-					CapturedSlot: 300,
-				},
-				nil,
-			))
-			if tc.seedFailure {
-				require.NoError(t, meta.SaveRewardSeedFailure(
-					rewardSnapshotEpoch,
-					"mark",
-					failureReason,
-					100,
-					nil,
-				))
-			}
-
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
-			app, ok, err := ls.calculateStakeRewardApplication(
+			app, ok, err := ls.engine().CalculateStakeRewardApplication(
 				context.Background(),
 				txn,
 				newEpoch,
@@ -10958,7 +10833,7 @@ func TestMissingRewardSnapshotReportsImportedSeedFailure(t *testing.T) {
 				400,
 				true,
 			)
-			require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+			require.ErrorIs(t, err, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 			require.False(t, ok)
 			require.Nil(t, app)
 			assert.Contains(t, logs.String(), tc.wantReason)
@@ -10988,57 +10863,55 @@ func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
 	pp.ProtocolVersion = lcommon.ProtocolParametersProtocolVersion{Major: 10}
 	encoded, err := cbor.Encode(&pp)
 	require.NoError(t, err)
-	meta := db.Metadata()
 	for epoch := range uint64(3) {
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			epoch*500, epoch, nil, nil, nil, nil,
 			eras.ConwayEraDesc.Id, 1, 500, nil,
 		))
-		require.NoError(t, db.SetPParams(
+		require.NoError(t, seedDB(t, db).SetPParams(
 			encoded, epoch*500, epoch, eras.ConwayEraDesc.Id, nil,
 		))
 	}
-	require.NoError(t, meta.SetNetworkState(0, 2_000_000_000_000, 0, nil))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SetNetworkState(0, 2_000_000_000_000, 0, nil))
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch: 0, Reserves: 2_000_000_000_000,
 	}, nil))
-	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+	require.NoError(t, seedDB(t, db).SaveRewardSnapshot(&models.RewardSnapshot{
 		Epoch: 0, SnapshotType: "mark", ProtocolVersion: 10,
 		TotalActiveStake: 2_000_000_000_000,
 		TotalPoolCount:   2, TotalDelegators: 2,
 	}, nil))
+	var minted []fxMinted
 	for _, key := range []byte{0x11, 0x22} {
 		poolKey := rewardCalcHash(key)
 		poolID := seedLiveStakeFixture(
 			t, db, poolKey, bytes.Repeat([]byte{key}, 32),
 			1_000_000_000_000, 0,
 		)
-		require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
+		seedTestStakedOutput(
+			t, ls, append(bytes.Clone(poolKey), 0, 0, 0, 0), 0, poolKey,
+			1_000_000_000_000,
+		)
+		require.NoError(t, seedDB(t, db).SaveRewardPoolInputs([]*models.RewardPoolInput{{
 			Epoch: 0, PoolKeyHash: poolKey, RewardAccount: poolKey,
 			Margin:         &types.Rat{Rat: big.NewRat(0, 1)},
 			DelegatedStake: 1_000_000_000_000, DelegatorCount: 1,
 		}}, nil))
 		require.NoError(
 			t,
-			meta.SaveRewardStakeInputs([]*models.RewardStakeInput{{
+			seedDB(t, db).SaveRewardStakeInputs([]*models.RewardStakeInput{{
 				Epoch: 0, PoolKeyHash: poolKey, StakingKey: poolKey,
 				Stake: 1_000_000_000_000, Registered: true,
 			}}, nil),
 		)
 		for i := range uint64(90) {
-			require.NoError(t, db.UpdatePoolOpCertSequence(
-				t.Context(),
-				poolID, i+1, 1+2*i+uint64(key), nil,
-			))
+			minted = append(minted, fxMinted{
+				pool: poolID, sequence: i + 1, slot: 1 + 2*i + uint64(key),
+			})
 		}
 	}
-	_, err = testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
-INSERT INTO "transaction" (
-    hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
-		[]byte("genesis-performance-tx"), []byte("genesis-performance-block"))
-	require.NoError(t, err)
+	fxMintBlocks(t, db, minted)
+	fxSeedFee(t, db, 60, 400_000)
 
 	for _, tc := range []struct {
 		epoch    uint64
@@ -11050,24 +10923,24 @@ INSERT INTO "transaction" (
 		{2, 1_080_080_000, 1_998_920_320_000, big.NewRat(1_562_500, 6_251_687)},
 	} {
 		boundary := tc.epoch * 500
-		ended, err := meta.GetEpoch(tc.epoch-1, nil)
+		ended, err := seedDB(t, db).GetEpoch(tc.epoch-1, nil)
 		require.NoError(t, err)
 		require.NotNil(t, ended)
 		txn := db.Transaction(t.Context(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			if err := ls.applyStakeRewards(t.Context(), txn, tc.epoch, boundary, false); err != nil {
+			if err := ls.engine().ApplyStakeRewards(t.Context(), txn, tc.epoch, boundary, false); err != nil {
 				return err
 			}
-			return ls.saveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
+			return ls.engine().SaveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
 		}))
-		state, err := meta.GetNetworkState(nil)
+		state, err := seedDB(t, db).GetNetworkState(nil)
 		require.NoError(t, err)
 		require.NotNil(t, state)
 		require.Equal(t, tc.treasury, uint64(state.Treasury),
 			"treasury at boundary into epoch %d", tc.epoch)
 		require.Equal(t, tc.reserves, uint64(state.Reserves),
 			"reserves at boundary into epoch %d", tc.epoch)
-		pots, err := meta.GetRewardAdaPots(tc.epoch, nil)
+		pots, err := seedDB(t, db).GetRewardAdaPots(tc.epoch, nil)
 		require.NoError(t, err)
 		require.NotNil(t, pots)
 		require.Equal(t, state.Treasury, pots.Treasury)
@@ -11106,7 +10979,7 @@ func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
 		Unspendable:      50,
 		Undistributed:    150,
 	}
-	suppressBootstrapStakeRewards(result)
+	epochengine.SuppressBootstrapStakeRewards(result)
 
 	require.Empty(t, result.PoolRewards)
 	require.Empty(t, result.AccountRewards)
@@ -11114,19 +10987,19 @@ func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
 	require.Zero(t, result.Unspendable)
 	require.Equal(t, uint64(800), result.Undistributed)
 
-	app := &stakeRewardApplication{
-		params: rewards.Parameters{
+	app := &epochengine.StakeRewardApplication{
+		Params: rewards.Parameters{
 			TreasuryExpansion: big.NewRat(1, 5),
 		},
-		pots: &models.RewardAdaPots{
+		Pots: &models.RewardAdaPots{
 			Reserves: types.Uint64(10_000),
 			Treasury: types.Uint64(10),
 		},
-		totalRewardPot:   result.TotalRewardPot,
-		availableRewards: result.AvailableRewards,
-		undistributed:    result.Undistributed,
+		TotalRewardPot:   result.TotalRewardPot,
+		AvailableRewards: result.AvailableRewards,
+		Undistributed:    result.Undistributed,
 	}
-	reserves, treasury, err := stakeRewardUpdatedPots(app)
+	reserves, treasury, err := epochengine.StakeRewardUpdatedPots(app)
 	require.NoError(t, err)
 	require.Equal(t, uint64(9_800), reserves)
 	require.Equal(t, uint64(210), treasury)
@@ -11183,12 +11056,12 @@ func TestRequiredRewardBasisErrorNamesEpochInputAndRecovery(t *testing.T) {
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
 
-			app, ok, err := ls.calculateStakeRewardApplication(
+			app, ok, err := ls.engine().CalculateStakeRewardApplication(
 				context.Background(),
 				txn, retentionNewEpoch, retentionBoundarySlot,
 				retentionBoundarySlot, true,
 			)
-			require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+			require.ErrorIs(t, err, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 			require.False(t, ok)
 			require.Nil(t, app)
 			assert.Contains(t, err.Error(), tc.wantInput)
@@ -11198,7 +11071,7 @@ func TestRequiredRewardBasisErrorNamesEpochInputAndRecovery(t *testing.T) {
 			assert.Contains(t, err.Error(), "ledger-state import")
 			assert.Contains(t, err.Error(), "ledgerstate import warnings")
 
-			app, ok, err = ls.calculateStakeRewardApplication(
+			app, ok, err = ls.engine().CalculateStakeRewardApplication(
 				context.Background(),
 				txn, retentionNewEpoch, retentionBoundarySlot,
 				retentionBoundarySlot, false,
@@ -11213,14 +11086,25 @@ func TestRequiredRewardBasisErrorNamesEpochInputAndRecovery(t *testing.T) {
 func TestRequiredRewardBasisErrorNamesHiddenBlockCounts(t *testing.T) {
 	t.Parallel()
 
-	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	require.NoError(t, db.Metadata().SetSyncState(
-		mithrilLedgerSlotSyncKey, "199", nil,
-	))
+	ls, db := newLoadedRewardCalculationTestLedger(
+		t, func(db *database.Database) {
+			seedRewardPrecomputeTimingInputs(t, db, 7)
+			// The set takes over the reward inputs of the epochs the
+			// store holds a row of.
+			require.NoError(t, seedDB(t, db).SetEpoch(
+				0, 1, nil, nil, nil, nil,
+				eras.ShelleyEraDesc.Id, 1, 100, nil,
+			))
+			require.NoError(t, db.SetImportedLedgerStateBoundary(
+				ocommon.Point{Slot: 199}, nil,
+			))
+			fxImportRewardBlocks(t, db, 199, nil, nil)
+		},
+	)
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 
-	_, ok, err := ls.calculateStakeRewardApplication(
+	_, ok, err := ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,
@@ -11228,13 +11112,13 @@ func TestRequiredRewardBasisErrorNamesHiddenBlockCounts(t *testing.T) {
 		1_200,
 		true,
 	)
-	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, err, epochengine.ErrRequiredStakeRewardBasisUnavailable)
 	require.False(t, ok)
 	assert.Contains(t, err.Error(), "new epoch 4")
 	assert.Contains(t, err.Error(), "performance_epoch=2")
 	assert.Contains(t, err.Error(), "re-running Mithril sync")
 
-	_, ok, err = ls.calculateStakeRewardApplication(
+	_, ok, err = ls.engine().CalculateStakeRewardApplication(
 		context.Background(),
 		txn,
 		4,
@@ -11252,22 +11136,46 @@ func TestRequiredRewardBasisErrorNamesHiddenBlockCounts(t *testing.T) {
 func TestRewardRoundEnumeratedAbsences(t *testing.T) {
 	t.Parallel()
 
-	_, ok := stakeRewardEpochsForApplication(0)
+	_, ok := epochengine.StakeRewardEpochsForApplication(0)
 	require.False(t, ok, "epoch 0 has no reward round")
 	for _, e := range []uint64{1, 2} {
-		epochs, ok := stakeRewardEpochsForApplication(e)
+		epochs, ok := epochengine.StakeRewardEpochsForApplication(e)
 		require.True(t, ok, "epoch %d", e)
-		require.True(t, epochs.bootstrap, "epoch %d", e)
+		require.True(t, epochs.Bootstrap, "epoch %d", e)
 	}
 	for e := uint64(3); e < 10; e++ {
-		epochs, ok := stakeRewardEpochsForApplication(e)
+		epochs, ok := epochengine.StakeRewardEpochsForApplication(e)
 		require.True(t, ok, "epoch %d", e)
-		require.False(t, epochs.bootstrap, "epoch %d", e)
+		require.False(t, epochs.Bootstrap, "epoch %d", e)
 	}
 
 	ls, db := newRewardCalculationTestLedger(t)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 0, 0, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 0, 0, false)
 	}))
+}
+
+// precomputeStakeRewardsForTest computes and persists stake rewards for
+// newEpoch within one read-write transaction, composing the same calculate
+// and save steps the chunked production path splits across transactions.
+func (ls *LedgerState) precomputeStakeRewardsForTest(
+	txn ledgerdb.Txn,
+	newEpoch uint64,
+	capturedSlot uint64,
+	boundarySlot uint64,
+) error {
+	e := ls.engine()
+	app, ok, err := e.PrecomputeStakeRewardsCalculate(
+		txn, newEpoch, capturedSlot, boundarySlot,
+	)
+	if err != nil || !ok {
+		return err
+	}
+	if app == nil {
+		return errors.New("missing stake reward application")
+	}
+	return e.SaveStakeRewardPrecompute(
+		ls.ledgerDB(), txn, app, newEpoch, capturedSlot, boundarySlot,
+	)
 }

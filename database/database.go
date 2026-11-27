@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/leiosdb"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -44,9 +45,7 @@ type Config struct {
 	DataDir      string
 	StorageMode  string // "core" or "api"
 	// Role is empty for the ledger's own database and RoleIndexer for the
-	// IndexerDB. An indexer database holds no commit timestamp: that value
-	// pairs the ledger's two stores, and the IndexerDB's own transaction
-	// carries its tip instead.
+	// IndexerDB.
 	Role string
 	// IndexerLayout is "split" beside an IndexerDB and "shared" without one;
 	// empty means the caller does not know it and the indexer_layout gate is
@@ -88,6 +87,11 @@ type Config struct {
 // RoleIndexer is the Config.Role of an IndexerDB.
 const RoleIndexer = "indexer"
 
+// RoleReleased is the Config.Role of a v0.94.2 database opened as the source
+// of the migration that moves its ledger state into the LedgerDB. Only that
+// migration opens one.
+const RoleReleased = "released"
+
 // Stores contains the provider-owned storage services injected into a
 // Database. Their lifecycle remains owned by the plugin host.
 type Stores struct {
@@ -99,6 +103,11 @@ type Stores struct {
 	// Leios is the endorser-block store. Nil lets the Database open its own
 	// under the data directory on first use and close it with Close.
 	Leios leiosdb.Store
+	// LeiosPeer is the database whose endorser-block store the new Database
+	// reads and never opens or closes, as the IndexerDB reads the ledger's.
+	// It is installed before init runs, which can read a closure through the
+	// Leios store.
+	LeiosPeer *Database
 }
 
 // isNilStore reports whether an injected store is a nil interface or an
@@ -117,24 +126,38 @@ type Database struct {
 	config   *Config
 	logger   *slog.Logger
 	metadata metadata.MetadataStore
+	// gatesMu serialises the ledger's node settings read-modify-write;
+	// memGates holds them when there is no data directory to keep them in.
+	gatesMu  sync.Mutex
+	memGates nodesettings.Values
 	// liveUtxo is set when the ledger holds the live UTxO set outside the
 	// metadata store; see SetLiveUtxoSource.
 	liveUtxo bool
-	// drained is the persisted ledger-state latch; see FamilyDrained.
-	drained drainedMask
-	// nonceSource serves rollback nonce reads once the nonces family is
-	// drained; see SetNonceSource.
+	// liveOutputs, when set, answers reads of an active output whose block
+	// history has expired; see SetLiveOutputs.
+	liveOutputs atomic.Pointer[types.LiveOutputReader]
+	// txIndex lists the transactions applied after a slot when the LedgerDB
+	// holds the transaction index; see SetLiveUtxoSource.
+	txIndex types.TxIndexSource
+	// rolledBackBlocksReleased is set once a release has found no rolled-back
+	// block body left, and cleared whenever one is kept, so a rollback that
+	// kept none does not scan for them.
+	rolledBackBlocksReleased atomic.Bool
+	// rolledBackBlockHold keeps rolled-back bodies from release; see
+	// SetRolledBackBlockHold.
+	rolledBackBlockHold atomic.Pointer[RolledBackBlockHold]
+	// nonceSource serves rollback nonce reads when there is no metadata store;
+	// see SetNonceSource.
 	nonceSource atomic.Pointer[NonceSource]
-	// epochSource serves epoch and era switch reads once those families are
-	// drained; see SetEpochSource.
+	// epochSource serves epoch and era switch reads when there is no metadata
+	// store; see SetEpochSource.
 	epochSource atomic.Pointer[EpochSource]
 	// pparamsSource serves protocol parameter, update proposal and sync
-	// marker reads once the pparams-updates family is drained; see
-	// SetPParamsSource. pparamsSourceLoaded caches that it holds them all.
+	// marker reads when there is no metadata store; see SetPParamsSource.
+	// pparamsSourceLoaded caches that it holds them all.
 	pparamsSource       atomic.Pointer[PParamsSource]
 	pparamsSourceLoaded atomic.Bool
-	// poolSource serves pool reads once the pools-history family is
-	// drained.
+	// poolSource serves pool reads when there is no metadata store.
 	poolSource atomic.Pointer[PoolSource]
 	// blobRef is the installed blob store, guarded by blobMu. See
 	// blob_store.go for the ownership, locking, and replacement rules that
@@ -178,8 +201,7 @@ type Database struct {
 	// can open both read views as of the same logical commit boundary. Only
 	// Txns holding the metadata store's single write
 	// connection participate (see acquireCommitBarrier) — a blob-only Txn
-	// never touches that connection and never writes the commit timestamp
-	// this guards, so it does not take part. Txn construction holds the
+	// never touches that connection, so it does not take part. Txn construction holds the
 	// read side (many concurrent read-write Txns proceed normally);
 	// PauseCommits/PauseCommitsContext hold the write side.
 	//
@@ -193,8 +215,7 @@ type Database struct {
 	commitBarrier cancellableBarrier
 
 	// commitPhase covers only the commit step of a Txn that holds the shared
-	// side of commitBarrier: the commit timestamp update and both store
-	// commits. NewReadSnapshotContext takes its exclusive side instead of
+	// side of commitBarrier: both store commits. NewReadSnapshotContext takes its exclusive side instead of
 	// commitBarrier's, because a consistent pair of read views needs only that
 	// no commit lands between opening them. Uncommitted writes are invisible to
 	// both views, so waiting for every open read-write Txn to finish -- a
@@ -266,9 +287,8 @@ func (d *Database) releaseReadSnapshotAdmission() {
 //
 // database/lifecycle.Snapshot uses this to bracket its blob and metadata
 // backup calls: each backup is independently consistent as of whenever it
-// runs, but a commit landing between the two would write its timestamp to
-// one store's backup and not the other's, so the restored copy fails
-// checkCommitTimestamp's cross-check. NewReadSnapshotContext brackets opening
+// runs, but a commit landing between the two would leave one store's backup
+// a commit ahead of the other's. NewReadSnapshotContext brackets opening
 // its two read views with the narrower pauseCommitPhaseContext. The
 // destructive-transition shared hold also prevents either snapshot type from
 // opening in the gap between a blob-only primary-chain truncation and its
@@ -572,15 +592,20 @@ func (d *Database) init(ctx context.Context) error {
 		// We do this so we don't have to add guards around every log operation
 		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	// Check commit timestamp
-	if !d.isIndexer() {
-		if err := d.checkCommitTimestamp(ctx); err != nil {
-			return err
-		}
+	if err := d.settleLedgerNodeSettings(ctx); err != nil {
+		return err
+	}
+	if err := d.movePairedChainStateToBlockStore(ctx); err != nil {
+		return fmt.Errorf("move chain state to the block store: %w", err)
 	}
 	// Check immutable settings have not changed since initial sync
 	if err := d.CheckNodeSettings(ctx); err != nil {
 		return err
+	}
+	// The API indexes live only in an IndexerDB's metadata store; the ledger's
+	// database keeps none, whatever its storage mode.
+	if !d.isIndexer() {
+		return nil
 	}
 	if d.config.StorageMode == types.StorageModeAPI {
 		rebuilder, ok := d.metadata.(metadata.AddressTransactionIndexRebuilder)
@@ -629,8 +654,16 @@ func New(
 	if stores.Blob == nil || isNilStore(stores.Blob) {
 		return nil, errors.New("blob store is required")
 	}
-	if stores.Metadata == nil || isNilStore(stores.Metadata) {
+	hasMetadata := stores.Metadata != nil && !isNilStore(stores.Metadata)
+	switch {
+	case configCopy.Role == "" && hasMetadata:
+		return nil, errors.New(
+			"the ledger's database keeps no metadata store",
+		)
+	case configCopy.Role != "" && !hasMetadata:
 		return nil, errors.New("metadata store is required")
+	case !hasMetadata:
+		stores.Metadata = nil
 	}
 	if stores.Immutable != nil && isNilStore(stores.Immutable) {
 		return nil, errors.New("immutable store must not be a typed nil")
@@ -645,9 +678,15 @@ func New(
 	if stores.Leios != nil && !isNilStore(stores.Leios) {
 		db.leios.store = stores.Leios
 	}
+	if stores.LeiosPeer != nil {
+		db.leios.peer = stores.LeiosPeer
+	}
 	// Initialize the tiered CBOR cache
 	db.cborCache = NewTieredCborCache(configCopy.CacheConfig, db)
 	db.cborCache.SetLogger(configCopy.Logger)
+	if setter, ok := db.metadata.(types.PayloadResolverSetter); ok {
+		setter.SetPayloadResolver(db)
+	}
 	// Register cache metrics if prometheus registry is available
 	if configCopy.PromRegistry != nil {
 		db.cborCache.Metrics().Register(configCopy.PromRegistry)
@@ -736,6 +775,9 @@ func New(
 				}
 			}
 		}()
+	}
+	if err := db.settleLedgerStore(); err != nil {
+		return db, err
 	}
 	// The marker-resolving read path goes in before anything reads a block.
 	if err := db.initImmutable(); err != nil {

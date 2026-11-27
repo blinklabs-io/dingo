@@ -780,19 +780,6 @@ func (q *Queries) DeleteNetworkStateAfterSlot(ctx context.Context, slot int64) e
 	return err
 }
 
-const deleteOrphanRewardPoolLikelihoods = `-- name: DeleteOrphanRewardPoolLikelihoods :exec
-DELETE FROM reward_pool_likelihood
-WHERE NOT EXISTS (
-    SELECT 1 FROM reward_likelihood_state
-    WHERE reward_likelihood_state.epoch = reward_pool_likelihood.epoch
-)
-`
-
-func (q *Queries) DeleteOrphanRewardPoolLikelihoods(ctx context.Context) error {
-	_, err := q.db.ExecContext(ctx, deleteOrphanRewardPoolLikelihoods)
-	return err
-}
-
 const deletePParamUpdatesAfterSlot = `-- name: DeletePParamUpdatesAfterSlot :exec
 DELETE FROM pparam_update
 WHERE added_slot > ?
@@ -872,15 +859,6 @@ func (q *Queries) DeleteRewardAccountOutputsAfterSlot(ctx context.Context, captu
 	return err
 }
 
-const deleteRewardAccountOutputsBeforeEpoch = `-- name: DeleteRewardAccountOutputsBeforeEpoch :exec
-DELETE FROM reward_account_output WHERE epoch < ?
-`
-
-func (q *Queries) DeleteRewardAccountOutputsBeforeEpoch(ctx context.Context, epoch int64) error {
-	_, err := q.db.ExecContext(ctx, deleteRewardAccountOutputsBeforeEpoch, epoch)
-	return err
-}
-
 const deleteRewardAccountOutputsForEpoch = `-- name: DeleteRewardAccountOutputsForEpoch :exec
 DELETE FROM reward_account_output WHERE epoch = ?
 `
@@ -896,15 +874,6 @@ DELETE FROM reward_ada_pots WHERE captured_slot > ?
 
 func (q *Queries) DeleteRewardAdaPotsAfterSlot(ctx context.Context, capturedSlot int64) error {
 	_, err := q.db.ExecContext(ctx, deleteRewardAdaPotsAfterSlot, capturedSlot)
-	return err
-}
-
-const deleteRewardLikelihoodStatesAfterSlot = `-- name: DeleteRewardLikelihoodStatesAfterSlot :exec
-DELETE FROM reward_likelihood_state WHERE boundary_slot > ?
-`
-
-func (q *Queries) DeleteRewardLikelihoodStatesAfterSlot(ctx context.Context, boundarySlot int64) error {
-	_, err := q.db.ExecContext(ctx, deleteRewardLikelihoodStatesAfterSlot, boundarySlot)
 	return err
 }
 
@@ -929,15 +898,6 @@ DELETE FROM reward_pool_input WHERE epoch = ?
 
 func (q *Queries) DeleteRewardPoolInputsForEpoch(ctx context.Context, epoch int64) error {
 	_, err := q.db.ExecContext(ctx, deleteRewardPoolInputsForEpoch, epoch)
-	return err
-}
-
-const deleteRewardPoolLikelihoodsForEpoch = `-- name: DeleteRewardPoolLikelihoodsForEpoch :exec
-DELETE FROM reward_pool_likelihood WHERE epoch = ?
-`
-
-func (q *Queries) DeleteRewardPoolLikelihoodsForEpoch(ctx context.Context, epoch int64) error {
-	_, err := q.db.ExecContext(ctx, deleteRewardPoolLikelihoodsForEpoch, epoch)
 	return err
 }
 
@@ -1048,6 +1008,31 @@ DELETE FROM transaction_metadata_label WHERE slot > ?
 
 func (q *Queries) DeleteTransactionMetadataLabelsAfterSlot(ctx context.Context, slot sql.NullInt64) error {
 	_, err := q.db.ExecContext(ctx, deleteTransactionMetadataLabelsAfterSlot, slot)
+	return err
+}
+
+const deleteTransactionOffset = `-- name: DeleteTransactionOffset :exec
+DELETE FROM transaction_offset
+WHERE hash = ?
+`
+
+func (q *Queries) DeleteTransactionOffset(ctx context.Context, hash []byte) error {
+	_, err := q.db.ExecContext(ctx, deleteTransactionOffset, hash)
+	return err
+}
+
+const deleteUtxoOffset = `-- name: DeleteUtxoOffset :exec
+DELETE FROM utxo_offset
+WHERE tx_id = ? AND output_idx = ?
+`
+
+type DeleteUtxoOffsetParams struct {
+	TxID      []byte
+	OutputIdx int64
+}
+
+func (q *Queries) DeleteUtxoOffset(ctx context.Context, arg DeleteUtxoOffsetParams) error {
+	_, err := q.db.ExecContext(ctx, deleteUtxoOffset, arg.TxID, arg.OutputIdx)
 	return err
 }
 
@@ -2131,19 +2116,6 @@ func (q *Queries) GetExpiredDReps(ctx context.Context, expiryEpoch sql.NullInt64
 	return items, nil
 }
 
-const getImportCheckpoint = `-- name: GetImportCheckpoint :one
-SELECT id, import_key, phase
-FROM import_checkpoint
-WHERE import_key = ?
-`
-
-func (q *Queries) GetImportCheckpoint(ctx context.Context, importKey string) (ImportCheckpoint, error) {
-	row := q.db.QueryRowContext(ctx, getImportCheckpoint, importKey)
-	var i ImportCheckpoint
-	err := row.Scan(&i.ID, &i.ImportKey, &i.Phase)
-	return i, err
-}
-
 const getImportedEpochBlockTotal = `-- name: GetImportedEpochBlockTotal :one
 SELECT total_blocks
 FROM imported_epoch_block_total
@@ -2926,50 +2898,6 @@ func (q *Queries) GetRewardAdaPots(ctx context.Context, epoch int64) (RewardAdaP
 	return i, err
 }
 
-const getRewardLikelihoodStateAtSlot = `-- name: GetRewardLikelihoodStateAtSlot :one
-SELECT id, epoch, reward_pot, captured_slot, boundary_slot, complete
-FROM reward_likelihood_state
-WHERE boundary_slot <= ?
-ORDER BY boundary_slot DESC, epoch DESC
-LIMIT 1
-`
-
-func (q *Queries) GetRewardLikelihoodStateAtSlot(ctx context.Context, boundarySlot int64) (RewardLikelihoodState, error) {
-	row := q.db.QueryRowContext(ctx, getRewardLikelihoodStateAtSlot, boundarySlot)
-	var i RewardLikelihoodState
-	err := row.Scan(
-		&i.ID,
-		&i.Epoch,
-		&i.RewardPot,
-		&i.CapturedSlot,
-		&i.BoundarySlot,
-		&i.Complete,
-	)
-	return i, err
-}
-
-const getRewardLikelihoodStateBeforeEpoch = `-- name: GetRewardLikelihoodStateBeforeEpoch :one
-SELECT id, epoch, reward_pot, captured_slot, boundary_slot, complete
-FROM reward_likelihood_state
-WHERE epoch < ?
-ORDER BY epoch DESC
-LIMIT 1
-`
-
-func (q *Queries) GetRewardLikelihoodStateBeforeEpoch(ctx context.Context, epoch int64) (RewardLikelihoodState, error) {
-	row := q.db.QueryRowContext(ctx, getRewardLikelihoodStateBeforeEpoch, epoch)
-	var i RewardLikelihoodState
-	err := row.Scan(
-		&i.ID,
-		&i.Epoch,
-		&i.RewardPot,
-		&i.CapturedSlot,
-		&i.BoundarySlot,
-		&i.Complete,
-	)
-	return i, err
-}
-
 const getRewardPoolInputs = `-- name: GetRewardPoolInputs :many
 SELECT margin, pool_key_hash, reward_account, blocks_produced,
        total_blocks_in_epoch, id, epoch, pledge, delegated_stake,
@@ -3004,44 +2932,6 @@ func (q *Queries) GetRewardPoolInputs(ctx context.Context, epoch int64) ([]Rewar
 			&i.DelegatorCount,
 			&i.RewardAccountCredentialTag,
 			&i.CapturedSlot,
-			&i.BoundarySlot,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getRewardPoolLikelihoods = `-- name: GetRewardPoolLikelihoods :many
-SELECT id, epoch, pool_key_hash, log_weights, performance_estimate,
-       boundary_slot
-FROM reward_pool_likelihood
-WHERE epoch = ?
-ORDER BY pool_key_hash ASC
-`
-
-func (q *Queries) GetRewardPoolLikelihoods(ctx context.Context, epoch int64) ([]RewardPoolLikelihood, error) {
-	rows, err := q.db.QueryContext(ctx, getRewardPoolLikelihoods, epoch)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []RewardPoolLikelihood{}
-	for rows.Next() {
-		var i RewardPoolLikelihood
-		if err := rows.Scan(
-			&i.ID,
-			&i.Epoch,
-			&i.PoolKeyHash,
-			&i.LogWeights,
-			&i.PerformanceEstimate,
 			&i.BoundarySlot,
 		); err != nil {
 			return nil, err
@@ -3482,6 +3372,19 @@ func (q *Queries) GetTransactionMetadataByHash(ctx context.Context, hash []byte)
 	return metadata, err
 }
 
+const getTransactionOffset = `-- name: GetTransactionOffset :one
+SELECT data
+FROM transaction_offset
+WHERE hash = ?
+`
+
+func (q *Queries) GetTransactionOffset(ctx context.Context, hash []byte) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, getTransactionOffset, hash)
+	var data []byte
+	err := row.Scan(&data)
+	return data, err
+}
+
 const getTransactionSlotByHash = `-- name: GetTransactionSlotByHash :one
 SELECT a.slot
 FROM "transaction" AS t
@@ -3552,6 +3455,24 @@ func (q *Queries) GetTransactionsByBlockHash(ctx context.Context, blockHash []by
 		return nil, err
 	}
 	return items, nil
+}
+
+const getUtxoOffset = `-- name: GetUtxoOffset :one
+SELECT data
+FROM utxo_offset
+WHERE tx_id = ? AND output_idx = ?
+`
+
+type GetUtxoOffsetParams struct {
+	TxID      []byte
+	OutputIdx int64
+}
+
+func (q *Queries) GetUtxoOffset(ctx context.Context, arg GetUtxoOffsetParams) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, getUtxoOffset, arg.TxID, arg.OutputIdx)
+	var data []byte
+	err := row.Scan(&data)
+	return data, err
 }
 
 const getUtxoRefsBySlot = `-- name: GetUtxoRefsBySlot :many
@@ -3833,52 +3754,6 @@ func (q *Queries) InsertOffchainMetadataPointer(ctx context.Context, arg InsertO
 	return result.RowsAffected()
 }
 
-const insertRewardSnapshot = `-- name: InsertRewardSnapshot :one
-INSERT INTO reward_snapshot (
-    epoch, snapshot_type, total_active_stake, total_pool_count,
-    total_delegators, captured_slot, boundary_slot, epoch_nonce,
-    protocol_version, authoritative, calculation_version,
-    excluded_active_stake
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (epoch, snapshot_type) DO NOTHING
-RETURNING id
-`
-
-type InsertRewardSnapshotParams struct {
-	Epoch               int64
-	SnapshotType        string
-	TotalActiveStake    string
-	TotalPoolCount      int64
-	TotalDelegators     int64
-	CapturedSlot        int64
-	BoundarySlot        int64
-	EpochNonce          []byte
-	ProtocolVersion     int64
-	Authoritative       bool
-	CalculationVersion  int64
-	ExcludedActiveStake sql.NullString
-}
-
-func (q *Queries) InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnapshotParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, insertRewardSnapshot,
-		arg.Epoch,
-		arg.SnapshotType,
-		arg.TotalActiveStake,
-		arg.TotalPoolCount,
-		arg.TotalDelegators,
-		arg.CapturedSlot,
-		arg.BoundarySlot,
-		arg.EpochNonce,
-		arg.ProtocolVersion,
-		arg.Authoritative,
-		arg.CalculationVersion,
-		arg.ExcludedActiveStake,
-	)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
 const listPParamsByEra = `-- name: ListPParamsByEra :many
 SELECT cbor, id, added_slot, epoch, era_id
 FROM pparams
@@ -3925,19 +3800,6 @@ WHERE updated_at < ?
 // snapshot and is no longer published upstream.
 func (q *Queries) PruneTokenRegistryEntriesStaleBefore(ctx context.Context, updatedAt sql.NullTime) (int64, error) {
 	result, err := q.db.ExecContext(ctx, pruneTokenRegistryEntriesStaleBefore, updatedAt)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const releaseFallbackRewardSnapshotGuard = `-- name: ReleaseFallbackRewardSnapshotGuard :execrows
-DELETE FROM reward_snapshot
-WHERE id = ? AND authoritative = FALSE
-`
-
-func (q *Queries) ReleaseFallbackRewardSnapshotGuard(ctx context.Context, id int64) (int64, error) {
-	result, err := q.db.ExecContext(ctx, releaseFallbackRewardSnapshotGuard, id)
 	if err != nil {
 		return 0, err
 	}
@@ -4202,39 +4064,6 @@ func (q *Queries) SaveRewardAdaPots(ctx context.Context, arg SaveRewardAdaPotsPa
 	return id, err
 }
 
-const saveRewardLikelihoodState = `-- name: SaveRewardLikelihoodState :one
-INSERT INTO reward_likelihood_state (
-    epoch, reward_pot, captured_slot, boundary_slot, complete
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (epoch) DO UPDATE SET
-    reward_pot = excluded.reward_pot,
-    captured_slot = excluded.captured_slot,
-    boundary_slot = excluded.boundary_slot,
-    complete = excluded.complete
-RETURNING id
-`
-
-type SaveRewardLikelihoodStateParams struct {
-	Epoch        int64
-	RewardPot    string
-	CapturedSlot int64
-	BoundarySlot int64
-	Complete     bool
-}
-
-func (q *Queries) SaveRewardLikelihoodState(ctx context.Context, arg SaveRewardLikelihoodStateParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, saveRewardLikelihoodState,
-		arg.Epoch,
-		arg.RewardPot,
-		arg.CapturedSlot,
-		arg.BoundarySlot,
-		arg.Complete,
-	)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
 const saveRewardPoolInput = `-- name: SaveRewardPoolInput :one
 INSERT INTO reward_pool_input (
     margin, pool_key_hash, reward_account, blocks_produced,
@@ -4290,38 +4119,6 @@ func (q *Queries) SaveRewardPoolInput(ctx context.Context, arg SaveRewardPoolInp
 		arg.DelegatorCount,
 		arg.RewardAccountCredentialTag,
 		arg.CapturedSlot,
-		arg.BoundarySlot,
-	)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
-const saveRewardPoolLikelihood = `-- name: SaveRewardPoolLikelihood :one
-INSERT INTO reward_pool_likelihood (
-    epoch, pool_key_hash, log_weights, performance_estimate, boundary_slot
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
-    log_weights = excluded.log_weights,
-    performance_estimate = excluded.performance_estimate,
-    boundary_slot = excluded.boundary_slot
-RETURNING id
-`
-
-type SaveRewardPoolLikelihoodParams struct {
-	Epoch               int64
-	PoolKeyHash         []byte
-	LogWeights          []byte
-	PerformanceEstimate float64
-	BoundarySlot        int64
-}
-
-func (q *Queries) SaveRewardPoolLikelihood(ctx context.Context, arg SaveRewardPoolLikelihoodParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, saveRewardPoolLikelihood,
-		arg.Epoch,
-		arg.PoolKeyHash,
-		arg.LogWeights,
-		arg.PerformanceEstimate,
 		arg.BoundarySlot,
 	)
 	var id int64
@@ -4764,22 +4561,6 @@ func (q *Queries) SetEpoch(ctx context.Context, arg SetEpochParams) error {
 	return err
 }
 
-const setImportCheckpoint = `-- name: SetImportCheckpoint :exec
-INSERT INTO import_checkpoint (import_key, phase)
-VALUES (?, ?)
-ON CONFLICT (import_key) DO UPDATE SET phase = excluded.phase
-`
-
-type SetImportCheckpointParams struct {
-	ImportKey string
-	Phase     string
-}
-
-func (q *Queries) SetImportCheckpoint(ctx context.Context, arg SetImportCheckpointParams) error {
-	_, err := q.db.ExecContext(ctx, setImportCheckpoint, arg.ImportKey, arg.Phase)
-	return err
-}
-
 const setNetworkState = `-- name: SetNetworkState :exec
 INSERT INTO network_state (treasury, reserves, slot)
 VALUES (?, ?, ?)
@@ -4920,6 +4701,39 @@ func (q *Queries) SetTip(ctx context.Context, arg SetTipParams) error {
 	return err
 }
 
+const setTransactionOffset = `-- name: SetTransactionOffset :exec
+INSERT INTO transaction_offset (hash, data)
+VALUES (?, ?)
+ON CONFLICT (hash) DO UPDATE SET data = excluded.data
+`
+
+type SetTransactionOffsetParams struct {
+	Hash []byte
+	Data []byte
+}
+
+func (q *Queries) SetTransactionOffset(ctx context.Context, arg SetTransactionOffsetParams) error {
+	_, err := q.db.ExecContext(ctx, setTransactionOffset, arg.Hash, arg.Data)
+	return err
+}
+
+const setUtxoOffset = `-- name: SetUtxoOffset :exec
+INSERT INTO utxo_offset (tx_id, output_idx, data)
+VALUES (?, ?, ?)
+ON CONFLICT (tx_id, output_idx) DO UPDATE SET data = excluded.data
+`
+
+type SetUtxoOffsetParams struct {
+	TxID      []byte
+	OutputIdx int64
+	Data      []byte
+}
+
+func (q *Queries) SetUtxoOffset(ctx context.Context, arg SetUtxoOffsetParams) error {
+	_, err := q.db.ExecContext(ctx, setUtxoOffset, arg.TxID, arg.OutputIdx, arg.Data)
+	return err
+}
+
 const softDeleteAllCommitteeMembers = `-- name: SoftDeleteAllCommitteeMembers :exec
 UPDATE committee_member
 SET deleted_slot = ?
@@ -5035,55 +4849,6 @@ func (q *Queries) UpdateDRepActivity(ctx context.Context, arg UpdateDRepActivity
 		arg.ExpiryEpoch,
 		arg.CredentialTag,
 		arg.Credential,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const updateFallbackRewardSnapshot = `-- name: UpdateFallbackRewardSnapshot :execrows
-UPDATE reward_snapshot
-SET total_active_stake = ?,
-    total_pool_count = ?,
-    total_delegators = ?,
-    captured_slot = ?,
-    boundary_slot = ?,
-    epoch_nonce = ?,
-    protocol_version = ?,
-    authoritative = FALSE,
-    calculation_version = ?,
-    excluded_active_stake = ?
-WHERE epoch = ? AND snapshot_type = ? AND authoritative = FALSE
-`
-
-type UpdateFallbackRewardSnapshotParams struct {
-	TotalActiveStake    string
-	TotalPoolCount      int64
-	TotalDelegators     int64
-	CapturedSlot        int64
-	BoundarySlot        int64
-	EpochNonce          []byte
-	ProtocolVersion     int64
-	CalculationVersion  int64
-	ExcludedActiveStake sql.NullString
-	Epoch               int64
-	SnapshotType        string
-}
-
-func (q *Queries) UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFallbackRewardSnapshotParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, updateFallbackRewardSnapshot,
-		arg.TotalActiveStake,
-		arg.TotalPoolCount,
-		arg.TotalDelegators,
-		arg.CapturedSlot,
-		arg.BoundarySlot,
-		arg.EpochNonce,
-		arg.ProtocolVersion,
-		arg.CalculationVersion,
-		arg.ExcludedActiveStake,
-		arg.Epoch,
-		arg.SnapshotType,
 	)
 	if err != nil {
 		return 0, err

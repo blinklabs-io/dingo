@@ -64,8 +64,8 @@ var _ SCLSSource = (*SCLSSnapshotSource)(nil)
 
 // NewSCLSSource opens a snapshot of store for an export. It refuses, with
 // badgerutxo.ErrNotCheckpointable or badgerutxo.ErrBootstrapIncomplete, a set
-// that carries a failure mark, a pending merge or rollback, or an unfinished
-// bootstrap. The caller releases the snapshot with Close.
+// that carries a failure mark, an interrupted ledger-state import, a pending
+// rollback, or an unfinished bootstrap. The caller releases the snapshot with Close.
 func NewSCLSSource(store *badgerutxo.Store) (*SCLSSnapshotSource, error) {
 	snap, err := store.CheckpointableSnapshot()
 	if err != nil {

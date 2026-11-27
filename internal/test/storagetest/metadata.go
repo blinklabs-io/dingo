@@ -48,16 +48,6 @@ func RunMetadataStoreConformance(
 	t.Helper()
 	store := newStore(t)
 
-	t.Run("CommitTimestampRoundTrip", func(t *testing.T) {
-		txn := store.Transaction(t.Context())
-		require.NoError(t, store.SetCommitTimestamp(555, txn))
-		require.NoError(t, txn.Commit())
-
-		got, err := store.GetCommitTimestamp(context.Background())
-		require.NoError(t, err)
-		require.Equal(t, int64(555), got)
-	})
-
 	t.Run("NodeSettingsFirstWriteWins", func(t *testing.T) {
 		require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
 			StorageMode: types.StorageModeCore,
@@ -145,23 +135,23 @@ func RunMetadataStoreConformance(
 
 	t.Run("TransactionCommitPersists", func(t *testing.T) {
 		txn := store.Transaction(t.Context())
-		require.NoError(t, store.SetCommitTimestamp(777, txn))
+		require.NoError(t, store.SetSyncState("conformance_commit", "777", txn))
 		require.NoError(t, txn.Commit())
 
-		got, err := store.GetCommitTimestamp(context.Background())
+		got, err := store.GetSyncState("conformance_commit", nil)
 		require.NoError(t, err)
-		require.Equal(t, int64(777), got)
+		require.Equal(t, "777", got)
 	})
 
 	t.Run("TransactionRollbackDiscardsWrites", func(t *testing.T) {
-		baseline, err := store.GetCommitTimestamp(context.Background())
+		baseline, err := store.GetSyncState("conformance_commit", nil)
 		require.NoError(t, err)
 
 		txn := store.Transaction(t.Context())
-		require.NoError(t, store.SetCommitTimestamp(baseline+1, txn))
+		require.NoError(t, store.SetSyncState("conformance_commit", baseline+"1", txn))
 		require.NoError(t, txn.Rollback())
 
-		got, err := store.GetCommitTimestamp(context.Background())
+		got, err := store.GetSyncState("conformance_commit", nil)
 		require.NoError(t, err)
 		require.Equal(t, baseline, got)
 	})
@@ -435,9 +425,9 @@ func RunMetadataStoreConformance(
 		start := time.Now()
 
 		txn := store.Transaction(t.Context())
-		require.NoError(t, store.SetCommitTimestamp(1, txn))
+		require.NoError(t, store.SetSyncState("conformance_timeout", "1", txn))
 		require.NoError(t, txn.Commit())
-		_, err := store.GetCommitTimestamp(context.Background())
+		_, err := store.GetSyncState("conformance_timeout", nil)
 		require.NoError(t, err)
 
 		require.Less(

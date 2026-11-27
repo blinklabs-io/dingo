@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -89,7 +90,7 @@ func TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite(t *testing.T) {
 // TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins runs many
 // concurrent conditional inserts for the same name against a real
 // connection pool and asserts exactly one reports having inserted -- the
-// property commit_timestamp.go's evaluateAndPersistGates depends on to
+// property node_settings.go's evaluateAndPersistGates depends on to
 // detect a concurrent first-ever opener instead of racing an unconditional
 // upsert.
 func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
@@ -273,11 +274,38 @@ func newManagementTestStore(t *testing.T) *Store {
 		MigrationLocker: migrations.NewProcessLocker(),
 	})
 	require.NoError(t, err)
+	store.SetPayloadResolver(testutil.NewPayloadArchive())
 	require.NoError(t, store.Start(context.Background()))
 	t.Cleanup(func() {
 		require.NoError(t, store.Close())
 	})
 	return store
+}
+
+// testLocate returns the locate function of the archive a test store
+// resolves payloads from, so a payload written through it reads back.
+func testLocate(store *Store) locateFunc {
+	archive := store.payloads.(*testutil.PayloadArchive)
+	return func(payload []byte, _ ...[]byte) ([]byte, error) {
+		return archive.LocatePayload(payload)
+	}
+}
+
+// bindTestPayloads makes writes through the given transactions and
+// accumulators locate their payloads in an archive the store reads them back
+// from, installing the archive when the store has none.
+func bindTestPayloads(t testing.TB, store *Store, targets ...any) {
+	t.Helper()
+	archive, ok := store.payloads.(*testutil.PayloadArchive)
+	if !ok {
+		archive = testutil.NewPayloadArchive()
+		store.SetPayloadResolver(archive)
+	}
+	for _, target := range targets {
+		setter, ok := target.(types.PayloadLocatorSetter)
+		require.True(t, ok, "%T takes a payload locator", target)
+		setter.SetPayloadLocator(archive)
+	}
 }
 
 func TestGetPoolByVrfKeyHashExcludesRetiredPool(t *testing.T) {
@@ -1159,7 +1187,7 @@ func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	txn := store.Transaction(ctx)
-	require.NoError(t, store.SetCommitTimestamp(42, txn))
+	require.NoError(t, store.SetSyncState("cancel_probe", "42", txn))
 
 	cancel()
 
@@ -1170,7 +1198,7 @@ func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
 	// first attempt regardless of that goroutine's timing: dbFromTxn hands
 	// this statement the transaction's own now-canceled ctx directly.)
 	require.Eventually(t, func() bool {
-		return store.SetCommitTimestamp(43, txn) != nil
+		return store.SetSyncState("cancel_probe", "43", txn) != nil
 	}, 2*time.Second, 5*time.Millisecond,
 		"transaction must stop accepting writes once its ctx is canceled")
 
@@ -1186,9 +1214,9 @@ func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
 
 	// Neither the successful first write nor anything else from the
 	// canceled transaction may be durably visible.
-	persisted, err := store.GetCommitTimestamp(context.Background())
+	persisted, err := store.GetSyncState("cancel_probe", nil)
 	require.NoError(t, err)
-	require.Zero(t, persisted)
+	require.Empty(t, persisted)
 }
 
 func TestSettingsOperationsHonorCancelledContext(t *testing.T) {
@@ -1196,9 +1224,7 @@ func TestSettingsOperationsHonorCancelledContext(t *testing.T) {
 	s := newManagementTestStore(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err := s.GetCommitTimestamp(ctx)
-	require.ErrorIs(t, err, context.Canceled)
-	_, err = s.GetNodeSettings(ctx)
+	_, err := s.GetNodeSettings(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = s.GetNodeSettingsGates(ctx)
 	require.ErrorIs(t, err, context.Canceled)

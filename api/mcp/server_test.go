@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -80,7 +81,11 @@ func TestNewMCPServerUsesActiveSQLiteProvider(t *testing.T) {
 	nodeDB, err := dbtest.NewDatabaseWithOptions(
 		t,
 		dbtest.Options{
-			Config: &database.Config{DataDir: root},
+			Config: &database.Config{
+				DataDir:     root,
+				Role:        database.RoleIndexer,
+				StorageMode: types.StorageModeAPI,
+			},
 			Metadata: dbtest.StorageProvider{
 				Config: map[string]any{"dataDir": active},
 			},
@@ -551,19 +556,26 @@ func TestServerStartStopLifecycle(t *testing.T) {
 	err = server.Start(ctx)
 	require.Error(t, err)
 
+	// Keep-alive reuse lets the transport dial a speculative connection that
+	// never carries a request. The server holds such a connection in
+	// StateNew and Shutdown only reaps it after five seconds.
+	client := &http.Client{
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+
 	// Query HTTP healthz endpoint
-	resp, err := http.Get(fmt.Sprintf("http://%s/healthz", addr))
+	resp, err := client.Get(fmt.Sprintf("http://%s/healthz", addr))
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
 
 	// Query root endpoint
-	respRoot, err := http.Get(fmt.Sprintf("http://%s/", addr))
+	respRoot, err := client.Get(fmt.Sprintf("http://%s/", addr))
 	require.NoError(t, err)
 	respRoot.Body.Close()
 
 	// Query not found path
-	resp404, err := http.Get(fmt.Sprintf("http://%s/random_path", addr))
+	resp404, err := client.Get(fmt.Sprintf("http://%s/random_path", addr))
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusNotFound, resp404.StatusCode)
 	resp404.Body.Close()

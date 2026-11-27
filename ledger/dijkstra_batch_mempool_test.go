@@ -17,13 +17,13 @@ package ledger
 import (
 	"bytes"
 	"context"
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"io"
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
@@ -87,7 +87,7 @@ func TestDijkstraBatchPendingBalanceAgreesWithAppliedBalance(t *testing.T) {
 	}
 
 	db := newTestDB(t)
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+	require.NoError(t, seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 		StakingKey: stakeKey,
 		AddedSlot:  1,
 		Reward:     dbtypes.Uint64(100),
@@ -185,23 +185,13 @@ func TestMempoolIndexesConfirmedInputsThroughLedgerSession(t *testing.T) {
 		return addr
 	}
 	store := func(ref batchRef, addr lcommon.Address) {
-		require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-			TxId:       ref.txID(),
-			OutputIdx:  uint32(ref.index), // #nosec G115 -- test index
-			PaymentKey: addr.PaymentKeyHash().Bytes(),
-			Amount:     5_000_000,
-			AddedSlot:  1,
-		}))
 		raw, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
 			OutputAddress: addr,
 			OutputAmount:  5_000_000,
 		})
 		require.NoError(t, err)
-		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
-			return db.Blob().SetUtxo(
-				txn.Blob(), ref.txID(), uint32(ref.index), raw, // #nosec G115 -- test index
-			)
-		}))
+		// #nosec G115 -- test index
+		fxSeedOutput(t, db, ref.txID(), uint32(ref.index), 1, raw)
 	}
 	topIn, childIn, missing := batchRef{seed: 0xa1}, batchRef{seed: 0xa2},
 		batchRef{seed: 0xa3}

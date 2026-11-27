@@ -164,10 +164,10 @@ func newAnchorFixture(t *testing.T) *anchorFixture {
 
 	f.anchor, err = database.BlockByHash(ctx, f.consensus, anchorPt.Hash)
 	require.NoError(t, err)
-	require.NoError(t, f.consensus.SetSyncState(
+	require.NoError(t, f.consensus.SetChainState(
 		"mithril_ledger_slot", strconv.FormatUint(f.anchor.Slot, 10), nil,
 	))
-	require.NoError(t, f.consensus.SetSyncState(
+	require.NoError(t, f.consensus.SetChainState(
 		"mithril_ledger_hash", hex.EncodeToString(f.anchor.Hash), nil,
 	))
 	f.indexerDB, err = internalplugins.OpenIndexerDatabase(
@@ -240,7 +240,7 @@ func (f *anchorFixture) requireTablesAt(
 	requireSameTables(t, want, got)
 }
 
-func TestSplitMithrilBootstrapMatchesAGenesisIndexAtAnchor(t *testing.T) {
+func TestIndexerMithrilBootstrapMatchesAGenesisIndexAtAnchor(t *testing.T) {
 	t.Parallel()
 	f := newAnchorFixture(t)
 	ctx := context.Background()
@@ -307,7 +307,7 @@ func (f *anchorFixture) lazyIndexExists(t *testing.T) bool {
 	)
 }
 
-func TestSplitMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
+func TestIndexerMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -355,20 +355,15 @@ func TestSplitMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 	require.NoError(t, err)
 	require.False(t, ready, "not ready before the anchor")
 
-	// A restart replays to the anchor, then is stopped part-way through the
-	// index build, after the critical subset and before the rest.
+	// A restart replays to the anchor, then is stopped in the index phase,
+	// after the drop and before the build.
 	w, store = f.writer(t, f.cappedAtAnchor(), 7)
 	w.WithDeferredIndexes(
 		func(ctx context.Context) error {
 			NewDeferredIndexRebuilder(ctx, f.indexerDB, f.deps.Logger).Drop()
 			return nil
 		},
-		func(ctx context.Context) error {
-			if err := NewDeferredIndexRebuilder(
-				ctx, f.indexerDB, f.deps.Logger,
-			).BuildCritical(); err != nil {
-				return err
-			}
+		func(context.Context) error {
 			return errStopped
 		},
 	)
@@ -406,7 +401,7 @@ func TestSplitMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 	requireSameTables(t, atAnchor, got)
 }
 
-func TestSplitMithrilBootstrapRefusesRowsThatDisagreeWithTheImportedState(
+func TestIndexerMithrilBootstrapRefusesRowsThatDisagreeWithTheImportedState(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -481,7 +476,7 @@ func TestSplitMithrilBootstrapRefusesRowsThatDisagreeWithTheImportedState(
 // given the ledger to read them through finds neither the imported balances
 // nor the journal the anchor state is rebuilt from, and an empty IndexerDB
 // refuses the bootstrap rather than take over an empty state.
-func TestSplitMithrilBootstrapRefusesAWriterWithoutTheLedgerState(
+func TestIndexerMithrilBootstrapRefusesAWriterWithoutTheLedgerState(
 	t *testing.T,
 ) {
 	t.Parallel()

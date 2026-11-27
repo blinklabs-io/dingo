@@ -16,18 +16,16 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/dbinfo"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -68,34 +66,33 @@ func TestCheckSyncStateRepairsLegacyAlonzoPParamsUnit(t *testing.T) {
 		"the embedded preview config must supply an Alonzo genesis word",
 	)
 
-	// Seed a database in the shape a pre-gouroboros-v0.205.7 release left
-	// behind: one Alonzo row holding the lossy quotient, and the
-	// conservative marker migration v20 writes for it.
-	seedMigratedMetadata(t, cfg)
-	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
+	// Seed a v0.94.2 database in the shape a pre-gouroboros-v0.205.7 release
+	// left behind: one Alonzo row holding the lossy quotient, and the
+	// conservative marker migration v20 writes for it. The first open
+	// migrates it, and the migration's source open is the one that meets the
+	// row.
+	released, err := dbtest.NewReleasedDatabase(t, &database.Config{
+		DataDir:     dir,
+		StorageMode: "core",
+		Network:     cfg.Network,
+		Logger:      logger,
+	})
 	require.NoError(t, err)
 	params := alonzo.AlonzoProtocolParameters{AdaPerUtxoByte: word / 8}
 	encoded, err := cbor.Encode(&params)
 	require.NoError(t, err)
-	require.NoError(t, runtime.Database.SetPParams(
+	require.NoError(t, released.SetPParams(
 		encoded, 0, 0, alonzo.EraIdAlonzo, nil,
 	))
-	require.NoError(t, runtime.Close(context.Background()))
+	require.NoError(t, dbtest.CloseDatabase(released))
 
-	sqlDB, err := sql.Open(
-		"sqlite",
-		filepath.Join(dir, "metadata.sqlite")+"?_pragma=synchronous(OFF)",
-	)
+	info, err := dbinfo.Read(dir)
 	require.NoError(t, err)
-	_, err = sqlDB.Exec(
-		`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
-		nodesettings.AlonzoPParamsUnitLegacyByteV0,
-		nodesettings.AlonzoPParamsUnitGateName,
-	)
-	require.NoError(t, err)
-	require.NoError(t, sqlDB.Close())
+	info.Gates[nodesettings.AlonzoPParamsUnitGateName] =
+		nodesettings.AlonzoPParamsUnitLegacyByteV0
+	require.NoError(t, dbinfo.WriteGates(dir, info.Gates))
 
-	require.NoError(t, checkSyncState(cfg, logger))
+	require.NoError(t, checkSyncState(t.Context(), cfg, logger))
 
 	reopened, err := openConfiguredDatabase(
 		context.Background(),
@@ -105,68 +102,12 @@ func TestCheckSyncStateRepairsLegacyAlonzoPParamsUnit(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reopened.Close(context.Background()) })
-	gates, err := reopened.Database.Metadata().
-		GetNodeSettingsGates(context.Background())
+	gates, err := reopened.Database.NodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t,
 		nodesettings.AlonzoPParamsUnitWordV1,
 		gates[nodesettings.AlonzoPParamsUnitGateName],
-	)
-}
-
-// TestServeCoreModeRepairsMissingCascadeIndex covers the composition serveRun
-// actually takes: a core-mode configuration reaches repairDeferredIndexes,
-// which is the only deferred-index entry point on that path.
-//
-// The state under test is the one two Mithril-bootstrapped preview nodes were
-// found in: idx_utxo_spent_at_tx_id absent with no pending marker to record
-// it, so every rollback's delete of a transaction row scanned utxo once
-// per deleted transaction row.
-func TestServeCoreModeRepairsMissingCascadeIndex(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	dir := t.TempDir()
-	cfg := &config.Config{
-		DatabasePath:    dir,
-		DatabaseWorkers: 1,
-		Plugins:         testStoragePlugins(),
-	}
-	require.False(
-		t,
-		effectiveStorageMode(cfg).IsAPI(),
-		"serveRun sends this configuration down the core-mode branch, "+
-			"which is the branch repairDeferredIndexes is wired into",
-	)
-
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: dir,
-		Logger:  logger,
-	})
-	require.NoError(t, err)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec("DROP INDEX IF EXISTS idx_utxo_spent_at_tx_id")
-	require.NoError(t, err)
-	_, err = raw.Exec(
-		"DELETE FROM sync_state WHERE sync_key = ?",
-		deferred.SyncStateKey,
-	)
-	require.NoError(t, err)
-	require.NoError(t, dbtest.CloseDatabase(db))
-
-	require.NoError(t, repairDeferredIndexes(t.Context(), cfg, logger))
-
-	var count int
-	require.NoError(t, raw.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
-		"idx_utxo_spent_at_tx_id",
-	).Scan(&count))
-	require.Equal(
-		t,
-		1,
-		count,
-		"core-mode serve must restore the rollback cascade index before "+
-			"the node starts",
 	)
 }
 
@@ -219,18 +160,18 @@ func TestCheckSyncStateAllowsInterruptedRewardRepairToResume(t *testing.T) {
 	seedMigratedMetadata(t, cfg)
 	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
 	require.NoError(t, err)
-	require.NoError(t, runtime.Database.SetSyncState(
+	require.NoError(t, runtime.Database.SetChainState(
 		"sync_status", syncStatusInProgress, nil,
 	))
-	require.NoError(t, runtime.Database.SetSyncState(
+	require.NoError(t, runtime.Database.SetChainState(
 		mithril.RewardStateRepairPendingKey, "1", nil,
 	))
-	require.NoError(t, runtime.Database.SetSyncState(
+	require.NoError(t, runtime.Database.SetChainState(
 		mithril.RewardStateRepairActiveKey, "1", nil,
 	))
 	require.NoError(t, runtime.Close(context.Background()))
 
-	require.NoError(t, checkSyncState(cfg, logger),
+	require.NoError(t, checkSyncState(t.Context(), cfg, logger),
 		"serve must resume an interrupted in-place repair before node startup")
 }
 
@@ -248,15 +189,15 @@ func TestCheckSyncStateAllowsTheNodesOwnReimportToResume(t *testing.T) {
 	seedMigratedMetadata(t, cfg)
 	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
 	require.NoError(t, err)
-	require.NoError(t, runtime.Database.SetSyncState(
+	require.NoError(t, runtime.Database.SetChainState(
 		"sync_status", syncStatusInProgress, nil,
 	))
-	require.NoError(t, runtime.Database.SetSyncState(
+	require.NoError(t, runtime.Database.SetChainState(
 		database.LedgerReimportSyncKey, "1", nil,
 	))
 	require.NoError(t, runtime.Close(context.Background()))
 
-	require.NoError(t, checkSyncState(cfg, logger),
+	require.NoError(t, checkSyncState(t.Context(), cfg, logger),
 		"serve must let the node run its own interrupted re-import")
 
 	// The same status without the re-import mark is still an incomplete sync.
@@ -264,12 +205,12 @@ func TestCheckSyncStateAllowsTheNodesOwnReimportToResume(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		runtime.Database.DeleteSyncState(database.LedgerReimportSyncKey, nil),
+		runtime.Database.DeleteChainState(database.LedgerReimportSyncKey, nil),
 	)
 	require.NoError(t, runtime.Close(context.Background()))
 	require.ErrorContains(
 		t,
-		checkSyncState(cfg, logger),
+		checkSyncState(t.Context(), cfg, logger),
 		"incomplete sync detected",
 	)
 }
@@ -290,15 +231,15 @@ func TestCheckSyncStateDoesNotIgnoreOtherInterruptedSyncForRewardRepair(
 	seedMigratedMetadata(t, cfg)
 	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
 	require.NoError(t, err)
-	require.NoError(t, runtime.Database.SetSyncState(
+	require.NoError(t, runtime.Database.SetChainState(
 		"sync_status", syncStatusInProgress, nil,
 	))
-	require.NoError(t, runtime.Database.SetSyncState(
+	require.NoError(t, runtime.Database.SetChainState(
 		mithril.RewardStateRepairPendingKey, "1", nil,
 	))
 	require.NoError(t, runtime.Close(context.Background()))
 
-	err = checkSyncState(cfg, logger)
+	err = checkSyncState(t.Context(), cfg, logger)
 	require.ErrorContains(t, err, "incomplete sync detected")
 }
 
@@ -380,11 +321,16 @@ func TestCheckSyncStateDevModeAgreesWithTheNodeOpen(t *testing.T) {
 	seedMigratedMetadata(t, cfg)
 	for start := range 2 {
 		preflight := *cfg
-		require.NoError(t, checkSyncState(&preflight, logger), "start %d", start)
+		require.NoError(
+			t,
+			checkSyncState(t.Context(), &preflight, logger),
+			"start %d",
+			start,
+		)
 
 		run := *cfg
 		run.ApplyRunModeOverrides(run.RunMode)
-		require.True(t, run.SplitIndexer(), "dev mode serves the APIs")
+		require.True(t, run.HasIndexerDB(), "dev mode serves the APIs")
 		mode := run.ConsensusStorageMode()
 		runtime, err := internalplugins.OpenDatabase(
 			t.Context(),
@@ -399,9 +345,7 @@ func TestCheckSyncStateDevModeAgreesWithTheNodeOpen(t *testing.T) {
 			},
 		)
 		require.NoError(t, err, "start %d", start)
-		require.NoError(t, runtime.RecoveryError())
-		gates, err := runtime.Database.Metadata().
-			GetNodeSettingsGates(t.Context())
+		gates, err := runtime.Database.NodeSettingsGates(t.Context())
 		require.NoError(t, err)
 		require.Equal(t, "core", gates["storage_mode"])
 		require.NoError(t, runtime.Close(context.WithoutCancel(t.Context())))
@@ -423,16 +367,16 @@ func TestServeAcceptsInNodeModeFreshDB(t *testing.T) {
 	}
 	cfg.Mithril.Enabled = true
 	seedMigratedMetadata(t, cfg)
-	require.NoError(t, checkSyncState(cfg, logger),
+	require.NoError(t, checkSyncState(t.Context(), cfg, logger),
 		"an empty database must pass with node-managed Mithril")
 
 	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
 	require.NoError(t, err)
-	require.NoError(t, runtime.Database.SetSyncState(
+	require.NoError(t, runtime.Database.SetChainState(
 		"sync_status", syncStatusInProgress, nil,
 	))
 	require.NoError(t, runtime.Close(context.Background()))
-	require.ErrorContains(t, checkSyncState(cfg, logger),
+	require.ErrorContains(t, checkSyncState(t.Context(), cfg, logger),
 		"incomplete sync detected")
 }
 
@@ -456,31 +400,31 @@ func TestServeAcceptsInterruptedSnapshotRestore(t *testing.T) {
 	seedMigratedMetadata(t, cfg)
 	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
 	require.NoError(t, err)
-	require.NoError(t, runtime.Database.SetSyncState(
+	require.NoError(t, runtime.Database.SetChainState(
 		"sync_status", syncStatusInProgress, nil,
 	))
 	require.NoError(t, runtime.Close(context.Background()))
-	require.ErrorContains(t, checkSyncState(cfg, logger),
+	require.ErrorContains(t, checkSyncState(t.Context(), cfg, logger),
 		"incomplete sync detected", "a manual sync's interruption passed")
 
 	runtime, err = openConfiguredDatabase(context.Background(), cfg, logger, 1)
 	require.NoError(t, err)
-	require.NoError(t, runtime.Database.SetSyncState(
+	require.NoError(t, runtime.Database.SetChainState(
 		"mithril_snapshot_restore_active", "1", nil,
 	))
 	require.NoError(t, runtime.Close(context.Background()))
-	require.NoError(t, checkSyncState(cfg, logger))
+	require.NoError(t, checkSyncState(t.Context(), cfg, logger))
 
 	// Refused elsewhere, but pointed at the in-node resume: no sync
 	// command can finish the node's restore.
 	cfg.DelegatorInactivityEnabled = true
-	err = checkSyncState(cfg, logger)
+	err = checkSyncState(t.Context(), cfg, logger)
 	require.ErrorContains(t, err, "node's own interrupted Mithril snapshot")
 	require.NotContains(t, err.Error(), "dingo sync")
 	cfg.DelegatorInactivityEnabled = false
 
 	cfg.HistoryExpiry.Enabled = false
-	err = checkSyncState(cfg, logger)
+	err = checkSyncState(t.Context(), cfg, logger)
 	require.ErrorContains(t, err, "node's own interrupted Mithril snapshot",
 		"stream mode resumed a snapshot restore")
 	require.NotContains(t, err.Error(), "dingo sync")

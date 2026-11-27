@@ -242,6 +242,8 @@ func newExpiryRunNode(
 			ListenAddress: "127.0.0.1:0",
 		}),
 		WithUtxorpcPort(0),
+		WithBlockfrostPort(0),
+		WithMeshPort(0),
 		WithMidnightConfig(MidnightConfig{Port: 0}),
 		WithShutdownTimeout(5 * time.Second),
 	}
@@ -325,7 +327,7 @@ func TestNodeImmutableCeilingUsesLedgerAppliedTip(t *testing.T) {
 	require.Equal(t, uint64(total*10), cm.PrimaryChain().Tip().Point.Slot)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           livesettest.New(),
+		UtxoSet:           livesettest.OpenLedgerDB(t, db),
 		ChainManager:      cm,
 		Logger:            logger,
 		CardanoNodeConfig: nodeCfg,

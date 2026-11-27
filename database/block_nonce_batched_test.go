@@ -23,7 +23,7 @@ import (
 
 func TestSetBlockNonceBatchedQueuesUntilFlush(t *testing.T) {
 	t.Parallel()
-	db := openTestDB(t)
+	db := openIndexerTestDB(t)
 	acc := db.NewBatchAccumulator()
 	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()

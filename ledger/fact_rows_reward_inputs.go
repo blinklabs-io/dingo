@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 )
 
 // rewardSnapshotTypes are the snapshot types a reward snapshot header or seed
@@ -43,7 +44,7 @@ type rewardInputsExport struct {
 func (ls *LedgerState) rewardInputsExport() (rewardInputsExport, error) {
 	r := ls.rewardInputsReader(nil)
 	if r == nil {
-		return rewardInputsExport{}, drainedUnserved(
+		return rewardInputsExport{}, ledgerStateUnserved(
 			nodesettings.FamilyRewardInputs,
 		)
 	}
@@ -161,7 +162,7 @@ func (ls *LedgerState) rewardSeedFailureFactRows(
 ) (metadata.FactRows, error) {
 	r := ls.rewardInputsReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(
+		return metadata.FactRows{}, ledgerStateUnserved(
 			nodesettings.FamilyRewardInputs,
 		)
 	}
@@ -319,7 +320,7 @@ func (ls *LedgerState) rewardDerivedExport() (
 ) {
 	r := ls.rewardDerivedReader(nil)
 	if r == nil {
-		return nil, nil, drainedUnserved(nodesettings.FamilyRewardOutputs)
+		return nil, nil, ledgerStateUnserved(nodesettings.FamilyRewardOutputs)
 	}
 	epochs, err := r.RewardDerivedEpochs()
 	if err != nil {
@@ -439,7 +440,7 @@ func (ls *LedgerState) rewardCreditRoundFactRows(
 ) (metadata.FactRows, error) {
 	r := ls.rewardOutputReader(nil)
 	if r == nil {
-		return metadata.FactRows{}, drainedUnserved(
+		return metadata.FactRows{}, ledgerStateUnserved(
 			nodesettings.FamilyRewardOutputs,
 		)
 	}
@@ -462,33 +463,16 @@ func (ls *LedgerState) rewardCreditRoundFactRows(
 }
 
 // RewardPrecomputeCursors returns each retained reward precompute cursor as
-// stored, by snapshot epoch: from the live UTxO set once the reward outputs
-// are drained into it, from the metadata store's sync state otherwise.
+// the LedgerDB set stores it, by snapshot epoch.
 func (ls *LedgerState) RewardPrecomputeCursors() (map[uint64]string, error) {
-	var epochs []uint64
-	if ls.FactTableDrained("reward_pool_output") {
-		_, set, err := ls.rewardDerivedExport()
-		if err != nil {
-			return nil, err
-		}
-		epochs = set
-	} else {
-		keys, err := ls.ledgerDB().ListSyncStateKeysByPrefix(
-			models.RewardPrecomputeCursorPrefix, nil,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for _, k := range keys {
-			if epoch, ok := cursorEpochOfKey(k); ok {
-				epochs = append(epochs, epoch)
-			}
-		}
+	_, epochs, err := ls.rewardDerivedExport()
+	if err != nil {
+		return nil, err
 	}
 	out := make(map[uint64]string, len(epochs))
 	for _, epoch := range epochs {
 		raw, err := ls.ledgerDB().GetSyncState(
-			rewardPrecomputeCursorKey(epoch), nil,
+			epochengine.RewardPrecomputeCursorKey(epoch), nil,
 		)
 		if err != nil {
 			return nil, err

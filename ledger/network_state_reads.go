@@ -39,7 +39,7 @@ type NetworkStateReader interface {
 }
 
 // networkStateReader returns the set's network state reader and the read
-// mode, or false when these reads stay on the metadata store.
+// mode, or false when the set does not serve them.
 func (ls *LedgerState) networkStateReader(
 	txn ledgerdb.Txn,
 ) (NetworkStateReader, bool) {
@@ -179,14 +179,6 @@ func (ls *LedgerState) donationList(
 		return cmp.Compare(a.Slot, b.Slot)
 	})
 	return out, nil
-}
-
-func sameNetworkState(a, b *models.NetworkState) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return a.Slot == b.Slot && a.Treasury == b.Treasury &&
-		a.Reserves == b.Reserves
 }
 
 func (s stagingLedgerDB) GetNetworkState(

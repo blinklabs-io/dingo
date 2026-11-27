@@ -17,7 +17,6 @@ package node
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -37,7 +36,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -46,13 +44,11 @@ import (
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
-	"github.com/blinklabs-io/dingo/plugin"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	fxcbor "github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1129,6 +1125,7 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 	db := newTestDB(t)
 	rejected := errors.New("reject trusted replay batch")
 	noBatch := errors.New("trusted replay ended without a batch")
+	replayStarted := make(chan struct{})
 	firstBatchReceived := make(chan struct{})
 	rejectReplay := make(chan struct{})
 
@@ -1142,6 +1139,7 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 		ctx context.Context,
 		batches <-chan []gledger.Block,
 	) error {
+		close(replayStarted)
 		select {
 		case _, ok := <-batches:
 			if !ok {
@@ -1177,21 +1175,48 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 			db,
 		)
 	}()
-	testutil.RequireReceive(
-		t, firstBatchReceived, 5*time.Second, "first replay batch",
-	)
-	testutil.WaitForCondition(
-		t,
+	// Each wait also watches loadErr: a load that fails early reports its
+	// error at once rather than at the deadline with no cause.
+	waitWhileLoading := func(msg string, reached func() bool) {
+		t.Helper()
+		deadline := time.After(testutil.AsyncWait)
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for !reached() {
+			select {
+			case err := <-loadErr:
+				t.Fatalf("LoadWithDB returned before %s: %v", msg, err)
+			case <-deadline:
+				t.Fatalf("timeout waiting for %s", msg)
+			case <-tick.C:
+			}
+		}
+	}
+	closed := func(ch <-chan struct{}) func() bool {
+		return func() bool {
+			select {
+			case <-ch:
+				return true
+			default:
+				return false
+			}
+		}
+	}
+	// Wait for LoadWithDB to reach replay before timing the first batch:
+	// the setup before it is not the step under test, and is what stalls
+	// on a loaded host.
+	waitWhileLoading("trusted replay started", closed(replayStarted))
+	waitWhileLoading("first replay batch", closed(firstBatchReceived))
+	waitWhileLoading(
+		"the copier must persist a later batch before replay rejects the first",
 		func() bool {
 			return replayState.PrimaryChainTip().BlockNumber >
 				firstCopiedTip.BlockNumber
 		},
-		5*time.Second,
-		"the copier must persist a later batch before replay rejects the first",
 	)
 	close(rejectReplay)
 	err := testutil.RequireReceive(
-		t, loadErr, 5*time.Second, "load failure after replay rejection",
+		t, loadErr, testutil.AsyncWait, "load failure after replay rejection",
 	)
 	require.ErrorIs(t, err, rejected)
 	require.Greater(
@@ -1499,9 +1524,7 @@ func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 		"devnet genesis fixture must declare staking for this test to be meaningful",
 	)
 
-	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(db.DataDir()), Only: true,
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: utxoset.DirFor(db.DataDir())})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, set.Close()) })
 	rewardSnapshot, err := set.RewardSnapshotRow(0, "mark", nil)
@@ -1533,37 +1556,6 @@ func decodeImmutableBlockHeader(
 		)
 	}
 	return header, nil
-}
-
-// TestRunPlannerStats_Idempotent verifies that repeated planner-stat
-// maintenance stays safe for resume/restart paths.
-func TestRunPlannerStats_Idempotent(t *testing.T) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-
-	require.NoError(t, RunPlannerStats(t.Context(), db, slog.Default()))
-	require.NoError(t, RunPlannerStats(t.Context(), db, slog.Default()))
-
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	var count int64
-	err = raw.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_stat1",
-	).Scan(&count)
-	require.NoError(t, err)
-	assert.Positive(t, count, "sqlite_stat1 should remain populated")
-}
-
-func TestRunPlannerStats_ReturnsErrorWhenUpdaterFails(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	require.NoError(t, closeTestDB(db))
-
-	err := RunPlannerStats(t.Context(), db, slog.Default())
-	require.Error(t, err)
-	assert.ErrorContains(t, err, "planner statistics maintenance")
 }
 
 // mustOpenImmutable opens an ImmutableDB by pathname for tests that have no
@@ -1667,87 +1659,6 @@ func requireChunkTrio(t *testing.T, name, dir string) {
 		require.NoError(t, os.WriteFile(
 			filepath.Join(dir, name+ext), data, 0o640,
 		))
-	}
-}
-
-// TestLoadWithDBPropagatesApplyRowBatching verifies that `dingo load`, which
-// replays blocks without validating them, honours the operator's
-// ledgerApplyRowBatchingEnabled setting as serve mode does.
-func TestLoadWithDBPropagatesApplyRowBatching(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	stop := errors.New("stop after ledger config capture")
-	run := func(enabled bool) ledger.LedgerStateConfig {
-		db := newTestDB(t)
-		var captured ledger.LedgerStateConfig
-		old := newLedgerStateForLoad
-		newLedgerStateForLoad = func(cfg ledger.LedgerStateConfig) (*ledger.LedgerState, error) {
-			captured = cfg
-			return nil, stop
-		}
-		t.Cleanup(func() { newLedgerStateForLoad = old })
-		err := LoadWithDB(
-			context.Background(),
-			&config.Config{
-				Network:                       "preview",
-				LedgerApplyRowBatchingEnabled: enabled,
-			},
-			logger,
-			"unused",
-			db,
-		)
-		require.ErrorIs(t, err, stop)
-		return captured
-	}
-	require.True(t, run(true).ApplyRowBatchingEnabled)
-	require.False(t, run(false).ApplyRowBatchingEnabled)
-}
-
-func TestLoadWithDBDefaultConfigCertifiesLegacySnapshots(t *testing.T) {
-	dataDir := t.TempDir()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	sqlDB, err := sql.Open("sqlite", filepath.Join(dataDir, "metadata.sqlite")+
-		"?_pragma=synchronous(OFF)&_pragma=journal_mode(MEMORY)")
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
-	runner := migrations.Runner{
-		DB: sqlDB, Dialect: "sqlite", Registry: registry[:34],
-		Locker: migrations.NewProcessLocker(), Logger: logger,
-	}
-	require.NoError(t, runner.Run(t.Context()))
-	for _, query := range []string{
-		`INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots) VALUES (658, 280000000, 6, 1, 432000)`,
-		`INSERT INTO pool_stake_snapshot (epoch, snapshot_type, pool_key_hash, total_stake, delegator_count, captured_slot, calculation_version) VALUES (658, 'mark', X'010203', '123456789', 1, 279999999, 2)`,
-		`INSERT INTO reward_snapshot (epoch, snapshot_type, total_active_stake, total_pool_count, total_delegators, captured_slot, boundary_slot, protocol_version, calculation_version) VALUES (658, 'mark', '123456789', 1, 1, 279999999, 280000000, 9, 2)`,
-	} {
-		_, err := sqlDB.ExecContext(t.Context(), query)
-		require.NoError(t, err)
-	}
-	params := mockledger.NewMockConwayProtocolParams()
-	params.ProtocolVersion.Major = 9
-	raw, err := gcbor.Encode(&params)
-	require.NoError(t, err)
-	_, err = sqlDB.ExecContext(t.Context(),
-		`INSERT INTO pparams (era_id, epoch, added_slot, cbor) VALUES (6, 658, 280000000, ?)`, raw)
-	require.NoError(t, err)
-
-	stopAfterOpen := errors.New("stop after certified database open")
-	old := newLedgerStateForLoad
-	newLedgerStateForLoad = func(ledger.LedgerStateConfig) (*ledger.LedgerState, error) {
-		return nil, stopAfterOpen
-	}
-	t.Cleanup(func() { newLedgerStateForLoad = old })
-	cfg := &config.Config{DatabasePath: dataDir}
-	cfg.Plugins.Storage.Blob = plugin.Selection{Provider: "badger"}
-	cfg.Plugins.Storage.Metadata = plugin.Selection{Provider: "sqlite"}
-	err = LoadWithDB(t.Context(), cfg, logger, "unused", nil)
-	require.ErrorIs(t, err, stopAfterOpen)
-	for _, table := range []string{"pool_stake_snapshot", "reward_snapshot"} {
-		var version uint
-		require.NoError(t, sqlDB.QueryRowContext(t.Context(),
-			"SELECT calculation_version FROM "+table).Scan(&version))
-		require.Equal(t, models.RewardStakeCalculationVersion, version)
 	}
 }
 

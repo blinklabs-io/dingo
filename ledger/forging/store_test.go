@@ -37,10 +37,7 @@ func newMockSyncStateStore() *mockSyncStateStore {
 	return &mockSyncStateStore{values: make(map[string]string)}
 }
 
-func (m *mockSyncStateStore) GetSyncState(
-	key string,
-	_ types.Txn,
-) (string, error) {
+func (m *mockSyncStateStore) ChainStateValue(key string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.getErr != nil {
@@ -49,11 +46,7 @@ func (m *mockSyncStateStore) GetSyncState(
 	return m.values[key], nil
 }
 
-func (m *mockSyncStateStore) SetSyncState(
-	key string,
-	value string,
-	_ types.Txn,
-) error {
+func (m *mockSyncStateStore) SetChainStateSynced(key, value string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.setErr != nil {
@@ -74,10 +67,10 @@ func storeTestPoolID(seed string) lcommon.PoolKeyHash {
 // anything with the new credentials.
 func TestSyncStateForgeFenceStoreIsPerPool(t *testing.T) {
 	backing := newMockSyncStateStore()
-	first := NewSyncStateForgeFenceStore(backing, storeTestPoolID("poolA"))
-	second := NewSyncStateForgeFenceStore(backing, storeTestPoolID("poolB"))
+	first := NewChainStateForgeFenceStore(backing, storeTestPoolID("poolA"))
+	second := NewChainStateForgeFenceStore(backing, storeTestPoolID("poolB"))
 
-	// NewSyncStateForgeFenceStore returns nil only for a nil store
+	// NewChainStateForgeFenceStore returns nil only for a nil store
 	// (ledger/forging/store.go), and newMockSyncStateStore never returns
 	// nil, so the fence stores built above are non-nil.
 	//nolint:nilaway // newMockSyncStateStore returns a non-nil store
@@ -98,7 +91,7 @@ func TestSyncStateForgeFenceStoreIsPerPool(t *testing.T) {
 // out-of-order write from weakening protection already recorded.
 func TestSyncStateForgeFenceStoreNeverLowersFence(t *testing.T) {
 	backing := newMockSyncStateStore()
-	store := NewSyncStateForgeFenceStore(backing, storeTestPoolID("pool"))
+	store := NewChainStateForgeFenceStore(backing, storeTestPoolID("pool"))
 
 	require.NoError(t, store.StoreLastForgedSlot(100))
 	require.NoError(t, store.StoreLastForgedSlot(50))
@@ -115,9 +108,9 @@ func TestSyncStateForgeFenceStoreNeverLowersFence(t *testing.T) {
 func TestSyncStateForgeFenceStoreRejectsCorruptRecord(t *testing.T) {
 	poolID := storeTestPoolID("pool")
 	backing := newMockSyncStateStore()
-	backing.values[syncStateForgeFencePrefix+":"+
+	backing.values[types.ForgeFenceChainStatePrefix+
 		hex.EncodeToString(poolID[:])] = "{not json"
-	store := NewSyncStateForgeFenceStore(backing, poolID)
+	store := NewChainStateForgeFenceStore(backing, poolID)
 
 	_, _, err := store.LoadLastForgedSlot()
 	require.Error(t, err)
@@ -129,16 +122,16 @@ func TestSyncStateForgeFenceStoreRejectsCorruptRecord(t *testing.T) {
 func TestSyncStateForgeFenceStoreRejectsForeignPoolRecord(t *testing.T) {
 	poolID := storeTestPoolID("poolA")
 	backing := newMockSyncStateStore()
-	other := NewSyncStateForgeFenceStore(backing, poolID)
+	other := NewChainStateForgeFenceStore(backing, poolID)
 	require.NoError(t, other.StoreLastForgedSlot(9))
 
 	// Re-point the same key at different credentials.
 	otherPoolID := storeTestPoolID("poolB")
-	backing.values[syncStateForgeFencePrefix+":"+
+	backing.values[types.ForgeFenceChainStatePrefix+
 		hex.EncodeToString(otherPoolID[:])] =
-		backing.values[syncStateForgeFencePrefix+":"+
+		backing.values[types.ForgeFenceChainStatePrefix+
 			hex.EncodeToString(poolID[:])]
-	store := NewSyncStateForgeFenceStore(backing, otherPoolID)
+	store := NewChainStateForgeFenceStore(backing, otherPoolID)
 
 	_, _, err := store.LoadLastForgedSlot()
 	require.ErrorContains(t, err, "pool mismatch")
@@ -151,12 +144,12 @@ func TestSyncStateForgeFenceStoreRejectsForeignPoolRecord(t *testing.T) {
 func TestSyncStateForgeFenceStoreRejectsMissingSlot(t *testing.T) {
 	poolID := storeTestPoolID("pool")
 	backing := newMockSyncStateStore()
-	backing.values[syncStateForgeFenceKey(poolID)] = fmt.Sprintf(
+	backing.values[chainStateForgeFenceKey(poolID)] = fmt.Sprintf(
 		`{"format_version":%d,"pool_id":%q}`,
 		forgeFenceFormatVersion,
 		hex.EncodeToString(poolID[:]),
 	)
-	store := NewSyncStateForgeFenceStore(backing, poolID)
+	store := NewChainStateForgeFenceStore(backing, poolID)
 
 	_, _, err := store.LoadLastForgedSlot()
 	require.ErrorContains(t, err, "missing last_forged_slot")
@@ -167,12 +160,12 @@ func TestSyncStateForgeFenceStoreRejectsMissingSlot(t *testing.T) {
 func TestSyncStateForgeFenceStoreAcceptsExplicitZeroSlot(t *testing.T) {
 	poolID := storeTestPoolID("pool")
 	backing := newMockSyncStateStore()
-	backing.values[syncStateForgeFenceKey(poolID)] = fmt.Sprintf(
+	backing.values[chainStateForgeFenceKey(poolID)] = fmt.Sprintf(
 		`{"format_version":%d,"pool_id":%q,"last_forged_slot":0}`,
 		forgeFenceFormatVersion,
 		hex.EncodeToString(poolID[:]),
 	)
-	store := NewSyncStateForgeFenceStore(backing, poolID)
+	store := NewChainStateForgeFenceStore(backing, poolID)
 
 	slot, ok, err := store.LoadLastForgedSlot()
 	require.NoError(t, err)
@@ -186,7 +179,7 @@ func TestSyncStateForgeFenceStoreAcceptsExplicitZeroSlot(t *testing.T) {
 // read-modify-write on an exported type should not depend on that.
 func TestSyncStateForgeFenceStoreConcurrentStoresKeepHighest(t *testing.T) {
 	backing := newMockSyncStateStore()
-	store := NewSyncStateForgeFenceStore(backing, storeTestPoolID("pool"))
+	store := NewChainStateForgeFenceStore(backing, storeTestPoolID("pool"))
 
 	const highest = 500
 	var wg sync.WaitGroup

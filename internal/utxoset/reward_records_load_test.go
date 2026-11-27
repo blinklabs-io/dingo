@@ -30,7 +30,7 @@ func TestSetLoadsTheMetadataStoresRewardJournal(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{})
 	applySlots(t, set, 8)
-	db := ledgerAt(t, slotPoint(8))
+	db := releasedAt(t, slotPoint(8))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec(
@@ -43,9 +43,6 @@ func TestSetLoadsTheMetadataStoresRewardJournal(t *testing.T) {
 
 	require.NoError(t, set.LoadLedgerState(t.Context(), dbadapter.New(db)))
 
-	lost, err := set.RewardRecordsLost()
-	require.NoError(t, err)
-	require.False(t, lost)
 	recs, err := set.RewardRecordsIn(0, 100)
 	require.NoError(t, err)
 	require.Len(t, recs, 3)

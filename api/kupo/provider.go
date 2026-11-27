@@ -40,7 +40,7 @@ type ProviderDependencies struct {
 	Logger             *slog.Logger
 	Host               string
 	CORSAllowedOrigins []string
-	// Ready gates the IndexerDB-backed routes on a split layout. Nil serves
+	// Ready gates the IndexerDB-backed routes with an IndexerDB. Nil serves
 	// every route.
 	Ready apiready.Check
 }
@@ -53,6 +53,10 @@ func RegisterProvider(host *plugin.Host) error {
 			Capability:  plugin.CapabilityAPIKupo,
 			Name:        "builtin",
 			Description: "built-in Kupo-compatible HTTP API",
+			Storage: plugin.StorageRequirements{
+				Tier:     plugin.StorageTierAPI,
+				Features: []plugin.StorageFeature{plugin.StorageFeatureKupo},
+			},
 		},
 		func() ProviderConfig { return ProviderConfig{Port: 1442} },
 		func(

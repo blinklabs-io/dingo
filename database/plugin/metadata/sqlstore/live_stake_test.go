@@ -15,7 +15,6 @@
 package sqlstore
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -619,8 +618,7 @@ func TestApplyUtxoStakeDeltaOverflowAndUnderflow(t *testing.T) {
 // load-bearing test for the whole design: the incremental
 // running total this change introduces trades away sumCredentialUtxoStake's
 // self-healing full-scan property, so it depends entirely on
-// RewardLiveStakeNeedsBackfill (run at every node startup, before block
-// application resumes -- see Node.backfillRewardLiveStake) actually
+// RewardLiveStakeNeedsBackfill actually
 // detecting a corrupted running total and RebuildRewardLiveStake actually
 // correcting it. This proves both halves against a corruption that exactly
 // simulates a missed or double-applied delta: the stored total is wrong, and
@@ -1056,112 +1054,6 @@ func TestSumCredentialUtxoStakeConcurrentReuse(t *testing.T) {
 		len(hotStatements),
 		entries,
 		"expected concurrent first use to converge on the fixed set of cached statements",
-	)
-}
-
-// TestStaleConsensusStakeSnapshotsExistFailsClosed covers the fail-closed
-// gate itself: every prior test writes the symbolic
-// current version, so none of them exercise a literal old
-// calculation_version tripping the gate. It also covers finding 2: a
-// non-authoritative (fallback) Mark reward_snapshot row must fail the gate
-// on its own, not by relying on authoritativeMarkRewardSnapshotExists
-// rejecting the version mismatch separately.
-func TestStaleConsensusStakeSnapshotsExistFailsClosed(t *testing.T) {
-	t.Parallel()
-
-	t.Run("current version only reports not stale", func(t *testing.T) {
-		t.Parallel()
-		store := newManagementTestStore(t)
-		poolKey := bytes.Repeat([]byte{0x44}, 28)
-		require.NoError(
-			t,
-			store.SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
-				Epoch:              20,
-				SnapshotType:       models.PoolStakeSnapshotTypeMark,
-				PoolKeyHash:        poolKey,
-				CalculationVersion: models.RewardStakeCalculationVersion,
-			}, nil),
-		)
-		require.NoError(t, store.SaveRewardSnapshot(&models.RewardSnapshot{
-			Epoch:              20,
-			SnapshotType:       models.PoolStakeSnapshotTypeMark,
-			Authoritative:      true,
-			CalculationVersion: models.RewardStakeCalculationVersion,
-		}, nil))
-		stale, err := store.StaleConsensusStakeSnapshotsExist(nil)
-		require.NoError(t, err)
-		require.False(t, stale)
-	})
-
-	t.Run("version 2 Dijkstra snapshot requires replay", func(t *testing.T) {
-		store := newManagementTestStore(t)
-		require.NoError(t, store.SaveRewardSnapshot(&models.RewardSnapshot{
-			Epoch: 4, SnapshotType: "mark", Authoritative: true, CalculationVersion: 2,
-		}, nil))
-		stale, err := store.StaleConsensusStakeSnapshotsExist(nil)
-		require.NoError(t, err)
-		require.True(t, stale)
-	})
-
-	t.Run(
-		"literal old pool_stake_snapshot version trips the gate",
-		func(t *testing.T) {
-			t.Parallel()
-			store := newManagementTestStore(t)
-			poolKey := bytes.Repeat([]byte{0x55}, 28)
-			require.NoError(
-				t,
-				store.SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
-					Epoch:              21,
-					SnapshotType:       models.PoolStakeSnapshotTypeMark,
-					PoolKeyHash:        poolKey,
-					CalculationVersion: 1,
-				}, nil),
-			)
-			stale, err := store.StaleConsensusStakeSnapshotsExist(nil)
-			require.NoError(t, err)
-			require.True(t, stale)
-			epochs, err := store.StaleConsensusStakeSnapshotEpochs(nil)
-			require.NoError(t, err)
-			require.Equal(t, []uint64{21}, epochs)
-		},
-	)
-
-	t.Run(
-		"literal old authoritative reward_snapshot version trips the gate",
-		func(t *testing.T) {
-			t.Parallel()
-			store := newManagementTestStore(t)
-			require.NoError(t, store.SaveRewardSnapshot(&models.RewardSnapshot{
-				Epoch:              22,
-				SnapshotType:       models.PoolStakeSnapshotTypeMark,
-				Authoritative:      true,
-				CalculationVersion: 1,
-			}, nil))
-			stale, err := store.StaleConsensusStakeSnapshotsExist(nil)
-			require.NoError(t, err)
-			require.True(t, stale)
-		},
-	)
-
-	t.Run(
-		"literal old non-authoritative fallback reward_snapshot version trips the gate",
-		func(t *testing.T) {
-			t.Parallel()
-			store := newManagementTestStore(t)
-			require.NoError(t, store.SaveRewardSnapshot(&models.RewardSnapshot{
-				Epoch:              23,
-				SnapshotType:       models.PoolStakeSnapshotTypeMark,
-				Authoritative:      false,
-				CalculationVersion: 1,
-			}, nil))
-			stale, err := store.StaleConsensusStakeSnapshotsExist(nil)
-			require.NoError(t, err)
-			require.True(t, stale)
-			epochs, err := store.StaleConsensusStakeSnapshotEpochs(nil)
-			require.NoError(t, err)
-			require.Equal(t, []uint64{23}, epochs)
-		},
 	)
 }
 

@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -39,54 +40,10 @@ import (
 // real method.
 type storedHashStore struct {
 	metadata.MetadataStore
-	poolByVrfKeyHash  *models.Pool
-	committeeMembers  []*models.CommitteeMember
-	committeeHot      *models.AuthCommitteeHot
 	epoch             *models.Epoch
 	rebuiltInputs     []*models.RewardStakeInput
 	rebuiltErr        error
 	registrationsSeen [][]lcommon.PoolKeyHash
-}
-
-func (s *storedHashStore) GetPoolByVrfKeyHash(
-	vrfKeyHash []byte,
-	epochStartSlot uint64,
-	txn types.Txn,
-) (*models.Pool, error) {
-	if s.poolByVrfKeyHash == nil {
-		return s.MetadataStore.GetPoolByVrfKeyHash(
-			vrfKeyHash,
-			epochStartSlot,
-			txn,
-		)
-	}
-	return s.poolByVrfKeyHash, nil
-}
-
-func (s *storedHashStore) GetCommitteeMembers(
-	txn types.Txn,
-) ([]*models.CommitteeMember, error) {
-	if s.committeeMembers == nil {
-		return s.MetadataStore.GetCommitteeMembers(txn)
-	}
-	return s.committeeMembers, nil
-}
-
-func (s *storedHashStore) GetCommitteeMember(
-	coldTag uint8,
-	coldKey []byte,
-	termStartSlot uint64,
-	txn types.Txn,
-) (*models.AuthCommitteeHot, error) {
-	if s.committeeHot == nil {
-		return s.MetadataStore.GetCommitteeMember(
-			coldTag,
-			coldKey,
-			termStartSlot,
-			txn,
-		)
-	}
-	return s.committeeHot, nil
 }
 
 func (s *storedHashStore) GetEpoch(
@@ -142,9 +99,13 @@ func newStoredHashDB(
 ) (*database.Database, *storedHashStore) {
 	t.Helper()
 	store := &storedHashStore{}
+	// Rows a release that kept ledger state in SQL left behind are read only
+	// from a v0.94.2 database.
 	db, err := dbtest.NewDatabaseWithMetadataWrapper(
 		t,
-		dbtest.Options{Config: &database.Config{DataDir: ""}},
+		dbtest.Options{Config: &database.Config{
+			DataDir: "", Role: database.RoleReleased,
+		}},
 		func(inner metadata.MetadataStore) metadata.MetadataStore {
 			store.MetadataStore = inner
 			configure(store)
@@ -162,6 +123,19 @@ func storedHashView(t *testing.T, db *database.Database) *LedgerView {
 	return &LedgerView{ls: &LedgerState{db: db}, txn: txn}
 }
 
+// storedHashSetView is a ledger view over a LedgerDB set holding changes, for
+// a row the set stores as given and its reader must reject.
+func storedHashSetView(t *testing.T, changes LedgerChanges) *LedgerView {
+	t.Helper()
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+	fxAttachLedgerDB(t, ls)
+	fxSeed(t, db, changes)
+	txn := db.Transaction(context.Background(), false)
+	t.Cleanup(txn.Release)
+	return &LedgerView{ls: ls, txn: txn}
+}
+
 // shortStoredHash is one byte narrower than a hash of size bytes. An unchecked
 // conversion zero-pads it into a well-formed hash.
 func shortStoredHash(size int, fill byte) []byte {
@@ -170,13 +144,13 @@ func shortStoredHash(size int, fill byte) []byte {
 
 func TestMIRPendingRejectsMalformedStoredCredential(t *testing.T) {
 	t.Parallel()
-	ls, db, raw := newMIRTestLedger(t)
+	ls, db, _ := newMIRTestLedger(t)
 	withMIRCutoffEpoch(
 		t,
 		ls,
 		models.Epoch{StartSlot: 100, LengthInSlots: 432_000},
 	)
-	seedMIRDistribution(t, raw, mirPotReserves, 150,
+	seedMIRDistribution(t, db, epochengine.MIRPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{{
 			Credential: shortStoredHash(lcommon.Blake2b224Size, 0x77),
 			Amount:     big.NewInt(10),
@@ -185,7 +159,7 @@ func TestMIRPendingRejectsMalformedStoredCredential(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	err := txn.Do(func(txn *database.Txn) error {
 		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
-		_, err := lv.InstantaneousRewardsTotal(mirPotReserves)
+		_, err := lv.InstantaneousRewardsTotal(epochengine.MIRPotReserves)
 		return err
 	})
 	require.ErrorContains(t, err, "MIR reward credential")
@@ -194,15 +168,25 @@ func TestMIRPendingRejectsMalformedStoredCredential(t *testing.T) {
 
 func TestIsVrfKeyInUseRejectsMalformedStoredPoolKey(t *testing.T) {
 	t.Parallel()
-	db, _ := newStoredHashDB(t, func(s *storedHashStore) {
-		s.poolByVrfKeyHash = &models.Pool{
-			PoolKeyHash: shortStoredHash(lcommon.Blake2b224Size, 0x21),
-		}
+	short := shortStoredHash(lcommon.Blake2b224Size, 0x21)
+	vrf := lcommon.Blake2b256{0x01}
+	reg := &models.PoolRegistration{
+		PoolKeyHash: short,
+		VrfKeyHash:  vrf[:],
+		AddedSlot:   1,
+	}
+	lv := storedHashSetView(t, LedgerChanges{
+		Pools: []PoolChange{{
+			Slot:  1,
+			State: PoolState{Pool: short, Params: reg},
+		}},
+		PoolEvents: []PoolEventChange{{
+			Pool:  short,
+			Event: PoolEvent{Slot: 1, Registration: reg},
+		}},
 	})
-	lv := storedHashView(t, db)
-	inUse, owner, err := lv.IsVrfKeyInUse(
-		lcommon.Blake2b256{0x01},
-	)
+	lv.epochStartSlot = 100
+	inUse, owner, err := lv.IsVrfKeyInUse(vrf)
 	require.ErrorContains(t, err, "VRF key owner pool key hash")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.ErrorIs(t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault)
@@ -212,14 +196,14 @@ func TestIsVrfKeyInUseRejectsMalformedStoredPoolKey(t *testing.T) {
 
 func TestCommitteeMembersRejectsMalformedStoredColdCredential(t *testing.T) {
 	t.Parallel()
-	db, _ := newStoredHashDB(t, func(s *storedHashStore) {
-		s.committeeMembers = []*models.CommitteeMember{{
-			ID:           1,
+	lv := storedHashSetView(t, LedgerChanges{Committee: []CommitteeChange{{
+		Slot: 1,
+		Member: &models.CommitteeMember{
 			ColdCredHash: shortStoredHash(lcommon.Blake2b224Size, 0x31),
 			ExpiresEpoch: 10,
-		}}
-	})
-	members, err := storedHashView(t, db).CommitteeMembers()
+		},
+	}}})
+	members, err := lv.CommitteeMembers()
 	require.ErrorContains(t, err, "committee cold credential")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, members)
@@ -233,18 +217,15 @@ func TestCommitteeMembersRejectsMalformedColdCredentialUnderBothTags(
 ) {
 	t.Parallel()
 	hash := shortStoredHash(lcommon.Blake2b224Size, 0x32)
-	db, _ := newStoredHashDB(t, func(s *storedHashStore) {
-		s.committeeMembers = []*models.CommitteeMember{
-			{ID: 1, ColdCredHash: hash, ExpiresEpoch: 10},
-			{
-				ID:                2,
-				ColdCredentialTag: 1,
-				ColdCredHash:      hash,
-				ExpiresEpoch:      10,
-			},
-		}
-	})
-	members, err := storedHashView(t, db).CommitteeMembers()
+	lv := storedHashSetView(t, LedgerChanges{Committee: []CommitteeChange{
+		{Slot: 1, Member: &models.CommitteeMember{
+			ColdCredHash: hash, ExpiresEpoch: 10,
+		}},
+		{Slot: 1, Member: &models.CommitteeMember{
+			ColdCredentialTag: 1, ColdCredHash: hash, ExpiresEpoch: 10,
+		}},
+	}})
+	members, err := lv.CommitteeMembers()
 	require.ErrorContains(t, err, "committee cold credential")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, members)
@@ -253,30 +234,27 @@ func TestCommitteeMembersRejectsMalformedColdCredentialUnderBothTags(
 func TestCommitteeHotCredentialRejectsMalformedStoredHash(t *testing.T) {
 	t.Parallel()
 	cold := bytes.Repeat([]byte{0x41}, lcommon.Blake2b224Size)
-	configure := func(s *storedHashStore) {
-		s.committeeMembers = []*models.CommitteeMember{{
-			ID:           1,
-			ColdCredHash: cold,
-			ExpiresEpoch: 10,
-		}}
-		s.committeeHot = &models.AuthCommitteeHot{
+	changes := LedgerChanges{Committee: []CommitteeChange{
+		{Slot: 1, Member: &models.CommitteeMember{
+			ColdCredHash: cold, ExpiresEpoch: 10,
+		}},
+		{Slot: 1, Auth: &models.AuthCommitteeHot{
 			ColdCredential: cold,
 			HotCredential:  shortStoredHash(lcommon.Blake2b224Size, 0x42),
-		}
-	}
+			AddedSlot:      1,
+		}},
+	}}
 
 	t.Run("CommitteeMembers", func(t *testing.T) {
 		t.Parallel()
-		db, _ := newStoredHashDB(t, configure)
-		members, err := storedHashView(t, db).CommitteeMembers()
+		members, err := storedHashSetView(t, changes).CommitteeMembers()
 		require.ErrorContains(t, err, "committee hot credential")
 		require.ErrorContains(t, err, "invalid blake2b-224 hash")
 		require.Nil(t, members)
 	})
 	t.Run("CommitteeCredentialMember", func(t *testing.T) {
 		t.Parallel()
-		db, _ := newStoredHashDB(t, configure)
-		member, err := storedHashView(t, db).CommitteeCredentialMember(
+		member, err := storedHashSetView(t, changes).CommitteeCredentialMember(
 			lcommon.Credential{
 				CredType:   lcommon.CredentialTypeAddrKeyHash,
 				Credential: lcommon.CredentialHash(cold),
@@ -379,7 +357,7 @@ func TestChainDepStateRejectsMalformedStoredEpochNonce(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	valid := bytes.Repeat([]byte{0x22}, lcommon.Blake2b256Size)
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		0,
 		0,
 		shortStoredHash(lcommon.Blake2b256Size, 0x11),
@@ -414,14 +392,13 @@ func TestRewardBlockCountsRejectsMalformedPoolInput(t *testing.T) {
 	ls := &LedgerState{config: LedgerStateConfig{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
-	_, _, _, err := ls.rewardBlockCounts(
+	_, _, _, err := ls.engine().RewardBlockCounts(
 		dbadapter.New(db),
 		nil,
 		5,
 		[]*models.RewardPoolInput{{
 			PoolKeyHash: shortStoredHash(lcommon.Blake2b224Size, 0x51),
 		}},
-		big.NewRat(0, 1),
 	)
 	require.ErrorContains(t, err, "reward block-count pool input")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
@@ -441,14 +418,14 @@ func TestRebuildPrunedRewardStakeInputsRejectsMalformedPoolInput(t *testing.T) {
 	ls := &LedgerState{config: LedgerStateConfig{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
-	_, err := ls.rebuildPrunedRewardStakeInputs(
+	_, err := ls.engine().RebuildPrunedRewardStakeInputs(
 		dbadapter.New(db),
 		nil,
 		5,
 		&models.RewardSnapshot{CapturedSlot: 150, BoundarySlot: 199},
 		[]*models.RewardPoolInput{{PoolKeyHash: short}},
 	)
-	require.ErrorIs(t, err, errRewardStakeInputsUnrecoverable)
+	require.ErrorIs(t, err, epochengine.ErrRewardStakeInputsUnrecoverable)
 	require.ErrorContains(t, err, "reward pool input for epoch 5")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Empty(t, store.registrationsSeen,
@@ -466,7 +443,7 @@ func TestRebuildPrunedRewardStakeInputsKeepsQueryFailureRetryable(
 	ls := &LedgerState{config: LedgerStateConfig{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
-	_, err := ls.rebuildPrunedRewardStakeInputs(
+	_, err := ls.engine().RebuildPrunedRewardStakeInputs(
 		dbadapter.New(db),
 		nil,
 		5,
@@ -476,5 +453,5 @@ func TestRebuildPrunedRewardStakeInputsKeepsQueryFailureRetryable(
 		}},
 	)
 	require.ErrorIs(t, err, queryErr)
-	require.NotErrorIs(t, err, errRewardStakeInputsUnrecoverable)
+	require.NotErrorIs(t, err, epochengine.ErrRewardStakeInputsUnrecoverable)
 }

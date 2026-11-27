@@ -28,9 +28,13 @@ import (
 // with no stored datum is a nil entry, not an error that discards the rest.
 func TestGetDatumsAlignsResultsAndReportsMissingAsNil(t *testing.T) {
 	t.Parallel()
-	db := newTestDB(t)
+	db := newIndexerTestDB(t, nil).indexer
 	raw := []byte{0x01}
-	require.NoError(t, db.SetDatum(raw, 1, nil))
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Rollback() //nolint:errcheck
+	bindTestPayloads(t, db, txn)
+	require.NoError(t, db.SetDatum(raw, 1, txn))
+	require.NoError(t, txn.Commit())
 	stored := lcommon.Blake2b256Hash(raw).Bytes()
 	missing := bytes.Repeat([]byte{0xEE}, lcommon.Blake2b256Size)
 

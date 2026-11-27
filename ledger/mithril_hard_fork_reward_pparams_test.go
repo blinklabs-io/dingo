@@ -124,7 +124,6 @@ func runHardForkRewardRound(
 		tipSlot       = uint64(1_397_799)
 	)
 	ls, db := newRewardCalculationTestLedger(t)
-	seedEligiblePreviewGoRewardBasis(t, db)
 
 	currentData, err := cbor.Encode(currentParams)
 	require.NoError(t, err)
@@ -139,7 +138,7 @@ func runHardForkRewardRound(
 		}
 	}
 	nonce := make([]byte, 32)
-	require.NoError(t, importLedgerStateForTest(
+	require.NoError(t, fxImportLedgerState(
 		t, ls,
 		ledgerstate.ImportConfig{
 			Database: db,
@@ -167,7 +166,10 @@ func runHardForkRewardRound(
 			},
 		},
 	))
-	require.NoError(t, db.Metadata().SaveRewardAdaPots(
+	// The import replaces the set, so the reward basis the node captured
+	// goes in after it.
+	seedEligiblePreviewGoRewardBasis(t, db)
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(
 		&models.RewardAdaPots{
 			Epoch:        snapshotEpoch,
 			Reserves:     100_000_000,
@@ -182,7 +184,7 @@ func runHardForkRewardRound(
 		t, ls, db, snapshotEpoch-1, snapshotEpoch, pots,
 	)
 
-	currentEpoch, err := db.Metadata().GetEpoch(snapshotEpoch, nil)
+	currentEpoch, err := seedDB(t, db).GetEpoch(snapshotEpoch, nil)
 	require.NoError(t, err)
 	require.NotNil(t, currentEpoch)
 	ls.currentEpoch = *currentEpoch
@@ -209,14 +211,14 @@ func runHardForkRewardRound(
 		t, ls, db, snapshotEpoch, snapshotEpoch+1, pots,
 	)
 
-	pools, err := db.Metadata().GetRewardPoolOutputs(snapshotEpoch-2, nil)
+	pools, err := seedDB(t, db).GetRewardPoolOutputs(snapshotEpoch-2, nil)
 	require.NoError(t, err)
 	for _, pool := range pools {
 		row := *pool
 		row.ID = 0
 		round.pools = append(round.pools, row)
 	}
-	accounts, err := db.Metadata().GetRewardAccountOutputs(
+	accounts, err := seedDB(t, db).GetRewardAccountOutputs(
 		snapshotEpoch-2, nil,
 	)
 	require.NoError(t, err)
@@ -225,7 +227,7 @@ func runHardForkRewardRound(
 		row.ID = 0
 		round.accounts = append(round.accounts, row)
 	}
-	nextPots, err := db.Metadata().GetRewardAdaPots(snapshotEpoch+1, nil)
+	nextPots, err := seedDB(t, db).GetRewardAdaPots(snapshotEpoch+1, nil)
 	require.NoError(t, err)
 	require.NotNil(t, nextPots)
 	round.pots = *nextPots
@@ -245,7 +247,7 @@ func rewardParamsFor(
 	var view rewardParamsView
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, params, _, err := ls.rewardParameters(
+		_, params, err := ls.engine().RewardParameters(
 			txn, performanceEpoch, calculationEpoch, pots,
 		)
 		if err != nil {

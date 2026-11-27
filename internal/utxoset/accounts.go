@@ -18,13 +18,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger"
 )
@@ -89,26 +86,7 @@ func (s *Set) ensureAccounts(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 	err = s.store.LoadAccounts(func(put func(badgerutxo.AccountRow) error) error {
 		return ldb.IterateAccounts(txn, func(a *models.Account) error {
 			n++
-			s.merge.noteAccount(a.CredentialTag, a.StakingKey)
 			row := accountRow(*a)
-			if s.merge != nil && s.mergeOverDrained.Load() {
-				// The metadata store lost the rows a drain moved out, so the
-				// import wrote the account over none. One it holds keeps
-				// what an import of an account the ledger already holds does:
-				// its delegations, activity and reward update and the slots
-				// and expiry it was first written with stay.
-				held, ok, err := s.store.Account(row.Tag, row.Key)
-				if err != nil {
-					return err
-				}
-				if ok {
-					row.AddedSlot = held.AddedSlot
-					row.CreatedSlot = held.CreatedSlot
-					row.ExpirationEpoch = held.ExpirationEpoch
-					row.InactivityActivation = held.InactivityActivation
-					row.InactivityActivationEpoch = held.InactivityActivationEpoch
-				}
-			}
 			return put(row)
 		})
 	})
@@ -121,7 +99,7 @@ func (s *Set) ensureAccounts(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 
 // ensureAccountInactivityActivation upgrades legacy set account rows with the
 // CIP-0163 activation membership and floor. The SQL relation is authoritative
-// when retained; a set that activated after the account family was drained
+// when retained; a set that activated after it alone held the accounts
 // reconstructs the same membership from its rollback state immediately before
 // the activation boundary.
 func (s *Set) ensureAccountInactivityActivation(
@@ -135,19 +113,16 @@ func (s *Set) ensureAccountInactivityActivation(
 	if loaded {
 		return nil
 	}
-	txn := ldb.Begin(ctx, false)
-	defer txn.Release()
-	raw, err := ldb.GetSyncState(database.DelegatorInactivityActivatedSyncKey, txn)
+	// The activation epoch is loaded before the accounts' membership.
+	epoch, ran, err := s.InactivityActivation(nil)
 	if err != nil {
 		return fmt.Errorf("utxoset: read delegator-inactivity activation: %w", err)
 	}
-	if raw == "" {
+	if !ran {
 		return s.store.LoadAccountInactivityActivation(0, 0, nil)
 	}
-	epoch, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil {
-		return fmt.Errorf("utxoset: parse delegator-inactivity activation %q: %w", raw, err)
-	}
+	txn := ldb.Begin(ctx, false)
+	defer txn.Release()
 	epochs, err := s.Epochs()
 	if err != nil {
 		return fmt.Errorf("utxoset: read activation epoch: %w", err)
@@ -175,16 +150,14 @@ func (s *Set) ensureAccountInactivityActivation(
 	}); err != nil {
 		return fmt.Errorf("utxoset: list accounts for activation provenance: %w", err)
 	}
-	if !s.store.LoadsRefusedFor(nodesettings.FamilyAccounts) {
-		for start := 0; start < len(refs); start += 400 {
-			end := min(start+400, len(refs))
-			batch, err := ldb.AccountInactivityActivationMembership(ctx, refs[start:end], txn)
-			if err != nil {
-				return fmt.Errorf("utxoset: read account activation membership: %w", err)
-			}
-			for key := range batch {
-				members[key] = struct{}{}
-			}
+	for start := 0; start < len(refs); start += 400 {
+		end := min(start+400, len(refs))
+		batch, err := ldb.AccountInactivityActivationMembership(ctx, refs[start:end], txn)
+		if err != nil {
+			return fmt.Errorf("utxoset: read account activation membership: %w", err)
+		}
+		for key := range batch {
+			members[key] = struct{}{}
 		}
 	}
 	if boundary > 0 {
@@ -431,9 +404,8 @@ func (s *Set) AccountsWithDrep() ([]models.StakeCredentialRef, error) {
 	return refs, err
 }
 
-// ensureRewardRecords loads the metadata store's reward journal into a set
-// that has not held it. A drained store holds none, and the load then marks the
-// records as lost: what the drain removed cannot be read back.
+// ensureRewardRecords loads the v0.94.2 metadata store's reward journal into
+// a set that has not held it.
 func (s *Set) ensureRewardRecords(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
@@ -449,12 +421,11 @@ func (s *Set) ensureRewardRecords(
 	if !ok {
 		return nil
 	}
-	lost := false
 	n := 0
-	err = s.store.LoadRewardRecords(false, func(put func(badgerutxo.RewardRecord) error) error {
+	err = s.store.LoadRewardRecords(func(put func(badgerutxo.RewardRecord) error) error {
 		txn := ldb.Begin(ctx, false)
 		defer txn.Release()
-		err := r.EachRewardJournalRow(txn, func(row ledgerdb.RewardJournalRow) error {
+		return r.EachRewardJournalRow(txn, func(row ledgerdb.RewardJournalRow) error {
 			n++
 			return put(badgerutxo.RewardRecord{
 				Slot: row.Slot, Withdrawal: row.Withdrawal, Source: row.TxHash,
@@ -462,28 +433,12 @@ func (s *Set) ensureRewardRecords(
 				PostSnapshot: row.PostSnapshot,
 			})
 		})
-		if errors.Is(err, database.ErrFamilyDrained) {
-			lost = true
-			return nil
-		}
-		return err
 	})
 	if err != nil {
 		return fmt.Errorf("utxoset: load reward records: %w", err)
 	}
-	if lost {
-		if err := s.store.MarkRewardRecordsLost(); err != nil {
-			return err
-		}
-	}
-	s.logger.Info("loaded reward records into the live UTxO set", "records", n, "lost", lost)
+	s.logger.Info("loaded reward records into the live UTxO set", "records", n)
 	return nil
-}
-
-// RewardRecordsLost reports whether the metadata store had drained its reward
-// journal before the set could load it.
-func (s *Set) RewardRecordsLost() (bool, error) {
-	return s.store.RewardRecordsLost()
 }
 
 // RewardRecordHigh returns the sequence number the next record will take.

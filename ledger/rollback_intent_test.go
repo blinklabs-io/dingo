@@ -17,12 +17,12 @@ package ledger
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
 	"strconv"
-	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,8 +30,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -64,7 +64,9 @@ func TestRollbackIntentRoundTripsUndoBlocks(t *testing.T) {
 	require.False(t, pending)
 }
 
-func TestValidateAndEmitRollbackUndoRefusesBeforePersistingIntent(t *testing.T) {
+func TestValidateAndEmitRollbackUndoRefusesBeforePersistingIntent(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	tests := []struct {
@@ -81,18 +83,12 @@ func TestValidateAndEmitRollbackUndoRefusesBeforePersistingIntent(t *testing.T) 
 			want: ErrRollbackExceedsMithrilBoundary,
 		},
 		{
-			name: "consumed UTxO prune floor",
+			name: "live UTxO set journal",
 			prepare: func(f *chainsyncRollbackFixture) error {
-				return f.ls.db.SetSyncState(
-					database.ConsumedUtxoPruneFloorSyncKey,
-					strconv.FormatUint(
-						f.ancestorTip.Point.Slot+1,
-						10,
-					),
-					nil,
-				)
+				fxEmptyJournal(t, f.ls)
+				return nil
 			},
-			want: ErrRollbackBelowUtxoPruneFloor,
+			want: ErrRollbackBelowUtxoJournal,
 		},
 	}
 
@@ -203,9 +199,12 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	require.NotZero(t, txSubID)
 	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
 
+	// The set lives under the data directory, where the restart below finds
+	// it again.
+	set, closeSet := OpenLiveSetAtForTest(t, db, dataDir)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           set,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		EventBus:          bus,
@@ -222,10 +221,16 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 		Point:       targetPoint,
 		BlockNumber: raw[0].BlockNumber,
 	}
-	require.NoError(t, db.SetBlockNonce(
-		targetPoint.Hash, targetPoint.Slot, bytes.Repeat([]byte{0x11}, 32), true, nil,
+	require.NoError(t, seedBlockNonce(
+		t,
+		db,
+		targetPoint.Hash,
+		targetPoint.Slot,
+		bytes.Repeat([]byte{0x11}, 32),
+		true,
+		nil,
 	))
-	require.NoError(t, db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, db,
 		currentTip.Point.Hash,
 		currentTip.Point.Slot,
 		bytes.Repeat([]byte{0x22}, 32),
@@ -235,6 +240,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	require.NoError(t, db.SetTip(currentTip, nil))
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = bytes.Repeat([]byte{0x22}, 32)
+	fxJournalChain(t, ls)
 
 	injected := errors.New("injected metadata truncation failure")
 	ls.rollbackTruncateAfterSlotFunc = func(
@@ -244,7 +250,11 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}
-	rollbackErr := ls.rollbackChainAndStateDeferred(context.Background(), targetPoint, nil)
+	rollbackErr := ls.rollbackChainAndStateDeferred(
+		context.Background(),
+		targetPoint,
+		nil,
+	)
 	require.ErrorIs(t, rollbackErr, ErrChainTruncatedLedgerRollbackFailed)
 	require.Contains(t, rollbackErr.Error(), injected.Error())
 
@@ -265,6 +275,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	require.Equal(t, blocks[1].Cbor, intentBlocks[0].Cbor)
 	require.Equal(t, targetPoint, ls.chain.Tip().Point)
 
+	require.NoError(t, closeSet())
 	require.NoError(t, dbtest.CloseDatabase(db))
 	db, err = dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
@@ -283,9 +294,10 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 		recoveryBus.Unsubscribe(TransactionEventType, recoverySubID)
 	})
 
+	recoveredSet, _ := OpenLiveSetAtForTest(t, db, dataDir)
 	recoveredLS, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           recoveredSet,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		EventBus:          recoveryBus,
@@ -303,7 +315,11 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	recoveredUndo, ok := recoveredEvent.Data.(TransactionEvent)
 	require.True(t, ok)
 	require.True(t, recoveredUndo.Rollback)
-	require.Equal(t, firstUndo.Transaction.Hash(), recoveredUndo.Transaction.Hash())
+	require.Equal(
+		t,
+		firstUndo.Transaction.Hash(),
+		recoveredUndo.Transaction.Hash(),
+	)
 	require.Equal(t, blocks[1].Slot, recoveredUndo.Point.Slot)
 	require.Equal(t, blocks[1].Hash, recoveredUndo.Point.Hash)
 
@@ -339,7 +355,7 @@ func TestRecoverRollbackIntentAheadOfLedgerDeliversUndo(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		EventBus:          bus,
@@ -415,7 +431,7 @@ func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		EventBus:          bus,
@@ -431,7 +447,10 @@ func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
 	ls.currentTip = tip
 
 	middlePoint := ocommon.NewPoint(raw[1].Slot, raw[1].Hash)
-	require.NoError(t, ls.validateAndEmitRollbackUndo(context.Background(), middlePoint))
+	require.NoError(
+		t,
+		ls.validateAndEmitRollbackUndo(context.Background(), middlePoint),
+	)
 	_, firstBlocks, pending, err := loadRollbackIntent(db)
 	require.NoError(t, err)
 	require.True(t, pending)
@@ -473,91 +492,328 @@ func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
 	)
 }
 
-func rollbackIntentRecord(blocks string) string {
-	return `{"format_version":1,"slot":1,"hash":"01","blocks":` + blocks + `}`
+// rolledBackBlockBodies counts the rolled-back bodies the block store keeps.
+func rolledBackBlockBodies(t *testing.T, db *database.Database) int {
+	t.Helper()
+	txn := db.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	prefix := []byte(dbtypes.RolledBackBlockKeyPrefix)
+	it := txn.BlobStore().NewIterator(
+		txn.Blob(), dbtypes.BlobIteratorOptions{Prefix: prefix},
+	)
+	require.NotNil(t, it)
+	defer it.Close()
+	count := 0
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		count++
+	}
+	require.NoError(t, it.Err())
+	return count
 }
 
-// A restored database can hold any string under the sync-state key. Recovery
-// must refuse a record that exceeds the limits the writer enforces before it
-// allocates one struct per element, or a few megabytes of "{}" would expand
-// into gigabytes of decoded blocks.
-func TestDecodeRollbackIntentRefusesRecordsBeyondWriterLimits(t *testing.T) {
+// The record names blocks; it does not carry them. A body the chain no
+// longer holds is kept by the block store instead, and a body still on the
+// chain is not copied at all.
+func TestRollbackIntentRecordCarriesNoBlockBodies(t *testing.T) {
 	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	onChain := models.Block{
+		ID: 1, Slot: 10, Number: 1, Type: 1,
+		Hash: bytes.Repeat([]byte{1}, 32),
+		Cbor: bytes.Repeat([]byte{0x81}, 4096),
+	}
+	require.NoError(t, db.BlockCreate(onChain, nil))
+	removed := models.Block{
+		ID: 2, Slot: 20, Number: 2, Type: 1,
+		Hash: bytes.Repeat([]byte{2}, 32),
+		Cbor: bytes.Repeat([]byte{0x82}, 4096),
+	}
+	point := ocommon.Point{Slot: 5, Hash: []byte{5}}
+	require.NoError(t, persistRollbackIntent(
+		db, point, []models.Block{removed, onChain}, nil,
+	))
 
-	emptyBlocks := func(n int) string {
-		return "[" + strings.Repeat("{},", n-1) + "{}]"
+	record, err := db.GetChainState(database.RollbackIntentKey, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, record)
+	require.Less(t, len(record), 1024, "the record carries block bodies")
+	require.Nil(t, db.Metadata(), "no sync_state can hold the intent")
+	require.Equal(t, 1, rolledBackBlockBodies(t, db))
+
+	_, got, pending, err := loadRollbackIntent(db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Len(t, got, 2)
+	require.Equal(t, removed.Cbor, got[0].Cbor)
+	require.Equal(t, onChain.Cbor, got[1].Cbor)
+}
+
+// rollbackCrashFixture is a two-block chain the ledger has applied, with a
+// transaction subscriber, on a data directory a second ledger can reopen.
+type rollbackCrashFixture struct {
+	dataDir  string
+	db       *database.Database
+	ls       *LedgerState
+	closeSet func() error
+	txCh     <-chan event.Event
+	// unsubscribe removes the transaction subscriber, the only consumer of
+	// rollback undo events the fixture has.
+	unsubscribe func()
+	blocks      []models.Block
+	tip         ochainsync.Tip
+	target      ochainsync.Tip
+}
+
+func newRollbackCrashFixture(t *testing.T) *rollbackCrashFixture {
+	t.Helper()
+	f := &rollbackCrashFixture{dataDir: t.TempDir()}
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: f.dataDir})
+	require.NoError(t, err)
+	f.db = db
+	// The set lives under the data directory before anything is seeded into
+	// it, so a restart finds what was seeded.
+	OpenLiveSetAtForTest(t, db, f.dataDir)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	f.blocks = loadTestBlocksWithTxs(t, 2)
+	raw := make([]chain.RawBlock, len(f.blocks))
+	for i, block := range f.blocks {
+		raw[i] = chain.RawBlock{
+			Slot:        block.Slot,
+			Hash:        bytes.Clone(block.Hash),
+			BlockNumber: block.Number,
+			Type:        block.Type,
+			Cbor:        bytes.Clone(block.Cbor),
+		}
+		if i > 0 {
+			raw[i].PrevHash = bytes.Clone(raw[i-1].Hash)
+		}
 	}
-	tests := []struct {
-		name string
-		raw  string
-		want string
-	}{
-		{
-			name: "encoded size",
-			raw:  strings.Repeat(" ", maxRollbackIntentEncodedBytes+1),
-			want: "encoded size",
-		},
-		{
-			name: "block count",
-			raw:  rollbackIntentRecord(emptyBlocks(maxRollbackIntentBlocks + 1)),
-			want: "more than",
-		},
-		{
-			name: "trailing data",
-			raw:  rollbackIntentRecord("[]") + " {}",
-			want: "unexpected data",
-		},
-		{
-			name: "unknown field",
-			raw:  `{"format_version":1,"slot":1,"hash":"01","extra":"x"}`,
-			want: "unknown field",
-		},
-		{
-			name: "blocks not an array",
-			raw:  rollbackIntentRecord(`{}`),
-			want: "blocks is not an array",
-		},
+	require.NoError(
+		t, cm.PrimaryChain().AddRawBlocks(context.Background(), raw),
+	)
+	f.tip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(raw[1].Slot, raw[1].Hash),
+		BlockNumber: raw[1].BlockNumber,
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, err := decodeRollbackIntent(tc.raw)
-			require.ErrorIs(t, err, errInvalidRollbackIntent)
-			require.ErrorContains(t, err, tc.want)
+	f.target = ochainsync.Tip{
+		Point:       ocommon.NewPoint(raw[0].Slot, raw[0].Hash),
+		BlockNumber: raw[0].BlockNumber,
+	}
+	require.NoError(t, seedBlockNonce(t, db,
+		f.target.Point.Hash, f.target.Point.Slot,
+		bytes.Repeat([]byte{0x11}, 32), true, nil,
+	))
+	require.NoError(t, seedBlockNonce(t, db,
+		f.tip.Point.Hash, f.tip.Point.Slot,
+		bytes.Repeat([]byte{0x22}, 32), false, nil,
+	))
+	require.NoError(t, db.SetTip(f.tip, nil))
+	f.ls, f.txCh, f.closeSet = f.openLedger(t, cm)
+	f.ls.currentTip = f.tip
+	f.ls.currentTipBlockNonce = bytes.Repeat([]byte{0x22}, 32)
+	fxJournalChain(t, f.ls)
+	return f
+}
+
+func (f *rollbackCrashFixture) openLedger(
+	t *testing.T,
+	cm *chain.ChainManager,
+) (*LedgerState, <-chan event.Event, func() error) {
+	t.Helper()
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	subID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotZero(t, subID)
+	var unsubscribeOnce sync.Once
+	f.unsubscribe = func() {
+		unsubscribeOnce.Do(func() {
+			bus.Unsubscribe(TransactionEventType, subID)
 		})
 	}
+	t.Cleanup(f.unsubscribe)
+	set, closeSet := OpenLiveSetAtForTest(t, f.db, f.dataDir)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          f.db,
+		UtxoSet:           set,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	// Registered after the set and the database were opened, so it runs
+	// before their own cleanup closes them.
+	t.Cleanup(func() { _ = ls.Close() })
+	return ls, txCh, closeSet
 }
 
-func TestDecodeRollbackIntentRefusesBlockBytesBeyondLimit(t *testing.T) {
+// restart closes the ledger and the database and opens both again over the
+// same data directory, as a process that stopped and started would.
+func (f *rollbackCrashFixture) restart(t *testing.T) {
+	t.Helper()
+	// A committed rollback queues work that reads the set; Close waits for
+	// it, so the set is not closed under it.
+	require.NoError(t, f.ls.Close())
+	require.NoError(t, f.closeSet())
+	require.NoError(t, dbtest.CloseDatabase(f.db))
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: f.dataDir})
+	require.NoError(t, err)
+	f.db = db
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	f.ls, f.txCh, f.closeSet = f.openLedger(t, cm)
+	durable, err := db.GetTip(nil)
+	require.NoError(t, err)
+	f.ls.currentTip = durable
+}
+
+func (f *rollbackCrashFixture) requireUndo(t *testing.T, msg string) {
+	t.Helper()
+	evt := testutil.RequireReceive(t, f.txCh, 2*time.Second, msg)
+	undo, ok := evt.Data.(TransactionEvent)
+	require.True(t, ok)
+	require.True(t, undo.Rollback)
+	require.Equal(t, f.blocks[1].Slot, undo.Point.Slot)
+	require.Equal(t, f.blocks[1].Hash, undo.Point.Hash)
+}
+
+// A stop after the chain truncation and before the ledger's own rollback
+// leaves the intent pending and the rolled-back block off the chain. Its body
+// is still in the block store, so the restart replays the undo, rolls the
+// ledger back, clears the intent and only then deletes the body.
+func TestRollbackResumesAfterAStopBetweenChainTruncationAndLedgerUndo(
+	t *testing.T,
+) {
 	t.Parallel()
-
-	// The payload limit is injected so the refusal is exercised on a few
-	// bytes instead of allocating the full 64 MiB limit.
-	const limit = 64
-	decode := func(size int) error {
-		data, err := json.Marshal([]durableRollbackBlock{{
-			Cbor: make([]byte, size),
-		}})
-		require.NoError(t, err)
-		_, err = decodeRollbackBlocks(
-			json.NewDecoder(strings.NewReader(string(data))), limit,
-		)
-		return err
+	f := newRollbackCrashFixture(t)
+	injected := errors.New("stopped before the ledger rollback")
+	f.ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point, uint64, ledgerdb.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, injected
 	}
-	require.NoError(t, decode(limit))
-	err := decode(limit + 1)
-	require.ErrorIs(t, err, errInvalidRollbackIntent)
-	require.ErrorContains(t, err, "block bytes exceed")
-
-	// A record just past the payload limit must still fit the encoded size
-	// limit, so the byte limit is the one that refuses it.
-	require.LessOrEqual(
-		t,
-		(maxRollbackIntentPayloadBytes+1+2)/3*4+
-			maxRollbackIntentBlockOverhead+maxRollbackIntentEnvelope,
-		maxRollbackIntentEncodedBytes,
-		"the byte limit must be reachable under the encoded size limit",
+	err := f.ls.rollbackChainAndStateDeferred(
+		context.Background(), f.target.Point, nil,
 	)
+	require.ErrorIs(t, err, ErrChainTruncatedLedgerRollbackFailed)
+	f.requireUndo(t, "live undo before the truncation")
+
+	require.Equal(t, f.target.Point, f.ls.chain.Tip().Point)
+	_, err = database.BlockByPoint(
+		context.Background(), f.db, f.tip.Point,
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound,
+		"the rolled-back block is still a chain block")
+	require.Equal(t, 1, rolledBackBlockBodies(t, f.db),
+		"the chain truncation did not keep the rolled-back body")
+	durable, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.tip, durable, "the ledger rollback was not interrupted")
+
+	f.restart(t)
+	require.NoError(t, f.ls.recoverRollbackIntent(context.Background()))
+	f.requireUndo(t, "undo replayed from the kept body")
+
+	_, _, pending, err := loadRollbackIntent(f.db)
+	require.NoError(t, err)
+	require.False(t, pending)
+	require.Zero(t, rolledBackBlockBodies(t, f.db),
+		"the body outlived the intent that named it")
+	durable, err = f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.target, durable)
+}
+
+// A stop after the ledger's rollback committed and before the intent cleared
+// replays the undo once more -- delivery is at least once -- and finishes
+// without rolling anything back again.
+func TestRollbackResumesAfterAStopBetweenLedgerUndoAndIntentClear(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newRollbackCrashFixture(t)
+	require.NoError(t, f.ls.rollbackChainAndStateDeferred(
+		context.Background(), f.target.Point, nil,
+	))
+	f.requireUndo(t, "live undo")
+	durable, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.target, durable)
+	_, _, pending, err := loadRollbackIntent(f.db)
+	require.NoError(t, err)
+	require.False(t, pending)
+	require.Zero(t, rolledBackBlockBodies(t, f.db))
+
+	// Put back what the stop would have left: the intent and the body it
+	// names, with the chain and the ledger already at the target.
+	require.NoError(t, persistRollbackIntent(
+		f.db, f.target.Point, []models.Block{f.blocks[1]}, nil,
+	))
+	require.Equal(t, 1, rolledBackBlockBodies(t, f.db))
+
+	f.restart(t)
+	require.NoError(t, f.ls.recoverRollbackIntent(context.Background()))
+	f.requireUndo(t, "undo replayed after the ledger rollback committed")
+
+	_, _, pending, err = loadRollbackIntent(f.db)
+	require.NoError(t, err)
+	require.False(t, pending)
+	require.Zero(t, rolledBackBlockBodies(t, f.db))
+	durable, err = f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.target, durable)
+	require.Equal(t, f.target.Point, f.ls.chain.Tip().Point)
+}
+
+// A stop after the intent cleared and before its bodies were deleted leaves
+// bodies nothing names. The restart deletes them and replays nothing.
+func TestRollbackResumesAfterAStopBetweenIntentClearAndBodyDeletion(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newRollbackCrashFixture(t)
+	require.NoError(t, f.ls.rollbackChainAndStateDeferred(
+		context.Background(), f.target.Point, nil,
+	))
+	f.requireUndo(t, "live undo")
+	require.NoError(t, f.db.RetainRolledBackBlock(
+		f.blocks[1].Slot, f.blocks[1].Hash, f.blocks[1].Cbor,
+	))
+	require.Equal(t, 1, rolledBackBlockBodies(t, f.db))
+
+	f.restart(t)
+	require.NoError(t, f.ls.recoverRollbackIntent(context.Background()))
+	require.Zero(t, rolledBackBlockBodies(t, f.db),
+		"a body no intent names survived the restart")
+	testutil.RequireNoReceive(t, f.txCh, 100*time.Millisecond,
+		"a cleared intent was replayed")
+	durable, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.target, durable)
+}
+
+// A pending intent holds its bodies against a release: only a cleared intent
+// lets them go.
+func TestPendingRollbackIntentHoldsItsBodies(t *testing.T) {
+	t.Parallel()
+	f := newRollbackCrashFixture(t)
+	removed := models.Block{
+		ID: 9, Slot: f.tip.Point.Slot + 100, Number: 9, Type: 1,
+		Hash: bytes.Repeat([]byte{9}, 32), Cbor: []byte{0x80},
+	}
+	require.NoError(t, persistRollbackIntent(
+		f.db, f.target.Point, []models.Block{removed}, nil,
+	))
+	f.ls.releaseRolledBackBlocks(context.Background())
+	require.Equal(t, 1, rolledBackBlockBodies(t, f.db))
+
+	require.NoError(t, clearRollbackIntent(f.db))
+	f.ls.releaseRolledBackBlocks(context.Background())
+	require.Zero(t, rolledBackBlockBodies(t, f.db))
 }
 
 func TestRollbackIntentAcceptsWriterMaximumBlockCount(t *testing.T) {
@@ -582,51 +838,109 @@ func TestRollbackIntentAcceptsWriterMaximumBlockCount(t *testing.T) {
 	require.Len(t, gotBlocks, maxRollbackIntentBlocks)
 }
 
-func TestLoadRollbackIntentRefusesOversizedStoredRecord(t *testing.T) {
-	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+// setTip returns the tip of the LedgerDB set the ledger was opened with.
+func (f *rollbackCrashFixture) setTip(t *testing.T) ocommon.Point {
+	t.Helper()
+	set, ok := f.ls.config.UtxoSet.(interface {
+		Tip() (ocommon.Point, bool, error)
+	})
+	require.True(t, ok)
+	tip, found, err := set.Tip()
 	require.NoError(t, err)
-	require.NoError(t, db.SetSyncState(
-		durableRollbackIntentSyncKey,
-		rollbackIntentRecord("["+strings.Repeat("{},", maxRollbackIntentBlocks)+"{}]"),
+	require.True(t, found)
+	return tip
+}
+
+// A rollback lowers the stored tip before its revert commits. A stop between
+// the two leaves the tip at the target while the LedgerDB set, which is
+// rolled back only after that commit, still stands at the abandoned block.
+// Opening the set rolls it back to the stored tip from its journal, and the
+// restart then replays the undo and finishes at the target.
+func TestRollbackResumesAfterAStopBetweenTipRetreatAndRevertCommit(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newRollbackCrashFixture(t)
+	injected := errors.New("stopped before the revert committed")
+	f.ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point, uint64, ledgerdb.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, injected
+	}
+	err := f.ls.rollbackChainAndStateDeferred(
+		context.Background(), f.target.Point, nil,
+	)
+	require.ErrorIs(t, err, ErrChainTruncatedLedgerRollbackFailed)
+	f.requireUndo(t, "live undo before the truncation")
+	require.Equal(t, f.tip.Point, f.setTip(t),
+		"the set was rolled back before the revert committed")
+	// The commit of the revert writes the retreating tip first.
+	require.NoError(t, f.db.SetTip(f.target, nil))
+
+	f.restart(t)
+	require.Equal(t, f.target, f.ls.currentTip)
+	require.Equal(t, f.target.Point, f.setTip(t),
+		"the set opened ahead of the stored tip")
+	require.NoError(t, f.ls.recoverRollbackIntent(context.Background()))
+	f.requireUndo(t, "undo replayed from the kept body")
+
+	_, _, pending, err := loadRollbackIntent(f.db)
+	require.NoError(t, err)
+	require.False(t, pending)
+	require.Zero(t, rolledBackBlockBodies(t, f.db))
+	durable, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.target, durable)
+	require.Equal(t, f.target.Point, f.setTip(t))
+	require.Equal(t, f.target.Point, f.ls.chain.Tip().Point)
+}
+
+// A mark that names another point than the stored tip belongs to a revert
+// the ledger has moved past. It is removed and nothing is reverted.
+func TestStartDropsATipRevertMarkTheLedgerMovedPast(t *testing.T) {
+	t.Parallel()
+	f := newRollbackCrashFixture(t)
+	require.NoError(t, f.db.SetChainState(
+		database.TipRevertPendingKey,
+		strconv.FormatUint(f.target.Point.Slot, 10)+":"+
+			strconv.FormatUint(f.target.BlockNumber, 10)+":"+
+			hex.EncodeToString(f.target.Point.Hash),
 		nil,
 	))
-
-	_, _, pending, err := loadRollbackIntent(db)
-	require.ErrorIs(t, err, errInvalidRollbackIntent)
-	require.False(t, pending)
-}
-
-// The stored value is sized inside the database, so an oversized record is
-// refused without being read into memory at all.
-type oversizedSyncStateStore struct {
-	metadata.MetadataStore
-}
-
-func (oversizedSyncStateStore) GetSyncStateBounded(
-	key string,
-	_ int,
-	_ dbtypes.Txn,
-) (string, error) {
-	return "", metadata.ErrSyncStateTooLarge
-}
-
-// The store refuses a record above its own size limit; the reader must map
-// that refusal to an invalid intent so recovery discards the record instead
-// of failing startup. The refusal is injected rather than produced by
-// writing an oversized value.
-func TestLoadRollbackIntentMapsStoreSizeRefusal(t *testing.T) {
-	t.Parallel()
-	db, err := dbtest.NewDatabaseWithMetadataWrapper(
-		t,
-		dbtest.Options{Config: &database.Config{DataDir: t.TempDir()}},
-		func(inner metadata.MetadataStore) metadata.MetadataStore {
-			return oversizedSyncStateStore{MetadataStore: inner}
-		},
+	require.NoError(
+		t, f.ls.repeatInterruptedTipRevert(context.Background()),
 	)
+	_, found, err := f.db.TipRevertPending()
 	require.NoError(t, err)
-	_, _, pending, err := loadRollbackIntent(db)
+	require.False(t, found)
+	durable, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.tip, durable)
+	require.Equal(t, f.tip.Point, f.setTip(t))
+}
+
+// A record that cannot be read must not stop every later start: recovery
+// removes it, replays nothing, and releases the bodies it can no longer name.
+func TestRecoverRollbackIntentDiscardsAnUnreadableRecord(t *testing.T) {
+	t.Parallel()
+	f := newRollbackCrashFixture(t)
+	require.NoError(t, f.db.RetainRolledBackBlock(
+		f.blocks[1].Slot+1, bytes.Repeat([]byte{7}, 32), []byte{0x80},
+	))
+	require.NoError(t, f.db.SetChainState(
+		database.RollbackIntentKey, `{"format_version":1}`, nil,
+	))
+	_, _, _, err := loadRollbackIntent(f.db)
 	require.ErrorIs(t, err, errInvalidRollbackIntent)
-	require.ErrorIs(t, err, metadata.ErrSyncStateTooLarge)
-	require.False(t, pending)
+
+	require.NoError(t, f.ls.recoverRollbackIntent(context.Background()))
+	record, err := f.db.GetChainState(database.RollbackIntentKey, nil)
+	require.NoError(t, err)
+	require.Empty(t, record)
+	testutil.RequireNoReceive(t, f.txCh, 100*time.Millisecond,
+		"an unreadable intent was replayed")
+	durable, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.tip, durable)
+	require.Zero(t, rolledBackBlockBodies(t, f.db))
 }

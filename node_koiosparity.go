@@ -22,17 +22,17 @@ import (
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 )
 
-// defaultKoiosParityCacheSubdir mirrors cmd/koios-parity's own
-// defaultCacheSubdir default so the in-process observer and the standalone
-// CLI agree on where an unconfigured cache.db lives under a data directory.
+// defaultKoiosParityCacheSubdir is where an unconfigured cache.db lives under
+// the data directory.
 const defaultKoiosParityCacheSubdir = ".koios/cache.db"
 
 // koiosParitySource builds the observer's source over the node's own stores
 // (no export, no second Dingo sync, no new permanent table — see
-// koiosparity.DatabaseSource's doc comment). Reward state is read from the
-// consensus database through the ledger's LedgerDB. Transaction history is
-// read from the IndexerDB on an API node: the consensus database runs in
-// core mode there and retains none.
+// koiosparity.DatabaseSource's doc comment). Current ledger state is read
+// through the ledger's LedgerDB. On an API node the reward state and the
+// transaction history are read from the IndexerDB, which holds them for every
+// epoch; the LedgerDB keeps the reward state only for its own window. A node
+// without an IndexerDB checks the epochs that window still holds.
 func (n *Node) koiosParitySource() (*koiosparity.DatabaseSource, error) {
 	var source *koiosparity.DatabaseSource
 	var err error
@@ -46,7 +46,7 @@ func (n *Node) koiosParitySource() (*koiosparity.DatabaseSource, error) {
 	if err != nil {
 		return nil, err
 	}
-	return source.WithTransactionHistory(n.indexerDB), nil
+	return source.WithIndexerDB(n.indexerDB), nil
 }
 
 // startKoiosParityObserver wires the optional in-process Koios reward-parity

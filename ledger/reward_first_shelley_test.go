@@ -44,15 +44,14 @@ func TestApplyStakeRewardsAppliesFirstShelleyRoundOnByronStart(t *testing.T) {
 	)
 
 	ls, db := newRewardCalculationTestLedger(t)
-	meta := db.Metadata()
 
 	for epoch := range uint64(byronEpochs) {
-		require.NoError(t, meta.SetEpoch(
+		require.NoError(t, seedDB(t, db).SetEpoch(
 			epoch*epochLength, epoch, nil, nil, nil, nil,
 			eras.ByronEraDesc.Id, 1, epochLength, nil,
 		))
 	}
-	require.NoError(t, meta.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		firstShelley*epochLength, firstShelley, nil, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, epochLength, nil,
 	))
@@ -65,21 +64,21 @@ func TestApplyStakeRewardsAppliesFirstShelleyRoundOnByronStart(t *testing.T) {
 		ProtocolMajor:    2,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParams(
+	require.NoError(t, seedDB(t, db).SetPParams(
 		pparamsCbor, firstShelley*epochLength, firstShelley,
 		eras.ShelleyEraDesc.Id, nil,
 	))
-	require.NoError(t, meta.SetNetworkState(
+	require.NoError(t, seedDB(t, db).SetNetworkState(
 		0, reserves, firstShelley*epochLength, nil,
 	))
-	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+	require.NoError(t, seedDB(t, db).SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        firstShelley,
 		Reserves:     types.Uint64(reserves),
 		CapturedSlot: firstShelley * epochLength,
 	}, nil))
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.engine().ApplyStakeRewards(
 			context.Background(), txn, firstShelley+1,
 			(firstShelley+1)*epochLength,
 			false,
@@ -87,7 +86,7 @@ func TestApplyStakeRewardsAppliesFirstShelleyRoundOnByronStart(t *testing.T) {
 	}))
 	settleRewardCredits(t, ls)
 
-	state, err := meta.GetNetworkState(nil)
+	state, err := seedDB(t, db).GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, treasuryShare, uint64(state.Treasury))

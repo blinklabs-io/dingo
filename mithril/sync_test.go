@@ -63,14 +63,14 @@ func TestDetermineSyncMode(t *testing.T) {
 
 	t.Run("in_progress is resume", func(t *testing.T) {
 		require.NoError(
-			t, db.SetSyncState("sync_status", syncStatusInProgress, nil),
+			t, db.SetChainState("sync_status", syncStatusInProgress, nil),
 		)
 		expectMode(t, syncModeResume)
 	})
 
 	t.Run("backfill is resume", func(t *testing.T) {
 		require.NoError(
-			t, db.SetSyncState("sync_status", syncStatusBackfill, nil),
+			t, db.SetChainState("sync_status", syncStatusBackfill, nil),
 		)
 		expectMode(t, syncModeResume)
 	})
@@ -85,13 +85,13 @@ func TestDetermineSyncMode(t *testing.T) {
 			Type:     6,
 		}, nil))
 		require.NoError(
-			t, db.SetSyncState("sync_status", "unknown_interrupted_phase", nil),
+			t, db.SetChainState("sync_status", "unknown_interrupted_phase", nil),
 		)
 		expectMode(t, syncModeResume)
 	})
 
 	t.Run("complete database with blocks is catch-up", func(t *testing.T) {
-		require.NoError(t, db.DeleteSyncState("sync_status", nil))
+		require.NoError(t, db.DeleteChainState("sync_status", nil))
 		expectMode(t, syncModeCatchUp)
 	})
 }
@@ -161,7 +161,7 @@ func TestNeedsSyncReflectsSyncStatus(t *testing.T) {
 					Logger:  logger,
 				})
 				require.NoError(t, err)
-				require.NoError(t, db.SetSyncState("sync_status", tc.status, nil))
+				require.NoError(t, db.SetChainState("sync_status", tc.status, nil))
 				require.NoError(t, dbtest.CloseDatabase(db))
 			}
 			need, err := NeedsSync(SyncConfig{DataDir: dataDir, Logger: logger})
@@ -190,10 +190,10 @@ func TestSyncRefusesToAdvanceACompleteSplitDatabase(t *testing.T) {
 	// bootstrap that built it did, then give it chain state.
 	runtime, err := openDatabase(ctx, cfg, logger, 1)
 	require.NoError(t, err)
-	gates, err := runtime.Database.Metadata().GetNodeSettingsGates(ctx)
+	gates, err := runtime.Database.NodeSettingsGates(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "split", gates["indexer_layout"],
-		"a split bootstrap fills the layout gate on the empty database")
+		"an API node bootstrap fills the layout gate on the empty database")
 	require.NoError(t, runtime.Database.BlockCreate(models.Block{
 		Slot:     42,
 		Hash:     bytes.Repeat([]byte{0xaa}, 32),
@@ -205,5 +205,5 @@ func TestSyncRefusesToAdvanceACompleteSplitDatabase(t *testing.T) {
 	require.NoError(t, runtime.Close(ctx))
 
 	_, err = Sync(ctx, cfg)
-	require.ErrorIs(t, err, errSplitCatchUp)
+	require.ErrorIs(t, err, errIndexerDBCatchUp)
 }

@@ -47,6 +47,8 @@ import (
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/settingsresolve"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -299,9 +301,12 @@ const (
 	parityUnfilteredSearch = `{"maxItems":50}`
 )
 
-// normalizeParity removes the two things that differ between a database the
-// released version wrote and one the current code loads from the same chain,
-// neither of which is chain data.
+// normalizeParity removes what differs between a database the released
+// version wrote and one the current code loads from the same chain, none of
+// which is chain data.
+//
+// The clock route reports each node's wall clock when it answers, and the two
+// requests are made one after the other, so its value is dropped.
 //
 // Pool metadata documents are fetched from the network by each node on its
 // own schedule, so everything but the registered hash and URL is dropped.
@@ -324,6 +329,10 @@ func normalizeParity(
 		return body
 	}
 	switch {
+	case path == "/health/clock" || path == "/api/v0/health/clock":
+		if m, ok := v.(map[string]any); ok {
+			delete(m, "server_time")
+		}
 	case strings.SplitN(path, "?", 2)[0] == "/api/v0/pools/extended":
 		if list, ok := v.([]any); ok {
 			for _, row := range list {
@@ -740,7 +749,7 @@ func requireMigratedNodeMatchesFresh(
 	// before anything opens the consensus store, and the node then moves the
 	// UTxO set and the ledger state into the LedgerDB and the blocks into the
 	// ImmutableDB.
-	require.NoError(t, MigrateToSplit(
+	require.NoError(t, MigrateToIndexerDB(
 		t.Context(), parityConfig(legacyDir),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
@@ -763,14 +772,39 @@ func requireMigratedNodeMatchesFresh(
 	)
 
 	// The migrated directory is left as a node writes one: the ledger and
-	// the live UTxO set at the tip, and every graduated ledger-state family
-	// drained from the metadata store.
+	// the live UTxO set at the tip.
 	tipHash, err := hex.DecodeString(ids.latestHash)
 	require.NoError(t, err)
 	migrated.stop()
 	requireLoadedStorage(
 		t, legacyDir, ocommon.NewPoint(ids.latestSlot, tipHash),
 	)
+
+	// The migrated node applied no block of its own, so the LedgerDB's
+	// transaction index holds exactly the released version's applied
+	// transactions, less the genesis transactions whose only output was a
+	// zero-coin Byron output: the start removes those from both stores
+	// before the index is built.
+	repaired, err := sql.Open("sqlite", "file:"+filepath.Join(
+		legacyDir, internalplugins.IndexerDirName, "metadata.sqlite",
+	)+"?mode=ro")
+	require.NoError(t, err)
+	applied := rowCount(t, repaired, "applied_transaction")
+	require.NoError(t, repaired.Close())
+	require.NotZero(t, applied)
+	set, err := utxoset.Open(utxoset.Config{
+		Dir:                 utxoset.DirFor(legacyDir),
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RetainRewardRecords: parityConfig(legacyDir).HasIndexerDB(),
+	})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, set.Close()) }()
+	indexed := 0
+	require.NoError(t, set.EachTxIndexEntry(func(ledger.TxIndexEntry) error {
+		indexed++
+		return nil
+	}))
+	require.Equal(t, applied, indexed)
 }
 
 // requireNodesServeTheSame starts a node over freshDir and one over

@@ -1340,7 +1340,7 @@ func calculatePoolRewards(
 // validating full-pot outputs must first collect every pool's base PoolReward
 // from this function, apply ApportionFullPot to obtain each pool's scaled total,
 // and then re-derive the leader split from that scaled total with LeaderReward
-// (this is exactly what precomputedRewardPoolRewardsMatchInputs does).
+// (this is exactly what PrecomputedRewardPoolRewardsMatchInputs does).
 //
 // It validates the pool-reward parameters it dereferences (Decentralization and
 // PledgeInfluence) before computing, so malformed snapshot/config data yields an

@@ -121,7 +121,7 @@ type TachysDistributionProvider interface {
 //     delegations must match").
 //
 // Dingo relies on the same invariant, maintained at the same point: see
-// ledger/poolreap.go, which calls ClearDelegationsToRetiredPool for each
+// ledger/epochengine/poolreap.go, which calls ClearDelegationsToRetiredPool for each
 // reaped pool (failing to clear inflates the total active
 // stake above the network's and makes every other pool's eligibility region too
 // small). Dingo also runs its SNAP stake read before POOLREAP, matching

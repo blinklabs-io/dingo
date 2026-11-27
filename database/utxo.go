@@ -122,7 +122,7 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 		}
 		// Stage only what that transaction can still hold. Past its budget
 		// the store rejects every further staged write, including the
-		// commit timestamp Txn.Commit puts into this same transaction, so
+		// tip Txn.Commit puts into this same transaction, so
 		// an unbounded stage costs the caller its whole commit rather than
 		// just the tail of this set. What is left
 		// unstaged is counted with the deletes that failed and reported
@@ -148,6 +148,9 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 				"total", len(utxos),
 			)
 		}
+	} else if store, h, release, ok := indexerEntryWriter(txn); ok {
+		deleteBatch(store, h, utxos)
+		release()
 	} else {
 		for start := 0; start < len(utxos); start += batchSize {
 			end := min(start+batchSize, len(utxos))
@@ -549,7 +552,7 @@ func utxoRecoveryBlockForTx(
 		}
 		return &block, nil
 	}
-	producerTx, err := db.metadata.GetTransactionByHash(txId, txn.Metadata())
+	producerTx, found, err := db.appliedTransaction(txn, txId)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"lookup producer tx metadata for utxo recovery %x: %w",
@@ -557,7 +560,7 @@ func utxoRecoveryBlockForTx(
 			err,
 		)
 	}
-	if producerTx == nil || len(producerTx.BlockHash) == 0 {
+	if !found || len(producerTx.BlockHash) == 0 {
 		return nil, nil
 	}
 	block, err := BlockByPointTxn(
@@ -606,6 +609,11 @@ func repairUtxoBlob(
 	offset *CborOffset,
 ) error {
 	offsetData := EncodeUtxoOffset(offset)
+
+	if store, h, release, ok := indexerEntryWriter(txn); ok {
+		defer release()
+		return store.SetUtxo(h, txId, outputIdx, offsetData)
+	}
 
 	// Use the caller's blob txn when it is write-capable
 	if txn != nil && txn.Blob() != nil && txn.IsReadWrite() {
@@ -676,6 +684,9 @@ func (d *Database) UtxoByRef(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("UtxoByRef"); err != nil {
+		return nil, err
+	}
 	utxo, err := d.utxoStore().GetUtxo(txId, outputIdx, txn.Metadata())
 	if err != nil {
 		return nil, err
@@ -709,6 +720,9 @@ func (d *Database) UtxoExists(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("UtxoExists"); err != nil {
+		return false, err
+	}
 	utxo, err := d.utxoStore().GetUtxo(txId, outputIdx, txn.Metadata())
 	if err != nil {
 		return false, err
@@ -727,6 +741,9 @@ func (d *Database) UtxosByRefs(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("UtxosByRefs"); err != nil {
+		return nil, err
 	}
 	utxos, err := d.utxoStore().GetUtxosByRefs(refs, txn.Metadata())
 	if err != nil {
@@ -747,6 +764,9 @@ func (d *Database) PrefetchBackfillInputs(
 	ctx context.Context,
 	refs []models.UtxoId,
 ) error {
+	if err := d.requireStore("PrefetchBackfillInputs"); err != nil {
+		return err
+	}
 	prefetcher, ok := d.Metadata().(metadata.BackfillInputPrefetcher)
 	if !ok || len(refs) == 0 {
 		return nil
@@ -775,6 +795,9 @@ func (d *Database) UtxosByRefsBounded(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("UtxosByRefsBounded"); err != nil {
+		return nil, err
+	}
 	utxos, err := d.utxoStore().GetUtxosByRefs(refs, txn.Metadata())
 	if err != nil {
 		return nil, err
@@ -796,39 +819,6 @@ func (d *Database) UtxosByRefsBounded(
 	return utxos, nil
 }
 
-// UtxosByRefsAsOf returns the UTxOs matching refs as they stood at atSlot:
-// a ref is included when it was created at-or-before atSlot and is either
-// still live or was spent strictly after atSlot. As with UtxosByRefs, a
-// ref with no matching row is simply absent from the result -- but unlike
-// UtxosByRefs, that absence is ambiguous once atSlot is older than this
-// node's spent-UTxO retention floor: it could mean "genuinely never live
-// at atSlot" or "was live at atSlot but its spend record has since been
-// hard-deleted by the periodic stability-window cleanup"
-// (UtxosDeleteConsumed). Callers pinning a historical point (ledger.Query,
-// node-parity) must reject that case themselves before
-// calling this -- see ledger's checkUtxoRetentionWindow.
-func (d *Database) UtxosByRefsAsOf(
-	ctx context.Context,
-	refs []models.UtxoId,
-	atSlot uint64,
-	txn *Txn,
-) ([]models.Utxo, error) {
-	if txn == nil {
-		txn = d.Transaction(ctx, false)
-		defer txn.Release()
-	}
-	utxos, err := d.utxoStore().GetUtxosByRefsAsOf(refs, atSlot, txn.Metadata())
-	if err != nil {
-		return nil, err
-	}
-	for i := range utxos {
-		if err := loadCbor(&utxos[i], txn); err != nil {
-			return nil, err
-		}
-	}
-	return utxos, nil
-}
-
 // CreateUtxo inserts a Utxo row directly. The normal block-application
 // path uses AddUtxos with UtxoSlot inputs; this is the simple-insert
 // variant for callers that already have a populated model. When txn
@@ -839,6 +829,9 @@ func (d *Database) CreateUtxo(
 	txn *Txn,
 	utxo *models.Utxo,
 ) error {
+	if err := d.requireStore("CreateUtxo"); err != nil {
+		return err
+	}
 	if txn != nil {
 		return d.utxoStore().CreateUtxo(txn.Metadata(), utxo)
 	}
@@ -858,6 +851,9 @@ func (d *Database) UtxoByRefIncludingSpent(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("UtxoByRefIncludingSpent"); err != nil {
+		return nil, err
 	}
 	utxo, err := d.utxoStore().GetUtxoIncludingSpent(
 		txId,
@@ -901,6 +897,9 @@ func (d *Database) UtxosByAddress(
 		}
 		patterns[i] = pattern
 	}
+	if err := d.requireStore("UtxosByAddress"); err != nil {
+		return nil, err
+	}
 	utxos, err := d.utxoStore().
 		GetUtxosByAddress(patterns, maxResults, txn.Metadata())
 	if err != nil {
@@ -916,49 +915,6 @@ func (d *Database) UtxosByAddress(
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	return filterUtxosByAddressPatterns(ctx, utxos, patterns)
-}
-
-// UtxosByAddressAsOf is UtxosByAddress as the outputs stood at atSlot (see
-// the metadata store's GetUtxosByAddressAsOf). Rows spent at or before
-// atSlot and later removed by consumed-UTxO cleanup are missing, so callers
-// must reject a point below their retention floor first.
-func (d *Database) UtxosByAddressAsOf(
-	ctx context.Context,
-	addrs []ledger.Address,
-	atSlot uint64,
-	maxResults int,
-	txn *Txn,
-) ([]models.Utxo, error) {
-	if len(addrs) == 0 {
-		return nil, nil
-	}
-	if txn == nil {
-		txn = d.Transaction(ctx, false)
-		defer txn.Release()
-	}
-	patterns := make([]models.UtxoAddressPattern, len(addrs))
-	for i, addr := range addrs {
-		pattern, err := models.ExactUtxoAddressPattern(addr)
-		if err != nil {
-			return nil, err
-		}
-		patterns[i] = pattern
-	}
-	utxos, err := d.utxoStore().GetUtxosByAddressAsOf(
-		patterns,
-		atSlot,
-		maxResults,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	for i := range utxos {
-		if err := loadCbor(&utxos[i], txn); err != nil {
-			return nil, err
-		}
 	}
 	return filterUtxosByAddressPatterns(ctx, utxos, patterns)
 }
@@ -1124,6 +1080,9 @@ func (d *Database) GetControlledAmountByCredential(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetControlledAmountByCredential"); err != nil {
+		return 0, err
+	}
 	total, err := d.utxoStore().GetControlledAmountByCredential(
 		credentialTag,
 		stakingKey,
@@ -1155,6 +1114,9 @@ func (d *Database) GetUtxoPaymentScriptByCredential(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetUtxoPaymentScriptByCredential"); err != nil {
+		return nil, err
+	}
 	ret, err := d.utxoStore().GetUtxoPaymentScriptByCredential(
 		credentialTag,
 		stakingKey,
@@ -1181,6 +1143,9 @@ func (d *Database) UtxosByAddressWithOrdering(
 	}
 	if q == nil {
 		return nil, models.ErrNilUtxoWithOrderingQuery
+	}
+	if err := d.requireStore("UtxosByAddressWithOrdering"); err != nil {
+		return nil, err
 	}
 	if q.MatchAllAddresses ||
 		!models.RequiresExactAddressFilter(q.AddressPatterns) ||
@@ -1274,6 +1239,9 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
 			return nil, false, err
 		}
 		scanQuery.Limit = min(matchingUtxoRefBatchSize, maxCandidates-candidates)
+		if err := d.requireStore("MatchingUtxoRefsByAddressWithOrderingBounded"); err != nil {
+			return nil, false, err
+		}
 		batch, err := d.utxoStore().GetUtxosByAddressWithOrdering(
 			&scanQuery,
 			txn.Metadata(),
@@ -1377,6 +1345,9 @@ func (d *Database) UtxoRefsByIndexedAddressPage(
 		Descending:          descending,
 		SkipAssets:          true,
 	}
+	if err := d.requireStore("UtxoRefsByIndexedAddressPage"); err != nil {
+		return nil, 0, false, err
+	}
 	rows, err := d.utxoStore().GetUtxosByAddressWithOrdering(
 		query,
 		txn.Metadata(),
@@ -1416,6 +1387,9 @@ func (d *Database) CountUtxosByAddressWithOrdering(
 	if q == nil {
 		return 0, models.ErrNilUtxoWithOrderingQuery
 	}
+	if err := d.requireStore("CountUtxosByAddressWithOrdering"); err != nil {
+		return 0, err
+	}
 	count, err := d.utxoStore().
 		CountUtxosByAddressWithOrdering(q, txn.Metadata())
 	if err != nil {
@@ -1436,6 +1410,9 @@ func (d *Database) AssetHolders(
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
+	}
+	if err := d.requireStore("AssetHolders"); err != nil {
+		return nil, 0, err
 	}
 	return d.utxoStore().GetAssetHolders(query, txn.Metadata())
 }
@@ -1466,6 +1443,9 @@ func (d *Database) UtxoBalanceByAddressAtSlot(
 		return models.AddressBalance{}, errors.New(
 			"historical address index is incomplete",
 		)
+	}
+	if err := d.requireStore("UtxoBalanceByAddressAtSlot"); err != nil {
+		return models.AddressBalance{}, err
 	}
 	return d.utxoStore().GetUtxoBalanceByAddressAtSlot(
 		[]byte(address.String()), slot, 0,
@@ -1721,6 +1701,9 @@ func (d *Database) UtxosByAssets(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("UtxosByAssets"); err != nil {
+		return nil, err
+	}
 	utxos, err := d.utxoStore().GetUtxosByAssets(
 		policyId,
 		assetName,
@@ -1735,191 +1718,6 @@ func (d *Database) UtxosByAssets(
 		}
 	}
 	return utxos, nil
-}
-
-// ConsumedUtxoPruneFloorSyncKey is the durable sync_state marker key
-// recording the highest slot the periodic consumed-UTxO cleanup
-// (ledger.LedgerState's cleanupConsumedUtxos, which calls
-// UtxosDeleteConsumed below) has ever begun hard-deleting spent UTxO rows
-// up to. Both ledger (which writes it via persistConsumedUtxoPruneFloor)
-// and database/lifecycle's disaster-recovery Truncate (which reads it to
-// refuse a target older than what routine cleanup has already destroyed)
-// need to agree on this key, so it is exported from here as the single
-// source of truth for its name rather than duplicated as a string literal
-// in both packages. UtxosDeleteConsumed removes rows outright, while
-// TruncateAfterSlot can only restore rows that still exist; a rollback below
-// this marker would therefore leave the live UTxO set incomplete.
-const ConsumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
-
-// CountUtxosConsumedUpTo counts, up to limit, the spent UTxO rows that
-// UtxosDeleteConsumed with the same slot would remove. It reads at most limit
-// rows, so a result equal to limit means at least that many.
-func (d *Database) CountUtxosConsumedUpTo(
-	ctx context.Context,
-	slot uint64,
-	limit int,
-) (int, error) {
-	txn := d.Transaction(ctx, false)
-	defer txn.Rollback() //nolint:errcheck
-	utxos, err := d.utxoStore().GetUtxosDeletedBeforeSlot(
-		slot,
-		limit,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("count consumed UTxOs: %w", err)
-	}
-	return len(utxos), nil
-}
-
-func (d *Database) UtxosDeleteConsumed(
-	ctx context.Context,
-	slot uint64,
-	limit int,
-	txn *Txn,
-) (int, error) {
-	owned := false
-	if txn == nil {
-		txn = d.Transaction(ctx, true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	// Get UTxOs that are marked as deleted and older than our slot window
-	utxos, err := d.utxoStore().GetUtxosDeletedBeforeSlot(
-		slot,
-		limit,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"failed to query consumed UTxOs during cleanup: %w",
-			err,
-		)
-	}
-	utxoCount := len(utxos)
-	var pruneFloor uint64
-	if utxoCount > 0 {
-		// Read the floor before deleting anything. A malformed or unreadable
-		// value must not follow irreversible blob deletes. No-op sweeps skip
-		// this read so they do not fail on an unused corrupt floor.
-		pruneFloor, err = d.ConsumedUtxoPruneFloor(txn)
-		if err != nil {
-			return 0, err
-		}
-	}
-	deleteUtxos := make([]models.UtxoId, utxoCount)
-	for idx, utxo := range utxos {
-		deleteUtxos[idx] = models.UtxoId{Hash: utxo.TxId, Idx: utxo.OutputIdx}
-	}
-
-	// Delete blob data first. A failure here does not stop the metadata
-	// delete below: metadata is the source of truth, and leaving a consumed
-	// UTxO in the live set to keep its blob reachable would be the worse
-	// outcome. The objects it strands are counted and logged rather than
-	// passed over, because nothing reclaims them afterwards.
-	if blobErr := deleteUtxoBlobs(d, utxos, txn); blobErr != nil {
-		d.logger.Error(
-			"consumed UTxO blob delete left unreachable objects",
-			"error", blobErr,
-			"utxos", len(utxos),
-		)
-	}
-
-	// Then delete metadata (source of truth)
-	err = d.utxoStore().DeleteUtxos(deleteUtxos, txn.Metadata())
-	if err != nil {
-		return 0, err
-	}
-
-	// Record how deep spent rows have been removed, in the same transaction
-	// that removes them. TruncateAfterSlot restores spent UTxOs with an
-	// UPDATE, which cannot reach a row that no longer exists, so a rollback
-	// below this slot silently leaves the live set short of every output
-	// consumed above it. The floor only ever moves up: a sweep
-	// at a lower slot does not make rows an earlier, higher sweep removed
-	// restorable again.
-	if utxoCount > 0 && slot > pruneFloor {
-		if err := d.writeConsumedUtxoPruneFloor(slot, txn); err != nil {
-			return 0, err
-		}
-	}
-
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return 0, err
-		}
-		owned = false
-	}
-
-	return utxoCount, nil
-}
-
-// UtxosDeleteSpentInBatch removes the rows of outputs that one trusted batch
-// both created and spent, inside the transaction that applied it, so they are
-// never committed. Every id must name a row the same transaction has already
-// marked spent. slot is the last slot the transaction applied; the
-// consumed-UTxO prune floor is raised to it, as UtxosDeleteConsumed does,
-// because a rollback below it could not restore the removed rows.
-func (d *Database) UtxosDeleteSpentInBatch(
-	ids []models.UtxoId,
-	slot uint64,
-	txn *Txn,
-) error {
-	return d.utxosDropSpentInBatch(ids, slot, txn, true)
-}
-
-// UtxosDropSpentInBatchBlobs is UtxosDeleteSpentInBatch for a batch whose
-// metadata rows a batch UTxO overlay already handled: it deletes the blob
-// offset keys of ids and raises the consumed-UTxO prune floor to slot the
-// same way, but deletes no metadata row.
-func (d *Database) UtxosDropSpentInBatchBlobs(
-	ids []models.UtxoId,
-	slot uint64,
-	txn *Txn,
-) error {
-	return d.utxosDropSpentInBatch(ids, slot, txn, false)
-}
-
-func (d *Database) utxosDropSpentInBatch(
-	ids []models.UtxoId,
-	slot uint64,
-	txn *Txn,
-	deleteRows bool,
-) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	if txn == nil {
-		return types.ErrNilTxn
-	}
-	pruneFloor, err := d.ConsumedUtxoPruneFloor(txn)
-	if err != nil {
-		return err
-	}
-	utxos := make([]models.Utxo, len(ids))
-	for i, id := range ids {
-		utxos[i] = models.Utxo{TxId: id.Hash, OutputIdx: id.Idx}
-	}
-	if blobErr := deleteUtxoBlobs(d, utxos, txn); blobErr != nil {
-		d.logger.Error(
-			"trusted batch UTxO blob delete left unreachable objects",
-			"error", blobErr,
-			"utxos", len(utxos),
-		)
-	}
-	if deleteRows {
-		if err := d.utxoStore().DeleteUtxos(ids, txn.Metadata()); err != nil {
-			return err
-		}
-	}
-	if slot > pruneFloor {
-		return d.writeConsumedUtxoPruneFloor(slot, txn)
-	}
-	return nil
 }
 
 func (d *Database) UtxosDeleteRolledback(
@@ -1938,6 +1736,9 @@ func (d *Database) UtxosDeleteRolledback(
 		}()
 	}
 	d.noteUtxoRollback(slot, txn)
+	if err := d.requireStore("UtxosDeleteRolledback"); err != nil {
+		return err
+	}
 	utxos, err := d.utxoStore().GetUtxosAddedAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return err
@@ -2031,6 +1832,9 @@ func (d *Database) UtxosUnspend(
 		}()
 	}
 	d.noteUtxoRollback(slot, txn)
+	if err := d.requireStore("UtxosUnspend"); err != nil {
+		return err
+	}
 	if err := d.utxoStore().SetUtxosNotDeletedAfterSlot(
 		slot,
 		txn.Metadata(),
@@ -2070,6 +1874,9 @@ func (d *Database) IterateLiveUtxos(
 			return fn(u)
 		}
 	}
+	if err := d.requireStore("IterateLiveUtxos"); err != nil {
+		return err
+	}
 	if txn != nil {
 		return d.utxoStore().IterateLiveUtxos(txn.Metadata(), withCbor(txn))
 	}
@@ -2093,44 +1900,15 @@ func (d *Database) IterateLiveUtxoRefs(
 	txn *Txn,
 	fn func(*models.Utxo) error,
 ) error {
+	if err := d.requireStore("IterateLiveUtxoRefs"); err != nil {
+		return err
+	}
 	iterator := d.utxoStore()
 	if txn != nil {
 		return iterator.IterateLiveUtxosContext(ctx, txn.Metadata(), fn)
 	}
 	return d.Transaction(ctx, false).Do(func(t *Txn) error {
 		return iterator.IterateLiveUtxosContext(ctx, t.Metadata(), fn)
-	})
-}
-
-// IterateUtxoRefsAsOf is IterateLiveUtxoRefs' historical counterpart: it
-// invokes fn once for each UTxO row live as of atSlot rather than live
-// right now, and likewise does not resolve u.Cbor (see
-// ledger.queryShelleyUtxoWhole, its only caller as of this writing, which
-// resolves CBOR itself across a worker pool). As with IterateLiveUtxoRefs,
-// the callback receives a pointer to a row whose underlying buffer is
-// reused between callbacks -- copy out anything you intend to retain past
-// the current call. When txn is nil a read transaction is opened
-// internally.
-//
-// Callers pinning atSlot should check checkUtxoRetentionWindow (or the
-// equivalent guarantee for their own use) first: a slot older than this
-// node's spent-UTxO retention floor cannot be answered correctly by this
-// query, since the rows it would need may already be pruned -- see
-// IterateUtxosAsOf's doc comment on the MetadataStore interface.
-func (d *Database) IterateUtxoRefsAsOf(
-	ctx context.Context,
-	atSlot uint64,
-	txn *Txn,
-	fn func(*models.Utxo) error,
-) error {
-	iterator := d.utxoStore()
-	if txn != nil {
-		return iterator.IterateUtxosAsOfContext(
-			ctx, atSlot, txn.Metadata(), fn,
-		)
-	}
-	return d.Transaction(ctx, false).Do(func(t *Txn) error {
-		return iterator.IterateUtxosAsOfContext(ctx, atSlot, t.Metadata(), fn)
 	})
 }
 
@@ -2171,81 +1949,6 @@ func (d *Database) noteUtxoRollback(slot uint64, txn *Txn) {
 	}
 }
 
-// IterateUtxoRefsAsOfPaged invokes fn once for each UTxO live as of atSlot,
-// like IterateUtxoRefsAsOf, but reads pageSize rows per short read
-// transaction instead of holding one for the whole walk. Over SQLite a
-// transaction held for a whole-UTxO walk -- minutes on a large chain -- keeps
-// the WAL from restarting, and one walk after another keeps it growing.
-//
-// The pages agree with one another without sharing a snapshot because of
-// how UTxO rows change. Blocks applied after atSlot add rows with a later
-// added_slot and spend rows at a later slot, and the as-of predicate already
-// excludes the first and includes the second. Spent-row pruning removes only
-// rows spent before the prune floor, which an acquired-point pin holds at or
-// below atSlot. Rows keep their id, so paging on it neither repeats nor skips
-// a row. The one change that alters the as-of set is a rollback below atSlot,
-// which noteUtxoRollback reports: this returns ErrUtxoHistoryRolledBack and
-// the caller decides whether to retry. Callers must hold pruning at or below
-// atSlot themselves.
-func (d *Database) IterateUtxoRefsAsOfPaged(
-	ctx context.Context,
-	atSlot uint64,
-	pageSize int,
-	fn func(UtxoRef) error,
-) error {
-	if pageSize <= 0 {
-		return errors.New("iterate UTxO refs as of slot: page size must be positive")
-	}
-	read := &utxoAsOfRead{atSlot: atSlot}
-	d.utxoAsOfReadsMu.Lock()
-	if d.utxoAsOfReads == nil {
-		d.utxoAsOfReads = make(map[*utxoAsOfRead]struct{})
-	}
-	d.utxoAsOfReads[read] = struct{}{}
-	d.utxoAsOfReadsMu.Unlock()
-	defer func() {
-		d.utxoAsOfReadsMu.Lock()
-		delete(d.utxoAsOfReads, read)
-		d.utxoAsOfReadsMu.Unlock()
-	}()
-
-	var afterID uint
-	for {
-		var page []models.Utxo
-		err := d.MetadataTxn(ctx, false).Do(func(t *Txn) error {
-			var err error
-			page, err = d.utxoStore().UtxoRefsAsOfAfterID(
-				ctx, atSlot, afterID, pageSize, t.Metadata(),
-			)
-			return err
-		})
-		if err != nil {
-			return err
-		}
-		if read.disturbed.Load() {
-			return ErrUtxoHistoryRolledBack
-		}
-		for i := range page {
-			if len(page[i].TxId) != len(UtxoRef{}.TxId) {
-				return fmt.Errorf(
-					"iterate UTxO refs as of slot: row %d has a %d-byte tx id",
-					page[i].ID, len(page[i].TxId),
-				)
-			}
-			var ref UtxoRef
-			copy(ref.TxId[:], page[i].TxId)
-			ref.OutputIdx = page[i].OutputIdx
-			if err := fn(ref); err != nil {
-				return err
-			}
-			afterID = page[i].ID
-		}
-		if len(page) < pageSize {
-			return nil
-		}
-	}
-}
-
 // MarkUtxosDeletedAtSlot marks every live UTxO row matching one of
 // refs as deleted at atSlot. Refs that don't match any live row are
 // silently ignored; rollback un-deletion is handled by the existing
@@ -2260,6 +1963,9 @@ func (d *Database) MarkUtxosDeletedAtSlot(
 ) error {
 	if len(refs) == 0 {
 		return nil
+	}
+	if err := d.requireStore("MarkUtxosDeletedAtSlot"); err != nil {
+		return err
 	}
 	if txn != nil {
 		return d.utxoStore().MarkUtxosDeletedAtSlot(
@@ -2292,6 +1998,9 @@ func (d *Database) RemoveGenesisUtxos(
 	txHashes [][]byte,
 	txn *Txn,
 ) ([]models.UtxoId, uint64, error) {
+	if err := d.requireStore("RemoveGenesisUtxos"); err != nil {
+		return nil, 0, err
+	}
 	remover, ok := d.metadata.(genesisUtxoRemover)
 	if !ok {
 		return nil, 0, errors.New(
@@ -2337,9 +2046,9 @@ func (d *Database) RemoveGenesisUtxos(
 	return removed, applied, nil
 }
 
-// UtxoSetOnlySyncKey marks, in sync_state, a database whose metadata store
+// UtxoSetMigratedSyncKey marks, in sync_state, a database whose metadata store
 // holds no UTxO set because the ledger's live UTxO set is its only copy.
-const UtxoSetOnlySyncKey = "ledger.utxo_set_only"
+const UtxoSetMigratedSyncKey = "ledger.utxo_set_only"
 
 // liveUtxoSourceSetter is the metadata store hook SetLiveUtxoSource drives.
 type liveUtxoSourceSetter interface {
@@ -2354,38 +2063,15 @@ func (d *Database) SetLiveUtxoSource(src types.LiveUtxoSource) error {
 	if d.config.StorageMode == types.StorageModeAPI {
 		return errors.New("a live UTxO source needs core storage mode")
 	}
-	setter, ok := d.metadata.(liveUtxoSourceSetter)
-	if !ok {
-		return errors.New("the metadata store cannot use a live UTxO source")
+	// The ledger's database keeps no metadata store to tell.
+	if d.metadata != nil {
+		setter, ok := d.metadata.(liveUtxoSourceSetter)
+		if !ok {
+			return errors.New("the metadata store cannot use a live UTxO source")
+		}
+		setter.SetLiveUtxoSource(src)
 	}
-	setter.SetLiveUtxoSource(src)
 	d.liveUtxo = src != nil
+	d.txIndex, _ = src.(types.TxIndexSource)
 	return nil
-}
-
-// LiveUtxo reports whether the ledger holds the live UTxO set outside the
-// metadata store.
-func (d *Database) LiveUtxo() bool {
-	return d.liveUtxo
-}
-
-// RefreshRewardLiveStakeRefs recomputes the live reward aggregate of each
-// credential in refs, recording slot as its update.
-func (d *Database) RefreshRewardLiveStakeRefs(
-	refs []models.StakeCredentialRef,
-	slot uint64,
-	txn *Txn,
-) error {
-	refresher, ok := d.metadata.(interface {
-		RefreshRewardLiveStakeRefs(
-			[]models.StakeCredentialRef, uint64, types.Txn,
-		) error
-	})
-	if !ok {
-		return errors.New("the metadata store cannot refresh live stake")
-	}
-	if txn == nil {
-		return refresher.RefreshRewardLiveStakeRefs(refs, slot, nil)
-	}
-	return refresher.RefreshRewardLiveStakeRefs(refs, slot, txn.Metadata())
 }

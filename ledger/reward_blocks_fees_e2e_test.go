@@ -20,12 +20,9 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,17 +41,13 @@ type rewardBlocksRun struct {
 func newRewardBlocksRun(
 	t *testing.T,
 	reads string,
-	guard *statedrain.TripGuard,
+	g metadata.StatementGuard,
 	imported bool,
 ) *rewardBlocksRun {
 	t.Helper()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	var g metadata.StatementGuard
-	if guard != nil {
-		g = guard
-	}
 	scenario := ledger.NewRewardBlocksScenarioForTest(
 		t, set, reads, g, ledger.RewardBlocksOptions{Imported: imported},
 	)
@@ -228,34 +221,16 @@ func TestEpochCaptureBlockCountsIncludeOverlaySlotsFromTheSet(t *testing.T) {
 	}
 }
 
-// With the family drained and the set holding no rows for it, the reward
-// round's fee read fails rather than answer from the emptied tables.
-func TestRewardBlockFeesFailWhenTheDrainedSetHasNoRows(t *testing.T) {
+// With the set holding no rows for the family, the reward
+// round's fee read fails rather than answer nothing.
+func TestRewardBlockFeesFailWhenTheSetHasNoRows(t *testing.T) {
 	t.Parallel()
 	r := newRewardBlocksRun(t, "set", nil, false)
 	r.write()
-	require.NoError(t, r.scenario.DB.RecordDrainedFamily(
-		t.Context(), nodesettings.FamilyRewardBlocksFees,
-	))
-	r.scenario.DrainFamilies(
-		nodesettings.FamilyMask(0).With(nodesettings.FamilyRewardBlocksFees),
-	)
 	// Epoch 2 is outside the window the set loaded.
 	_, err := r.scenario.Fees(2)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateUnserved)
 	_, _, known, err := r.scenario.Counts(2)
 	require.NoError(t, err)
 	require.False(t, known, "an epoch the set holds no counts for is unknown")
-}
-
-// rewardBlocksDrainSource is the statedrain.Source of a rewardBlocksRun.
-type rewardBlocksDrainSource struct{ r *rewardBlocksRun }
-
-func (s rewardBlocksDrainSource) Tip() (ocommon.Point, bool, error) {
-	tip, err := s.r.scenario.DB.GetTip(nil)
-	return tip.Point, true, err
-}
-
-func (s rewardBlocksDrainSource) Loaded(f nodesettings.Family) (bool, error) {
-	return ledger.FamilyLoaded(f, s.r.set)
 }

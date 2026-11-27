@@ -46,7 +46,7 @@ type RewardAdaPots struct {
 	// (UTxOState.utxosFees minus SnapShots.ssFee at import time; see
 	// seedImportedRewardBasis). A live-computed row never sets it. It exists
 	// because this epoch's locally stored transactions only cover slots
-	// after CapturedSlot: rewardEpochFees adds it to a post-anchor local sum
+	// after CapturedSlot: RewardEpochFees adds it to a post-anchor local sum
 	// instead of summing the whole epoch, which would silently omit the
 	// fees collected before the anchor. Nil means the row was computed live
 	// or imported by a release predating this field; either way the
@@ -78,10 +78,9 @@ type RewardSnapshot struct {
 	EpochNonce          []byte
 	ProtocolVersion     uint
 	// Authoritative marks a snapshot captured inside the ledger epoch-rollover
-	// write transaction at the SNAP point (CaptureEpochBoundarySnapshot). The
-	// event-driven fallback capture (captureMarkSnapshot) never overwrites an
-	// authoritative row: it either claims a fresh row or is superseded. Defaults
-	// to false, so pre-existing rows and fallback captures read as provisional.
+	// write transaction at the SNAP point (CaptureEpochBoundarySnapshot).
+	// Defaults to false, so rows written before the column existed read as
+	// provisional.
 	Authoritative bool
 	// CalculationVersion ties authoritative Mark metadata to the stake
 	// calculation that produced its accompanying pool snapshots.

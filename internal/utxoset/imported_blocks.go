@@ -16,21 +16,16 @@ package utxoset
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/ledger"
 )
 
 // ensureImportedBlocks loads the block counts a snapshot import carried for
-// the epochs below its anchor, as imported, into a set from before it kept
-// them. A drained metadata store holds none, and the load then marks the set
-// as having lost them: what the drain removed cannot be read back, and the
-// windowed reward block rows already fold it in. The set then refuses to
-// export the counts rather than export none.
+// the epochs below its anchor, as imported, from the v0.94.2 metadata store
+// into a set that has not held them.
 func (s *Set) ensureImportedBlocks(
 	ctx context.Context,
 	ldb ledgerdb.LedgerDB,
@@ -43,19 +38,15 @@ func (s *Set) ensureImportedBlocks(
 		return nil
 	}
 	var rows map[uint64]ledgerdb.ImportedBlockRows
-	lost := false
 	if r, ok := ldb.(ledgerdb.ImportedBlockRowsReader); ok {
 		txn := ldb.Begin(ctx, false)
 		rows, err = r.ImportedBlockRows(txn)
 		txn.Release()
-		if errors.Is(err, database.ErrFamilyDrained) {
-			lost, err = true, nil
-		}
 		if err != nil {
 			return fmt.Errorf("utxoset: read imported block counts: %w", err)
 		}
 	}
-	err = s.store.LoadImportedBlocks(lost, func(
+	err = s.store.LoadImportedBlocks(func(
 		put func(k, v []byte) error,
 		tombstone func(slot uint64, prefix []byte) error,
 	) error {
@@ -99,12 +90,6 @@ func (s *Set) ensureImportedBlocks(
 // counts of every epoch a snapshot import carried them for.
 func (s *Set) ImportedBlocksLoaded() (bool, error) {
 	return s.store.ImportedBlocksLoaded()
-}
-
-// ImportedBlocksLost reports whether the metadata store had drained the
-// imported block counts before the set could load them.
-func (s *Set) ImportedBlocksLost() (bool, error) {
-	return s.store.ImportedBlocksLost()
 }
 
 // ImportedBlocks lists the imported block counts the set holds, by epoch.

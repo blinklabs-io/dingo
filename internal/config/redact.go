@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -68,6 +69,10 @@ const (
 	// logSelectionMap renders a map of capability name to plugin selection,
 	// keeping each provider name and walking each provider config by key.
 	logSelectionMap
+	// logEventSources renders barkEventSources source by source with each
+	// URL's credentials removed. A slice of structs is otherwise rendered
+	// whole, which would print a password embedded in a source URL.
+	logEventSources
 )
 
 // logSecretConfigFields are the Config field paths (dotted Go field names)
@@ -103,6 +108,12 @@ var logURIConfigFields = []string{
 var logHostOnlyConfigFields = []string{
 	"TokenRegistry.ManifestURL",
 	"TokenRegistry.SourceURL",
+}
+
+// logEventSourcesConfigFields are Config field paths holding the remote
+// EventService sources.
+var logEventSourcesConfigFields = []string{
+	"BarkEventSources",
 }
 
 var logURLOrPathConfigFields = []string{
@@ -354,6 +365,7 @@ var logPlainConfigFields = []string{
 	"ShelleyKESAgentMode",
 	"ShelleyKESAgentPlaintext",
 	"ShelleyKESAgentProfile",
+	"ShelleyKESAgentShared",
 	"ShelleyKESAgentServerSPKISHA256",
 	"ShelleyKESAgentSignTimeout",
 	"ShelleyKeyWatchInterval",
@@ -412,6 +424,7 @@ var configLogClasses = sync.OnceValue(func() map[string]logClass {
 		logHostOnly:       logHostOnlyConfigFields,
 		logProviderConfig: logProviderConfigFields,
 		logSelectionMap:   logSelectionMapConfigFields,
+		logEventSources:   logEventSourcesConfigFields,
 	} {
 		for _, path := range paths {
 			classes[path] = class
@@ -590,6 +603,8 @@ func classedValue(v reflect.Value, class logClass) slog.Value {
 		)
 	case logSelectionMap:
 		return selectionMapValue(v)
+	case logEventSources:
+		return eventSourcesValue(v)
 	case logProviderSection:
 		// A section is rendered by providerConfigEntry, which reaches
 		// here only for a value that is not one.
@@ -666,6 +681,26 @@ func mappedValue(
 	default:
 		return fallback(v)
 	}
+}
+
+// eventSourcesValue renders a []BarkEventSource with each URL's credentials
+// removed. Any other shape is redacted.
+func eventSourcesValue(v reflect.Value) slog.Value {
+	sources, ok := reflect.TypeAssert[[]BarkEventSource](v)
+	if !ok {
+		return redactedValue(v)
+	}
+	attrs := make([]slog.Attr, 0, len(sources))
+	for i, src := range sources {
+		attrs = append(attrs, slog.Group(
+			strconv.Itoa(i),
+			"name", src.Name,
+			"url", redactURICredentials(src.URL),
+			"eventTypes", src.EventTypes,
+			"originNodeIds", src.OriginNodeIDs,
+		))
+	}
+	return slog.GroupValue(attrs...)
 }
 
 // selectionMapValue renders a map[string]plugin.Selection. The provider name

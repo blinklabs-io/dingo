@@ -113,6 +113,7 @@ func TestLedgerProcessBlockExpandsIndexesAcrossValidatedTransactions(
 			SkipDijkstraTxValidation: true,
 		},
 	}
+	attachTestLiveSet(t, ls)
 	require.NoError(
 		t,
 		db.Transaction(context.Background(), true).
@@ -148,7 +149,9 @@ func TestLedgerProcessBlockExpandsIndexesAcrossValidatedTransactions(
 		{hash: batch.Hash().Bytes(), index: 1},
 		{hash: plain.Hash().Bytes(), index: 2},
 	} {
-		stored, err := db.Metadata().GetTransactionByHash(want.hash, nil)
+		stored, err := ls.ledgerDB().GetTransactionByHash(
+			context.Background(), want.hash, nil,
+		)
 		require.NoError(t, err)
 		require.NotNil(t, stored)
 		require.Equal(t, want.index, stored.BlockIndex)
@@ -204,6 +207,7 @@ func TestTxValidationSessionAppliesDijkstraBatchLevels(t *testing.T) {
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.publishSnapshotsLocked()
 
 	err := ls.withTxValidationSession(context.Background(), nil, nil, true, false, nil, func(
@@ -222,9 +226,14 @@ func TestTxValidationSessionAppliesDijkstraBatchLevels(t *testing.T) {
 	})
 	require.NoError(t, err)
 	// The session stages its writes and always rolls them back.
-	stored, err := db.Metadata().GetTransactionByHash(childHash.Bytes(), nil)
+	stored, err := ls.ledgerDB().GetTransactionByHash(
+		context.Background(), childHash.Bytes(), nil,
+	)
 	require.NoError(t, err)
 	require.Nil(t, stored)
+	output, err := ls.UtxoByRef(childHash.Bytes(), 0)
+	require.ErrorIs(t, err, database.ErrUtxoNotFound)
+	require.Nil(t, output)
 }
 
 func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
@@ -274,6 +283,7 @@ func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	require.NoError(
 		t,
 		db.Transaction(context.Background(), true).
@@ -282,13 +292,19 @@ func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
 			}),
 	)
 
-	child, err := db.Metadata().GetTransactionByHash(childHash.Bytes(), nil)
+	for _, hash := range [][]byte{childHash.Bytes(), parentHash.Bytes()} {
+		indexed, err := ls.ledgerDB().GetTransactionByHash(
+			context.Background(), hash, nil,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, indexed, "transaction %x is indexed", hash)
+	}
+	child, err := ls.UtxoByRef(childHash.Bytes(), 0)
 	require.NoError(t, err)
-	require.Len(t, child.Outputs, 1)
-	require.Equal(t, childHash.Bytes(), child.Outputs[0].TxId)
-	parent, err := db.Metadata().GetTransactionByHash(parentHash.Bytes(), nil)
-	require.NoError(t, err)
-	require.Empty(t, parent.Outputs)
+	require.Equal(t, childHash.Bytes(), child.TxId)
+	_, err = ls.UtxoByRef(parentHash.Bytes(), 0)
+	require.ErrorIs(t, err, database.ErrUtxoNotFound,
+		"the enclosing body produces no output")
 }
 
 func TestDijkstraBatchAppliesSubtransactionGovernance(t *testing.T) {
@@ -371,6 +387,7 @@ func TestDijkstraBatchAppliesSubtransactionGovernance(t *testing.T) {
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	publishGovernanceTestEpoch(ls, 12, eras.DijkstraEraDesc)
 	delta := NewLedgerDelta(
 		ocommon.Point{Slot: 1, Hash: blockHash},
@@ -388,7 +405,7 @@ func TestDijkstraBatchAppliesSubtransactionGovernance(t *testing.T) {
 			}),
 	)
 
-	got, err := db.GetGovernanceProposal(
+	got, err := seedDB(t, db).GetGovernanceProposal(
 		context.Background(),
 		childHash.Bytes(),
 		0,
@@ -397,7 +414,7 @@ func TestDijkstraBatchAppliesSubtransactionGovernance(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, childHash.Bytes(), got.TxHash)
 	require.Equal(t, uint64(12), got.ProposedEpoch)
-	rootProposal, err := db.GetGovernanceProposal(
+	rootProposal, err := seedDB(t, db).GetGovernanceProposal(
 		context.Background(),
 		rootHash.Bytes(),
 		0,
@@ -414,7 +431,7 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 	rewardAddress := append([]byte{0xe0}, stakeKey...)
 	require.NoError(
 		t,
-		db.CreateAccount(context.Background(), nil, &models.Account{
+		seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 			StakingKey:    stakeKey,
 			CredentialTag: 0,
 			AddedSlot:     1,
@@ -468,14 +485,23 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		},
 	}
+	attachTestLiveSet(t, ls)
+	// The set journals a block's changes under the block's point, so the
+	// rollback below has a record at slot 1 to return to.
+	parent := ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x01}, 32)}
+	ls.stageUtxoSet(nil, &parent)
 	require.NoError(
 		t,
 		db.Transaction(context.Background(), true).
 			Do(func(txn *database.Txn) error {
-				return delta.apply(context.Background(), ls, txn)
+				if err := delta.apply(context.Background(), ls, txn); err != nil {
+					return err
+				}
+				ls.stageUtxoSet(dbadapter.Txn(txn), &delta.Point)
+				return nil
 			}),
 	)
-	account, err := db.GetAccountByCredential(
+	account, err := ls.ledgerDB().GetAccountByCredential(
 		context.Background(),
 		0,
 		stakeKey,
@@ -487,11 +513,9 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 
 	// Direct-deposit credits use the transaction-body hash as their journal
 	// source, so rollback removes the credit and replay can apply it again.
-	require.NoError(
-		t,
-		db.DeleteAccountRewardsAfterSlot(context.Background(), 1, nil),
-	)
-	account, err = db.GetAccountByCredential(
+	ls.stageUtxoSetRollback(nil, parent)
+	require.False(t, ls.utxoSetFailed.Load())
+	account, err = ls.ledgerDB().GetAccountByCredential(
 		context.Background(),
 		0,
 		stakeKey,
@@ -506,14 +530,14 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 			Do(func(txn *database.Txn) error {
 				return ApplyDijkstraDirectDeposits(
 					context.Background(),
-					dbadapter.New(db),
+					ls.ledgerDB(),
 					tx,
 					2,
 					dbadapter.Txn(txn),
 				)
 			}),
 	)
-	account, err = db.GetAccountByCredential(
+	account, err = ls.ledgerDB().GetAccountByCredential(
 		context.Background(),
 		0,
 		stakeKey,

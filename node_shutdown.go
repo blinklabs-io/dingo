@@ -285,6 +285,15 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.remoteEvents != nil {
+		if stopErr := n.remoteEvents.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("remote event subscriber shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	if n.bark != nil {
 		if stopErr := n.bark.Stop(ctx); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("bark shutdown: %w", stopErr))
@@ -519,29 +528,6 @@ func (n *Node) shutdown() error {
 					fmt.Errorf("ledger state close: %w", closeErr),
 				)
 			}
-		}
-	}
-
-	if n.deferredIndexMaintenanceDone != nil {
-		n.config.logger.Info("waiting for deferred-index maintenance")
-		select {
-		case <-n.deferredIndexMaintenanceDone:
-			n.config.logger.Info("deferred-index maintenance stopped")
-		case <-ctx.Done():
-			n.config.logger.Warn(
-				"timed out waiting for deferred-index maintenance; continuing shutdown",
-				"timeout",
-				shutdownTimeout,
-				"error",
-				ctx.Err(),
-			)
-			err = errors.Join(
-				err,
-				fmt.Errorf(
-					"deferred-index maintenance shutdown: %w",
-					ctx.Err(),
-				),
-			)
 		}
 	}
 

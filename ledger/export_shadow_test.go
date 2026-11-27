@@ -34,11 +34,11 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -134,13 +134,16 @@ func runUtxoSetScenario(
 ) ShadowScenario {
 	t.Helper()
 	blocks, _ := externalIngestBlocks(t, 0)
-	run := runRowBatchingScenarioTolerating(
+	run := runRowBatchingScenarioOn(
 		t,
 		blocks,
 		storageMode,
 		true,
 		2,
 		fatal != nil,
+		// utxoSet is the database's LedgerDB set from the start, so the
+		// ledger is built on the only copy of its state.
+		func(db *database.Database) { AdoptLiveSetForTest(t, db, utxoSet) },
 		func(ls *LedgerState) {
 			ls.config.EventBus = bus
 			ls.config.UtxoSet = utxoSet
@@ -148,13 +151,6 @@ func runUtxoSetScenario(
 			attach(ls.db)
 			for _, fn := range configure {
 				fn(ls)
-			}
-			if loader, ok := utxoSet.(interface {
-				LoadLedgerState(context.Context, ledgerdb.LedgerDB) error
-			}); ok {
-				require.NoError(t, loader.LoadLedgerState(
-					t.Context(), dbadapter.New(ls.db),
-				))
 			}
 		},
 	)
@@ -178,7 +174,7 @@ func runUtxoSetScenario(
 			return res.(*utxoWholeResult).encoded, nil
 		},
 		UtxosByAddress: func(addrs []gledger.Address) ([]models.Utxo, error) {
-			return run.ls.UtxosByAddress(t.Context(), addrs)
+			return run.ls.utxosByAddress(addrs, 0, nil)
 		},
 		UtxosByAddressAt: func(p ocommon.Point, addrs []gledger.Address) ([]models.Utxo, error) {
 			res, err := run.ls.queryShelleyUtxoByAddress(
@@ -213,7 +209,7 @@ func runUtxoSetScenario(
 			return ret, nil
 		},
 		UtxoIncludingSpent: func(txID []byte, index uint32) (*models.Utxo, error) {
-			return run.ls.UtxoByRefIncludingSpent(txID, index)
+			return run.ls.utxoIncludingSpent(t.Context(), nil, txID, index)
 		},
 		ReadsForValidation: func(refs []models.UtxoId) ([]models.Utxo, error) {
 			return run.ls.utxosByRefsForValidation(refs, nil)
@@ -232,9 +228,9 @@ func runUtxoSetScenario(
 	}
 }
 
-// RunUtxoSetOnlyScenarioForTest is RunShadowScenarioForTest in core mode with
+// RunLedgerDBScenarioForTest is RunShadowScenarioForTest in core mode with
 // utxoSet as the only copy of the live UTxO set.
-func RunUtxoSetOnlyScenarioForTest(
+func RunLedgerDBScenarioForTest(
 	t *testing.T,
 	utxoSet UtxoSetWriter,
 	attach func(*database.Database),
@@ -247,31 +243,6 @@ func RunUtxoSetOnlyScenarioForTest(
 		utxoSet,
 		nil,
 		attach,
-	)
-}
-
-// RunUtxoSetOnlyDrainedScenarioForTest is RunUtxoSetOnlyScenarioForTest on a
-// database that has drained the families of mask before its first block.
-func RunUtxoSetOnlyDrainedScenarioForTest(
-	t *testing.T,
-	utxoSet UtxoSetWriter,
-	mask nodesettings.FamilyMask,
-	attach func(*database.Database),
-) ShadowScenario {
-	t.Helper()
-	return runUtxoSetScenario(
-		t,
-		types.StorageModeCore,
-		nil,
-		utxoSet,
-		nil,
-		attach,
-		func(ls *LedgerState) {
-			for _, f := range mask.Families() {
-				require.NoError(t, ls.db.RecordDrainedFamily(t.Context(), f))
-			}
-			ls.SetDrainedFamilies(mask)
-		},
 	)
 }
 
@@ -326,8 +297,7 @@ type BoundaryEpochStateScenario struct {
 	// LedgerDB is the LedgerDB the ledger reads through.
 	LedgerDB func() ledgerdb.LedgerDB
 	// ReadFactRows reads a fact table through the ledger, from the live UTxO
-	// set when the table's family is drained and from the metadata store
-	// otherwise. UnservedFactTables names the drained tables it cannot read.
+	// set. UnservedFactTables names the tables it cannot read.
 	ReadFactRows func(
 		table metadata.FactTable, from, through uint64, cursor int64,
 		limit int,
@@ -352,12 +322,16 @@ type BoundaryEpochStateScenario struct {
 	// reached it and a switch for the hiding. A read the live UTxO set
 	// serves never reaches the store.
 	HideStoreReads func(names ...string) (reached func() int64, hide func(on bool))
-	// DrainFamilies adds mask to the families the ledger treats as drained.
-	DrainFamilies func(mask nodesettings.FamilyMask)
-	// InstallDrainedSources gives the database the sources its reads of a
-	// drained family come from, which a ledger built for set reads installs
+	// FailSet makes the ledger treat its set as failed, as an update the
+	// set refused does.
+	FailSet func()
+	// WrapSet replaces the ledger's set with wrap's result, for a test that
+	// overrides what the set answers.
+	WrapSet func(wrap func(UtxoSetWriter) UtxoSetWriter)
+	// InstallSetSources gives the database the sources its reads of a
+	// ledger-state family come from, which a ledger built for set reads installs
 	// when it is created.
-	InstallDrainedSources func()
+	InstallSetSources func()
 	// CorruptEpochWrites makes the metadata store keep a different nonce
 	// than each epoch write gives it.
 	CorruptEpochWrites func()
@@ -627,9 +601,8 @@ type BoundaryEpochStateScenario struct {
 	// BoundaryStake commits, at the slots of the epoch before the boundary,
 	// the registrations, delegations, pointer-address outputs, reward
 	// credits and pool retirement described by BoundaryStakeFixture,
-	// through the ledger's LedgerDB, and the same outputs to the metadata
-	// store's utxo rows. retireEpoch, when non-zero, retires the
-	// harness's pool for that epoch.
+	// through the ledger's LedgerDB. retireEpoch, when non-zero, retires
+	// the harness's pool for that epoch.
 	BoundaryStake func(retireEpoch uint64) BoundaryStakeFixture
 	// AfterBoundaryStake commits state after the fixture's snapshot slot, an
 	// account registered and delegated and stake at a base address, and
@@ -975,28 +948,58 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 	guard metadata.StatementGuard,
 ) BoundaryEpochStateScenario {
 	t.Helper()
+	return NewSeededBoundaryEpochStateScenarioForTest(t, set, guard, nil)
+}
+
+// BoundaryScenarioEndedEpochForTest is the epoch the boundary of a
+// BoundaryEpochStateScenario ends, and BoundaryScenarioEpochLengthForTest the
+// slots in each of its epochs, all Shelley epochs from slot 0.
+const (
+	BoundaryScenarioEndedEpochForTest  = replayBoundaryEndedEra
+	BoundaryScenarioEpochLengthForTest = replayBoundaryLength
+)
+
+// NewSeededBoundaryEpochStateScenarioForTest is
+// NewGuardedBoundaryEpochStateScenarioForTest with seed run on the metadata
+// store before set takes it over, so the rows seed writes are ones a v0.94.2
+// database left in SQL. They are written before the harness's own state.
+func NewSeededBoundaryEpochStateScenarioForTest(
+	t *testing.T,
+	set UtxoSetWriter,
+	guard metadata.StatementGuard,
+	seed func(*database.Database),
+) BoundaryEpochStateScenario {
+	t.Helper()
+	cfg := &database.Config{DataDir: t.TempDir()}
+	if seed != nil {
+		// Only the v0.94.2 migration source keeps the SQL rows seed writes.
+		cfg.Role = database.RoleReleased
+	}
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
-		Config:         &database.Config{DataDir: t.TempDir()},
+		Config:         cfg,
 		StatementGuard: guard,
 	})
 	require.NoError(t, err)
-	h := newBoundaryReplayHarnessWithSet(t, db, set)
-	// A treasury and reserves baseline, and a donation in the epoch before
-	// the boundary, for the boundary's pots to start from.
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 9_000, 0, nil))
-	require.NoError(t, db.Metadata().AddNetworkDonation(
-		h.fixture.ancestorTip.Point.Slot, h.ls.currentEpoch.EpochId, 25, nil,
-	))
-	// The harness creates its accounts with no certificate history; an
-	// import baseline gives a rollback the delegation to restore, as a
-	// Mithril import's accounts have.
-	require.NoError(
-		t,
-		db.Metadata().IterateAccounts(nil, func(a *models.Account) error {
-			c := *a
-			return db.Metadata().ImportAccount(&c, nil)
-		}),
-	)
+	if seed != nil {
+		seed(db)
+	}
+	if set != nil {
+		// The caller's set is the database's LedgerDB set from here on, so
+		// everything seeded below lands in it.
+		AdoptLiveSetForTest(t, db, set)
+	}
+	h := newBoundaryReplayHarnessSeeded(t, db, false, func() {
+		// A treasury and reserves baseline, and a donation in the epoch
+		// before the boundary, for the boundary's pots to start from.
+		require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 9_000, 0, nil))
+		require.NoError(t, seedDB(t, db).AddNetworkDonation(
+			10, replayBoundaryEndedEra, 25, nil,
+		))
+		// The harness creates its accounts with no certificate history; an
+		// import baseline gives a rollback the delegation to restore, as a
+		// Mithril import's accounts have.
+		fxImportAccountBaselines(t, db)
+	})
 	var setOutputs byte
 	var onProposalWrite func(step int)
 	proposalWrites := 0
@@ -1243,15 +1246,6 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 					added,
 					UtxoOutput{Ref: models.UtxoId{Hash: id}, Cbor: out},
 				)
-				require.NoError(
-					t,
-					h.ls.db.CreateUtxo(t.Context(), nil, &models.Utxo{
-						TxId: id, OutputIdx: 0, StakingKey: o.staking,
-						Amount: types.Uint64(
-							o.amount,
-						), AddedSlot: 11, Pointer: o.pointer,
-					}),
-				)
 			}
 			point := ocommon.NewPoint(11, bytes.Repeat([]byte{0xcf}, 32))
 			require.NoError(t, set.ApplyUtxoChanges(&point, []UtxoEvent{{
@@ -1345,13 +1339,6 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			id := bytes.Repeat([]byte{0xd0}, 32)
 			out, err := cbor.Encode(map[uint]any{0: raw, 1: uint64(1_000_000)})
 			require.NoError(t, err)
-			require.NoError(
-				t,
-				h.ls.db.CreateUtxo(t.Context(), nil, &models.Utxo{
-					TxId: id, OutputIdx: 0, StakingKey: f.Pointed.Key,
-					Amount: 1_000_000, AddedSlot: late,
-				}),
-			)
 			point := ocommon.NewPoint(late+1, bytes.Repeat([]byte{0xd1}, 32))
 			require.NoError(t, set.ApplyUtxoChanges(&point, []UtxoEvent{{
 				Point: point,
@@ -1511,8 +1498,11 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			blind.off.Store(false)
 			return blind.hits.Load, func(on bool) { blind.off.Store(!on) }
 		},
-		DrainFamilies: h.ls.SetDrainedFamilies,
-		InstallDrainedSources: func() {
+		FailSet: func() { h.ls.utxoSetFailed.Store(true) },
+		WrapSet: func(wrap func(UtxoSetWriter) UtxoSetWriter) {
+			h.ls.config.UtxoSet = wrap(h.ls.config.UtxoSet)
+		},
+		InstallSetSources: func() {
 			h.ls.installNonceSource()
 			h.ls.installEpochSource()
 			h.ls.installPParamsSource()
@@ -1895,7 +1885,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			require.NoError(t, txn.Commit())
 			txn = ldb.Begin(t.Context(), true)
 			defer txn.Release()
-			require.NoError(t, h.ls.applyPoolReapRefunds(
+			require.NoError(t, h.ls.engine().ApplyPoolReapRefunds(
 				t.Context(), txn, epoch, boundarySlot,
 			))
 			require.NoError(t, txn.Commit())
@@ -1955,15 +1945,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			write(slots.Pool, 4, slots.Lowered)
 			// The same observation again, at its earlier slot, changes nothing.
 			write(slots.Pool, 5, slots.Raised)
-			txn := ldb.Begin(t.Context(), true)
-			defer txn.Release()
-			acc := ldb.NewBatchAccumulator()
-			require.NoError(t, ldb.UpdatePoolOpCertSequenceBatched(
-				t.Context(), lcommon.PoolKeyHash(slots.Pool), 6, slots.Batched,
-				acc, txn,
-			))
-			require.NoError(t, ldb.FlushBatch(acc, txn))
-			require.NoError(t, txn.Commit())
+			write(slots.Pool, 6, slots.Batched)
 			return slots
 		},
 		OpCertsInsideTxn: func(pool []byte, sequence, slot uint64) {
@@ -2752,10 +2734,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			start := h.ls.currentEpoch.StartSlot
 			txn := ldb.Begin(t.Context(), true)
 			require.NoError(t, h.ls.activateDelegatorInactivityIfNeeded(
-				t.Context(), txn, epoch, start+5,
-			))
-			require.NoError(t, ldb.RenewAccountExpirations(
-				t.Context(), []models.StakeCredentialRef{ref}, epoch+30, txn,
+				txn, epoch, start+5,
 			))
 			h.ls.stageAccountExpirations(
 				txn, []models.StakeCredentialRef{ref}, epoch+30, start+6,
@@ -2775,10 +2754,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 				cur.EraId, cur.SlotLength, cur.LengthInSlots, txn,
 			))
 			require.NoError(t, h.ls.activateDelegatorInactivityIfNeeded(
-				t.Context(), txn, entered, next,
-			))
-			require.NoError(t, ldb.RenewAccountExpirations(
-				t.Context(), []models.StakeCredentialRef{ref}, entered+30, txn,
+				txn, entered, next,
 			))
 			h.ls.stageAccountExpirations(
 				txn, []models.StakeCredentialRef{ref}, entered+30, next+1,
@@ -2806,7 +2782,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 				},
 			}))
 			require.NoError(t, h.ls.activateDelegatorInactivityIfNeeded(
-				t.Context(), txn, entered, boundary,
+				txn, entered, boundary,
 			))
 			require.NoError(t, txn.Commit())
 			return entered, boundary
@@ -2816,10 +2792,10 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			snapshotEpoch uint64,
 			capturedSlot uint64,
 		) bool {
-			app := &stakeRewardApplication{
-				epochs:               stakeRewardEpochs{snapshot: snapshotEpoch},
-				snapshotCapturedSlot: capturedSlot,
-				accountOutputs: []*models.RewardAccountOutput{{
+			app := &epochengine.StakeRewardApplication{
+				Epochs:               epochengine.StakeRewardEpochs{Snapshot: snapshotEpoch},
+				SnapshotCapturedSlot: capturedSlot,
+				AccountOutputs: []*models.RewardAccountOutput{{
 					CredentialTag: ref.Tag,
 					StakingKey:    ref.Key,
 				}},
@@ -2827,7 +2803,7 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 			ldb := h.ls.LedgerDB()
 			txn := ldb.Begin(t.Context(), false)
 			defer txn.Release()
-			guarded, err := h.ls.guardedExpiredRewardCredentials(
+			guarded, err := h.ls.engine().GuardedExpiredRewardCredentials(
 				t.Context(), txn, app,
 			)
 			require.NoError(t, err)
@@ -3256,12 +3232,8 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 				Plain: start + 55, Withdraw: start + 80, CtxWithdraw: start + 47,
 				Boundary: start + 66,
 			}
-			require.NoError(t, db.Metadata().IterateAccounts(nil, func(a *models.Account) error {
-				if s.Payee.Key == nil {
-					s.Payee = models.NewStakeCredentialRef(a.CredentialTag, a.StakingKey)
-				}
-				return nil
-			}))
+			// The harness's pool owner, the first account it creates.
+			s.Payee = models.NewStakeCredentialRef(0, bytes.Repeat([]byte{0x71}, 28))
 			require.NotNil(t, s.Payee.Key)
 			cred := func(ref models.StakeCredentialRef) []any {
 				return []any{uint64(ref.Tag), ref.Key}
@@ -3388,19 +3360,8 @@ func NewGuardedBoundaryEpochStateScenarioForTest(
 				Credit: start + 43, Withdraw: start + 44, ZeroSkipped: start + 45,
 				ZeroRecorded: start + 46, Deregister: start + 47,
 			}
-			require.NoError(
-				t,
-				db.Metadata().
-					IterateAccounts(nil, func(a *models.Account) error {
-						if s.Payee.Key == nil {
-							s.Payee = models.NewStakeCredentialRef(
-								a.CredentialTag,
-								a.StakingKey,
-							)
-						}
-						return nil
-					}),
-			)
+			// The harness's pool owner, the first account it creates.
+			s.Payee = models.NewStakeCredentialRef(0, bytes.Repeat([]byte{0x71}, 28))
 			require.NotNil(t, s.Payee.Key)
 			cred := func(ref models.StakeCredentialRef) []any {
 				return []any{uint64(ref.Tag), ref.Key}
@@ -3879,8 +3840,9 @@ type MidEpochEraSwitchScenario struct {
 	EraInsideRollback func() uint
 	// LedgerDB is the LedgerDB the ledger reads through.
 	LedgerDB func() ledgerdb.LedgerDB
-	// DrainFamilies adds mask to the families the ledger treats as drained.
-	DrainFamilies func(mask nodesettings.FamilyMask)
+	// FailSet makes the ledger treat its set as failed, as an update the
+	// set refused does.
+	FailSet func()
 	// ReadEpochs renders the epoch and summary rows as the ledger's LedgerDB
 	// answers them.
 	ReadEpochs func() []string
@@ -3921,11 +3883,11 @@ func NewGuardedMidEpochEraSwitchScenarioForTest(
 	tc.db = db
 	ls, blocks := newBoundaryEraLedgerChain(t, tc)
 	return MidEpochEraSwitchScenario{
-		DB:            ls.db,
-		LedgerDB:      ls.LedgerDB,
-		DrainFamilies: ls.SetDrainedFamilies,
-		ReadPParams:   func() []string { return renderPParamState(t, ls.LedgerDB()) },
-		ReadEpochs:    func() []string { return renderEpochRows(t, ls.LedgerDB()) },
+		DB:          ls.db,
+		LedgerDB:    ls.LedgerDB,
+		FailSet:     func() { ls.utxoSetFailed.Store(true) },
+		ReadPParams: func() []string { return renderPParamState(t, ls.LedgerDB()) },
+		ReadEpochs:  func() []string { return renderEpochRows(t, ls.LedgerDB()) },
 
 		ApplySwitch: func() {
 			require.NoError(t, processMidEpochEraBlocks(t, ls, blocks))
@@ -4020,8 +3982,12 @@ type ClassicUpdateBoundaryScenario struct {
 	// reached it.
 	HideStoreReads func(names ...string) (reached func() int64)
 
-	// DrainFamilies adds mask to the families the ledger treats as drained.
-	DrainFamilies func(mask nodesettings.FamilyMask)
+	// FailSet makes the ledger treat its set as failed, as an update the
+	// set refused does.
+	FailSet func()
+	// ReplaceSet makes set the ledger's set. A set that was not the
+	// database's LedgerDB set holds none of the ledger's state.
+	ReplaceSet func(set UtxoSetWriter)
 	// ReadPParams renders the protocol parameter rows, the update proposals
 	// and the synthetic PlutusV2 markers as the ledger's LedgerDB answers
 	// them.
@@ -4142,25 +4108,21 @@ func NewGuardedClassicUpdateBoundaryScenarioForTest(
 			TxOffsets: map[[32]byte]database.CborOffset{txHash: {}},
 		}
 		point := ocommon.NewPoint(p.Slot, bytes.Repeat([]byte{0x34}, 32))
-		if p.Batched {
-			acc := ldb.NewBatchAccumulator()
-			require.NoError(t, ldb.SetTransactionBatchedWithOpts(
-				t.Context(), tx, point, p.Index, updateEpoch, proposals,
-				nil, offsets, acc, txn, database.BatchedTxIngestOpts{},
-			))
-			require.NoError(t, ldb.FlushBatch(acc, txn))
-		} else {
-			require.NoError(t, ldb.SetTransactionWithOpts(
-				t.Context(), tx, point, p.Index, updateEpoch, proposals,
-				nil, offsets, txn, database.BatchedTxIngestOpts{},
-			))
-		}
+		require.NoError(t, ldb.SetTransactionWithOpts(
+			t.Context(), tx, point, p.Index, updateEpoch, proposals,
+			nil, offsets, txn, database.BatchedTxIngestOpts{},
+		))
 	}
 	return ClassicUpdateBoundaryScenario{
-		DB:            ls.db,
-		LedgerDB:      ls.LedgerDB,
-		DrainFamilies: ls.SetDrainedFamilies,
-		ReadPParams:   func() []string { return renderPParamState(t, ls.LedgerDB()) },
+		DB:       ls.db,
+		LedgerDB: ls.LedgerDB,
+		FailSet:  func() { ls.utxoSetFailed.Store(true) },
+		ReplaceSet: func(set UtxoSetWriter) {
+			ls.config.UtxoSet = set
+			ls.pparamsSetLoaded.Store(false)
+			ls.pparamUpdatesSetLoaded.Store(false)
+		},
+		ReadPParams: func() []string { return renderPParamState(t, ls.LedgerDB()) },
 
 		ObserveRealV2: func(epoch uint64) {
 			ldb := ls.LedgerDB()

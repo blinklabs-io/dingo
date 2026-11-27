@@ -26,9 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -105,7 +103,7 @@ func newRecoveryRollbackEventFixture(
 	require.NoError(t, cm.SetLedger(ls))
 
 	for i := range blocks {
-		require.NoError(t, db.SetBlockNonce(
+		require.NoError(t, seedBlockNonce(t, db,
 			blocks[i].Hash,
 			blocks[i].Slot,
 			testHashBytes(fmt.Sprintf("recovery-nonce-%d", i)),
@@ -123,6 +121,7 @@ func newRecoveryRollbackEventFixture(
 	}
 	require.NoError(t, db.SetTip(currentTip, nil))
 	ls.currentTip = currentTip
+	fxJournalChain(t, ls)
 	ls.currentTipBlockNonce = testHashBytes("recovery-nonce-2")
 	ls.publishSnapshotsLocked()
 
@@ -212,7 +211,7 @@ func TestReplayRecoveryPublishesAppliedTransactionUndoEvents(t *testing.T) {
 	producerTxHash := testHashBytes("recovery-rollback-producer")
 	seedReplayRecoveryTransaction(
 		t,
-		f.ls.db,
+		f.ls,
 		producerTxHash,
 		f.blocks[1].Hash,
 		f.blocks[1].Slot,
@@ -264,7 +263,7 @@ func TestReplayRecoveryPublishesUndoWhenPrimaryChainNeedsNoRewind(
 	producerTxHash := testHashBytes("recovery-held-primary-producer")
 	seedReplayRecoveryTransaction(
 		t,
-		f.ls.db,
+		f.ls,
 		producerTxHash,
 		f.blocks[1].Hash,
 		f.blocks[1].Slot,
@@ -307,85 +306,4 @@ func TestReplayRecoveryPublishesUndoWhenPrimaryChainNeedsNoRewind(
 	require.Equal(t, f.ancestorTip, f.ls.currentTip)
 	require.Equal(t, f.ancestorTip.Point, f.ls.chain.Tip().Point)
 	requireRecoveryRollbackEvents(t, f)
-}
-
-func TestPartialCommitRecoveryPublishesAppliedTransactionUndoEvents(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	f := newRecoveryRollbackEventFixture(t)
-	replaceRecoveryPrimaryChain(t, f, "partial-commit-recovery-fork")
-
-	metadataErr := errors.New("metadata commit failed")
-	err := f.ls.handleDBTxnResult(t.Context(), database.PartialCommitError{
-		MetadataErr:     metadataErr,
-		CommitTimestamp: 1,
-	})
-	require.ErrorIs(t, err, metadataErr)
-	require.NotErrorIs(t, err, dbtypes.ErrPartialCommit)
-	require.Equal(t, f.ancestorTip, f.ls.currentTip)
-	requireRecoveryRollbackEvents(t, f)
-}
-
-func TestPartialCommitRecoveryTruncationFailurePublishesNoUndoEvents(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	f := newRecoveryRollbackEventFixture(t)
-	replaceRecoveryPrimaryChain(t, f, "partial-commit-failure-fork")
-	injected := errors.New("injected metadata truncation failure")
-	f.ls.rollbackTruncateAfterSlotFunc = func(
-		ocommon.Point,
-		uint64,
-		ledgerdb.Txn,
-	) (ochainsync.Tip, []byte, error) {
-		return ochainsync.Tip{}, nil, injected
-	}
-	metadataErr := errors.New("metadata commit failed")
-	err := f.ls.handleDBTxnResult(t.Context(), database.PartialCommitError{
-		MetadataErr:     metadataErr,
-		CommitTimestamp: 1,
-	})
-	require.ErrorIs(t, err, injected)
-	require.ErrorIs(t, err, metadataErr)
-	require.Equal(t, f.currentTip, f.ls.currentTip)
-	durableTip, err := f.ls.db.GetTip(nil)
-	require.NoError(t, err)
-	require.Equal(t, f.currentTip, durableTip)
-	require.True(t, f.bus.FlushOrderedContext(t.Context(), TransactionEventType))
-	testutil.RequireNoReceive(
-		t,
-		f.events,
-		250*time.Millisecond,
-		"failed metadata truncation must not publish undo events",
-	)
-	intentPoint, intentBlocks, pending, err := loadRollbackIntent(f.ls.db)
-	require.NoError(t, err)
-	require.True(t, pending)
-	require.Equal(t, f.ancestorTip.Point, intentPoint)
-	require.Len(t, intentBlocks, len(f.blocks)-1)
-}
-
-func TestPartialCommitRecoveryWithoutAppliedRollbackPublishesNoUndoEvents(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	f := newRecoveryRollbackEventFixture(t)
-	metadataErr := errors.New("metadata commit failed")
-	err := f.ls.handleDBTxnResult(t.Context(), database.PartialCommitError{
-		MetadataErr:     metadataErr,
-		CommitTimestamp: 1,
-	})
-	require.ErrorIs(t, err, metadataErr)
-	require.NotErrorIs(t, err, dbtypes.ErrPartialCommit)
-	require.Equal(t, f.currentTip, f.ls.currentTip)
-	testutil.RequireNoReceive(
-		t,
-		f.events,
-		250*time.Millisecond,
-		"partial-commit cleanup without metadata rollback must not publish undo events",
-	)
 }

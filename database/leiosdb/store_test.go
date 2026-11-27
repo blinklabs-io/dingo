@@ -17,12 +17,14 @@ package leiosdb_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/require"
 )
@@ -197,7 +199,7 @@ func TestStoreGarbageCollectIsVolatileOnlyAndStrictlyBelow(t *testing.T) {
 
 		deleted, err := s.GarbageCollect(context.Background(), 10)
 		require.NoError(t, err)
-		require.Equal(t, 2, deleted, "manifest and txs of the one old block")
+		require.Equal(t, 3, deleted, "marker, manifest, and txs")
 
 		_, err = s.Get(old)
 		require.ErrorIs(t, err, leiosdb.ErrNotFound)
@@ -541,7 +543,7 @@ func TestStoreCrashMidGarbageCollect(t *testing.T) {
 	// A retry with a lower bound still finishes the interrupted collection.
 	deleted, err := s.GarbageCollect(context.Background(), 1)
 	require.NoError(t, err)
-	require.Equal(t, 2, deleted)
+	require.Equal(t, 3, deleted)
 	_, err = s.Get(eb(5, 1))
 	require.ErrorIs(t, err, leiosdb.ErrNotFound)
 }
@@ -560,12 +562,24 @@ func TestStoreGarbageCollectHonoursCancellation(t *testing.T) {
 // syncCountingStore wraps a blob store to count the flushes a caller asks for.
 type syncCountingStore struct {
 	blob.BlobStore
-	syncs atomic.Int64
+	syncs      atomic.Int64
+	writes     atomic.Int64
+	valueBytes atomic.Int64
 }
 
 func (s *syncCountingStore) Sync() error {
 	s.syncs.Add(1)
 	return s.BlobStore.Sync()
+}
+
+func (s *syncCountingStore) Set(
+	txn types.Txn,
+	key []byte,
+	value []byte,
+) error {
+	s.writes.Add(1)
+	s.valueBytes.Add(int64(len(value)))
+	return s.BlobStore.Set(txn, key, value)
 }
 
 func TestStoreFlushesWritesCrossStoreCommitsDependOn(t *testing.T) {
@@ -593,36 +607,113 @@ func TestStoreFlushesWritesCrossStoreCommitsDependOn(t *testing.T) {
 	require.Equal(t, int64(4), counting.syncs.Load(), "SetMigrationState")
 }
 
-func TestStoreGetIgnoresPartialImmutableCopyWithoutPin(t *testing.T) {
+func TestStoreReadsPinsAndDemotesLegacyPayload(t *testing.T) {
 	t.Parallel()
 	forEachStore(t, func(t *testing.T, f storeFactory) {
-		var copies int
-		s := f.open(t, t.TempDir(), func(point string) error {
-			if point != leiosdb.HookPinCopy {
-				return nil
-			}
-			copies++
-			if copies == 1 {
-				return errCrash
-			}
-			return nil
-		})
+		s := f.open(t, t.TempDir(), nil)
 		ref, cert := eb(10, 1), eb(11, 9)
 		full := content("a", "tx")
-		require.NoError(t, s.PutVolatile(ref, full))
-		require.NoError(t, s.PutClosure(ref, []byte("closure")))
-
-		// The manifest is copied and the transactions are not.
-		_, err := s.Pin(ref, cert)
-		require.ErrorIs(t, err, errCrash)
+		txs, err := cbor.Encode(full.Txs)
+		require.NoError(t, err)
+		legacy := s.(*leiosdb.BadgerStore).BlobStore()
+		txn := legacy.NewTransaction(true)
+		for kind, value := range map[byte][]byte{
+			'm': full.Manifest,
+			't': txs,
+			'c': []byte("closure"),
+		} {
+			require.NoError(t, legacy.Set(txn, legacyRecordKey('v', ref, kind), value))
+		}
+		require.NoError(t, txn.Commit())
 
 		got, err := s.Get(ref)
 		require.NoError(t, err)
-		require.Equal(t, full, got, "the volatile copy is the complete one")
+		require.Equal(t, full, got)
 		closure, err := s.GetClosure(ref)
 		require.NoError(t, err)
 		require.Equal(t, []byte("closure"), closure)
+
+		res, err := s.Pin(ref, cert)
+		require.NoError(t, err)
+		require.False(t, res.ContentPending)
+		_, err = s.GarbageCollect(context.Background(), 100)
+		require.NoError(t, err)
+		got, err = s.Get(ref)
+		require.NoError(t, err)
+		require.Equal(t, full, got)
+		require.NoError(t, s.PutClosure(ref, []byte("current closure")))
+		require.NoError(t, s.PutVolatile(ref, content("partial current")))
+		got, err = s.Get(ref)
+		require.NoError(t, err)
+		require.Equal(t, full, got, "complete legacy content wins over partial current content")
+
+		rolledBack, err := s.RollbackPins(eb(9, 8))
+		require.NoError(t, err)
+		require.Equal(t, 1, rolledBack)
+		got, err = s.Get(ref)
+		require.NoError(t, err)
+		require.Equal(t, full, got)
+		closure, err = s.GetClosure(ref)
+		require.NoError(t, err)
+		require.Equal(t, []byte("current closure"), closure)
 	})
+}
+
+func legacyRecordKey(part byte, ref leiosdb.Ref, kind byte) []byte {
+	key := []byte{part}
+	key = binary.BigEndian.AppendUint64(key, ref.Slot)
+	key = append(key, ref.Hash...)
+	return append(key, kind)
+}
+
+func TestStorePinDoesNotRewriteStablePayload(t *testing.T) {
+	t.Parallel()
+	inner, err := leiosdb.Open(leiosdb.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inner.Close() })
+	counting := &syncCountingStore{BlobStore: inner.BlobStore()}
+	s := leiosdb.Wrap(counting)
+	ref := eb(10, 1)
+	large, err := cbor.Encode(bytes.Repeat([]byte{0x42}, 512))
+	require.NoError(t, err)
+	require.NoError(t, s.PutVolatile(ref, leiosdb.Content{
+		Manifest: bytes.Repeat([]byte{0x24}, 512),
+		Txs:      []cbor.RawMessage{large},
+	}))
+	counting.writes.Store(0)
+	counting.valueBytes.Store(0)
+
+	res, err := s.Pin(ref, eb(11, 9))
+	require.NoError(t, err)
+	require.False(t, res.ContentPending)
+	require.Less(t, counting.valueBytes.Load(), int64(128))
+}
+
+func TestStoreTransactionBackingReusesTransactionRecord(t *testing.T) {
+	t.Parallel()
+	inner, err := leiosdb.Open(leiosdb.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inner.Close() })
+	counting := &syncCountingStore{BlobStore: inner.BlobStore()}
+	s := leiosdb.Wrap(counting)
+	ref := eb(10, 1)
+	raw, err := cbor.Encode(bytes.Repeat([]byte{0x42}, 512))
+	require.NoError(t, err)
+	content := leiosdb.Content{
+		Manifest: []byte("manifest"),
+		Txs:      []cbor.RawMessage{raw},
+	}
+	require.NoError(t, s.PutVolatile(ref, content))
+	backing, err := cbor.Encode(content.Txs)
+	require.NoError(t, err)
+	counting.writes.Store(0)
+	counting.valueBytes.Store(0)
+
+	require.NoError(t, s.PutTransactionBacking(ref, backing))
+	require.Less(t, counting.valueBytes.Load(), int64(len(backing)))
+	got, err := s.GetClosure(ref)
+	require.NoError(t, err)
+	require.Equal(t, backing, got)
 }
 
 func TestStoreGarbageCollectIsCappedAtCurrentPinWatermark(t *testing.T) {

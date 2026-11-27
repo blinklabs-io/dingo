@@ -52,6 +52,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -857,27 +858,10 @@ func newUtxorpcConnectHarness(
 	for i := range blocks {
 		require.NoError(t, db.BlockCreate(blocks[i], nil))
 	}
-	// These blocks are inserted directly (db.BlockCreate) rather than run
-	// through LedgerState's normal block-application path, so no
-	// block_nonce row exists for any of them -- unlike a really-synced
-	// chain, which writes one for every applied block including a
-	// per-epoch checkpoint. Without at least one checkpoint here,
-	// ls.Start below hits healTruncateGapBlockNonces with an empty tip
-	// nonce and nothing to reconstruct from -- correctly refused, but for
-	// this harness gap rather than a genuine unreconstructable truncate.
-	// The nonce value is a fixed placeholder, not folded from real VRF
-	// output: these tests assert Connect RPC behavior, not nonce
-	// correctness.
-	require.NoError(t, db.SetBlockNonce(
-		blocks[0].Hash,
-		blocks[0].Slot,
-		bytes.Repeat([]byte{0x5c}, 32),
-		true, // isCheckpoint
-		nil,
-	))
-	// The ledger's store holds the outputs its live UTxO set is seeded from;
-	// the IndexerDB holds the rows the QueryService reads.
-	indexFixtureTransactionsForReadTx(t, db, blocks, opts.skipIndexTxHash)
+	// The set is reconciled with the database at origin, before the
+	// fixture moves the tip, and then seeded as the ledger leaves it.
+	utxoSet := livesettest.OpenLedgerDB(t, db)
+	seedFixtureLedgerSet(t, utxoSet, blocks, opts.skipIndexTxHash)
 	indexerDB, err := dbtest.NewIndexerDatabase(
 		t, db, dbtest.IndexerOptions{},
 	)
@@ -919,7 +903,7 @@ func newUtxorpcConnectHarness(
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:              db,
-		UtxoSet:               livesettest.NewFrom(t, db),
+		UtxoSet:               utxoSet,
 		ChainManager:          cm,
 		EventBus:              nil,
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1033,6 +1017,73 @@ func indexFixtureTransactionsForReadTx(
 		}
 	}
 	return indexed
+}
+
+// seedFixtureLedgerSet writes into set the ledger state of blocks, which the
+// fixture stores directly rather than through block application: the live
+// outputs and index entries of their transactions, except skipTxHash's, and a
+// nonce checkpoint at the first block, without which ls.Start finds no nonce
+// to fold from.
+// The nonce is a fixed placeholder; these tests assert Connect RPC behavior,
+// not nonce correctness.
+func seedFixtureLedgerSet(
+	t *testing.T,
+	set *utxoset.Set,
+	blocks []models.Block,
+	skipTxHash []byte,
+) {
+	t.Helper()
+	changes := ledger.LedgerChanges{
+		Nonces: []models.BlockNonce{{
+			Hash:         blocks[0].Hash,
+			Slot:         blocks[0].Slot,
+			Nonce:        bytes.Repeat([]byte{0x5c}, 32),
+			IsCheckpoint: true,
+		}},
+	}
+	for i := range blocks {
+		mb := blocks[i]
+		blk, err := gledger.NewBlockFromCbor(mb.Type, mb.Cbor)
+		if err != nil {
+			continue
+		}
+		point := ocommon.NewPoint(mb.Slot, mb.Hash)
+		for j, tx := range blk.Transactions() {
+			if bytes.Equal(tx.Hash().Bytes(), skipTxHash) {
+				continue
+			}
+			evt := ledger.UtxoEvent{
+				Point:   point,
+				Cause:   ledger.UtxoChangeTransaction,
+				TxIndex: uint32(j), //nolint:gosec // a block holds far fewer
+			}
+			for _, in := range tx.Consumed() {
+				evt.Removed = append(evt.Removed, models.UtxoId{
+					Hash: in.Id().Bytes(), Idx: in.Index(),
+				})
+			}
+			for _, u := range tx.Produced() {
+				evt.Added = append(evt.Added, ledger.UtxoOutput{
+					Ref: models.UtxoId{
+						Hash: u.Id.Id().Bytes(), Idx: u.Id.Index(),
+					},
+					Cbor: u.Output.Cbor(),
+				})
+			}
+			changes.Utxo = append(changes.Utxo, evt)
+			changes.TxIndex = append(changes.TxIndex, ledger.TxIndexEntry{
+				Hash:       tx.Hash().Bytes(),
+				BlockHash:  mb.Hash,
+				Slot:       mb.Slot,
+				BlockIndex: uint32(j),        //nolint:gosec // a block holds far fewer
+				Type:       uint8(tx.Type()), //nolint:gosec // era ids fit a byte
+				Valid:      tx.IsValid(),
+			})
+		}
+	}
+	tip := blocks[len(blocks)-1]
+	point := ocommon.NewPoint(tip.Slot, tip.Hash)
+	require.NoError(t, set.ApplyLedgerChanges(&point, changes))
 }
 
 // --- fixture helpers --------------------------------------------------------
@@ -2206,27 +2257,37 @@ func seedBetaReadStatePool(
 ) lcommon.PoolKeyHash {
 	t.Helper()
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
-	require.NoError(t, h.DB.Metadata().ImportPool(
-		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: vrfKeyHash},
-		&models.PoolRegistration{
-			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  vrfKeyHash,
-			AddedSlot:   1,
-			Pledge:      dbtypes.Uint64(1),
-			Cost:        dbtypes.Uint64(1),
-		},
-		nil,
-	))
-	require.NoError(t, h.DB.Metadata().SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:        snapshotEpoch,
-			SnapshotType: "mark",
-			PoolKeyHash:  pkh.Bytes(),
-			TotalStake:   dbtypes.Uint64(stake),
-			CapturedSlot: 1,
-		},
-		nil,
-	))
+	// The distribution is a ledger read, so the pool and its stake go into
+	// the ledger's LedgerDB set as a block registering the pool and the
+	// boundary capture after it would leave them.
+	set := livesettest.OpenLedgerDB(t, h.DB)
+	reg := ledger.CleanPoolRegistration(&models.PoolRegistration{
+		PoolKeyHash: pkh.Bytes(),
+		VrfKeyHash:  vrfKeyHash,
+		AddedSlot:   1,
+		Pledge:      dbtypes.Uint64(1),
+		Cost:        dbtypes.Uint64(1),
+	})
+	require.NoError(t, set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
+		Pools: []ledger.PoolChange{{
+			Slot:  1,
+			State: ledger.PoolState{Pool: pkh.Bytes(), Params: reg},
+		}},
+		PoolEvents: []ledger.PoolEventChange{{
+			Pool:  pkh.Bytes(),
+			Event: ledger.PoolEvent{Slot: 1, Registration: reg},
+		}},
+		Snapshots: []ledger.SnapshotChange{{
+			Kind: ledger.SnapshotSave,
+			Snapshot: &models.PoolStakeSnapshot{
+				Epoch:        snapshotEpoch,
+				SnapshotType: "mark",
+				PoolKeyHash:  pkh.Bytes(),
+				TotalStake:   dbtypes.Uint64(stake),
+				CapturedSlot: 1,
+			},
+		}},
+	}))
 	return pkh
 }
 

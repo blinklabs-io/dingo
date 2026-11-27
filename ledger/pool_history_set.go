@@ -93,7 +93,7 @@ type PoolEventChange struct {
 // PoolHistoryReader serves pool certificate events from a live UTxO set.
 type PoolHistoryReader interface {
 	// PoolHistoryLoaded reports whether the reader holds every event up to
-	// its tip; until it does, reads stay on the metadata store.
+	// its tip; until it does, the set does not serve the reads.
 	PoolHistoryLoaded() (bool, error)
 	// PoolHistory returns every event of pool, oldest first.
 	PoolHistory(pool []byte) ([]PoolEvent, error)
@@ -106,7 +106,7 @@ func poolEventBefore(a, b PoolEvent) bool {
 }
 
 // poolHistoryReader returns the set's pool history reader once it holds the
-// history, or nil when reads stay on the metadata store.
+// history, or nil when the set does not serve them.
 func (ls *LedgerState) poolHistoryReader(txn ledgerdb.Txn) PoolHistoryReader {
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
 		return nil
@@ -308,7 +308,7 @@ func (s stagingLedgerDB) GetPoolVrfKeyHashAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]byte, bool, error) {
-	a, err := drainedPoolRead(s, txn, func(b *poolBook) (vrfAnswer, error) {
+	a, err := setPoolRead(s, txn, func(b *poolBook) (vrfAnswer, error) {
 		events, err := b.events(poolKeyHash)
 		if err != nil {
 			return vrfAnswer{}, err
@@ -323,7 +323,7 @@ func (s stagingLedgerDB) GetPoolEarliestVrfKeyHashAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]byte, bool, error) {
-	a, err := drainedPoolRead(s, txn, func(b *poolBook) (vrfAnswer, error) {
+	a, err := setPoolRead(s, txn, func(b *poolBook) (vrfAnswer, error) {
 		events, err := b.events(poolKeyHash)
 		if err != nil {
 			return vrfAnswer{}, err
@@ -339,7 +339,7 @@ func (s stagingLedgerDB) GetPoolVrfState(
 	pkh lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	got, err := drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	got, err := setPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.pool(pkh[:], true)
 	})
 	return notFoundIfNil(got, err)
@@ -352,7 +352,7 @@ func (s stagingLedgerDB) GetPool(
 	includeInactive bool,
 	txn ledgerdb.Txn,
 ) (*models.Pool, error) {
-	got, err := drainedPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
+	got, err := setPoolRead(s, txn, func(b *poolBook) (*models.Pool, error) {
 		return b.pool(pkh[:], includeInactive)
 	})
 	return notFoundIfNil(got, err)
@@ -363,7 +363,7 @@ func (s stagingLedgerDB) GetPoolRegistrations(
 	pkh lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) ([]lcommon.PoolRegistrationCertificate, error) {
+	return setPoolRead(s, txn, func(b *poolBook) ([]lcommon.PoolRegistrationCertificate, error) {
 		return b.registrations(pkh)
 	})
 }
@@ -375,7 +375,7 @@ func (s stagingLedgerDB) GetPoolsRetiringAtEpoch(
 	boundarySlot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRetirementRefund, error) {
-	return drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRetirementRefund, error) {
+	return setPoolRead(s, txn, func(b *poolBook) ([]models.PoolRetirementRefund, error) {
 		return b.retiringAtEpoch(epoch, boundarySlot)
 	})
 }

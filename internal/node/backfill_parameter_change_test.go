@@ -32,12 +32,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBackfillRejectsMalformedParameterChange applies ParameterChange
-// proposals through the backfill governance path, which stores transactions
-// the chain already accepted without validating them. A proposal the
-// transaction rules refuse must be refused here too, and leave no
-// governance_proposal row; the nearest valid value must be stored.
-func TestBackfillRejectsMalformedParameterChange(t *testing.T) {
+// TestBackfillStoresParameterChangesAsTheChainHolds applies ParameterChange
+// proposals through the backfill governance path. It indexes only blocks the
+// chain accepted and applies none of the era's proposal rules, so a proposal
+// those rules would refuse is still stored: dropping it would leave the
+// IndexerDB without a proposal the chain holds.
+func TestBackfillStoresParameterChangesAsTheChainHolds(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -45,13 +45,11 @@ func TestBackfillRejectsMalformedParameterChange(t *testing.T) {
 		dijkstra bool
 		major    uint
 		ppu      map[uint]any
-		wantErr  string
 	}{
 		{
-			name:    "conway zero govActionDeposit",
-			major:   11,
-			ppu:     map[uint]any{testutil.PParamUpdateKeyGovActionDeposit: 0},
-			wantErr: "govActionDeposit",
+			name:  "conway zero govActionDeposit",
+			major: 11,
+			ppu:   map[uint]any{testutil.PParamUpdateKeyGovActionDeposit: 0},
 		},
 		{
 			name:  "conway nonzero govActionDeposit",
@@ -59,22 +57,20 @@ func TestBackfillRejectsMalformedParameterChange(t *testing.T) {
 			ppu:   map[uint]any{testutil.PParamUpdateKeyGovActionDeposit: 1},
 		},
 		{
-			name:  "conway zero coinsPerUTxOByte at PV9 is allowed",
+			name:  "conway zero coinsPerUTxOByte at PV9",
 			major: 9,
 			ppu:   map[uint]any{testutil.PParamUpdateKeyAdaPerUtxoByte: 0},
 		},
 		{
-			name:    "conway zero coinsPerUTxOByte at PV10",
-			major:   10,
-			ppu:     map[uint]any{testutil.PParamUpdateKeyAdaPerUtxoByte: 0},
-			wantErr: "coinsPerUTxOByte",
+			name:  "conway zero coinsPerUTxOByte at PV10",
+			major: 10,
+			ppu:   map[uint]any{testutil.PParamUpdateKeyAdaPerUtxoByte: 0},
 		},
 		{
 			name:     "dijkstra zero govActionDeposit",
 			dijkstra: true,
 			major:    dijkstra.MinProtocolVersionDijkstra,
 			ppu:      map[uint]any{testutil.PParamUpdateKeyGovActionDeposit: 0},
-			wantErr:  "govActionDeposit",
 		},
 		{
 			name:     "dijkstra nonzero govActionDeposit",
@@ -86,7 +82,7 @@ func TestBackfillRejectsMalformedParameterChange(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
+			db := newIndexerTestDB(t)
 			backfill := NewBackfill(db, nil, slog.Default())
 
 			txCbor := testutil.ParameterChangeTxCbor(t, test.ppu, test.name)
@@ -120,18 +116,11 @@ func TestBackfillRejectsMalformedParameterChange(t *testing.T) {
 					100,
 					pparams,
 					txn,
-					nil,
 				)
 			})
 			stored, getErr := db.GetGovernanceProposal(
 				context.Background(), tx.Id().Bytes(), 0, nil,
 			)
-			if test.wantErr != "" {
-				require.ErrorContains(t, err, test.wantErr)
-				require.ErrorIs(t, getErr, models.ErrGovernanceProposalNotFound)
-				require.Nil(t, stored)
-				return
-			}
 			require.NoError(t, err)
 			require.NoError(t, getErr)
 			require.NotNil(t, stored)
@@ -210,7 +199,7 @@ func TestBackfillRejectsOutOfDomainParameterChange(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
+			db := newIndexerTestDB(t)
 			backfill := NewBackfill(db, nil, slog.Default())
 
 			conwayPParams := mockledger.NewMockConwayProtocolParams()
@@ -248,7 +237,6 @@ func TestBackfillRejectsOutOfDomainParameterChange(t *testing.T) {
 						100,
 						pparams,
 						txn,
-						nil,
 					)
 				})
 			}

@@ -56,19 +56,7 @@ func poolRegistrationSnapshotWindow(
 	return previousEpochStartSlot, evt.PreviousEpoch
 }
 
-// errFallbackSupersededByAuthoritative is returned internally by
-// saveSnapshotInTxn (never to an outside caller — saveSnapshot translates it
-// into saved=false, nil) when a fallback, non-authoritative write's
-// in-transaction re-check finds that an authoritative mark snapshot has
-// already landed for the target epoch/boundary. See saveSnapshot's
-// checkAuthoritativeMark parameter.
-var errFallbackSupersededByAuthoritative = errors.New(
-	"snapshot: authoritative mark snapshot already captured",
-)
-
 // saveSnapshot saves a stake distribution as a snapshot of the given type.
-// It returns saved=false with no error when a fallback capture is superseded by
-// an authoritative capture that already landed for the target epoch.
 //
 // resolveAutoVote controls whether the CIP-1694 reward-account auto-vote is
 // computed against the live Pool/Account tables and frozen onto the snapshot
@@ -86,20 +74,6 @@ var errFallbackSupersededByAuthoritative = errors.New(
 // persisting reward inputs would make the reward calculator consume synthetic
 // current-state rows as if they were exact historical inputs. Historical rows
 // with unresolved auto-vote are tallied as PoolRewardAccountAutoVoteNone.
-//
-// checkAuthoritativeMark must be true only for the fallback (event-driven)
-// mark-snapshot capture path (captureMarkSnapshot); the authoritative
-// CaptureEpochBoundarySnapshot path always passes false. A fallback claims the
-// lockable reward_snapshot key before replacing Mark rows and is superseded
-// (this method returns errFallbackSupersededByAuthoritative) whenever an
-// authoritative row already exists. When reward inputs are available, the
-// normal ClaimFallbackRewardSnapshot marker provides that guard. Without
-// ended-epoch metadata, ClaimFallbackRewardSnapshotGuard temporarily claims the
-// same key and removes only the row it inserted before commit, preserving the
-// invariant that no reward_snapshot remains without reward inputs. In both
-// cases a concurrent authoritative writer blocks on the same key/row lock
-// (MySQL/Postgres) or is serialized by single-writer semantics (SQLite),
-// closing the check-then-write race outright rather than merely narrowing it.
 func (m *Manager) saveSnapshot(
 	ctx context.Context,
 	epoch uint64,
@@ -108,8 +82,7 @@ func (m *Manager) saveSnapshot(
 	evt event.EpochTransitionEvent,
 	resolveAutoVote bool,
 	persistRewardInputs bool,
-	checkAuthoritativeMark bool,
-) (bool, error) {
+) error {
 	_ = ctx
 	txn := m.db.Begin(ctx, true) // read-write transaction
 	defer func() { _ = txn.Rollback() }()
@@ -122,29 +95,11 @@ func (m *Manager) saveSnapshot(
 		evt,
 		resolveAutoVote,
 		persistRewardInputs,
-		checkAuthoritativeMark,
 		txn,
 	); err != nil {
-		switch {
-		case errors.Is(err, errFallbackSupersededByAuthoritative):
-			m.logger.Debug(
-				"authoritative mark snapshot landed concurrently; discarding fallback capture",
-				"component",
-				"snapshot",
-				"epoch",
-				epoch,
-				"snapshot_type",
-				snapshotType,
-			)
-			return false, nil
-		}
-		return false, err
+		return err
 	}
-
-	if err := txn.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
+	return txn.Commit()
 }
 
 func (m *Manager) saveSnapshotInTxn(
@@ -155,13 +110,12 @@ func (m *Manager) saveSnapshotInTxn(
 	evt event.EpochTransitionEvent,
 	resolveAutoVote bool,
 	persistRewardInputs bool,
-	checkAuthoritativeMark bool,
 	txn ledgerdb.Txn,
 ) error {
 	return m.saveSnapshotInTxnDeferring(
 		ctx,
 		epoch, snapshotType, distribution, evt, resolveAutoVote,
-		persistRewardInputs, checkAuthoritativeMark, false, txn,
+		persistRewardInputs, false, txn,
 	)
 }
 
@@ -176,7 +130,6 @@ func (m *Manager) saveSnapshotInTxnDeferring(
 	evt event.EpochTransitionEvent,
 	resolveAutoVote bool,
 	persistRewardInputs bool,
-	checkAuthoritativeMark bool,
 	deferStakeInputs bool,
 	txn ledgerdb.Txn,
 ) error {
@@ -189,7 +142,7 @@ func (m *Manager) saveSnapshotInTxnDeferring(
 		return err
 	}
 	return m.writePreparedSnapshot(
-		prepared, checkAuthoritativeMark, deferStakeInputs, txn,
+		prepared, deferStakeInputs, txn,
 	)
 }
 
@@ -296,7 +249,6 @@ func (m *Manager) prepareSnapshot(
 // writePreparedSnapshot writes a prepared snapshot through txn.
 func (m *Manager) writePreparedSnapshot(
 	prepared *preparedSnapshot,
-	checkAuthoritativeMark bool,
 	deferStakeInputs bool,
 	txn ledgerdb.Txn,
 ) error {
@@ -304,38 +256,11 @@ func (m *Manager) writePreparedSnapshot(
 	epoch := prepared.epoch
 	snapshotType := prepared.snapshotType
 	bundle := prepared.bundle
-	authoritative := !checkAuthoritativeMark
-	var temporaryFallbackGuardID uint
 	if bundle != nil {
-		bundle.snapshot.Authoritative = authoritative
-		if authoritative {
-			if err := ldb.SaveRewardSnapshot(bundle.snapshot, txn); err != nil {
-				return fmt.Errorf("save reward snapshot: %w", err)
-			}
-		} else {
-			proceed, err := ldb.ClaimFallbackRewardSnapshot(
-				bundle.snapshot, txn,
-			)
-			if err != nil {
-				return fmt.Errorf("claim fallback reward snapshot: %w", err)
-			}
-			if !proceed {
-				return errFallbackSupersededByAuthoritative
-			}
+		bundle.snapshot.Authoritative = true
+		if err := ldb.SaveRewardSnapshot(bundle.snapshot, txn); err != nil {
+			return fmt.Errorf("save reward snapshot: %w", err)
 		}
-	} else if checkAuthoritativeMark {
-		proceed, guardID, err := ldb.ClaimFallbackRewardSnapshotGuard(
-			epoch,
-			snapshotType,
-			txn,
-		)
-		if err != nil {
-			return fmt.Errorf("claim fallback reward snapshot guard: %w", err)
-		}
-		if !proceed {
-			return errFallbackSupersededByAuthoritative
-		}
-		temporaryFallbackGuardID = guardID
 	}
 
 	if err := ldb.DeletePoolStakeSnapshotsForEpoch(
@@ -365,15 +290,6 @@ func (m *Manager) writePreparedSnapshot(
 				Inputs:       bundle.stakeInputs,
 			}
 			m.mu.Unlock()
-		}
-	}
-
-	if temporaryFallbackGuardID != 0 {
-		if err := ldb.ReleaseFallbackRewardSnapshotGuard(
-			temporaryFallbackGuardID,
-			txn,
-		); err != nil {
-			return fmt.Errorf("release fallback reward snapshot guard: %w", err)
 		}
 	}
 
@@ -1239,6 +1155,17 @@ func (m *Manager) rotateSnapshots(ctx context.Context, newEpoch uint64) {
 // default currentEpoch-3 window regardless.
 const poolSnapshotRetentionMaxDepth uint64 = 24
 
+// RewardStateRetainedFrom returns the first epoch whose pool stake snapshots
+// and reward state cleanupOldSnapshots keeps once the boundary into
+// currentEpoch is processed. Rows of every epoch at or above it are still
+// held; rows below it may be gone.
+func RewardStateRetainedFrom(currentEpoch uint64) uint64 {
+	if currentEpoch < 3 {
+		return 0
+	}
+	return currentEpoch - 3
+}
+
 // cleanupOldSnapshots removes snapshots older than needed for the rotation and
 // delayed reward models. We keep 4 epochs of per-pool and per-credential rows:
 // current, current-1, current-2 for Go, and current-3 so reward calculation can
@@ -1247,25 +1174,14 @@ const poolSnapshotRetentionMaxDepth uint64 = 24
 //
 // reward_stake_input scales with delegator count (~1.3M rows/epoch on mainnet)
 // and is not needed once the epoch it snapshots has finished replaying, so
-// outside API storage mode it is pruned to that 4-epoch window. In API storage
-// mode (types.StorageModeAPI) it is retained WITHOUT BOUND so the Blockfrost
-// epoch stake and account stake-history endpoints can answer for any epoch the
-// node has run in that mode. reward_account_output is pruned to the same
-// window in CORE storage mode (types.StorageModeCore), matching dingo's original pruning behavior exactly, but likewise retained
-// WITHOUT BOUND in API storage mode so the Blockfrost account
-// reward-history endpoint (GET /accounts/{stake_address}/rewards)
-// can serve an account's full reward history instead of only the trailing few
-// epochs — the same "silently look empty past the window" failure mode that
-// epoch_summary rows once showed. reward_account_output is likewise
-// retained without bound whenever SetRewardAccountOutputRetentionUnbounded(true)
-// has been called (node.go wires this from the koios-parity observer's Enabled
-// config): that observer only validates a closed epoch after fetching and
-// comparing over the network, which can fall arbitrarily far behind chain
-// progression during a from-genesis or catch-up sync, so the fixed 4-epoch
-// window otherwise prunes an epoch's rows before the observer ever reads them.
-// See rewardstate.DeleteStateBeforeEpoch (core, prunes both tables) and
-// rewardstate.DeleteStakeInputBeforeEpoch (koios-parity, prunes only
-// reward_stake_input) for the implementation and full rationale.
+// outside API storage mode it is pruned to that 4-epoch window, together with
+// the account reward outputs. Through the ledger's staging LedgerDB the same
+// prune also drops the live set's derived reward rows, the pool outputs and
+// precompute cursors; a SQL store's DeleteRewardStateBeforeEpoch deletes only
+// the stake inputs and account outputs. In API
+// storage mode (types.StorageModeAPI) both reward tables are retained without
+// bound. The window is the same whatever reads the rows outside it: reward
+// history older than the window is API data, which the IndexerDB holds.
 //
 // epoch_summary is deliberately NOT pruned. It is a single small row per epoch
 // (aggregate stake/pool/delegator totals plus the epoch nonce and boundary
@@ -1284,13 +1200,11 @@ func (m *Manager) cleanupOldSnapshots(
 		return nil // Not enough history to clean
 	}
 
-	deleteBeforeEpoch := currentEpoch - 3
+	deleteBeforeEpoch := RewardStateRetainedFrom(currentEpoch)
 
 	// Pool-stake snapshots are retained without bound in API storage mode,
-	// the same way UTxO's own consumed-row cleanup and reward_account_output
-	// already are (types.StorageModeAPI, ledger/state.go's
-	// cleanupConsumedUtxos and this function's own reward-state section
-	// below): API mode's whole purpose is retaining full history for
+	// the same way reward_account_output already is (types.StorageModeAPI,
+	// this function's own reward-state section below): API mode's whole purpose is retaining full history for
 	// historical queries, and a fixed 3-epoch pool-snapshot window
 	// contradicts that for GetStakeDistribution/GetPoolDistr2 pinned to an
 	// older epoch the same way an unbounded UTxO table does for
@@ -1384,16 +1298,6 @@ func (m *Manager) cleanupOldSnapshots(
 		// Blockfrost epoch stake and account history endpoints read
 		// reward_stake_input for epochs far behind the tip. This costs about
 		// 1.3M rows per epoch on mainnet.
-	case m.RewardAccountOutputRetentionUnbounded():
-		// The in-process Koios parity observer needs reward_account_output
-		// only (see doc comment above).
-		if err := ldb.DeleteRewardStakeInputBeforeEpoch(
-			ctx,
-			deleteBeforeEpoch,
-			nil,
-		); err != nil {
-			return fmt.Errorf("cleanup reward state: %w", err)
-		}
 	default:
 		if err := ldb.DeleteRewardStateBeforeEpoch(
 			ctx,

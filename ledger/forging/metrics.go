@@ -56,23 +56,25 @@ type forgingMetrics struct {
 	blockTxCount     prometheus.Histogram
 	forgeSyncSkip    prometheus.Counter
 	// Leader checks refused because ancestry, local block distance, the admitted
-	// header frontier, peer height, or configured stale-tip evidence says forging
-	// would use an unsafe ledger snapshot. Labels distinguish those causes.
+	// header frontier, peer height, configured stale-tip evidence, or a shared KES
+	// signer without an upstream says forging would be unsafe. Labels distinguish
+	// those causes.
 	forgeStaleTipSkip *prometheus.CounterVec
 	// Pre-materialized children for the reason label values, so the leader
 	// check does not resolve a label on every skip and neither series is
 	// absent from a dashboard before the first skip.
-	forgeStaleTipSkipHashDiverged       prometheus.Counter
-	forgeStaleTipSkipPrimaryTipBehind   prometheus.Counter
-	forgeStaleTipSkipPrimaryNotAncestor prometheus.Counter
-	forgeStaleTipSkipBlockGap           prometheus.Counter
-	forgeStaleTipSkipHeaderFrontier     prometheus.Counter
-	forgeStaleTipSkipPeerHeightGap      prometheus.Counter
-	forgeStaleTipSkipUnappliedRival     prometheus.Counter
-	forgeStaleTipSkipAppliedStale       prometheus.Counter
-	forgeStaleTipSkipEbAhead            prometheus.Counter
-	slotClockErrors                     prometheus.Counter
-	tipGapSlots                         prometheus.Gauge
+	forgeStaleTipSkipHashDiverged        prometheus.Counter
+	forgeStaleTipSkipPrimaryTipBehind    prometheus.Counter
+	forgeStaleTipSkipPrimaryNotAncestor  prometheus.Counter
+	forgeStaleTipSkipBlockGap            prometheus.Counter
+	forgeStaleTipSkipHeaderFrontier      prometheus.Counter
+	forgeStaleTipSkipPeerHeightGap       prometheus.Counter
+	forgeStaleTipSkipUnappliedRival      prometheus.Counter
+	forgeStaleTipSkipAppliedStale        prometheus.Counter
+	forgeStaleTipSkipEbAhead             prometheus.Counter
+	forgeStaleTipSkipSharedKESNoUpstream prometheus.Counter
+	slotClockErrors                      prometheus.Counter
+	tipGapSlots                          prometheus.Gauge
 
 	// Slots refused by the persisted last-forged-slot fence. Any
 	// increment means the node was asked to forge a slot it had
@@ -183,7 +185,7 @@ func initForgingMetrics(
 	m.forgeMissedLeaderSlots = factory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_forge_missed_leader_slots_total",
-			Help: "slots confirmed by leader selection that did not end with a block of this node adopted (build, validation or adoption failure, a lost slot battle, or a post-selection refusal); excludes pre-selection KES and tip safety refusals",
+			Help: "slots confirmed by leader selection that did not end with a block of this node adopted (build, validation or adoption failure, a lost slot battle, or a post-selection refusal); excludes pre-selection KES and tip safety refusals and slots a shared KES signer had already signed for another producer",
 		},
 	)
 
@@ -258,7 +260,7 @@ func initForgingMetrics(
 	m.forgeStaleTipSkip = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_forge_stale_tip_skip_total",
-			Help: "forging attempts skipped because local chain ancestry, block distance, or the admitted header frontier was unsafe, the corroborated peer was at least K blocks ahead, or stale-tip evidence exceeded its bound; by reason",
+			Help: "forging attempts skipped because local chain ancestry, block distance, or the admitted header frontier was unsafe, the corroborated peer was at least K blocks ahead, stale-tip evidence exceeded its bound, or a shared KES signer had no live upstream; by reason",
 		},
 		[]string{"reason"},
 	)
@@ -288,6 +290,9 @@ func initForgingMetrics(
 	)
 	m.forgeStaleTipSkipEbAhead = m.forgeStaleTipSkip.WithLabelValues(
 		forgeStaleTipReasonEbManifestAhead,
+	)
+	m.forgeStaleTipSkipSharedKESNoUpstream = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonSharedKESNoUpstream,
 	)
 	m.tipGapSlots = factory.NewGauge(
 		prometheus.GaugeOpts{
@@ -359,7 +364,7 @@ func initForgingMetrics(
 	m.forgeSelectionFallback = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_forge_selection_fallback_total",
-			Help: "forge attempts whose transaction selection was aborted by a concurrent ledger publication or chain-tip move, by how the slot ended, counted after local adoption: retried (a later selection attempt produced the adopted block), empty (a transaction-free block was adopted instead), lost (the slot produced no adopted block)",
+			Help: "forge attempts whose transaction selection was aborted by a concurrent ledger publication or chain-tip move, by how the slot ended, counted after local adoption: retried (a later selection attempt produced the adopted block), empty (a transaction-free block was adopted instead), lost (the slot produced no adopted block); a slot that yields to a shared KES signer that already signed it, or that a tip gate refuses before a build, is counted on none",
 		},
 		[]string{"result"},
 	)

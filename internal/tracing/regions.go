@@ -37,4 +37,21 @@ const (
 	// apply and database commit, on the database worker goroutine that runs
 	// them.
 	RegionLedgerBatchApplyCommit = "dingo.ledger.batch_apply_commit"
+	// RegionIndexerReadBlocks covers the indexer reading a batch of
+	// canonical blocks from the ledger.
+	RegionIndexerReadBlocks = "dingo.indexer.read_blocks"
+	// RegionIndexerCopyFacts covers copying ledger facts for a segment.
+	RegionIndexerCopyFacts = "dingo.indexer.copy_facts"
+	// RegionIndexerIndexBlocks covers decoding a segment's blocks and
+	// writing their rows.
+	RegionIndexerIndexBlocks = "dingo.indexer.index_blocks"
+	// RegionIndexerPatchFacts covers patching ledger facts after a segment.
+	RegionIndexerPatchFacts = "dingo.indexer.patch_facts"
+	// RegionIndexerBatch covers one indexer batch transaction, rows and
+	// commit; the commit is what the stage regions inside it leave over.
+	RegionIndexerBatch = "dingo.indexer.batch"
+	// RegionSQLCommit covers committing the metadata SQL transaction.
+	RegionSQLCommit = "dingo.sql.commit"
+	// RegionBlobCommit covers committing the blob store transaction.
+	RegionBlobCommit = "dingo.blob.commit"
 )

@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// pledgeLeverageTestEpoch is one persisted epoch for the rewardParameters
+// pledgeLeverageTestEpoch is one persisted epoch for the RewardParameters
 // CIP-50 source tests. A nil leverage on a Dijkstra epoch is the enacted
 // "unset" value; leverage is ignored for a Conway epoch.
 type pledgeLeverageTestEpoch struct {
@@ -70,7 +70,7 @@ func pledgeLeverageTestPParams(
 }
 
 // TestRewardParametersPledgeLeverageSource pins which protocol parameters
-// supply CIP-50 L through the rewardParameters entry point. cardano-ledger's
+// supply CIP-50 L through the RewardParameters entry point. cardano-ledger's
 // startStep reads ppMaxPledgeLeverageG from prevPParams, the parameters in
 // force over the performance epoch; at the Conway-to-Dijkstra boundary those
 // have been upgraded with the Dijkstra genesis value, which is also what the
@@ -161,25 +161,24 @@ func TestRewardParametersPledgeLeverageSource(t *testing.T) {
 			)
 			ls.config.PledgeLeverageEnabled = true
 			ls.config.PledgeLeverage = 100
-			meta := db.Metadata()
-			require.NoError(t, meta.SetEpoch(
+			require.NoError(t, seedDB(t, db).SetEpoch(
 				100, 2, nil, nil, nil, nil, tc.performance.era.Id, 1, 100, nil,
 			))
-			require.NoError(t, meta.SetEpoch(
+			require.NoError(t, seedDB(t, db).SetEpoch(
 				200, 3, nil, nil, nil, nil, tc.calculation.era.Id, 1, 100, nil,
 			))
-			require.NoError(t, db.SetPParams(
+			require.NoError(t, seedDB(t, db).SetPParams(
 				pledgeLeverageTestPParams(t, tc.performance),
 				100, 2, tc.performance.era.Id, nil,
 			))
-			require.NoError(t, db.SetPParams(
+			require.NoError(t, seedDB(t, db).SetPParams(
 				pledgeLeverageTestPParams(t, tc.calculation),
 				200, 3, tc.calculation.era.Id, nil,
 			))
 
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
-			_, params, _, err := ls.rewardParameters(
+			_, params, err := ls.engine().RewardParameters(
 				txn, 2, 3, &models.RewardAdaPots{Reserves: 100_000_000},
 			)
 			require.NoError(t, err)

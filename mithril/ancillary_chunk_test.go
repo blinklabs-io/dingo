@@ -210,7 +210,7 @@ func TestSyncRefusesLedgerStateAboveImmutableDBTip(t *testing.T) {
 				context.Background(), cfg, slog.New(slog.DiscardHandler), 1,
 			)
 			require.NoError(t, err)
-			status, err := runtime.Database.GetSyncState("sync_status", nil)
+			status, err := runtime.Database.GetChainState("sync_status", nil)
 			require.NoError(t, err)
 			require.Empty(t, status, "a refused state must not leave the run to resume")
 			require.NoError(t, runtime.Close(context.Background()))

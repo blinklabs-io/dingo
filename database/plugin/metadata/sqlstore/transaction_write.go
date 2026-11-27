@@ -26,11 +26,9 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
-	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -63,9 +61,8 @@ type transactionBatchAccumulator struct {
 	debitWithdrawals bool
 	// debitWithdrawalsSet records that the caller chose debitWithdrawals,
 	// which a certified closure honours: its default is to debit.
-	debitWithdrawalsSet  bool
-	validatedAPIRowsOnly bool
-	transactionInsert    *sql.Stmt
+	debitWithdrawalsSet bool
+	transactionInsert   *sql.Stmt
 	// store routes the applied-transaction statements through the Store's
 	// prepared statements; nil runs them unprepared.
 	store                *Store
@@ -91,9 +88,12 @@ type transactionBatchAccumulator struct {
 	// nonces holds block nonces queued by QueueBlockNonce, in application
 	// order, until FlushBatch writes them.
 	nonces []models.BlockNonce
-	// overlay stages UTxO writes in memory when EnableBatchUtxoOverlay
-	// attached one; nil on the per-row path.
+	// overlay stages UTxO writes in memory when
+	// EnableLeiosClosureUtxoOverlay attached one; nil on the per-row path.
 	overlay *utxoOverlay
+	// locator names payloads by their position in the block of the
+	// transaction being applied; see SetPayloadLocator.
+	locator types.PayloadLocator
 }
 
 type poolOpCertSequenceKey struct {
@@ -525,7 +525,7 @@ type transactionRowOps struct {
 	// refreshAddressOrder asks for the address-page position of the
 	// transaction's outputs to be refreshed after its application row is
 	// written. API storage mode sets it; a staged UTxO overlay does not,
-	// because it refreshes when it writes the staged rows.
+	// because it writes its outputs' address rows after the application row.
 	refreshAddressOrder bool
 }
 
@@ -967,22 +967,8 @@ func (s *Store) NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
 	}
 }
 
-// NewValidatedBlockBatchAccumulator defers API indexes while keeping every
-// stateful transaction effect visible to subsequent validation.
-func (s *Store) NewValidatedBlockBatchAccumulator() types.MetadataBatchAccumulator {
-	if s.storageMode != types.StorageModeAPI {
-		return nil
-	}
-	return &transactionBatchAccumulator{
-		sqlite:               s.dialect.Name() == "sqlite",
-		validatedAPIRowsOnly: true,
-		sqlOperations:        s.sqlOperations,
-		store:                s,
-	}
-}
-
 func (a *transactionBatchAccumulator) apiRowsOnly() bool {
-	return a.leiosAPIRowsOnly || a.validatedAPIRowsOnly
+	return a.leiosAPIRowsOnly
 }
 
 // LeiosClosureRowsOnly identifies the ordered API-detail accumulator.
@@ -998,8 +984,7 @@ func (s *Store) SetTransactionLeiosClosureBatched(
 	txn types.Txn, protocolMajor uint64,
 ) error {
 	acc, ok := accumulator.(*transactionBatchAccumulator)
-	if !ok || !acc.leiosAPIRowsOnly ||
-		(acc.overlay != nil && !acc.overlay.retainHistory) {
+	if !ok || !acc.leiosAPIRowsOnly {
 		return errors.New("closure batching requires an API-only accumulator")
 	}
 	if txn == nil {
@@ -1115,6 +1100,12 @@ func (s *Store) setTransactionWithAccumulator(
 	if transaction == nil {
 		return errors.New("set transaction: nil transaction")
 	}
+	if s.liveUtxo != nil {
+		// The ledger's store: the LedgerDB holds every ledger effect of the
+		// transaction and its index entry, and the IndexerDB writer records
+		// its history, so nothing is kept here.
+		return nil
+	}
 	hash := transaction.Hash().Bytes()
 	var (
 		metadataValue  []byte
@@ -1131,6 +1122,24 @@ func (s *Store) setTransactionWithAccumulator(
 		}
 	}
 	batchedAccumulator, _ := accumulator.(*transactionBatchAccumulator)
+	locate := payloadLocate(payloadLocatorFor(txn, batchedAccumulator))
+	if metadataValue != nil {
+		var err error
+		if metadataValue, err = locate(metadataValue); err != nil {
+			return fmt.Errorf("locate transaction metadata: %w", err)
+		}
+		for i := range metadataLabels {
+			metadataLabels[i].CborValue, err = locate(
+				metadataLabels[i].CborValue,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"locate metadata label %d: %w",
+					metadataLabels[i].Label, err,
+				)
+			}
+		}
+	}
 	if batchedAccumulator != nil && txn == nil {
 		defer batchedAccumulator.resetStatement()
 	}
@@ -1143,7 +1152,7 @@ func (s *Store) setTransactionWithAccumulator(
 	if batchedAccumulator != nil {
 		overlay = batchedAccumulator.overlay
 	}
-	if overlay != nil && overlay.retainHistory {
+	if overlay != nil {
 		if !batchedAccumulator.leiosAPIRowsOnly ||
 			!tolerateConsumedInputConflict ||
 			historicalBackfill ||
@@ -1172,10 +1181,13 @@ func (s *Store) setTransactionWithAccumulator(
 		transactionIsNew   bool
 		batchedStakeDeltas []stakeCredentialDelta
 		repairedUtxoIDs    []int64
+		insertedSpends     map[string]spendCacheEntry
 	)
 	err := s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			phase := startPhases(ctx, "dingo.sqlstore.tx.prepare")
+			defer phase.end()
 			if historicalBackfill && txn != nil &&
 				batchedAccumulator != nil &&
 				batchedAccumulator.backfillBatchLimits != nil {
@@ -1197,9 +1209,7 @@ func (s *Store) setTransactionWithAccumulator(
 				collateralFee uint64
 				err           error
 			)
-			if s.liveUtxo != nil {
-				collateralFee, err = s.liveCollateralFee(txn, transaction)
-			} else if overlay != nil {
+			if overlay != nil {
 				collateralFee, err = overlay.collateralFee(
 					ctx, db, transaction,
 				)
@@ -1211,21 +1221,8 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return err
 			}
-			if overlay != nil && !overlay.retainHistory {
-				transactionID, err = overlay.stageTransaction(
-					hash,
-					point.Hash,
-					metadataValue,
-					point.Slot,
-					transaction.Type(),
-					decimalUint64(transactionFee(transaction)),
-					decimalUint64(types.Uint64(collateralFee)),
-					decimalUint64(types.Uint64(transaction.TTL())),
-					index,
-					transaction.IsValid(),
-				)
-				transactionIsNew = true
-			} else if batched := batchedAccumulator; batched != nil {
+			phase.next(ctx, "dingo.sqlstore.tx.identity")
+			if batched := batchedAccumulator; batched != nil {
 				var id uint
 				id, transactionIsNew, err = batched.insertTransaction(ctx, db,
 					hash,
@@ -1258,7 +1255,7 @@ func (s *Store) setTransactionWithAccumulator(
 				return fmt.Errorf("create transaction %x: %w", hash, err)
 			}
 			if ledgerContextSlot != nil {
-				if err := recordTransactionLedgerContext(ctx, db, transactionID, *ledgerContextSlot, !s.poolsDrained()); err != nil {
+				if err := recordTransactionLedgerContext(ctx, db, transactionID, *ledgerContextSlot); err != nil {
 					return err
 				}
 			}
@@ -1310,6 +1307,7 @@ func (s *Store) setTransactionWithAccumulator(
 					return err
 				}
 			}
+			phase.next(ctx, "dingo.sqlstore.tx.produced")
 			collateralReturn := transaction.CollateralReturn()
 			producedModels := make(
 				[]models.Utxo,
@@ -1333,17 +1331,30 @@ func (s *Store) setTransactionWithAccumulator(
 					id := uint(transactionID)
 					model.TransactionID = &id
 				}
+				blockIndex := index
+				model.BlockIndex = &blockIndex
 				producedModels = append(producedModels, model)
 			}
 			if overlay != nil {
+				if overlay.err != nil {
+					return overlay.err
+				}
+				// The overlay stages outputs and resolves inputs in memory;
+				// no utxo statement runs.
 				var produced, consumed, skipped []stakeCredentialDelta
-				produced, consumed, skipped, err = s.setTransactionOverlayUtxos(
-					ctx, db, overlay, transaction, point, transactionID,
-					producedModels, uniqueConsumedInputs(transaction),
+				produced, err = overlay.create(producedModels)
+				if err != nil {
+					return err
+				}
+				phase.next(ctx, "dingo.sqlstore.tx.spend")
+				consumed, skipped, err = overlay.consume(
+					ctx, db, uniqueConsumedInputs(transaction), point.Slot,
+					transaction.Hash().Bytes(), transactionID,
 				)
 				if err != nil {
 					return err
 				}
+				phase.next(ctx, "dingo.sqlstore.tx.supply_stake")
 				if historicalBackfill {
 					batchedStakeDeltas = mergeStakeCredentialDeltas(
 						consumed, produced,
@@ -1356,54 +1367,15 @@ func (s *Store) setTransactionWithAccumulator(
 					skipped,
 					produced,
 				)
-				if overlay.retainHistory {
-					for i := range producedModels {
-						output := overlay.created[newOverlayKey(producedModels[i].TxId, producedModels[i].OutputIdx)]
-						producedModels[i].ID = uint(output.id)
-					}
-					if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew); err != nil {
-						return err
-					}
-					if err := staged.flushExceptClosureAPIRows(ctx, db, s, s.dialect.ParameterLimit()); err != nil {
-						return err
-					}
-					return nil
+				for i := range producedModels {
+					output := overlay.created[newOverlayKey(producedModels[i].TxId, producedModels[i].OutputIdx)]
+					producedModels[i].ID = uint(output.id)
 				}
-				return nil
-			}
-			if s.liveUtxo != nil {
-				// The live UTxO set holds the outputs. reward_live_stake still
-				// carries their stake: produced outputs add theirs from the
-				// row models, spent inputs subtract theirs from the set as
-				// this transaction sees it.
-				produced, err := liveProducedStakeDeltas(producedModels)
-				if err != nil {
+				phase.next(ctx, "dingo.sqlstore.tx.api_details")
+				if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew, locate); err != nil {
 					return err
 				}
-				consumed, err := s.liveConsumedStakeDeltas(txn, transaction)
-				if err != nil {
-					return err
-				}
-				deltas := mergeStakeCredentialDeltas(
-					refsToStakeCredentialDeltas(certificateRefs),
-					consumed,
-					produced,
-				)
-				// Applied now, never queued for a batch flush: the live set
-				// is staged only after this write, so a credential re-sum
-				// here sees the set before this transaction and must add
-				// the transaction's own change, which a flush after staging
-				// would count twice.
-				if err := s.refreshRewardLiveStakeDeltas(
-					context.WithValue(ctx, liveUtxoPreWriteKey{}, true),
-					db, deltas, point.Slot,
-				); err != nil {
-					return err
-				}
-				if batchedAccumulator != nil {
-					return nil
-				}
-				return staged.flush(ctx, db, s, s.dialect.ParameterLimit())
+				return staged.flushExceptClosureAPIRows(ctx, db, s, s.dialect.ParameterLimit())
 			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))
 			for i := range producedModels {
@@ -1419,6 +1391,9 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return fmt.Errorf("create transaction outputs: %w", err)
 			}
+			insertedSpends = s.insertedSpendEntries(
+				producedModelPtrs, producedInserted,
+			)
 			if batchedAccumulator != nil && s.storageMode == types.StorageModeAPI {
 				for i, created := range producedInserted {
 					if !created {
@@ -1442,6 +1417,7 @@ func (s *Store) setTransactionWithAccumulator(
 					producedStakeDeltas = append(producedStakeDeltas, gain)
 				}
 			}
+			phase.next(ctx, "dingo.sqlstore.tx.api_details")
 			if err := s.applyTransactionAPIDetails(
 				ctx,
 				db,
@@ -1452,6 +1428,7 @@ func (s *Store) setTransactionWithAccumulator(
 				producedModels,
 				&staged,
 				transactionIsNew,
+				locate,
 			); err != nil {
 				return err
 			}
@@ -1477,6 +1454,7 @@ func (s *Store) setTransactionWithAccumulator(
 			// the utxo table, so they contribute no delta; they
 			// are still refreshed at zero delta so the set of credentials this
 			// write touches is unchanged from the full-scan path.
+			phase.next(ctx, "dingo.sqlstore.tx.spend")
 			var spentRefs []models.UtxoId
 			if s.dialect.Name() != "sqlite" {
 				spentRefs = make(
@@ -1495,6 +1473,27 @@ func (s *Store) setTransactionWithAccumulator(
 				end := min(start+utxoSpendBatchSize, len(uniqueConsumed))
 				batch := uniqueConsumed[start:end]
 				updated := make(map[string]struct{}, len(batch))
+				// Outputs this store inserted are spent by row id; the rest,
+				// and any cached row the update did not find live, go by
+				// reference below.
+				var cachedUpdated map[string]struct{}
+				if cached := s.takeCachedSpends(txn, batch); len(cached) > 0 {
+					var deltas []stakeCredentialDelta
+					cachedUpdated, deltas, err = s.spendCachedRows(
+						ctx, db, cached, point.Slot, transactionID,
+					)
+					if err != nil {
+						return err
+					}
+					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
+					rest := make([]models.UtxoId, 0, len(batch))
+					for _, ref := range batch {
+						if _, ok := cachedUpdated[utxoIdentityKey(ref.Hash, ref.Idx)]; !ok {
+							rest = append(rest, ref)
+						}
+					}
+					batch = rest
+				}
 				if s.dialect.Name() == "sqlite" && len(batch) > 1 {
 					query := consumeUtxosBatchQuery(len(batch), true)
 					args := make([]any, 0, 2+len(batch)*4)
@@ -1515,7 +1514,7 @@ func (s *Store) setTransactionWithAccumulator(
 					}
 					updated = updatedRows
 					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
-				} else if s.dialect.Name() == "sqlite" {
+				} else if s.dialect.Name() == "sqlite" && len(batch) == 1 {
 					rows, err := s.queryRowsCached(
 						ctx, db, consumeUtxoSQLiteReturningSQL,
 						u.bindRef(
@@ -1600,9 +1599,11 @@ func (s *Store) setTransactionWithAccumulator(
 					)
 				}
 			}
+			phase.next(ctx, "dingo.sqlstore.tx.supply_stake")
 			if historicalBackfill {
 				if s.dialect.Name() != "sqlite" {
-					consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
+					// Appended: deltas of outputs spent by row id are already in.
+					refDeltas, err := s.queryUtxoStakeConsumedDeltas(
 						ctx,
 						db,
 						spentRefs,
@@ -1610,6 +1611,9 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
+					consumedStakeDeltas = append(
+						consumedStakeDeltas, refDeltas...,
+					)
 				}
 				// Historical replay defers account-derived fields to the final
 				// rebuild, but it still changes the live UTxO set. Keep its
@@ -1627,7 +1631,8 @@ func (s *Store) setTransactionWithAccumulator(
 				)
 			}
 			if s.dialect.Name() != "sqlite" {
-				consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
+				// Appended: deltas of outputs spent by row id are already in.
+				refDeltas, err := s.queryUtxoStakeConsumedDeltas(
 					ctx,
 					db,
 					spentRefs,
@@ -1635,6 +1640,7 @@ func (s *Store) setTransactionWithAccumulator(
 				if err != nil {
 					return err
 				}
+				consumedStakeDeltas = append(consumedStakeDeltas, refDeltas...)
 			}
 			// An input this write did not actually spend still names a
 			// credential the full-scan path would have refreshed, so keep it
@@ -1685,10 +1691,13 @@ func (s *Store) setTransactionWithAccumulator(
 			"flushing bounded metadata rows: %w", staged.flushErr,
 		)
 	}
+	if err == nil {
+		s.rememberInsertedOutputs(txn, insertedSpends)
+	}
 	if err != nil || batchedAccumulator == nil {
 		return err
 	}
-	retained := batchedAccumulator.overlay != nil && batchedAccumulator.overlay.retainHistory
+	retained := batchedAccumulator.overlay != nil
 	if !batchedAccumulator.apiRowsOnly() || retained {
 		if err := batchedAccumulator.addStakeDeltas(batchedStakeDeltas, point.Slot); err != nil {
 			return err
@@ -1788,6 +1797,11 @@ func (s *Store) SetGenesisTransaction(
 	outputs []models.Utxo,
 	txn types.Txn,
 ) error {
+	if s.liveUtxo != nil {
+		// The ledger's store: the LedgerDB holds the genesis outputs and
+		// the transaction's index entry.
+		return nil
+	}
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
@@ -1807,10 +1821,8 @@ func (s *Store) SetGenesisTransaction(
 			for i := range outputs {
 				outputs[i].ID = 0
 				outputs[i].TransactionID = &transactionID
-				if s.liveUtxo == nil {
-					if err := s.insertUtxoModel(ctx, db, &outputs[i], true); err != nil {
-						return err
-					}
+				if err := s.insertUtxoModel(ctx, db, &outputs[i], true); err != nil {
+					return err
 				}
 				refs = append(refs, models.NewStakeCredentialRef(
 					outputs[i].CredentialTag,
@@ -1893,13 +1905,11 @@ SELECT tx_id FROM applied_transaction WHERE slot > ?`,
 			}
 			// The delete below removes these transactions' certificate and
 			// context rows, the keys their pool certificates rank by. A
-			// drained pools family has no pool rows to refresh.
+			// store without pool rows has none to refresh.
 			var poolHashes [][]byte
-			if !s.poolsDrained() {
-				poolHashes, err = poolHashesOfTransactions(ctx, db, txIDs)
-				if err != nil {
-					return err
-				}
+			poolHashes, err = poolHashesOfTransactions(ctx, db, txIDs)
+			if err != nil {
+				return err
 			}
 			refs := []models.StakeCredentialRef{}
 			for start := 0; start < len(txIDs); start += 400 {
@@ -1969,6 +1979,9 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 				`DELETE FROM applied_transaction WHERE slot > ?`,
 				slot,
 			); err != nil {
+				return err
+			}
+			if err := s.rollbackContentRows(ctx, db, slot); err != nil {
 				return err
 			}
 			// A rolled-back transaction's identity row is deleted unless
@@ -2191,7 +2204,7 @@ func (s *Store) persistUtxoRelationsWithoutAssets(
 			return err
 		}
 		addressRows.dropUtxoAddress(int64(id))
-		addressRows.add(utxoAddressShape, int64(id), address)
+		queueUtxoAddress(addressRows, int64(id), address, utxo)
 	} else if err := s.persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
 		return err
 	}
@@ -2216,7 +2229,7 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 		if err != nil {
 			return err
 		}
-		rows.add(utxoAddressShape, int64(id), address)
+		queueUtxoAddress(rows, int64(id), address, utxo)
 	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
 		return err
@@ -2350,9 +2363,6 @@ func (s *Store) applyTransactionWithdrawals(
 	txn types.Txn,
 	batchedAccumulator *transactionBatchAccumulator,
 ) error {
-	if s.familyDrained(nodesettings.FamilyAccounts) {
-		return nil
-	}
 	for address, amount := range transaction.Withdrawals() {
 		if address == nil || amount == nil {
 			continue
@@ -2497,7 +2507,6 @@ func recordTransactionLedgerContext(
 	db queryer,
 	transactionID int64,
 	slot uint64,
-	refreshPools bool,
 ) error {
 	value, err := checkedInt64(slot)
 	if err != nil {
@@ -2509,11 +2518,7 @@ INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CO
 		return err
 	}
 	// The context slot is the effective slot of the transaction's pool
-	// certificates, which pool_current_state ranks by. A drained pools
-	// family has no pool rows to refresh.
-	if !refreshPools {
-		return nil
-	}
+	// certificates, which pool_current_state ranks by.
 	return refreshPoolCurrentStateForTransactions(
 		ctx, db, []int64{transactionID},
 	)
@@ -2606,103 +2611,6 @@ func (s *Store) SetLiveUtxoSource(src types.LiveUtxoSource) {
 	s.liveUtxo = src
 }
 
-// liveCollateralFee is collateralFeeForTransaction with each collateral
-// input's amount read from the live UTxO set.
-func (s *Store) liveCollateralFee(
-	txn types.Txn,
-	transaction lcommon.Transaction,
-) (uint64, error) {
-	return collateralFeeWithLookup(transaction, func(
-		input lcommon.TransactionInput,
-	) (string, bool, error) {
-		cbor, ok, err := s.liveUtxo.LiveUtxoCbor(
-			txn, input.Id().Bytes(), input.Index(),
-		)
-		if err != nil || !ok {
-			return "", false, err
-		}
-		out, err := gledger.NewTransactionOutputFromCbor(cbor)
-		if err != nil {
-			return "", false, fmt.Errorf(
-				"decode collateral input %x#%d: %w",
-				input.Id().Bytes(), input.Index(), err,
-			)
-		}
-		return out.Amount().String(), true, nil
-	})
-}
-
 // liveUtxoTxnKey carries, in a write's context, the metadata transaction a
 // live UTxO source answers for.
 type liveUtxoTxnKey struct{}
-
-// liveUtxoPreWriteKey marks a stake refresh made inside a transaction write
-// before the live UTxO set holds that transaction's changes.
-type liveUtxoPreWriteKey struct{}
-
-func liveProducedStakeDeltas(
-	produced []models.Utxo,
-) ([]stakeCredentialDelta, error) {
-	ret := make([]stakeCredentialDelta, 0, len(produced))
-	for i := range produced {
-		m := &produced[i]
-		if len(m.StakingKey) == 0 {
-			continue
-		}
-		gain, err := producedStakeCredentialDelta(
-			m.CredentialTag, m.StakingKey, m.Amount, true,
-		)
-		if err != nil {
-			return nil, err
-		}
-		ret = append(ret, gain)
-	}
-	return ret, nil
-}
-
-// liveConsumedStakeDeltas is the stake each live input of transaction takes
-// from its credential, read from the live UTxO set before transaction
-// applies. An input that is not live changes nothing.
-func (s *Store) liveConsumedStakeDeltas(
-	txn types.Txn,
-	transaction lcommon.Transaction,
-) ([]stakeCredentialDelta, error) {
-	inputs := uniqueConsumedInputs(transaction)
-	ret := make([]stakeCredentialDelta, 0, len(inputs))
-	for _, in := range inputs {
-		cbor, ok, err := s.liveUtxo.LiveUtxoCbor(txn, in.Hash, in.Idx)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			continue
-		}
-		out, err := gledger.NewTransactionOutputFromCbor(cbor)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"decode input %x#%d: %w",
-				in.Hash,
-				in.Idx,
-				err,
-			)
-		}
-		skh := out.Address().StakeKeyHash()
-		if skh == (lcommon.Blake2b224{}) {
-			continue
-		}
-		tag, _ := models.StakeCredentialTagFromAddress(out.Address())
-		amount, err := models.CheckedUint64FromBigInt(out.Amount())
-		if err != nil {
-			return nil, err
-		}
-		gain, err := producedStakeCredentialDelta(
-			tag, skh.Bytes(), types.Uint64(amount), true,
-		)
-		if err != nil {
-			return nil, err
-		}
-		gain.delta = -gain.delta
-		ret = append(ret, gain)
-	}
-	return ret, nil
-}

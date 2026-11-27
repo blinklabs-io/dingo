@@ -17,6 +17,7 @@ package ledger_test
 import (
 	"math"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -33,79 +34,57 @@ func creditRows(rows metadata.FactRows) metadata.FactRows {
 	return projectFactRows(rows, creditColumns)
 }
 
-// With the accounts family drained, the live UTxO set exports the reward
-// credits the metadata store journaled: each source once at its slot, the
-// post-snapshot ones flagged, and a credit written later under an older slot
-// follows the position a reader holds.
-func TestDrainedSetExportsTheRewardCreditJournal(t *testing.T) {
+// The live UTxO set exports the reward credits the ledger journaled: each
+// source once at its slot, the post-snapshot ones flagged, and a credit written
+// later under an older slot follows the position a reader holds.
+func TestSetExportsTheRewardCreditJournal(t *testing.T) {
 	t.Parallel()
-	read := func(
-		drain bool,
-		h *p5Harness,
-		from, through uint64,
-		cursor int64,
-	) (metadata.FactRows, int64) {
-		if drain {
-			rows, next, err := h.scenario.ReadFactRows(
-				metadata.AccountRewardCreditTable, from, through, cursor, 100,
+	var h0 *setHarness
+	out, _ := releasedFactsRun(t, func(h *setHarness) func() []string {
+		h0 = h
+		ref := h.refs[0]
+		h.scenario.Credit(ref, 40)
+		ldb := h.scenario.LedgerDB()
+		txn := ldb.Begin(t.Context(), true)
+		slot := h.scenario.CurrentPoint().Slot
+		require.NoError(t, ldb.AddPostSnapshotAccountRewardByCredential(
+			t.Context(), ref.Tag, ref.Key, 6, slot, []byte{0x32}, txn,
+		))
+		require.NoError(t, txn.Commit())
+		// Read again after the rollback the harness performs next: the
+		// credits it undoes leave the journal.
+		return func() []string {
+			rows, _, err := h0.scenario.ReadFactRows(
+				metadata.AccountRewardCreditTable, 0, math.MaxInt64, 0, 100,
 			)
 			require.NoError(t, err)
-			return creditRows(rows), next
+			lines := renderFactRows(creditRows(rows))
+			slices.Sort(lines)
+			return append([]string{"credits"}, lines...)
 		}
-		store, ok := h.scenario.DB.Metadata().(metadata.FactRowStore)
-		require.True(t, ok)
-		rows, next, err := store.ReadFactRows(
-			t.Context(), metadata.AccountRewardCreditTable, from, through,
-			cursor, 100, nil,
-		)
-		require.NoError(t, err)
-		return creditRows(rows), next
+	})
+	after := func(lines []string) []string {
+		return lines[slices.Index(lines, "credits")+1:]
 	}
-	run := func(drain bool) map[string][]string {
-		var h0 *p5Harness
-		out, _ := allGraduatedRun(t, drain, func(h *p5Harness) func() []string {
-			h0 = h
-			ref := h.refs[0]
-			h.scenario.Credit(ref, 40)
-			ldb := h.scenario.LedgerDB()
-			txn := ldb.Begin(t.Context(), true)
-			slot := h.scenario.CurrentPoint().Slot
-			require.NoError(t, ldb.AddPostSnapshotAccountRewardByCredential(
-				t.Context(), ref.Tag, ref.Key, 6, slot, []byte{0x32}, txn,
-			))
-			require.NoError(t, txn.Commit())
-			// Read again after the rollback the harness performs next: the
-			// credits it undoes leave the journal as they leave the store.
-			return func() []string {
-				rows, _ := read(drain, h0, 0, math.MaxInt64, 0)
-				lines := renderFactRows(rows)
-				slices.Sort(lines)
-				return append([]string{"credits"}, lines...)
-			}
-		})
-		after := func(lines []string) []string {
-			return lines[slices.Index(lines, "credits")+1:]
-		}
-		return map[string][]string{
-			"applied": after(out["applied"]), "rolled back": after(out["rolled back"]),
-		}
-	}
-	want := run(false)
-	require.Len(t, want["applied"], 3,
+	applied := after(out["applied"])
+	require.Len(t, applied, 3,
 		"the single credit, the batch's second source and the post-snapshot credit")
-	require.Empty(t, want["rolled back"], "the rollback undoes the credits")
-	got := run(true)
-	require.Equal(t, want["applied"], got["applied"])
-	require.Equal(t, want["rolled back"], got["rolled back"])
+	flagged := slices.DeleteFunc(slices.Clone(applied), func(l string) bool {
+		return !strings.Contains(l, "post_snapshot=1")
+	})
+	require.Len(t, flagged, 1, "only the post-snapshot credit is flagged")
+	require.Contains(t, flagged[0], "amount=6")
+	require.Contains(t, flagged[0], "tx_hash=32")
+	require.Empty(t, after(out["rolled back"]), "the rollback undoes the credits")
 }
 
 // A reader that holds the position of its last read gets the credit journaled
 // after it even when the credit is dated before everything it read.
-func TestDrainedRewardCreditJournalResumesAfterALateCreditAtAnOldSlot(
+func TestRewardCreditJournalResumesAfterALateCreditAtAnOldSlot(
 	t *testing.T,
 ) {
 	t.Parallel()
-	allGraduatedRun(t, true, func(h *p5Harness) func() []string {
+	releasedFactsRun(t, func(h *setHarness) func() []string {
 		ref := h.refs[0]
 		credit := func(slot uint64, source byte) {
 			ldb := h.scenario.LedgerDB()

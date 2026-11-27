@@ -19,19 +19,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
@@ -39,12 +38,15 @@ import (
 
 var errInjectedBackup = errors.New("injected backup failure")
 
-// backupHooks replaces the blob and metadata backup calls. A nil hook runs
-// the real backup.
+// backupHooks replaces the blob, live UTxO set and metadata backup calls. A
+// nil hook runs the real backup.
 type backupHooks struct {
 	blob     func(ctx context.Context, w io.Writer) error
+	set      func(ctx context.Context, w io.Writer) error
 	metadata func(ctx context.Context, dstPath string) error
-	getTip   func() error
+	// stateRead runs once, on the snapshot's read of the ledger's state.
+	stateRead     func() error
+	stateReadOnce sync.Once
 }
 
 type hookedBlobStore struct {
@@ -59,18 +61,32 @@ func (s hookedBlobStore) Backup(ctx context.Context, w io.Writer) error {
 	return s.BlobStore.(blob.Backuper).Backup(ctx, w)
 }
 
-type hookedMetadataStore struct {
-	metadata.MetadataStore
+// Get is where the ledger's database reads its tip, the snapshot's state
+// read. The hook is armed after setup, so its first call is that read. A
+// blocked hook holds the read; its error is the snapshot's to observe
+// through the deadline, so it is dropped here.
+func (s hookedBlobStore) Get(txn types.Txn, key []byte) ([]byte, error) {
+	if s.hooks.stateRead != nil {
+		s.hooks.stateReadOnce.Do(func() { _ = s.hooks.stateRead() })
+	}
+	return s.BlobStore.Get(txn, key)
+}
+
+type hookedSet struct {
+	store *badgerutxo.Store
 	hooks *backupHooks
 }
 
-func (s hookedMetadataStore) GetTip(txn types.Txn) (ochainsync.Tip, error) {
-	if s.hooks.getTip != nil {
-		if err := s.hooks.getTip(); err != nil {
-			return ochainsync.Tip{}, err
-		}
+func (s hookedSet) Backup(ctx context.Context, w io.Writer) error {
+	if s.hooks.set != nil {
+		return s.hooks.set(ctx, w)
 	}
-	return s.MetadataStore.GetTip(txn)
+	return s.store.Backup(ctx, w)
+}
+
+type hookedMetadataStore struct {
+	metadata.MetadataStore
+	hooks *backupHooks
 }
 
 func (s hookedMetadataStore) BackupTo(ctx context.Context, dst string) error {
@@ -80,7 +96,34 @@ func (s hookedMetadataStore) BackupTo(ctx context.Context, dst string) error {
 	return s.MetadataStore.(metadata.Backuper).BackupTo(ctx, dst)
 }
 
+// hookedSets holds the live UTxO set newHookedDB opened beside each
+// database, which snapshotAt includes in the snapshot.
+var hookedSets sync.Map
+
+// newHookedDB opens a ledger database and the live UTxO set its snapshots
+// carry, with their backups replaced by hooks.
 func newHookedDB(
+	t *testing.T,
+	reg prometheus.Registerer,
+	hooks *backupHooks,
+) *database.Database {
+	t.Helper()
+	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
+		Config: &database.Config{DataDir: t.TempDir(), PromRegistry: reg},
+	})
+	require.NoError(t, err)
+	hookBlobStore(db, hooks)
+	store := openUtxoSetStore(t, t.TempDir())
+	applyBlocks(t, store, 1, 1)
+	hookedSets.Store(db, hookedSet{store: store, hooks: hooks})
+	t.Cleanup(func() { hookedSets.Delete(db) })
+	return db
+}
+
+// newHookedReleasedDB opens a v0.94.2 database, whose snapshot carries its
+// metadata store beside the blob store, with their backups replaced by
+// hooks.
+func newHookedReleasedDB(
 	t *testing.T,
 	reg prometheus.Registerer,
 	hooks *backupHooks,
@@ -89,19 +132,24 @@ func newHookedDB(
 	db, err := dbtest.NewDatabaseWithMetadataWrapper(
 		t,
 		dbtest.Options{Config: &database.Config{
-			DataDir: t.TempDir(), PromRegistry: reg,
+			DataDir:      t.TempDir(),
+			PromRegistry: reg,
+			Role:         database.RoleReleased,
 		}},
 		func(m metadata.MetadataStore) metadata.MetadataStore {
 			return hookedMetadataStore{MetadataStore: m, hooks: hooks}
 		},
 	)
 	require.NoError(t, err)
-	prev, drain := db.SetBlobStore(
+	hookBlobStore(db, hooks)
+	return db
+}
+
+func hookBlobStore(db *database.Database, hooks *backupHooks) {
+	_, release := db.SetBlobStore(
 		hookedBlobStore{BlobStore: db.Blob(), hooks: hooks},
 	)
-	_ = prev
-	drain()
-	return db
+	release()
 }
 
 func snapshotAt(
@@ -110,6 +158,9 @@ func snapshotAt(
 	dir string,
 	opts ...lifecycle.ManifestOption,
 ) (lifecycle.Manifest, error) {
+	if set, ok := hookedSets.Load(db); ok {
+		opts = append(opts, lifecycle.WithUtxoSetBackup(set.(hookedSet)))
+	}
 	return lifecycle.Snapshot(
 		ctx, db, dir, lifecycle.TriggerManual, "test-version",
 		"badger", "sqlite", opts...,
@@ -224,8 +275,9 @@ func TestSnapshotMaxCommitPauseReleasesBarrierBeforeBackupStops(t *testing.T) {
 			_, err := io.WriteString(w, "blob")
 			return err
 		},
-		metadata: func(_ context.Context, dst string) error {
-			return os.WriteFile(dst, []byte("metadata"), 0o600)
+		set: func(_ context.Context, w io.Writer) error {
+			_, err := io.WriteString(w, "set")
+			return err
 		},
 	}
 	db := newHookedDB(t, nil, hooks)
@@ -268,28 +320,49 @@ func TestSnapshotBackupFailureCancelsPeerAndReleasesBarrier(t *testing.T) {
 	t.Parallel()
 
 	peerCancelled := make(chan struct{})
+	releasePeer := make(chan struct{})
+	setFailed := make(chan struct{})
 	hooks := &backupHooks{
 		blob: func(ctx context.Context, _ io.Writer) error {
 			<-ctx.Done()
 			close(peerCancelled)
+			<-releasePeer
 			return ctx.Err()
 		},
-		metadata: func(context.Context, string) error {
+		set: func(context.Context, io.Writer) error {
+			close(setFailed)
 			return errInjectedBackup
 		},
 	}
 	db := newHookedDB(t, nil, hooks)
 	dir := snapshotTestDir(t, "snap")
-	_, err := snapshotAt(
-		t.Context(), db, dir,
-		lifecycle.WithMaxCommitPause(5*time.Second),
+	result := make(chan error, 1)
+	go func() {
+		_, err := snapshotAt(
+			t.Context(), db, dir,
+			lifecycle.WithMaxCommitPause(10*time.Minute),
+		)
+		result <- err
+	}()
+	// The bound covers only the cancellation, measured from the failure: the
+	// pause limit is far beyond it, so only the failed backup can cancel its
+	// peer in time. Setup before the backups start is not timed.
+	testutil.RequireReceive(
+		t, setFailed, testutil.AsyncWait, "the set backup must run",
+	)
+	testutil.RequireReceive(
+		t, peerCancelled, 5*time.Second,
+		"a failed set backup must cancel the blob backup",
+	)
+	testutil.RequireNoReceive(
+		t, result, 100*time.Millisecond,
+		"the snapshot must not return while its cancelled peer still runs",
+	)
+	close(releasePeer)
+	err := testutil.RequireReceive(
+		t, result, testutil.AsyncWait, "the snapshot must return",
 	)
 	require.ErrorIs(t, err, errInjectedBackup)
-	select {
-	case <-peerCancelled:
-	default:
-		t.Fatal("failed metadata backup did not cancel the blob backup")
-	}
 	require.NoDirExists(t, dir)
 	requireBarrierReleased(t, db)
 }
@@ -303,10 +376,11 @@ func TestSnapshotCallerCancellationDoesNotPublishSuccessfulBackups(t *testing.T)
 			_, err := io.WriteString(w, "blob")
 			return err
 		},
-		metadata: func(ctx context.Context, dst string) error {
+		set: func(ctx context.Context, w io.Writer) error {
 			started <- struct{}{}
 			<-ctx.Done()
-			return os.WriteFile(dst, []byte("metadata"), 0o600)
+			_, err := io.WriteString(w, "set")
+			return err
 		},
 	}
 	db := newHookedDB(t, nil, hooks)
@@ -341,7 +415,7 @@ func TestSnapshotReturnsBothBackupFailures(t *testing.T) {
 
 	errBlobBackup := errors.New("injected blob backup failure")
 	errMetadataBackup := errors.New("injected metadata backup failure")
-	db := newHookedDB(t, nil, &backupHooks{
+	db := newHookedReleasedDB(t, nil, &backupHooks{
 		blob: func(context.Context, io.Writer) error {
 			return errBlobBackup
 		},
@@ -391,8 +465,9 @@ func TestSnapshotMaxCommitPauseExcludesBarrierWait(t *testing.T) {
 			_, err := io.WriteString(w, "blob")
 			return err
 		},
-		metadata: func(_ context.Context, dst string) error {
-			return os.WriteFile(dst, []byte("metadata"), 0o600)
+		set: func(_ context.Context, w io.Writer) error {
+			_, err := io.WriteString(w, "set")
+			return err
 		},
 	})
 	writer := database.NewTxn(t.Context(), db, true)
@@ -489,23 +564,35 @@ func TestSnapshotReleasesBarrierWhenBackupFails(t *testing.T) {
 	failBlob := func(context.Context, io.Writer) error {
 		return errInjectedBackup
 	}
+	failSet := func(context.Context, io.Writer) error {
+		return errInjectedBackup
+	}
 	failMetadata := func(context.Context, string) error {
 		return errInjectedBackup
 	}
 	cases := []struct {
-		name  string
-		hooks backupHooks
+		name     string
+		hooks    func() *backupHooks
+		released bool
 	}{
-		{"blob", backupHooks{blob: failBlob}},
-		{"metadata", backupHooks{metadata: failMetadata}},
-		{"both", backupHooks{blob: failBlob, metadata: failMetadata}},
+		{"blob", func() *backupHooks { return &backupHooks{blob: failBlob} }, false},
+		{"set", func() *backupHooks { return &backupHooks{set: failSet} }, false},
+		{"both", func() *backupHooks {
+			return &backupHooks{blob: failBlob, set: failSet}
+		}, false},
+		{"metadata", func() *backupHooks {
+			return &backupHooks{metadata: failMetadata}
+		}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			hooks := tc.hooks
 			reg := prometheus.NewRegistry()
-			db := newHookedDB(t, reg, &hooks)
+			open := newHookedDB
+			if tc.released {
+				open = newHookedReleasedDB
+			}
+			db := open(t, reg, tc.hooks())
 			dir := snapshotTestDir(t, "snap")
 			_, err := snapshotAt(t.Context(), db, dir)
 			require.ErrorIs(t, err, errInjectedBackup)
@@ -533,7 +620,7 @@ func TestSnapshotReleasesBarrierOnCancellation(t *testing.T) {
 		blob: func(ctx context.Context, _ io.Writer) error {
 			return waitForCancellation(ctx)
 		},
-		metadata: func(ctx context.Context, _ string) error {
+		set: func(ctx context.Context, _ io.Writer) error {
 			return waitForCancellation(ctx)
 		},
 	}
@@ -587,9 +674,11 @@ func TestSnapshotRecordsCommitPauseAndBytesMetrics(t *testing.T) {
 	for _, mt := range written.GetMetric() {
 		got[mt.GetLabel()[0].GetValue()] = mt.GetCounter().GetValue()
 	}
+	require.NotZero(t, m.UtxoSetBytes)
 	require.Equal(t, map[string]float64{
 		"blob":     float64(m.BlobBytes),
-		"metadata": float64(m.MetadataBytes),
+		"metadata": 0,
+		"utxoset":  float64(m.UtxoSetBytes),
 	}, got)
 }
 
@@ -655,7 +744,7 @@ func TestSnapshotRejectsSuccessfulBackupAfterPauseDeadline(t *testing.T) {
 		blob: func(ctx context.Context, _ io.Writer) error {
 			return finishAfterDeadline(ctx)
 		},
-		metadata: func(ctx context.Context, _ string) error {
+		set: func(ctx context.Context, _ io.Writer) error {
 			return finishAfterDeadline(ctx)
 		},
 	})
@@ -698,7 +787,7 @@ func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
 	// Database setup must finish before the snapshot operation deadline starts.
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	hooks.getTip = func() error {
+	hooks.stateRead = func() error {
 		close(started)
 		defer close(finished)
 		select {

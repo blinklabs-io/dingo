@@ -54,10 +54,11 @@ type StorageMode string
 const (
 	// StorageModeCore stores only consensus and chain state data.
 	// Witnesses, scripts, datums, redeemers, and tx metadata CBOR
-	// are skipped. Suitable for block producers with no APIs.
+	// are skipped. Current-chain consumers such as UTxO RPC may use it.
 	StorageModeCore StorageMode = "core"
 	// StorageModeAPI stores everything needed for API queries
-	// (blockfrost, utxorpc, mesh, kupo) in addition to core data.
+	// (blockfrost, mesh, kupo, and historical UTxO RPC queries) in
+	// addition to core data.
 	StorageModeAPI StorageMode = "api"
 )
 
@@ -93,10 +94,9 @@ type ImmutableDBConfig struct {
 // observer. When Enabled, Run() subscribes an observer to the
 // node's own EventBus (event.EpochTransitionEventType) that validates each
 // newly closed epoch's committed reward state directly against Koios
-// reference data as the node advances — see internal/koiosparity and
-// ARCHITECTURE.md's "Koios Parity Tracker" section. This is a one-off
-// validation aid, not a permanent subsystem; leave Enabled false for normal
-// node operation.
+// reference data as the node advances — see internal/koiosparity/README.md.
+// This is a one-off validation aid, not a permanent subsystem; leave Enabled
+// false for normal node operation.
 type KoiosParityConfig struct {
 	// Enabled subscribes the observer to epoch.transition when true.
 	Enabled bool
@@ -273,10 +273,11 @@ type Config struct {
 	// malformedPluginSelections are capabilities WithPluginSelection could
 	// not store. The option cannot return an error, so New reports them.
 	malformedPluginSelections []hostplugin.Capability
-	// splitIndexer is set when the IndexerDB holds the API rows.
-	splitIndexer                    bool
+	// hasIndexerDB is set when the IndexerDB holds the API rows.
+	hasIndexerDB                    bool
 	bindAddr                        string
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
+	storageFeatures                 []hostplugin.StorageFeature
 	network                         string
 	tlsCertFilePath, tlsKeyFilePath string
 	// apiConfig mirrors cfg.API -- the shared api.tls policy
@@ -306,7 +307,6 @@ type Config struct {
 	networkMagic                                                                        uint32
 	intersectTip, peerSharing, validateHistorical, strictUtxoValidation                 bool
 	advertiseAddress                                                                    string
-	skipRewardLiveStakeBackfillCheck                                                    bool
 	runMode                                                                             string
 	startEra                                                                            internalconfig.StartEra
 	shutdownTimeout                                                                     time.Duration
@@ -340,6 +340,7 @@ type Config struct {
 	blockProducerPools                                                                  []BlockProducerPool
 	shelleyKESAgentPlaintext                                                            bool
 	shelleyKESAgentProfile                                                              string
+	shelleyKESAgentShared                                                               bool
 	shelleyKESAgentAddresses                                                            []string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
@@ -353,7 +354,6 @@ type Config struct {
 	ledgerPrefetchAheadEnabled                                                          bool
 	ledgerUtxoCheckpointEpochs, ledgerUtxoCheckpointKeep                                int
 	ledgerValidateAheadEnabled                                                          bool
-	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
 	cip0203Enabled                                                                      bool
@@ -683,8 +683,31 @@ func (n *Node) configValidate() error {
 				"WithShelleyKESKey, WithShelleyOperationalCertificate, " +
 				"WithShelleyKESAgentSocket, WithShelleyKESAgentMode, " +
 				"WithShelleyKESAgentRemote, WithShelleyKESAgentPlaintext and " +
-				"WithShelleyKESAgentProfile; set them in each pool",
+				"WithShelleyKESAgentProfile and WithShelleyKESAgentShared; set them in each pool",
 		)
+	}
+	if n.config.cfg.ShelleyKESAgentShared && !sharedKESAgentUsesSignMode(
+		n.config.cfg.ShelleyKESAgentMode,
+		n.config.cfg.ShelleyKESAgentSocket,
+		n.config.cfg.ShelleyKESAgentAddress,
+		n.config.cfg.ShelleyKESAgentAddresses,
+	) {
+		return errors.New(
+			"WithShelleyKESAgentShared requires a KES agent in sign mode",
+		)
+	}
+	for i, pool := range n.config.cfg.BlockProducerPools {
+		if pool.ShelleyKESAgentShared && !sharedKESAgentUsesSignMode(
+			pool.ShelleyKESAgentMode,
+			pool.ShelleyKESAgentSocket,
+			pool.ShelleyKESAgentAddress,
+			pool.ShelleyKESAgentAddresses,
+		) {
+			return fmt.Errorf(
+				"WithShelleyKESAgentShared on blockProducerPools[%d] requires a KES agent in sign mode",
+				i,
+			)
+		}
 	}
 	for name, v := range map[string]int{
 		"barkEventBufferSize":              n.config.cfg.BarkEventBufferSize,
@@ -694,6 +717,11 @@ func (n *Node) configValidate() error {
 		if v < 0 {
 			return fmt.Errorf("invalid %s %d: must not be negative", name, v)
 		}
+	}
+	if errs := internalconfig.ValidateBarkEventSources(
+		n.config.cfg.BarkEventSources,
+	); len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
 		return fmt.Errorf(
@@ -842,6 +870,22 @@ func (n *Node) configValidate() error {
 	return nil
 }
 
+func sharedKESAgentUsesSignMode(
+	mode, socket, address string,
+	addresses []string,
+) bool {
+	hasRemote := address != "" || len(addresses) > 0
+	if mode == "" {
+		switch {
+		case hasRemote:
+			mode = "sign"
+		case socket != "":
+			mode = "serve-key"
+		}
+	}
+	return mode == "sign" && (socket != "" || hasRemote)
+}
+
 // ConfigOptionFunc is a type that represents functions that modify the Connection config
 type ConfigOptionFunc func(*Config)
 
@@ -986,10 +1030,9 @@ func (c *Config) syncCompatFields() {
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
 	c.advertiseAddress = c.cfg.AdvertiseAddress
 	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
-	c.skipRewardLiveStakeBackfillCheck = c.cfg.SkipRewardLiveStakeBackfillCheck
 	// storageMode is the ledger's own store's mode, which is core when the
 	// IndexerDB holds the API rows.
-	c.splitIndexer = c.cfg.SplitIndexer()
+	c.hasIndexerDB = c.cfg.HasIndexerDB()
 	c.runMode, c.startEra, c.storageMode = string(
 		c.cfg.RunMode,
 	), c.cfg.StartEra, StorageMode(
@@ -1110,6 +1153,7 @@ func (c *Config) syncCompatFields() {
 	c.blockProducerPools = slices.Clone(c.cfg.BlockProducerPools)
 	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
 	c.shelleyKESAgentProfile = c.cfg.ShelleyKESAgentProfile
+	c.shelleyKESAgentShared = c.cfg.ShelleyKESAgentShared
 	c.shelleyKESAgentAddresses = slices.Clone(c.cfg.ShelleyKESAgentAddresses)
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
@@ -1122,7 +1166,6 @@ func (c *Config) syncCompatFields() {
 	c.ledgerUtxoCheckpointEpochs = c.cfg.LedgerUtxoCheckpointEpochs
 	c.ledgerUtxoCheckpointKeep = c.cfg.LedgerUtxoCheckpointKeep
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
-	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
 	c.cip0203Enabled = c.cfg.CIP0203Enabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1504,7 +1547,7 @@ func WithUtxorpcTlsKeyFilePath(path string) ConfigOptionFunc {
 	}
 }
 
-// WithUtxorpcPort specifies the port to use for the gRPC API listener. 0 disables the server (default)
+// WithUtxorpcPort specifies the port to use for the gRPC API listener. 0 disables the server.
 func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.API.Utxorpc.Config["port"] = port
@@ -1886,8 +1929,9 @@ func WithTrustedNtCIdleTimeout(d time.Duration) ConfigOptionFunc {
 	}
 }
 
-// WithSkipRewardLiveStakeBackfillCheck skips the startup scan that verifies
-// reward live-stake rows against the full UTxO table.
+// WithSkipRewardLiveStakeBackfillCheck has no effect: the ledger's database
+// keeps no reward live-stake rows to verify. The stake-snapshot provenance
+// check always runs.
 func WithSkipRewardLiveStakeBackfillCheck(skip bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.SkipRewardLiveStakeBackfillCheck = skip
@@ -2010,6 +2054,19 @@ func WithShelleyKESAgentRemote(
 	}
 }
 
+// BarkEventSource names one node whose Bark EventService this node follows.
+type BarkEventSource = internalconfig.BarkEventSource
+
+// WithBarkEventSources makes the node follow the EventService of other nodes
+// and republish what it receives on its own EventBus as bark.remote_event.
+// It is off unless sources are given, and independent of whether this node
+// serves its own EventService.
+func WithBarkEventSources(sources ...BarkEventSource) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkEventSources = cloneBarkEventSources(sources)
+	}
+}
+
 // BlockProducerPool is one pool a block producer forges for: its VRF key and
 // operational certificate files and one KES source.
 type BlockProducerPool = internalconfig.BlockProducerPool
@@ -2019,7 +2076,8 @@ type BlockProducerPool = internalconfig.BlockProducerPool
 // the single-pool WithShelleyVRFKey, WithShelleyKESKey,
 // WithShelleyOperationalCertificate, WithShelleyKESAgentSocket,
 // WithShelleyKESAgentMode, WithShelleyKESAgentRemote,
-// WithShelleyKESAgentPlaintext and WithShelleyKESAgentProfile options; New
+// WithShelleyKESAgentPlaintext, WithShelleyKESAgentProfile and
+// WithShelleyKESAgentShared options; New
 // refuses a config that sets any of them beside the pools.
 // WithShelleyKESAgentSignTimeout and WithShelleyKeyWatchInterval apply to
 // every pool.
@@ -2058,6 +2116,17 @@ func WithShelleyKESAgentAddresses(addresses ...string) ConfigOptionFunc {
 func WithShelleyKESAgentProfile(profile string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ShelleyKESAgentProfile = profile
+	}
+}
+
+// WithShelleyKESAgentShared marks a sign-mode KES agent as shared by another
+// producer for the same pool (CARDANO_SHELLEY_KES_AGENT_SHARED). Shared-agent
+// producers forge only while a live upstream connection is selected, so a
+// disconnected producer cannot consume the agent's first signature for a slot
+// on a stale parent. False preserves solo-producer behavior.
+func WithShelleyKESAgentShared(shared bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentShared = shared
 	}
 }
 
@@ -2257,13 +2326,9 @@ func WithLedgerValidateAheadEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
-// WithLedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
-// that are not validated through the metadata store's batched path in core
-// storage mode, as API storage mode already does. Validated blocks, Leios
-// endorser-block applies, and batches applied with closure context keep the
-// per-transaction path in every storage mode, API mode included. Off by
-// default; the stored state is identical either way. See
-// LedgerStateConfig.ApplyRowBatchingEnabled.
+// WithLedgerApplyRowBatchingEnabled sets a released setting that no longer
+// has an effect: the ledger writes its state to the LedgerDB, which has no
+// batched row path. It is kept so released configurations keep loading.
 func WithLedgerApplyRowBatchingEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerApplyRowBatchingEnabled = enabled
@@ -2697,13 +2762,12 @@ type IndexerWriter interface {
 
 // IndexerWriterDeps are what the node hands an IndexerWriterFactory.
 type IndexerWriterDeps struct {
-	// Consensus is the ledger's database, read for blocks, the tip and the
-	// ledger facts. Indexer is the IndexerDB's own database.
+	// Consensus is the ledger's database, read for blocks and the tip.
+	// Indexer is the IndexerDB's own database.
 	Consensus, Indexer *database.Database
-	// FactRows, when set, supplies the ledger-fact rows the writer copies,
-	// for a ledger that keeps them outside the consensus metadata store. It
-	// defaults to that store.
-	FactRows     metadata.FactRowReader
+	// FactRows supplies the ledger facts the writer copies. A writer that
+	// only rolls the IndexerDB back needs none.
+	FactRows     metadata.LedgerFacts
 	NodeConfig   *cardano.CardanoNodeConfig
 	Logger       *slog.Logger
 	PromRegistry prometheus.Registerer
@@ -2711,14 +2775,17 @@ type IndexerWriterDeps struct {
 	SlotTime                   func(uint64) (time.Time, error)
 	MaxReadyLagBlocks          uint64
 	DelegatorInactivityEnabled bool
+	// Moved, when set, is called after each pass in which the writer moved
+	// its tip, forward or back. It must not block.
+	Moved func()
 }
 
-// IndexerWriterFactory builds the writer of a split layout. It is a seam
+// IndexerWriterFactory builds the writer of an IndexerDB layout. It is a seam
 // because the writer's block indexing lives in a package that imports this
 // one.
 type IndexerWriterFactory func(IndexerWriterDeps) (IndexerWriter, error)
 
-// WithIndexerWriterFactory sets the writer a split layout runs.
+// WithIndexerWriterFactory sets the writer an IndexerDB layout runs.
 func WithIndexerWriterFactory(f IndexerWriterFactory) ConfigOptionFunc {
 	return func(c *Config) {
 		if c.cfg == nil {
@@ -2729,7 +2796,7 @@ func WithIndexerWriterFactory(f IndexerWriterFactory) ConfigOptionFunc {
 }
 
 // WithIndexerMaxReadyLagBlocks sets how far behind the ledger tip the
-// IndexerDB may be while current-state endpoints are ready (split layout).
+// IndexerDB may be while current-state endpoints are ready (IndexerDB layout).
 func WithIndexerMaxReadyLagBlocks(blocks uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		if c.cfg == nil {
@@ -2911,6 +2978,26 @@ func (c *Config) BarkEventNodeID() string {
 	return c.cfg.BarkEventNodeID
 }
 
+// BarkEventSources returns the nodes whose EventService this node follows.
+func (c *Config) BarkEventSources() []BarkEventSource {
+	return cloneBarkEventSources(c.cfg.BarkEventSources)
+}
+
+// cloneBarkEventSources copies the filter slices as well as the sources, so
+// a caller's slice cannot change this node's filters after the fact.
+func cloneBarkEventSources(sources []BarkEventSource) []BarkEventSource {
+	if sources == nil {
+		return nil
+	}
+	out := make([]BarkEventSource, len(sources))
+	for i, src := range sources {
+		src.EventTypes = slices.Clone(src.EventTypes)
+		src.OriginNodeIDs = slices.Clone(src.OriginNodeIDs)
+		out[i] = src
+	}
+	return out
+}
+
 // BarkLifecycleOperatorCertificateFingerprints retains the legacy input.
 // It does not enable authentication or authorization.
 func (c *Config) BarkLifecycleOperatorCertificateFingerprints() []string {
@@ -3060,7 +3147,8 @@ func (c *Config) DatabaseQueueSize() int {
 	return c.cfg.DatabaseQueueSize
 }
 
-// BackfillBatchSize returns the batch size for database backfill operations.
+// BackfillBatchSize returns the configured backfillBatchSize. The setting has
+// no effect; it is kept so existing configurations keep loading.
 func (c *Config) BackfillBatchSize() int {
 	return c.cfg.BackfillBatchSize
 }
@@ -3408,8 +3496,8 @@ func (c *Config) LedgerValidateAheadEnabled() bool {
 	return c.cfg.LedgerValidateAheadEnabled
 }
 
-// LedgerApplyRowBatchingEnabled returns whether blocks that are not validated
-// are applied through the batched metadata write path.
+// LedgerApplyRowBatchingEnabled returns the released row-batching setting,
+// which no longer has an effect.
 func (c *Config) LedgerApplyRowBatchingEnabled() bool {
 	return c.cfg.LedgerApplyRowBatchingEnabled
 }

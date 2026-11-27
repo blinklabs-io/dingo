@@ -288,6 +288,7 @@ func TestLedgerProcessBlockExtendsPlutusForecastFromBlockSlot(t *testing.T) {
 			db := newTestDB(t)
 			ls := mainnetForecastLedgerState(t, test.ledgerEra)
 			ls.db = db
+			fxAttachLedgerDB(t, ls)
 
 			// Premise: the HFC summary anchored at the real predecessor ends
 			// before the transaction's bound. If it stops doing so, this test
@@ -626,6 +627,7 @@ func TestTxValidationExtendsAlonzoPlutusForecastFromTip(t *testing.T) {
 						_ func() bool,
 						_ func(func() error) (bool, error),
 						_ func([]models.UtxoId) ([]models.Utxo, error),
+						_ func([]byte) (bool, error),
 					) error {
 						return validate(tx, nil, nil, nil)
 					},

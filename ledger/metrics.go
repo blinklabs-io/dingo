@@ -227,11 +227,6 @@ type stateMetrics struct {
 	// header whose nonce or snapshot is not yet available) and the deferred
 	// marker is recorded.
 	headerVerificationDeferred prometheus.Counter
-	// Rows the consumed-UTxO sweep hard-deleted, summed across runs.
-	consumedUtxoSweepRowsDeleted prometheus.Counter
-	// The consumed-UTxO prune floor slot most recently persisted by the
-	// sweep. It only rises while the node runs.
-	consumedUtxoPruneFloorSlot prometheus.Gauge
 	// Incremented when a chainsync peer asks for a rollback we refuse, but
 	// its own advertised tip is a strict ancestor of ours on our primary
 	// chain: the peer is behind, not forked, and is kept attached instead
@@ -256,13 +251,11 @@ type stateMetrics struct {
 	// means local ledger validation is diverging from the network (e.g. a
 	// false-positive validation rejection), not a peer/fork problem.
 	atTipRecoveryNonConverging prometheus.Counter
-	// Incremented when an at-tip recovery rewind target falls below the
-	// consumed-UTxO prune floor and is clamped to the ledger tip. The sweep
-	// hard-deletes spent rows, and rollback restores them with an UPDATE, so
-	// a rewind past the floor cannot rebuild the live UTxO set it implies. A
-	// rising value means recovery is asking for rewinds deeper than local
-	// history can support.
-	atTipRecoveryPruneFloorClamped prometheus.Counter
+	// Incremented when an at-tip recovery rewind target falls below the live
+	// UTxO set's journal and is clamped to the ledger tip. A rising value
+	// means recovery is asking for rewinds deeper than local history can
+	// support.
+	atTipRecoveryJournalFloorClamped prometheus.Counter
 	// Incremented when an at-tip recovery rewind target would cross the
 	// most recent epoch boundary and is clamped to the first block at or
 	// after it, so the completed rollover is not discarded and recomputed.
@@ -343,11 +336,6 @@ type stateMetrics struct {
 	// value on a Mithril-bootstrapped node explains a stake shortfall; a
 	// rising value on any node is a live divergence from the network.
 	skippedStakeRewardRounds prometheus.Counter
-	// Incremented each time a trusted batch's UTxO overlay hit a write
-	// conflict and the batch was applied again on the per-row path. Each
-	// increment is a batch that ran at the slower per-row speed; a rising
-	// value means the store holds rows the overlay does not expect.
-	trustedBatchOverlayFallbacks prometheus.Counter
 	// Incremented each time GetStakeDistribution or GetPoolDistr2 omits a
 	// pool that holds stake at the queried snapshot but has no resolvable
 	// registration/VRF key hash on record. This is a deliberate fallback
@@ -819,53 +807,11 @@ func (m *stateMetrics) incHeaderVerificationDeferred() {
 	m.headerVerificationDeferred.Inc()
 }
 
-// observeConsumedUtxoSweep records one consumed-UTxO sweep run that
-// persisted floor and hard-deleted rows rows.
-func (m *stateMetrics) observeConsumedUtxoSweep(floor uint64, rows int) {
-	if m == nil {
-		return
-	}
-	if m.consumedUtxoPruneFloorSlot != nil {
-		m.consumedUtxoPruneFloorSlot.Set(float64(floor))
-	}
-	if m.consumedUtxoSweepRowsDeleted != nil && rows > 0 {
-		m.consumedUtxoSweepRowsDeleted.Add(float64(rows))
-	}
-}
-
-// observeConsumedUtxoSweepAt exports a sweep's rows and, when the durable
-// floor was read back (floorErr nil), the floor gauge. A failed read leaves
-// the gauge as it was: the sweep's candidate can sit below the durable floor,
-// and the gauge must never report a lower rollback boundary.
-func (m *stateMetrics) observeConsumedUtxoSweepAt(
-	floor uint64,
-	floorErr error,
-	rows int,
-) {
-	if m == nil {
-		return
-	}
-	if floorErr == nil {
-		m.observeConsumedUtxoSweep(floor, rows)
-		return
-	}
-	if m.consumedUtxoSweepRowsDeleted != nil && rows > 0 {
-		m.consumedUtxoSweepRowsDeleted.Add(float64(rows))
-	}
-}
-
 func (m *stateMetrics) incLeaderThresholdRejections() {
 	if m == nil || m.leaderThresholdRejections == nil {
 		return
 	}
 	m.leaderThresholdRejections.Inc()
-}
-
-func (m *stateMetrics) incTrustedBatchOverlayFallbacks() {
-	if m == nil || m.trustedBatchOverlayFallbacks == nil {
-		return
-	}
-	m.trustedBatchOverlayFallbacks.Inc()
 }
 
 func (m *stateMetrics) incSkippedStakeRewardRounds() {
@@ -1278,18 +1224,6 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "block headers whose stateful verification was deferred until ledger apply and a deferred marker recorded",
 		},
 	)
-	m.consumedUtxoSweepRowsDeleted = promautoFactory.NewCounter(
-		prometheus.CounterOpts{
-			Name: "dingo_ledger_consumed_utxo_sweep_rows_deleted_total",
-			Help: "spent UTxO rows hard-deleted by the consumed-UTxO sweep",
-		},
-	)
-	m.consumedUtxoPruneFloorSlot = promautoFactory.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "dingo_ledger_consumed_utxo_prune_floor_slot",
-			Help: "slot of the consumed-UTxO prune floor most recently persisted by the sweep; rollbacks below it are refused",
-		},
-	)
 	m.chainsyncBehindPeers = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_chainsync_behind_peers_total",
@@ -1314,10 +1248,10 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "times at-tip validation recovery held at the ledger tip instead of rewinding the primary chain deeper, because a descending series of distinct failures indicated local validation divergence (operator intervention required)",
 		},
 	)
-	m.atTipRecoveryPruneFloorClamped = promautoFactory.NewCounter(
+	m.atTipRecoveryJournalFloorClamped = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_attip_recovery_prune_floor_clamped_total",
-			Help: "times an at-tip validation recovery rewind target below the consumed-UTxO prune floor was clamped to the ledger tip, because UTxOs consumed above that floor were hard-deleted and cannot be restored by a rewind",
+			Help: "times an at-tip validation recovery rewind target below the live UTxO set journal was clamped to the ledger tip, because the set cannot roll back past its journal",
 		},
 	)
 	m.atTipRecoveryEpochBoundaryClamped = promautoFactory.NewCounter(
@@ -1411,12 +1345,6 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_skipped_stake_reward_rounds_total",
 			Help: "epoch-boundary reward rounds skipped for want of their inputs; each one leaves reward balances and the leadership stake distribution permanently short by that epoch's rewards, which makes the node reject canonical blocks near the leader-eligibility threshold",
-		},
-	)
-	m.trustedBatchOverlayFallbacks = promautoFactory.NewCounter(
-		prometheus.CounterOpts{
-			Name: "dingo_ledger_trusted_batch_overlay_fallbacks_total",
-			Help: "trusted batches whose batch UTxO overlay hit a write conflict and were applied again on the per-row path",
 		},
 	)
 	m.poolStakeDistributionOmittedPools = promautoFactory.NewCounter(

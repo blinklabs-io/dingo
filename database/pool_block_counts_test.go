@@ -22,7 +22,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,8 +35,7 @@ func anchoredBlockCountFixture(
 	withImported bool,
 ) (*database.Database, lcommon.PoolKeyHash) {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
+	db := newIndexerDB(t)
 	for _, epoch := range []struct{ id, start uint64 }{{1, 0}, {2, 100}} {
 		require.NoError(t, db.SetEpoch(
 			epoch.start, epoch.id, nil, nil, nil, nil,
@@ -122,8 +120,7 @@ func TestMergeImportedPoolBlockCountsEpochCoverage(t *testing.T) {
 
 func TestMergeImportedPoolBlockCountsRejectsRecordedEmptyAnchor(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
+	db := newIndexerDB(t)
 	_, _, known, err := database.MergeImportedPoolBlockCounts(
 		db.Metadata(),
 		nil,

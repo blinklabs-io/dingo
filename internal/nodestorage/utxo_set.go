@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Package nodestorage composes the storage a ledger runs on: the live UTxO
-// set beside a database, its reconcile with the ledger, the ledger-state
-// drain, and the ImmutableDB configuration. The node and `dingo load` both
+// set beside a database, its reconcile with the ledger, the v0.94.2
+// migration, and the ImmutableDB configuration. The node and `dingo load` both
 // build on it, so a database either of them wrote is one the other opens.
 package nodestorage
 
@@ -28,14 +28,10 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/dingo/ledgerstate"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -48,7 +44,7 @@ type UtxoSetConfig struct {
 	Logger            *slog.Logger
 	Registerer        prometheus.Registerer
 	CardanoNodeConfig *cardano.CardanoNodeConfig
-	// RetainRewardRecords is set on the split layout; see
+	// RetainRewardRecords is set with an IndexerDB; see
 	// utxoset.Config.RetainRewardRecords.
 	RetainRewardRecords bool
 	// CheckpointKeep is how many checkpoints the set retains.
@@ -93,9 +89,7 @@ func OpenUtxoSet(cfg UtxoSetConfig) (*utxoset.Set, string, error) {
 		Logger:              logger,
 		Registerer:          cfg.Registerer,
 		HistorySlots:        history,
-		Only:                true,
 		RetainRewardRecords: cfg.RetainRewardRecords,
-		Authoritative:       true,
 		// The set is the only copy of the ledger state, so it needs a
 		// checkpoint to recover from.
 		CheckpointDir:  utxoset.CheckpointDirFor(dataDir),
@@ -115,98 +109,34 @@ func OpenUtxoSet(cfg UtxoSetConfig) (*utxoset.Set, string, error) {
 type Reconcile struct {
 	DB *database.Database
 	// Set is the open live UTxO set; nil fails any step that needs it.
-	Set *utxoset.Set
-	// DataDir is the data directory whose volume a migration must fit in.
-	DataDir string
-	Logger  *slog.Logger
-	// ResolveRewardInputs completes the reward stake inputs a deferred write
-	// left partial, from the metadata store's UTxO and delegation history. It
-	// runs before the UTxO rows move into the set, which deletes that history;
-	// nil resolves nothing.
-	ResolveRewardInputs func(context.Context, ledgerdb.LedgerDB) error
+	Set    *utxoset.Set
+	Logger *slog.Logger
 	// FinishImport completes a pending import of ledger state into the set;
-	// nil uses FinishDrainedImport.
+	// nil does nothing, and the set refuses to reconcile while one is
+	// pending.
 	FinishImport func(context.Context) error
-	// Publish receives the drained families when they are read and each
-	// time the drain latches one, so readers stop falling back to rows that
-	// were deleted.
-	Publish func(nodesettings.FamilyMask)
 	// Resume rolls the ledger back to the set's tip; see utxoset.ResumeFunc.
 	Resume utxoset.ResumeFunc
-	// Reconciled, when set, runs once the set equals the ledger and before
-	// the drain.
+	// Reconciled, when set, runs once the set equals the ledger.
 	Reconciled func(context.Context) error
-	// Guard, when non-nil, is armed for every drained family.
-	Guard statedrain.Guard
 	// CardanoNodeConfig names the zero-coin Byron genesis outputs Run
-	// removes from the metadata store and the live UTxO set; nil removes
-	// none.
+	// removes from the live UTxO set; nil removes none.
 	CardanoNodeConfig *cardano.CardanoNodeConfig
-	// RewindBlocks is the security parameter: how many blocks below its tip
-	// a database that holds its ledger state in the metadata store is
-	// reverted before the state moves into the set. Zero moves it at the tip,
-	// which leaves a set that cannot roll back below it.
-	RewindBlocks uint64
-	// DelegatorInactivityEnabled and DelegatorInactivity are the CIP-0163
-	// settings the rewind recomputes account expirations with.
-	DelegatorInactivityEnabled bool
-	DelegatorInactivity        uint64
-	// DeferUtxoRowCleanup lets the node become available after the verified
-	// live set is authoritative. CleanupMigratedUtxoRows removes the redundant
-	// SQL rows on a managed background worker.
-	DeferUtxoRowCleanup bool
 }
 
-// Run finishes a pending import, moves a metadata UTxO set into the live UTxO
-// set, marks the database as holding its UTxO set only there, makes the set
-// equal to the ledger, and drains the graduated ledger-state families from
-// the metadata store. It runs after database recovery and before the ledger
-// writes its genesis or applies a block, so a new database never holds those
-// families in SQL. A caller may defer deletion of redundant migration-source
-// UTxO rows until its managed services are available.
+// Run finishes a pending import and makes the set equal to the ledger. It
+// runs after database recovery and before the ledger writes its genesis or
+// applies a block. A v0.94.2 database's state was moved into the set by
+// ReleasedMigration before the database opened.
 func (r Reconcile) Run(ctx context.Context) error {
 	zero, err := ledger.ZeroValueByronGenesisOutputs(r.CardanoNodeConfig)
 	if err != nil {
 		return fmt.Errorf("derive zero-value Byron genesis outputs: %w", err)
 	}
-	// Before anything copies the metadata store's outputs into the live UTxO
-	// set.
-	if err := ledger.RepairZeroValueByronGenesis(
-		ctx, r.DB, zero, r.Logger, nil,
-	); err != nil {
-		return err
-	}
-	finish := r.FinishImport
-	if finish == nil {
-		finish = func(ctx context.Context) error {
-			return FinishDrainedImport(ctx, r.DB, r.Set, r.Logger)
+	if r.FinishImport != nil {
+		if err := r.FinishImport(ctx); err != nil {
+			return err
 		}
-	}
-	if err := finish(ctx); err != nil {
-		return err
-	}
-	if err := r.rewindMetadataLedger(ctx); err != nil {
-		return err
-	}
-	if err := r.resolveRewardInputs(ctx); err != nil {
-		return err
-	}
-	if err := migrateUtxoRows(
-		ctx, r.DB, r.Set, r.DataDir, r.Logger, r.DeferUtxoRowCleanup,
-	); err != nil {
-		return err
-	}
-	if err := CheckUtxoSetOnly(r.DB); err != nil {
-		return err
-	}
-	// Published before the reconcile, which can roll the SQL state back, so
-	// a family whose drain was interrupted is already served from the set.
-	mask, err := r.DB.EffectiveDrainedFamilies(ctx)
-	if err != nil {
-		return err
-	}
-	if r.Publish != nil {
-		r.Publish(mask)
 	}
 	if r.Set != nil {
 		if err := r.Set.Reconcile(
@@ -217,15 +147,15 @@ func (r Reconcile) Run(ctx context.Context) error {
 	}
 	// After the set is reconciled, which can restore a checkpoint older than
 	// the repair, and before anything reads it.
-	if err := r.removeLiveSetZeroValueByronGenesis(zero); err != nil {
+	if err := removeLiveSetZeroValueByronGenesis(
+		r.Set, r.Logger, zero,
+	); err != nil {
 		return err
 	}
 	if r.Reconciled != nil {
-		if err := r.Reconciled(ctx); err != nil {
-			return err
-		}
+		return r.Reconciled(ctx)
 	}
-	return DrainLedgerState(ctx, r.DB, r.Set, r.Logger, r.Guard, r.Publish)
+	return nil
 }
 
 // removeLiveSetZeroValueByronGenesis removes the zero-coin Byron genesis
@@ -235,21 +165,23 @@ func (r Reconcile) Run(ctx context.Context) error {
 // checkpoint that predates the removal, and a mark would then outlive the
 // outputs it vouched for. An output the set does not hold, because it was
 // spent, is not touched, and neither is one with coin.
-func (r Reconcile) removeLiveSetZeroValueByronGenesis(
+func removeLiveSetZeroValueByronGenesis(
+	set *utxoset.Set,
+	logger *slog.Logger,
 	zero ledger.ZeroValueByronOutputs,
 ) error {
-	if r.Set == nil || len(zero.Refs) == 0 {
+	if set == nil || len(zero.Refs) == 0 {
 		return nil
 	}
-	removed, err := r.Set.RemoveZeroCoinOutputs(zero.Refs)
+	removed, err := set.RemoveZeroCoinOutputs(zero.Refs)
 	if err != nil {
 		return fmt.Errorf(
 			"remove zero-value Byron genesis outputs from the live UTxO set: %w",
 			err,
 		)
 	}
-	if removed > 0 && r.Logger != nil {
-		r.Logger.Info(
+	if removed > 0 && logger != nil {
+		logger.Info(
 			"removed zero-value Byron genesis outputs from the live UTxO set",
 			"component", "node",
 			"outputs", removed,
@@ -258,43 +190,8 @@ func (r Reconcile) removeLiveSetZeroValueByronGenesis(
 	return nil
 }
 
-// FinishDrainedImport completes an import of ledger state into the live UTxO
-// set that a crash left after its SQL rows were written and before the set
-// loaded them. An import that is still writing, which leaves sync_status set,
-// is refused: only the import that began it can finish it.
-func FinishDrainedImport(
-	ctx context.Context,
-	db *database.Database,
-	set *utxoset.Set,
-	logger *slog.Logger,
-) error {
-	_, pending, err := db.DrainedImportPending(ctx)
-	if err != nil || !pending {
-		return err
-	}
-	status, err := db.GetSyncState("sync_status", nil)
-	if err != nil {
-		return fmt.Errorf("read sync status: %w", err)
-	}
-	if status != "" {
-		return database.ErrDrainedImportPending
-	}
-	if set == nil {
-		return errors.New(
-			"an import of ledger state into the live UTxO set is pending and the set is not open",
-		)
-	}
-	if logger != nil {
-		logger.Info(
-			"finishing an import of ledger state into the live UTxO set",
-			"component", "node",
-		)
-	}
-	return ledgerstate.FinishDrainedImport(ctx, db, set)
-}
-
 // SecurityParam returns the Shelley genesis security parameter, the value of
-// Reconcile.RewindBlocks, or zero when it is unknown.
+// ReleasedMigration.RewindBlocks, or zero when it is unknown.
 func SecurityParam(cfg *cardano.CardanoNodeConfig) uint64 {
 	if cfg == nil {
 		return 0
@@ -320,12 +217,16 @@ const MigrationRewindSyncKey = "ledger.utxo_set_migration.rewound"
 // set that cannot follow such a rollback. The metadata store can: its rows
 // carry the slots they were added and deleted at. The blocks stay, and the
 // ledger applies them again through the set, which journals each.
-func (r Reconcile) rewindMetadataLedger(ctx context.Context) error {
-	marked, err := r.DB.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+func (m ReleasedMigration) rewindMetadataLedger(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+) error {
+	marked, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read UTxO set mode: %w", err)
 	}
-	rewound, err := r.DB.GetSyncState(MigrationRewindSyncKey, nil)
+	rewound, err := db.GetSyncState(MigrationRewindSyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read migration rewind mark: %w", err)
 	}
@@ -334,30 +235,26 @@ func (r Reconcile) rewindMetadataLedger(ctx context.Context) error {
 			return nil
 		}
 		// The move has finished, so nothing reads the mark again.
-		if err := r.DB.DeleteSyncState(
+		if err := db.DeleteSyncState(
 			MigrationRewindSyncKey, nil,
 		); err != nil {
 			return fmt.Errorf("clear migration rewind mark: %w", err)
 		}
 		return nil
 	}
-	if rewound != "" || r.RewindBlocks == 0 {
+	if rewound != "" || m.RewindBlocks == 0 {
 		return nil
 	}
 	// A move an earlier start began has built or verified the set at the
 	// tip it found; reverting the store now would only make them differ.
-	progress, err := r.DB.GetSyncState(utxoset.MigrationSyncKey, nil)
+	progress, err := db.GetSyncState(utxoset.MigrationSyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read UTxO set migration progress: %w", err)
 	}
-	drained, err := r.DB.EffectiveDrainedFamilies(ctx)
-	if err != nil {
-		return err
-	}
-	if progress != "" || drained != 0 {
+	if progress != "" {
 		return nil
 	}
-	tip, err := r.DB.GetTip(nil)
+	tip, err := db.GetTip(nil)
 	if err != nil {
 		return fmt.Errorf("read tip: %w", err)
 	}
@@ -365,10 +262,10 @@ func (r Reconcile) rewindMetadataLedger(ctx context.Context) error {
 		return nil
 	}
 	target, reverted, err := lifecycle.RewindMetadata(
-		ctx, r.DB, r.RewindBlocks,
-		r.DelegatorInactivityEnabled, r.DelegatorInactivity,
+		ctx, db, m.RewindBlocks,
+		m.DelegatorInactivityEnabled, m.DelegatorInactivity,
 		func(txn *database.Txn) error {
-			return r.DB.SetSyncState(MigrationRewindSyncKey, "1", txn)
+			return db.SetSyncState(MigrationRewindSyncKey, "1", txn)
 		},
 	)
 	if err != nil {
@@ -377,8 +274,8 @@ func (r Reconcile) rewindMetadataLedger(ctx context.Context) error {
 			err,
 		)
 	}
-	if reverted && r.Logger != nil {
-		r.Logger.Info(
+	if reverted {
+		logger.Info(
 			"reverted the metadata store below its tip; the ledger applies the blocks after it again through the live UTxO set",
 			"component", "node",
 			"tip_slot", tip.Point.Slot,
@@ -389,34 +286,32 @@ func (r Reconcile) rewindMetadataLedger(ctx context.Context) error {
 	return nil
 }
 
-// resolveRewardInputs runs ResolveRewardInputs while the metadata store still
-// holds its UTxO rows and its reward families, that is before the move into
-// the set marks the database or drains a family.
-func (r Reconcile) resolveRewardInputs(ctx context.Context) error {
-	if r.ResolveRewardInputs == nil {
-		return nil
-	}
-	marked, err := r.DB.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+// resolveRewardInputs runs ResolveRewardInputs before the move into the set
+// marks the database.
+func (m ReleasedMigration) resolveRewardInputs(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+) error {
+	marked, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read UTxO set mode: %w", err)
 	}
-	drained, err := r.DB.EffectiveDrainedFamilies(ctx)
-	if err != nil {
-		return err
-	}
-	if marked != "" || drained != 0 {
+	if marked != "" {
 		return nil
 	}
-	if err := r.ResolveRewardInputs(ctx, dbadapter.New(r.DB)); err != nil {
+	if err := ledger.ResolveReleasedRewardStakeInputs(
+		ctx, dbadapter.New(db), logger,
+		m.DelegatorInactivityEnabled, m.DelegatorInactivity,
+	); err != nil {
 		return fmt.Errorf("resolve pending reward stake inputs: %w", err)
 	}
 	return nil
 }
 
-// MigrateUtxoRows moves a database that holds its UTxO set in the metadata
-// store into the live UTxO set, or finishes a move an earlier start began. It
-// runs before CheckUtxoSetOnly, which finds the database marked once the move
-// has finished.
+// MigrateUtxoRows copies the UTxO set of a v0.94.2 database, open with its
+// metadata store, into the live UTxO set, or finishes a copy an earlier start
+// began.
 func MigrateUtxoRows(
 	ctx context.Context,
 	db *database.Database,
@@ -424,18 +319,7 @@ func MigrateUtxoRows(
 	dataDir string,
 	logger *slog.Logger,
 ) error {
-	return migrateUtxoRows(ctx, db, set, dataDir, logger, false)
-}
-
-func migrateUtxoRows(
-	ctx context.Context,
-	db *database.Database,
-	set *utxoset.Set,
-	dataDir string,
-	logger *slog.Logger,
-	deferCleanup bool,
-) error {
-	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	marked, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read UTxO set mode: %w", err)
 	}
@@ -471,50 +355,28 @@ func migrateUtxoRows(
 		ctx,
 		dbadapter.New(db),
 		utxoset.MigrationEnv{
-			Store: DrainStore{db},
+			Store: releasedStore{db},
 			Mark: func(context.Context) error {
-				return db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil)
+				return db.SetSyncState(database.UtxoSetMigratedSyncKey, "1", nil)
 			},
 			Marked: func(context.Context) (bool, error) {
-				v, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+				v, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
 				return v != "", err
 			},
 			FreeBytes: func() (uint64, error) {
 				return utxoset.AvailableDiskBytes(dataDir)
 			},
-			DeferCleanup: deferCleanup,
-			Logger:       logger,
+			Logger: logger,
 		},
 	)
 }
 
-// CleanupMigratedUtxoRows removes redundant SQL UTxO rows after a deferred
-// migration cutover. It is safe to call when no cleanup is pending.
-func CleanupMigratedUtxoRows(
-	ctx context.Context,
-	db *database.Database,
-	set *utxoset.Set,
-	logger *slog.Logger,
-) error {
-	if set == nil {
-		return errors.New("the live UTxO set is not open")
-	}
-	return set.CleanupMigratedSQLRows(ctx, utxoset.MigrationEnv{
-		Store: DrainStore{db},
-		Marked: func(context.Context) (bool, error) {
-			v, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
-			return v != "", err
-		},
-		Logger: logger,
-	})
-}
-
-// CheckUtxoSetOnly marks a database at origin as holding its UTxO set only in
-// the live UTxO set. A database with a metadata UTxO set is marked by
+// CheckUtxoSetMigrated marks a database at origin as holding its UTxO set only
+// in the live UTxO set. A database with a metadata UTxO set is marked by
 // MigrateUtxoRows, which runs first, so one still unmarked past origin has a
 // metadata UTxO set that was not moved.
-func CheckUtxoSetOnly(db *database.Database) error {
-	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+func CheckUtxoSetMigrated(db *database.Database) error {
+	marked, err := db.GetSyncState(database.UtxoSetMigratedSyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read UTxO set mode: %w", err)
 	}
@@ -530,7 +392,7 @@ func CheckUtxoSetOnly(db *database.Database) error {
 			"found a metadata UTxO set that was not moved into the live UTxO set",
 		)
 	}
-	if err := db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil); err != nil {
+	if err := db.SetSyncState(database.UtxoSetMigratedSyncKey, "1", nil); err != nil {
 		return fmt.Errorf("record UTxO set mode: %w", err)
 	}
 	return nil
@@ -566,4 +428,35 @@ func UpdateAnchor(
 		return
 	}
 	set.UpdateAnchor(point)
+}
+
+// releasedStore adapts a v0.94.2 database to utxoset.MigrationStore.
+type releasedStore struct {
+	*database.Database
+}
+
+func (s releasedStore) SQLTip(context.Context) (ocommon.Point, error) {
+	tip, err := s.GetTip(nil)
+	if err != nil {
+		return ocommon.Point{}, err
+	}
+	return tip.Point, nil
+}
+
+func (s releasedStore) GetSyncState(
+	_ context.Context,
+	key string,
+) (string, error) {
+	return s.Database.GetSyncState(key, nil)
+}
+
+func (s releasedStore) SetSyncState(
+	_ context.Context,
+	key, value string,
+) error {
+	return s.Database.SetSyncState(key, value, nil)
+}
+
+func (s releasedStore) DeleteSyncState(_ context.Context, key string) error {
+	return s.Database.DeleteSyncState(key, nil)
 }

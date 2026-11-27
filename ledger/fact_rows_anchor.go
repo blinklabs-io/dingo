@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -49,9 +48,6 @@ type ImportBaselinePager interface {
 		after *models.StakeCredentialRef,
 		limit int,
 	) ([]ImportBaseline, *models.StakeCredentialRef, error)
-	// ImportBaselineDelegationsLost reports baselines whose delegations the
-	// set never held and the metadata store drained.
-	ImportBaselineDelegationsLost() (bool, error)
 }
 
 // RewardRecordStreamer serves the reward records a live UTxO set holds
@@ -60,105 +56,36 @@ type RewardRecordStreamer interface {
 	EachRewardRecordIn(from, through uint64, fn func(RewardRecord) error) error
 }
 
-// anchorFamilyDrained reports whether the metadata store no longer holds f's
-// rows. The writer asks before the ledger has started, when the ledger has not
-// yet published the families the database records as drained, so the database
-// is asked as well.
-func (ls *LedgerState) anchorFamilyDrained(
-	ctx context.Context,
-	f nodesettings.Family,
-) (bool, error) {
-	if ls.familyDrained(f) {
-		return true, nil
-	}
-	mask, err := ls.db.EffectiveDrainedFamilies(ctx)
-	if err != nil {
-		return false, fmt.Errorf("read drained ledger families: %w", err)
-	}
-	return mask.Has(f), nil
-}
-
-// anchorStore is the ledger metadata store's anchor capability.
-func (ls *LedgerState) anchorStore() (metadata.AnchorStateStore, error) {
-	store, ok := ls.db.Metadata().(metadata.AnchorStateStore)
-	if !ok {
-		return nil, errors.New(
-			"ledger metadata store cannot export anchor state",
-		)
-	}
-	return store, nil
-}
-
-// AnchorStateReady implements metadata.AnchorStateSource. A drained accounts
-// family is served from the set's import baselines and reward records, which
-// the set holds only when it loaded them before the metadata store drained
-// the rows they come from.
+// AnchorStateReady implements metadata.AnchorStateSource. The accounts are
+// served from the set's import baselines and reward records.
 func (ls *LedgerState) AnchorStateReady(ctx context.Context) error {
-	drained, err := ls.anchorFamilyDrained(ctx, nodesettings.FamilyAccounts)
-	if err != nil || !drained {
-		return err
-	}
 	if ls.accountReader(nil) == nil {
-		return drainedUnserved(nodesettings.FamilyAccounts)
+		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	set := ls.readSet(nil)
-	pager, ok := set.(ImportBaselinePager)
-	if !ok {
-		return drainedUnserved(nodesettings.FamilyAccounts)
+	if _, ok := set.(ImportBaselinePager); !ok {
+		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
-	lost, err := pager.ImportBaselineDelegationsLost()
-	if err != nil {
-		return err
-	}
-	if lost {
-		return fmt.Errorf(
-			"%w: the import baselines were written before the set kept the "+
-				"delegations they record, and the rows were drained first",
-			drainedUnserved(nodesettings.FamilyAccounts),
-		)
-	}
-	keeper, ok := set.(RewardRecordRetainer)
-	if !ok {
-		return drainedUnserved(nodesettings.FamilyAccounts)
-	}
-	lost, err = keeper.RewardRecordsLost()
-	if err != nil {
-		return err
-	}
-	if lost {
-		return fmt.Errorf(
-			"%w: the reward journal was drained before the set held it, and "+
-				"its entries before then are in neither store",
-			drainedUnserved(nodesettings.FamilyAccounts),
-		)
+	if _, ok := set.(RewardRecordRetainer); !ok {
+		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	return nil
 }
 
 // anchorView is where an anchor read takes its rows from. The live view reads
-// the ledger as it moves, one lock hold per call; a pinned view reads a fixed
-// point and decides once whether the accounts are in the set or the store.
+// the ledger as it moves, one lock hold per call; a pinned view reads a set
+// snapshot of one point.
 type anchorView struct {
 	ls *LedgerState
 	// pinned is set for a view over one point, whose source never changes
 	// between calls.
-	pinned  bool
-	drained bool
-	// txn is the metadata store read transaction of a pinned SQL view.
-	txn types.Txn
+	pinned bool
 	// set is the set snapshot of a pinned set view; nil reads the live set.
 	set UtxoSetWriter
 }
 
 func (ls *LedgerState) liveAnchorView() *anchorView {
 	return &anchorView{ls: ls}
-}
-
-func (v *anchorView) isDrained(ctx context.Context) (bool, error) {
-	if v.pinned {
-		return v.drained, nil
-	}
-	return v.ls.anchorFamilyDrained(ctx, nodesettings.FamilyAccounts)
 }
 
 func (v *anchorView) readSet() UtxoSetWriter {
@@ -179,41 +106,19 @@ func (v *anchorView) lock() func() {
 	return v.ls.utxoSetApplyMu.RUnlock
 }
 
-// AnchorStateView implements metadata.AnchorStateViewer. Accounts in the
-// metadata store are read in one read transaction; accounts in the set are
+// AnchorStateView implements metadata.AnchorStateViewer. The accounts are
 // read from a set snapshot taken under the apply lock, so the reward records
 // and the balances are of the same applied block.
 func (ls *LedgerState) AnchorStateView(
 	ctx context.Context,
 ) (metadata.AnchorStateSource, func(), error) {
-	drained, err := ls.anchorFamilyDrained(ctx, nodesettings.FamilyAccounts)
-	if err != nil {
-		return nil, nil, err
-	}
-	v := &anchorView{ls: ls, pinned: true, drained: drained}
-	if !drained {
-		store, err := ls.anchorStore()
-		if err != nil {
-			return nil, nil, err
-		}
-		v.txn = ls.db.Metadata().ReadTransaction(ctx)
-		release := func() { _ = v.txn.Rollback() }
-		// A read transaction takes its snapshot at its first statement, so
-		// run one now: the view is of this point, not of the first read.
-		if _, _, err := store.ReadRewardJournalAfter(
-			ctx, math.MaxInt64, 0, 1, v.txn,
-		); err != nil {
-			release()
-			return nil, nil, err
-		}
-		return v, release, nil
-	}
+	v := &anchorView{ls: ls, pinned: true}
 	if err := ls.AnchorStateReady(ctx); err != nil {
 		return nil, nil, err
 	}
 	snapper, ok := ls.readSet(nil).(UtxoSetSnapshotter)
 	if !ok {
-		return nil, nil, drainedUnserved(nodesettings.FamilyAccounts)
+		return nil, nil, ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	ls.utxoSetApplyMu.RLock()
 	snap, release, err := snapper.SnapshotUtxoSet()
@@ -242,11 +147,6 @@ func (v *anchorView) AnchorUtxoDigest(
 	return v.ls.AnchorUtxoDigest(ctx, anchor)
 }
 
-// AnchorUtxoInMetadata implements metadata.AnchorStateSource.
-func (v *anchorView) AnchorUtxoInMetadata(anchor uint64) (bool, error) {
-	return v.ls.AnchorUtxoInMetadata(anchor)
-}
-
 // AnchorImportedAccounts implements metadata.AnchorStateSource. The cursor is
 // the metadata store's account id when it serves the read, and the credential
 // of the last baseline, its tag then its key, when the set does.
@@ -267,30 +167,6 @@ func (v *anchorView) AnchorImportedAccounts(
 	limit int,
 ) ([]metadata.ImportedAccount, []byte, error) {
 	ls := v.ls
-	drained, err := v.isDrained(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !drained {
-		store, err := ls.anchorStore()
-		if err != nil {
-			return nil, nil, err
-		}
-		var after int64
-		if len(cursor) != 0 {
-			if len(cursor) != 8 {
-				return nil, nil, fmt.Errorf("malformed account cursor %x", cursor)
-			}
-			after = int64(binary.BigEndian.Uint64(cursor)) //nolint:gosec // an id
-		}
-		accounts, next, err := store.ReadImportedAccounts(
-			ctx, anchor, after, limit, v.txn,
-		)
-		if err != nil || next == 0 {
-			return accounts, nil, err
-		}
-		return accounts, binary.BigEndian.AppendUint64(nil, uint64(next)), nil //nolint:gosec // an id
-	}
 	if !v.pinned {
 		if err := ls.AnchorStateReady(ctx); err != nil {
 			return nil, nil, err
@@ -298,12 +174,9 @@ func (v *anchorView) AnchorImportedAccounts(
 	}
 	set := v.readSet()
 	r, _ := set.(AccountReader)
-	if !ls.keepsEpochState() {
-		r = nil
-	}
 	pager, ok := set.(ImportBaselinePager)
 	if r == nil || !ok {
-		return nil, nil, drainedUnserved(nodesettings.FamilyAccounts)
+		return nil, nil, ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	var after *models.StakeCredentialRef
 	if len(cursor) != 0 {
@@ -362,34 +235,6 @@ func (v *anchorView) EachAnchorRewardJournal(
 	fn func(metadata.RewardJournalEntry) error,
 ) error {
 	ls := v.ls
-	drained, err := v.isDrained(ctx)
-	if err != nil {
-		return err
-	}
-	if !drained {
-		store, err := ls.anchorStore()
-		if err != nil {
-			return err
-		}
-		var cursor int64
-		for {
-			entries, next, err := store.ReadRewardJournalAfter(
-				ctx, slot, cursor, 20_000, v.txn,
-			)
-			if err != nil {
-				return err
-			}
-			for _, e := range entries {
-				if err := fn(e); err != nil {
-					return err
-				}
-			}
-			if next == 0 {
-				return nil
-			}
-			cursor = next
-		}
-	}
 	if !v.pinned {
 		if err := ls.AnchorStateReady(ctx); err != nil {
 			return err
@@ -397,7 +242,7 @@ func (v *anchorView) EachAnchorRewardJournal(
 	}
 	r, ok := v.readSet().(RewardRecordStreamer)
 	if !ok {
-		return drainedUnserved(nodesettings.FamilyAccounts)
+		return ledgerStateUnserved(nodesettings.FamilyAccounts)
 	}
 	defer v.lock()()
 	return r.EachRewardRecordIn(slot+1, math.MaxUint64, func(rec RewardRecord) error {
@@ -408,11 +253,8 @@ func (v *anchorView) EachAnchorRewardJournal(
 	})
 }
 
-// utxoSetServesAnchor reports whether the live UTxO set, rather than the
-// metadata store, holds the UTxO set a digest at the anchor is taken of: the
-// set is the only copy and has loaded up to the anchor. A set that has not
-// been loaded yet leaves the outputs in the metadata store, which the node
-// moves into the set only as it starts.
+// utxoSetServesAnchor reports whether the live UTxO set has loaded up to the
+// anchor.
 func (ls *LedgerState) utxoSetServesAnchor(anchor uint64) (bool, error) {
 	tipper, ok := ls.config.UtxoSet.(interface {
 		Tip() (ocommon.Point, bool, error)
@@ -427,18 +269,9 @@ func (ls *LedgerState) utxoSetServesAnchor(anchor uint64) (bool, error) {
 	return has && tip.Slot >= anchor, nil
 }
 
-// AnchorUtxoInMetadata implements metadata.AnchorStateSource.
-func (ls *LedgerState) AnchorUtxoInMetadata(anchor uint64) (bool, error) {
-	inSet, err := ls.utxoSetServesAnchor(anchor)
-	if err != nil {
-		return false, err
-	}
-	return !inSet, nil
-}
-
-// AnchorUtxoDigest implements metadata.AnchorStateSource. With the live UTxO
-// set the only copy, the set at the anchor is rebuilt from its journal, which
-// reaches back only one stability window.
+// AnchorUtxoDigest implements metadata.AnchorStateSource. The set at the
+// anchor is rebuilt from its journal, which reaches back only one stability
+// window.
 func (ls *LedgerState) AnchorUtxoDigest(
 	ctx context.Context,
 	anchor uint64,
@@ -448,16 +281,9 @@ func (ls *LedgerState) AnchorUtxoDigest(
 		return metadata.UtxoSetDigest{}, err
 	}
 	if !inSet {
-		store, err := ls.anchorStore()
-		if err != nil {
-			return metadata.UtxoSetDigest{}, err
-		}
-		return store.LiveUtxoDigestWithOutputs(
-			ctx, anchor,
-			func(txHash []byte, idx uint32) ([]byte, error) {
-				return ls.db.ResolveUtxoCborWithRecovery(ctx, txHash, idx, nil)
-			},
-			nil,
+		return metadata.UtxoSetDigest{}, fmt.Errorf(
+			"%w: the live UTxO set has not loaded up to the anchor",
+			metadata.ErrAnchorDigestUnavailable,
 		)
 	}
 	h, ok := ls.config.UtxoSet.(UtxoSetHistory)

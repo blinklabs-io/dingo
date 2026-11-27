@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -760,7 +759,7 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 				},
 			}),
 		)
-		require.NoError(t, ls.db.SetBlockNonce(
+		require.NoError(t, seedBlockNonce(t, ls.db,
 			raceTip.Point.Hash,
 			raceTip.Point.Slot,
 			raceNonce,
@@ -1346,11 +1345,7 @@ func TestReconcileDeclinesPruneFloorWithoutRewindingOrPersistingIntent(
 		}}),
 	)
 	chainTip := ls.chain.Tip()
-	require.NoError(t, ls.db.SetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey,
-		fmt.Sprint(fixture.ancestorTip.Point.Slot+1),
-		nil,
-	))
+	fxEmptyJournal(t, ls)
 
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
@@ -1360,7 +1355,7 @@ func TestReconcileDeclinesPruneFloorWithoutRewindingOrPersistingIntent(
 	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
 
 	err := ls.reconcilePrimaryChainTipWithLedgerTip(context.Background())
-	require.ErrorIs(t, err, ErrRollbackBelowUtxoPruneFloor)
+	require.ErrorIs(t, err, ErrRollbackBelowUtxoJournal)
 	require.Equal(t, chainTip, ls.chain.Tip())
 	require.Equal(t, fixture.currentTip, ls.currentTip)
 	_, _, pending, err := loadRollbackIntent(ls.db)
@@ -1405,7 +1400,7 @@ func TestReconciliationUndoBlocksIncludesNilNonceRecords(t *testing.T) {
 			},
 		}),
 	)
-	require.NoError(t, ls.db.SetBlockNonce(
+	require.NoError(t, seedBlockNonce(t, ls.db,
 		byronLikeHash,
 		fixture.currentTip.Point.Slot+5,
 		nil,
@@ -1635,7 +1630,7 @@ func TestRejectedWindowedRollbackEmitsNoUndoEvents(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           OpenLiveSetForTest(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		EventBus:          bus,

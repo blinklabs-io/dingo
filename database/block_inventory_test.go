@@ -601,12 +601,14 @@ func TestBlockBatchTransactionComposesWithGenericWriterAndPause(t *testing.T) {
 	}, 5*time.Second, time.Millisecond)
 
 	cancel()
-	err := generic.Do(func(txn *Txn) error {
-		return db.BlockCreate(models.Block{
-			ID: 1, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x80},
-		}, txn)
-	})
+	// Do refuses a cancelled context before running its function, so the
+	// write is issued on the transaction directly: the refusal under test is
+	// the busy inventory, not the context.
+	err := db.BlockCreate(models.Block{
+		ID: 1, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x80},
+	}, generic)
 	require.ErrorContains(t, err, "block inventory mutation is busy")
+	require.NoError(t, generic.Rollback())
 
 	require.NoError(t, holder.Rollback())
 	var batch *Txn

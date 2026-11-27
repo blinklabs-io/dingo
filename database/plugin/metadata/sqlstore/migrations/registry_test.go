@@ -16,8 +16,10 @@ package migrations
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
@@ -25,6 +27,84 @@ import (
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
+
+func TestOrderedSchemaVersionsFollowsPredecessorsNotIDs(t *testing.T) {
+	t.Parallel()
+	first := schemaVersion{Version: 1, Name: "initial", Dir: "v1"}
+	nameA, nameB := "branch_a", "branch_b"
+	versionA, versionB := StableVersion(nameA), StableVersion(nameB)
+	require.NotEqual(t, versionA, versionB)
+	if versionA > versionB {
+		nameA, nameB = nameB, nameA
+		versionA, versionB = versionB, versionA
+	}
+	higher := schemaVersion{Version: versionB, Name: nameB, Dir: "higher", After: 1}
+	lower := schemaVersion{Version: versionA, Name: nameA, Dir: "lower", After: versionB}
+	ordered, err := orderedSchemaVersions([]schemaVersion{lower, first, higher})
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, versionB, versionA}, []int64{
+		ordered[0].Version,
+		ordered[1].Version,
+		ordered[2].Version,
+	})
+
+	nameC, nameD := "sibling_a", "sibling_b"
+	versionC, versionD := StableVersion(nameC), StableVersion(nameD)
+	if versionC > versionD {
+		nameC, nameD = nameD, nameC
+		versionC, versionD = versionD, versionC
+	}
+	ordered, err = orderedSchemaVersions([]schemaVersion{
+		first,
+		{Version: versionD, Name: nameD, Dir: "b", After: 1},
+		{Version: versionC, Name: nameC, Dir: "a", After: 1},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, versionC, versionD}, []int64{
+		ordered[0].Version,
+		ordered[1].Version,
+		ordered[2].Version,
+	})
+
+	_, err = orderedSchemaVersions([]schemaVersion{
+		first,
+		{Version: versionC, Name: nameC, Dir: "orphan", After: versionD},
+	})
+	require.ErrorIs(t, err, ErrInvalidRegistry)
+}
+
+func TestSchemaVersionsDiscoverIndependentManifests(t *testing.T) {
+	t.Parallel()
+	nameA, nameB := "manifest_migration_a", "manifest_migration_b"
+	versionA, versionB := StableVersion(nameA), StableVersion(nameB)
+	resources := fstest.MapFS{
+		fmt.Sprintf("migration-manifests/%d.json", versionA): &fstest.MapFile{
+			Data: []byte(fmt.Sprintf(
+				`{"version":%d,"name":%q,"after":1}`,
+				versionA,
+				nameA,
+			)),
+		},
+		fmt.Sprintf("migration-manifests/%d.json", versionB): &fstest.MapFile{
+			Data: []byte(fmt.Sprintf(
+				`{"version":%d,"name":%q,"after":1}`,
+				versionB,
+				nameB,
+			)),
+		},
+	}
+	versions, err := schemaVersionsFrom(resources, []schemaVersion{
+		{Version: 1, Name: "initial", Dir: "v1"},
+	})
+	require.NoError(t, err)
+	ordered, err := orderedSchemaVersions(versions)
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, min(versionA, versionB), max(versionA, versionB)}, []int64{
+		ordered[0].Version,
+		ordered[1].Version,
+		ordered[2].Version,
+	})
+}
 
 func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
 	t.Parallel()
@@ -43,7 +123,6 @@ func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
 			t.Parallel()
 			registry, err := cachedRegistryForDialect(testCase.dialect)
 			require.NoError(t, err)
-			require.Len(t, registry, 74)
 			migration := registry[51]
 			require.Equal(t, backfillCheckpointIdentitySchemaRelease, migration.Name)
 			require.Contains(t, migration.SQL[testCase.dialect].Expand,
@@ -73,7 +152,6 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 74)
 			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
@@ -302,7 +380,6 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 74)
 
 	require.Contains(
 		t,
@@ -530,4 +607,17 @@ func TestPoolRegistrationIdentityMigrationTranslatesIndexDrop(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUtxoAddressPrefixIndexDropTranslatesForProviders(t *testing.T) {
+	t.Parallel()
+	mysql, err := cachedMySQLRegistry()
+	require.NoError(t, err)
+	migration := mysql[73]
+	require.Equal(t, utxoAddressPrefixIndexDropSchemaRelease, migration.Name)
+	require.Equal(
+		t,
+		[]string{"DROP INDEX `idx_utxo_address_address` ON `utxo_address`"},
+		migration.SQL["mysql"].Expand,
+	)
 }

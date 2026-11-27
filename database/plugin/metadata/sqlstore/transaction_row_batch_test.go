@@ -125,6 +125,7 @@ func TestBatchedWitnessRowsAreFlushedAsOneMultiRowInsert(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	for seed := byte(1); seed <= 3; seed++ {
@@ -159,6 +160,7 @@ func TestBatchedWitnessRowsReplacePendingRowsOfSameTransaction(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	for range 2 {
@@ -180,6 +182,7 @@ func TestBatchedWitnessRowsReplaceFlushedRowsOfSameTransaction(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	for range 2 {
@@ -200,6 +203,7 @@ func TestBatchAccumulatorResetDropsQueuedWitnessRows(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	tx, point := witnessTx(t, 5, 2)
@@ -287,6 +291,7 @@ func TestBatchedWitnessRowsReplacePendingRowsOfEveryShape(t *testing.T) {
 	immediate := newAPIModeSQLiteStore(t, nil)
 	immediateTxn := immediate.Transaction(context.Background())
 	t.Cleanup(func() { _ = immediateTxn.Rollback() })
+	bindTestPayloads(t, immediate, immediateTxn)
 	tx, point := allShapesWitnessTx(t, 11)
 	require.NoError(t, immediate.SetTransaction(
 		tx, point, 0, nil, true, immediateTxn, 0,
@@ -297,6 +302,7 @@ func TestBatchedWitnessRowsReplacePendingRowsOfEveryShape(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	for range 2 {
 		tx, point := allShapesWitnessTx(t, 11)
@@ -723,6 +729,7 @@ func TestBatchedAPIDetailRowsWaitForFlush(t *testing.T) {
 	immediate := newAPIModeSQLiteStore(t, nil)
 	immediateTxn := immediate.Transaction(context.Background())
 	t.Cleanup(func() { _ = immediateTxn.Rollback() })
+	bindTestPayloads(t, immediate, immediateTxn)
 	tx, point := apiDetailTx(t, 21)
 	require.NoError(t, immediate.SetTransaction(
 		tx, point, 0, nil, true, immediateTxn, 0,
@@ -736,6 +743,7 @@ func TestBatchedAPIDetailRowsWaitForFlush(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	for range 2 {
 		tx, point := apiDetailTx(t, 21)
@@ -756,6 +764,7 @@ func TestBatchedProducedAssetRowsWaitForFlush(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	type assetRef struct {
@@ -863,6 +872,7 @@ func TestSetTransactionBatchedCoalescesStakeDeltas(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	stakingKey := lcommon.NewBlake2b224([]byte("stake-key"))
@@ -978,6 +988,7 @@ func TestBatchedRowsOfFailedWriteAreNotQueued(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 
 	tx, point := apiDetailTx(t, 23)
@@ -1154,7 +1165,10 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 				metadataLabelShape.suffix,
 			"INSERT INTO datum (hash, raw_datum, added_slot) " +
 				"VALUES ($1, $2, $3), ($4, $5, $6)\n" +
-				"ON CONFLICT (hash) DO NOTHING",
+				"ON CONFLICT (hash) DO UPDATE SET " +
+				"raw_datum = excluded.raw_datum, " +
+				"added_slot = excluded.added_slot " +
+				"WHERE SUBSTR(datum.raw_datum, 1, 4) = $7",
 		},
 		"mysql": {
 			"INSERT INTO key_witness (vkey, signature, transaction_id, type) " +
@@ -1180,7 +1194,11 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 				"    json_value = VALUES(json_value)",
 			"INSERT INTO datum (hash, raw_datum, added_slot) " +
 				"VALUES (?, ?, ?), (?, ?, ?)\n" +
-				"ON DUPLICATE KEY UPDATE hash = hash",
+				"ON DUPLICATE KEY UPDATE " +
+				"added_slot = IF(SUBSTR(raw_datum, 1, 4) = ?, " +
+				"VALUES(added_slot), added_slot), " +
+				"raw_datum = IF(SUBSTR(raw_datum, 1, 4) = ?, " +
+				"VALUES(raw_datum), raw_datum)",
 		},
 	}
 	for dialect, statements := range want {
@@ -1236,6 +1254,7 @@ func TestBatchedRowsRestoreQueueOnCallerRollback(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	retained, point := witnessTx(t, 7, 2)
 	require.NoError(t, store.SetTransactionBatchedHistorical(retained, point, 0, nil, true, true, acc, nil, 0))
@@ -1252,6 +1271,7 @@ func TestBatchedRowsRestoreQueueOnSavepointRollback(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
@@ -1269,6 +1289,7 @@ func TestBatchedRowsResetOnRollbackBeforeFirstSavepointBinding(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)
 	acc := store.NewBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })

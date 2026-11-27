@@ -59,6 +59,7 @@ func NewDeferredHeaderRecoveryFixture(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	ls := newEligibilityTestLedgerOnDB(t, tb.epochNonce, db)
+	installTestLedgerSources(t, ls)
 
 	blocks := make([]models.Block, 0, 4)
 	for slot := uint64(1); slot <= 4; slot++ {
@@ -84,6 +85,7 @@ func NewDeferredHeaderRecoveryFixture(
 
 	ls.chain = cm.PrimaryChain()
 	ls.currentTip = ledgerTip
+	fxJournalChain(t, ls)
 	ls.config.ChainManager = cm
 	ls.config.EventBus = bus
 	ls.config.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))

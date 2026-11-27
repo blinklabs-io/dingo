@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -451,25 +452,17 @@ func (ls *LedgerState) drepStaging(
 	return ar, r
 }
 
-// drepsUnserved is the error of a DRep write the set cannot stage: when the
-// DReps family is drained the SQL write was skipped, so the write would be
-// lost. Otherwise the metadata store holds it and there is nothing to report.
+// drepsUnserved is the error of a DRep write the set cannot stage: no SQL
+// row holds it, so the write would be lost.
 func (s stagingLedgerDB) drepsUnserved() error {
-	if s.drepsDrained() {
-		return drainedUnserved(nodesettings.FamilyDReps)
-	}
-	return nil
+	return ledgerStateUnserved(nodesettings.FamilyDReps)
 }
 
-// failDrepStaging stops the set following the ledger and, when the DReps
-// family is drained and the set alone holds the write, returns err so the
-// write is not lost.
-func (s stagingLedgerDB) failDrepStaging(err error) error {
-	s.ls.failAccountStaging(err)
-	if s.drepsDrained() {
-		return err
-	}
-	return nil
+// failDrepStaging stops the set following the ledger and, since the set
+// alone holds the write, returns err so the write is not lost.
+func (s stagingLedgerDB) failDrepStaging(txn ledgerdb.Txn, err error) error {
+	s.ls.failAccountStaging(txn, err)
+	return err
 }
 
 func (s stagingLedgerDB) UpdateDRepActivity(
@@ -481,21 +474,13 @@ func (s stagingLedgerDB) UpdateDRepActivity(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.drepsDrained() {
-		if err := s.LedgerDB.UpdateDRepActivity(
-			ctx, credentialTag, drepCredential, activityEpoch, inactivityPeriod,
-			slot, txn,
-		); err != nil {
-			return err
-		}
-	}
 	_, r := s.ls.drepStaging(txn)
 	if r == nil {
 		return s.drepsUnserved()
 	}
 	d, err := s.ls.drepView(r, txn, credentialTag, drepCredential)
 	if err != nil {
-		return s.failDrepStaging(err)
+		return s.failDrepStaging(txn, err)
 	}
 	if d == nil {
 		// The metadata store's answer for a missing DRep, which vote
@@ -510,6 +495,24 @@ func (s stagingLedgerDB) UpdateDRepActivity(
 	return nil
 }
 
+// RecordDRepActivityEpoch refuses. It records a DRep's activity epoch while
+// keeping the expiry a Mithril snapshot recorded, for replay below the
+// snapshot's anchor, which only the IndexerDB writer runs; the ledger applies
+// activity with UpdateDRepActivity, which journals the expiry at its slot.
+func (s stagingLedgerDB) RecordDRepActivityEpoch(
+	ctx context.Context,
+	credentialTag uint8,
+	drepCredential []byte,
+	activityEpoch uint64,
+	txn ledgerdb.Txn,
+) error {
+	return errDRepActivityEpochReplayOnly
+}
+
+var errDRepActivityEpochReplayOnly = errors.New(
+	"DRep activity epochs below a Mithril anchor are recorded by the IndexerDB writer",
+)
+
 func (s stagingLedgerDB) InsertDrepIfAbsent(
 	ctx context.Context,
 	credentialTag uint8,
@@ -520,20 +523,13 @@ func (s stagingLedgerDB) InsertDrepIfAbsent(
 	active bool,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.drepsDrained() {
-		if err := s.LedgerDB.InsertDrepIfAbsent(
-			ctx, credentialTag, cred, slot, url, hash, active, txn,
-		); err != nil {
-			return err
-		}
-	}
 	_, r := s.ls.drepStaging(txn)
 	if r == nil {
 		return s.drepsUnserved()
 	}
 	d, err := s.ls.drepView(r, txn, credentialTag, cred)
 	if err != nil {
-		return s.failDrepStaging(err)
+		return s.failDrepStaging(txn, err)
 	}
 	if d != nil {
 		return nil
@@ -554,18 +550,13 @@ func (s stagingLedgerDB) ResetDormantDRepEpochs(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) error {
-	if !s.drepsDrained() {
-		if err := s.LedgerDB.ResetDormantDRepEpochs(ctx, slot, txn); err != nil {
-			return err
-		}
-	}
 	_, r := s.ls.drepStaging(txn)
 	if r == nil {
 		return s.drepsUnserved()
 	}
 	n, err := s.ls.dormancyView(r, txn)
 	if err != nil {
-		return s.failDrepStaging(err)
+		return s.failDrepStaging(txn, err)
 	}
 	if n != 0 {
 		s.ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
@@ -586,29 +577,7 @@ func (s stagingLedgerDB) BumpDormantDRepExpiries(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (int, error) {
-	if s.drepsDrained() {
-		return s.bumpDrainedDormantDRepExpiries(slot, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	}
-	before, err := s.LedgerDB.GetDormantDRepEpochs(ctx, txn)
-	if err != nil {
-		return 0, err
-	}
-	n, err := s.LedgerDB.BumpDormantDRepExpiries(ctx, slot, txn)
-	if err != nil {
-		return n, err
-	}
-	after, err := s.LedgerDB.GetDormantDRepEpochs(ctx, txn)
-	if err != nil {
-		return n, err
-	}
-	_, r := s.ls.drepStaging(txn)
-	if r == nil || after == before {
-		return n, nil
-	}
-	if err := s.ls.stageDormantBump(r, txn, slot); err != nil { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-		s.ls.failAccountStaging(err)
-	}
-	return n, nil
+	return s.bumpDormantDRepExpiriesInSet(slot, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 }
 
 func (ls *LedgerState) stageDormantBump(r DRepReader, txn ledgerdb.Txn, slot uint64) error {
@@ -676,20 +645,13 @@ func (s stagingLedgerDB) ClearDanglingDRepDelegations(
 	atSlot uint64,
 	txn ledgerdb.Txn,
 ) (int, error) {
-	var n int
-	if !s.drepsDrained() {
-		var err error
-		n, err = s.LedgerDB.ClearDanglingDRepDelegations(ctx, atSlot, txn)
-		if err != nil {
-			return n, err
-		}
-	}
 	ar, r := s.ls.drepStaging(txn)
 	if ar == nil || r == nil {
-		return n, s.drepsUnserved()
+		return 0, s.drepsUnserved()
 	}
-	if err := s.ls.stageDanglingClear(ar, r, txn, atSlot); err != nil { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-		return n, s.failDrepStaging(err)
+	n, err := s.ls.stageDanglingClear(ar, r, txn, atSlot) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	if err != nil {
+		return 0, s.failDrepStaging(txn, err)
 	}
 	return n, nil
 }
@@ -698,20 +660,21 @@ func (s stagingLedgerDB) ClearDanglingDRepDelegations(
 // that is not registered, closes every link that no longer matches an
 // active account's delegation to a registered DRep, and opens the missing
 // ones, as clearDanglingDRepDelegations does at the protocol version 10
-// hard fork.
+// hard fork. It returns the number of account delegations it cleared.
 func (ls *LedgerState) stageDanglingClear(
 	ar AccountReader,
 	r DRepReader,
 	txn ledgerdb.Txn,
 	slot uint64,
-) error {
+) (int, error) {
+	cleared := 0
 	refs, err := ar.AccountsWithDrep()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	refs, err = ls.accountCandidates(ar, txn, refs, refSet(refs))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	registered := func(typ uint64, cred []byte) (bool, error) {
 		d, err := ls.drepView(r, txn, uint8(typ), cred) //nolint:gosec // a DRep credential type
@@ -720,42 +683,43 @@ func (ls *LedgerState) stageDanglingClear(
 	for _, ref := range refs {
 		a, err := ls.accountView(ar, txn, ref.Tag, ref.Key)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if a == nil || len(a.Drep) == 0 || a.DrepType > models.DrepTypeScriptHash {
 			continue
 		}
 		ok, err := registered(a.DrepType, a.Drep)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if !ok {
 			if err := ls.clearAccountDrep(ar, txn, ref, slot); err != nil {
-				return err
+				return 0, err
 			}
+			cleared++
 		}
 	}
 	links, err := ls.drepLinkCandidates(r, txn, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	for _, l := range links {
 		live, err := ls.drepLinkView(r, txn, l[0], l[1])
 		if err != nil || !live {
 			if err != nil {
-				return err
+				return 0, err
 			}
 			continue
 		}
 		a, err := ls.accountView(ar, txn, l[1].Tag, l[1].Key)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		keep := a != nil && a.Active && a.DrepType <= models.DrepTypeScriptHash &&
 			a.DrepType == uint64(l[0].Tag) && bytes.Equal(a.Drep, l[0].Key)
 		if keep {
 			if keep, err = registered(a.DrepType, a.Drep); err != nil {
-				return err
+				return 0, err
 			}
 		}
 		if !keep {
@@ -765,7 +729,7 @@ func (ls *LedgerState) stageDanglingClear(
 	for _, ref := range refs {
 		a, err := ls.accountView(ar, txn, ref.Tag, ref.Key)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if a == nil || !a.Active || len(a.StakingKey) == 0 || len(a.Drep) == 0 ||
 			a.DrepType > models.DrepTypeScriptHash {
@@ -774,24 +738,24 @@ func (ls *LedgerState) stageDanglingClear(
 		ok, err := registered(a.DrepType, a.Drep)
 		if err != nil || !ok {
 			if err != nil {
-				return err
+				return 0, err
 			}
 			continue
 		}
 		link := models.NewStakeCredentialRef(uint8(a.DrepType), a.Drep) //nolint:gosec // a DRep credential type
 		live, err := ls.drepLinkView(r, txn, link, ref)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if !live {
 			ls.stageDrepLink(txn, slot, link, ref, true)
 		}
 	}
-	return nil
+	return cleared, nil
 }
 
 // drepServing returns the DRep reader when DRep reads are answered from the
-// set, or nil when they stay on the metadata store.
+// set, or nil when the set does not serve them.
 func (ls *LedgerState) drepServing(txn ledgerdb.Txn) DRepReader {
 	_, r := ls.drepStaging(txn)
 	if r == nil || !ls.setServes(&ls.drepsSetLoaded, r.DrepStateLoaded) {
@@ -866,17 +830,17 @@ func (s stagingLedgerDB) GetDormantDRepEpochs(
 	return s.ls.dormancyView(r, txn)
 }
 
-// bumpDrainedDormantDRepExpiries applies the epoch's dormancy bump to the set
+// bumpDormantDRepExpiriesInSet applies the epoch's dormancy bump to the set
 // alone. The metadata store applies it once per boundary slot, so the bump
 // is skipped when the set already holds a counter change at slot, staged in
 // txn or committed, that no staged rollback undoes.
-func (s stagingLedgerDB) bumpDrainedDormantDRepExpiries(
+func (s stagingLedgerDB) bumpDormantDRepExpiriesInSet(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (int, error) {
 	_, r := s.ls.drepStaging(txn)
 	if r == nil {
-		return 0, drainedUnserved(nodesettings.FamilyDReps)
+		return 0, ledgerStateUnserved(nodesettings.FamilyDReps)
 	}
 	var staged []DormancyChange
 	var ceiling *uint64

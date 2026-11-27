@@ -16,17 +16,24 @@ package dingo
 
 import (
 	"context"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
+	"github.com/blinklabs-io/dingo/plugin"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // midnightIndexerActive is shared by initial startup and live reconstruction.
 // Indexer enablement is independent of the Midnight server's listener settings.
-func midnightIndexerActive(storageMode StorageMode, cfg MidnightConfig) bool {
-	return cfg.Enabled && storageMode.IsAPI()
+func midnightIndexerActive(
+	features []plugin.StorageFeature,
+	cfg MidnightConfig,
+) bool {
+	return cfg.Enabled &&
+		slices.Contains(features, plugin.StorageFeatureMidnight)
 }
 
 // midnightIndexerConfig preserves startup configuration during reconstruction.
@@ -63,6 +70,12 @@ func (n *Node) midnightIndexerConfig() midnightindexer.Config {
 			block models.Block,
 		) ([]lcommon.Transaction, error) {
 			return n.ledgerState.BlockTransactions(ctx, block)
+		},
+		BlockPayloads: func(
+			ctx context.Context,
+			block models.Block,
+		) (types.PayloadLocator, error) {
+			return n.ledgerState.CertifiedClosurePayloads(ctx, block)
 		},
 		BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
 			return database.ForEachBlockInRangeDB(

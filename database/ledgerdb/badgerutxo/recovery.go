@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
@@ -82,8 +83,10 @@ func readFailed(txn *badger.Txn) (uint64, bool, error) {
 }
 
 // PointBefore returns the tip the store held before its oldest journaled
-// commit at or after slot, which Rollback restores exactly. ok is false when
-// no journaled commit is at or after slot, so the store never took one. It
+// commit at or after slot, which Rollback restores exactly. When no journal
+// record is at or after slot but state journal entries lie past the tip, a
+// commit stopped before its first record, and the tip is the point before
+// it. ok is false when neither is found, so the store never took one. It
 // returns ErrRollbackBeyondJournal when the journal does not reach a tip
 // below slot.
 func (s *Store) PointBefore(slot uint64) (ocommon.Point, bool, error) {
@@ -115,7 +118,9 @@ func (s *Store) PointBefore(slot uint64) (ocommon.Point, bool, error) {
 			oldest, found = rec, true
 		}
 		if !found {
-			return nil
+			var err error
+			point, found, err = stoppedBeforeRecord(txn)
+			return err
 		}
 		if !oldest.hadTip || oldest.prevTip.Slot >= slot {
 			return ErrRollbackBeyondJournal
@@ -131,6 +136,28 @@ func (s *Store) PointBefore(slot uint64) (ocommon.Point, bool, error) {
 		return nil
 	})
 	return point, found, err
+}
+
+// stoppedBeforeRecord returns the tip when state journal entries lie past
+// it. A committed batch journals no row past its own tip, so those are the
+// writes of a chunked batch that stopped among the reward block, row,
+// account and reward record transactions it writes ahead of its first
+// journal record. Their slots can lie below the failure mark, which takes
+// the first change's or the tip's. A reward block fee adds to its row, so a
+// batch applied again over them counts the fee twice. Rollback to the tip
+// undoes every entry past it.
+func stoppedBeforeRecord(txn *badger.Txn) (ocommon.Point, bool, error) {
+	tip, hadTip, err := readTip(txn)
+	if err != nil || !hadTip || tip.Slot == math.MaxUint64 {
+		return ocommon.Point{}, false, err
+	}
+	opts := badger.DefaultIteratorOptions
+	opts.Prefix = []byte{StateJournalTag}
+	opts.PrefetchValues = false
+	it := txn.NewIterator(opts)
+	defer it.Close()
+	it.Seek(slotKey(StateJournalTag, tip.Slot+1))
+	return tip, it.Valid(), nil
 }
 
 // HasJournalPoint reports whether Rollback(point) restores a set that held
@@ -297,7 +324,12 @@ func (s *Store) Restore(ctx context.Context, r io.Reader) error {
 		return err
 	}
 	defer s.rewriteRows()()
-	return s.db.Load(r, 256)
+	if err := s.db.Load(r, 256); err != nil {
+		return err
+	}
+	// A backup written by a store without an index, or before it existed,
+	// carries outputs with no index rows and no completion marker.
+	return s.ensureAddressIndex()
 }
 
 // backupBatchBytes is how much row data goes into one KVList of a checkpoint
@@ -372,8 +404,8 @@ func (s *Store) fixCheckpointVersion() (
 }
 
 // ErrNotCheckpointable reports a set whose state is not one worth restoring:
-// it carries a failure mark, holds a merge or a rollback part done, or has an
-// unfinished bootstrap.
+// it carries a failure mark, holds an interrupted ledger-state import or a
+// rollback part done, or has an unfinished bootstrap.
 var ErrNotCheckpointable = errors.New("badgerutxo: the set is not in a state a checkpoint can restore")
 
 // checkCheckpointable returns ErrNotCheckpointable, saying which mark it found.
@@ -390,7 +422,7 @@ func checkCheckpointable(txn *badger.Txn) error {
 		key  []byte
 		what string
 	}{
-		{mergeKey, "a ledger-state merge is pending"},
+		{importKey, "a ledger-state import is pending"},
 		{rollbackPendingKey, "a rollback is pending"},
 	} {
 		_, err := txn.Get(m.key)

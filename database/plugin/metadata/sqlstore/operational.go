@@ -962,9 +962,13 @@ func (s *Store) GetDatum(
 	if err != nil {
 		return nil, fmt.Errorf("get datum: %w", err)
 	}
+	rawDatum, err := s.resolvePayload(row.RawDatum)
+	if err != nil {
+		return nil, fmt.Errorf("get datum: %w", err)
+	}
 	return &models.Datum{
 		Hash:      row.Hash,
-		RawDatum:  row.RawDatum,
+		RawDatum:  rawDatum,
 		ID:        uint(row.ID),
 		AddedSlot: addedSlot,
 	}, nil
@@ -985,11 +989,15 @@ func (s *Store) SetDatum(
 	if err != nil {
 		return err
 	}
+	offset, err := payloadLocate(payloadLocatorFor(txn, nil))(rawDatum)
+	if err != nil {
+		return fmt.Errorf("locate datum: %w", err)
+	}
 	if err := queries.SetDatum(
 		ctx,
 		sqlitequery.SetDatumParams{
 			Hash:      hash[:],
-			RawDatum:  rawDatum,
+			RawDatum:  offset,
 			AddedSlot: slot,
 		},
 	); err != nil {
@@ -1022,9 +1030,13 @@ func (s *Store) GetScript(
 	if err != nil {
 		return nil, fmt.Errorf("get script: %w", err)
 	}
+	content, err := s.resolvePayload(row.Content)
+	if err != nil {
+		return nil, fmt.Errorf("get script: %w", err)
+	}
 	return &models.Script{
 		Hash:        row.Hash,
-		Content:     row.Content,
+		Content:     content,
 		ID:          uint(row.ID),
 		CreatedSlot: createdSlot,
 		Type:        scriptType,
@@ -1127,9 +1139,13 @@ func (s *Store) GetPParamUpdates(
 		if err != nil {
 			return nil, fmt.Errorf("get pparam updates: %w", err)
 		}
+		cborData, err := s.resolvePayload(row.Cbor)
+		if err != nil {
+			return nil, fmt.Errorf("get pparam updates: %w", err)
+		}
 		ret = append(ret, models.PParamUpdate{
 			GenesisHash: row.GenesisHash,
-			Cbor:        row.Cbor,
+			Cbor:        cborData,
 			ID:          uint(row.ID),
 			AddedSlot:   addedSlot,
 			Epoch:       epoch,
@@ -1184,7 +1200,17 @@ func (s *Store) ListPParamUpdates(
 			Epoch:       e,
 		})
 	}
-	return ret, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range ret {
+		resolved, err := s.resolvePayload(ret[i].Cbor)
+		if err != nil {
+			return nil, fmt.Errorf("list pparam updates: %w", err)
+		}
+		ret[i].Cbor = resolved
+	}
+	return ret, nil
 }
 
 func (s *Store) HasPParamsForEra(
@@ -1341,11 +1367,15 @@ func (s *Store) SetPParamUpdate(
 	if err != nil {
 		return err
 	}
+	offset, err := payloadLocate(payloadLocatorFor(txn, nil))(update)
+	if err != nil {
+		return fmt.Errorf("locate pparam update: %w", err)
+	}
 	return queries.SetPParamUpdate(
 		ctx,
 		sqlitequery.SetPParamUpdateParams{
 			GenesisHash: genesis,
-			Cbor:        update,
+			Cbor:        offset,
 			AddedSlot: sql.NullInt64{
 				Int64: sqlSlot,
 				Valid: true,
@@ -1541,56 +1571,6 @@ DELETE FROM network_donation WHERE epoch = ?`), sqlEpoch); err != nil {
 			epoch,
 			err,
 		)
-	}
-	return nil
-}
-
-func (s *Store) GetImportCheckpoint(
-	importKey string,
-	txn types.Txn,
-) (*models.ImportCheckpoint, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, fmt.Errorf("get import checkpoint: %w", err)
-	}
-	queries := s.operationalQueries(db)
-	row, err := queries.GetImportCheckpoint(
-		ctx,
-		importKey,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get import checkpoint: %w", err)
-	}
-	return &models.ImportCheckpoint{
-		ID:        uint(row.ID),
-		ImportKey: row.ImportKey,
-		Phase:     row.Phase,
-	}, nil
-}
-
-func (s *Store) SetImportCheckpoint(
-	checkpoint *models.ImportCheckpoint,
-	txn types.Txn,
-) error {
-	if checkpoint == nil {
-		return errors.New("set import checkpoint: checkpoint is nil")
-	}
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return fmt.Errorf("set import checkpoint: %w", err)
-	}
-	queries := s.operationalQueries(db)
-	if err := queries.SetImportCheckpoint(
-		ctx,
-		sqlitequery.SetImportCheckpointParams{
-			ImportKey: checkpoint.ImportKey,
-			Phase:     checkpoint.Phase,
-		},
-	); err != nil {
-		return fmt.Errorf("set import checkpoint: %w", err)
 	}
 	return nil
 }

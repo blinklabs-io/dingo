@@ -182,7 +182,7 @@ func alonzoUpdateBlock(t *testing.T, slot, epoch uint64) models.Block {
 // epoch (a fresh run, where nothing is stored until replay writes it).
 func TestRun_EnactsPendingUpdateBeforeHardFork(t *testing.T) {
 	t.Parallel()
-	testRunEnactsPendingUpdateBeforeHardFork(t, newTestDB)
+	testRunEnactsPendingUpdateBeforeHardFork(t, newIndexerTestDB)
 }
 
 func testRunEnactsPendingUpdateBeforeHardFork(
@@ -254,21 +254,22 @@ func testRunEnactsPendingUpdateBeforeHardFork(
 					boundary.target.Id, 1000, 10, nil,
 				))
 				if replayed {
-					require.NoError(t, db.BlockCreate(
+					require.NoError(t, consensusOf(t, db).BlockCreate(
 						boundary.updateBlock(t, 5, ppupSourceEpoch),
 						nil,
 					))
 				} else {
 					for _, key := range ppupGenesisKeys() {
-						require.NoError(t, db.SetPParamUpdate(
-							key.Bytes(), ppupUpdateCbor(t), 5, ppupSourceEpoch, nil,
-						))
+						setTestPParamUpdate(
+							t, db, key.Bytes(), ppupUpdateCbor(t), 5,
+							ppupSourceEpoch,
+						)
 					}
 				}
 				targetBlocks, err := boundary.targetBlock(10)
 				require.NoError(t, err)
 				for _, block := range targetBlocks {
-					require.NoError(t, db.BlockCreate(models.Block{
+					require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 						Slot:   block.SlotNumber(),
 						Hash:   block.Hash().Bytes(),
 						Number: block.BlockNumber(),
@@ -337,7 +338,7 @@ func testRunEnactsPendingUpdateBeforeHardFork(
 // derived again from the stored proposals rather than kept.
 func TestRun_RederivesPParamsBelowTheAnchor(t *testing.T) {
 	t.Parallel()
-	testRunRederivesPParamsBelowTheAnchor(t, newTestDB)
+	testRunRederivesPParamsBelowTheAnchor(t, newIndexerTestDB)
 }
 
 func testRunRederivesPParamsBelowTheAnchor(
@@ -363,9 +364,9 @@ func testRunRederivesPParamsBelowTheAnchor(
 		))
 	}
 	for _, key := range ppupGenesisKeys() {
-		require.NoError(t, db.SetPParamUpdate(
-			key.Bytes(), ppupUpdateCbor(t), 5, ppupSourceEpoch, nil,
-		))
+		setTestPParamUpdate(
+			t, db, key.Bytes(), ppupUpdateCbor(t), 5, ppupSourceEpoch,
+		)
 	}
 	bootstrap := NewBackfill(db, nodeCfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, bootstrap.bootstrapEraChain(eras.MaryEraDesc.Id))
@@ -380,7 +381,7 @@ func testRunRederivesPParamsBelowTheAnchor(
 		blocks, err := mockfixtures.GenerateAlonzoChain(1, lcommon.Blake2b256{}, slot, 1, 3)
 		require.NoError(t, err)
 		for _, block := range blocks {
-			require.NoError(t, db.BlockCreate(models.Block{
+			require.NoError(t, consensusOf(t, db).BlockCreate(models.Block{
 				Slot:   block.SlotNumber(),
 				Hash:   block.Hash().Bytes(),
 				Number: block.BlockNumber(),

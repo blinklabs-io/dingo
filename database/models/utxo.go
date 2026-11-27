@@ -295,6 +295,11 @@ type Utxo struct {
 	// it equals TransactionID. Unique: a transaction has at most one
 	// collateral return output.
 	CollateralReturnForTxID *uint
+	// BlockIndex is the producing transaction's position in its block when
+	// the writer knows it. It is not stored on the row: it lets the address
+	// index row take its page position when written instead of by a second
+	// statement.
+	BlockIndex *uint32 `json:"-"`
 	// TxId is the hash of the producing transaction.
 	TxId       []byte
 	PaymentKey []byte
@@ -307,7 +312,10 @@ type Utxo struct {
 	Cbor          []byte // This is here for convenience but not represented in the metadata DB
 	DatumHash     []byte // Optional datum hash (32 bytes)
 	Datum         []byte // Inline datum CBOR, not stored in metadata DB
-	ScriptRef     []byte // Reference script bytes, not stored in metadata DB
+	// DatumOffset is the stored CBOR offset of Datum. Only
+	// GetMidnightCandidates sets it.
+	DatumOffset []byte
+	ScriptRef   []byte // Reference script bytes, not stored in metadata DB
 	// ReferenceScriptHash is the hash of the script the output carries as a
 	// reference script. It is not a utxo column; API storage mode indexes it
 	// in utxo_reference_script.

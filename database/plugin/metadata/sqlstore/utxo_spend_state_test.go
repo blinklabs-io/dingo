@@ -106,6 +106,7 @@ func TestUtxoSpendStateReadsUnflushedRetainedOverlay(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { require.NoError(t, txn.Rollback()) }()
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	enabled, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
 	require.NoError(t, err)

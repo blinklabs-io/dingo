@@ -43,7 +43,7 @@ func insertScript(
 	_, err := raw.Exec(
 		`INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 1, ?)`,
 		hash,
-		content,
+		payloadColumn(t, raw, content),
 		scriptType,
 	)
 	require.NoError(t, err)
@@ -169,7 +169,7 @@ func TestNodeAdapterDatum(t *testing.T) {
 	hash := lcommon.Blake2b256Hash(datumCbor)
 	_, err = raw.Exec(
 		`INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, 1)`,
-		hash.Bytes(), datumCbor,
+		hash.Bytes(), payloadColumn(t, raw, datumCbor),
 	)
 	require.NoError(t, err)
 

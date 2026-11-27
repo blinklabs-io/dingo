@@ -55,14 +55,14 @@ type FetchConfig struct {
 	// fetches. False by default: per-account fetching issues far more Koios
 	// requests than pool-level fetching (one chunked request set per epoch
 	// covering the full address universe, versus one request per pool), so
-	// this is opt-in for the standalone CLI. See ObserverConfig.AccountsEnabled
-	// for the in-process observer's default.
+	// this is opt-in. See ObserverConfig.AccountsEnabled for the in-process
+	// observer's default.
 	AccountsEnabled bool
 	// AccountsSource supplies Dingo's own known reward-account addresses to
 	// union with Koios's full account list (see BuildAccountAddressUniverse)
-	// when AccountsEnabled is true. nil is valid (e.g. the standalone CLI's
-	// `fetch` command run without Dingo database access configured for
-	// accounts) — the address universe then falls back to Koios's list
+	// when AccountsEnabled is true. nil is valid (a caller without Dingo
+	// database access for accounts) — the address universe then falls back
+	// to Koios's list
 	// alone, which still checks every Koios-known account, just cannot also
 	// surface a Dingo-only account Koios has never indexed.
 	AccountsSource RewardParitySource
@@ -314,8 +314,7 @@ func Fetch(
 	// before per-account fetching existed (or before AccountsEnabled was
 	// turned on) would look "already fetched" to GetUncachedEpochs forever and
 	// never get a per-account backfill — see GetEpochsMissingAccountCoverage's
-	// doc comment and ARCHITECTURE.md's Koios Parity Tracker "Per-account
-	// exact parity" subsection.
+	// doc comment and README.md's "Per-account exact parity" section.
 	// ForceRefresh mode: fetch the full range and overwrite cached rows, used
 	// when the user suspects stale or corrupt cached data in [fromEpoch, through].
 	var epochs []uint64

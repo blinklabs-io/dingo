@@ -111,11 +111,12 @@ func runClassicEnactment(
 	results := make([]*shelley.ShelleyProtocolParameters, 0, 3)
 	// Every mode runs in its own transaction that is rolled back, so one
 	// database serves all three.
-	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	db, err := newIndexerTestDatabase(t)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	for _, mode := range []string{"compute", "forecast", "apply"} {
 		txn := db.Transaction(context.Background(), true)
+		bindTestPayloads(t, db, txn)
 		for epoch, start := range map[uint64]uint64{
 			classicTestSubmissionEpoch - 1: classicTestEpochStart - 100,
 			classicTestSubmissionEpoch:     classicTestEpochStart,

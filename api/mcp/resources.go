@@ -42,7 +42,7 @@ backfill all historical transaction metadata. Pruning also limits history.
 | Transactions | tx | "transaction": id, hash (every known transaction); applied_transaction: tx_id, block_hash, slot, block_index, fee (applied transactions) |
 | Outputs | tx_out, tx_in | utxo: tx_id (producer row id), output_idx, amount, deleted_slot, spent_at_tx_id |
 | Stake accounts | stake_address and delegation/reward tables | account: staking_key, credential_tag, pool, drep, reward, active |
-| Datums | datum | datum: hash, raw_datum (CBOR bytes) |
+| Datums | datum | datum: hash, raw_datum (52-byte block offset of the CBOR, not the CBOR) |
 | Native assets | multi_asset and output/mint relations | asset_identity: id, policy_id, name; asset_holding: utxo_id, asset_id, amount (output holdings) |
 | Governance | gov_action_proposal, voting_procedure | governance_proposal, governance_vote, drep, committee_member |
 
@@ -117,14 +117,20 @@ type from the hash bytes.
 ### Stored datums
 
 ~~~sql
-SELECT hex(hash) AS datum_hash, hex(raw_datum) AS datum_cbor_hex
+SELECT hex(hash) AS datum_hash, hex(raw_datum) AS datum_offset_hex
 FROM datum
 ORDER BY id DESC
 LIMIT 5;
 ~~~
 
-raw_datum contains serialized CBOR, not JSON. Use resolve_datum_or_script with
-the datum hash for decoded content. Core storage mode does not populate the
+raw_datum holds a 52-byte offset (magic "DOFF", then block slot, block hash,
+byte offset and byte length) of the datum's CBOR in the block that carried it,
+not the CBOR itself. The same holds for script.content,
+applied_transaction.metadata, transaction_metadata_label.cbor_value,
+pparam_update.cbor and the Midnight datum columns. A payload whose block
+expired reads as a "DEXP" marker or fails with a history-expired error. SQL
+cannot read the block: use resolve_datum_or_script with the datum or script
+hash for the bytes and decoded content. Core storage mode does not populate the
 API-mode datum, script, or redeemer detail indexes. Empty results from those
 tables in core mode do not mean the chain has no such data. API mode indexes
 details for transactions it processes, subject to available and retained
@@ -167,7 +173,7 @@ ORDER BY m.name, p.cid`)
 		"account":             "Stake accounts identified by credential_tag and staking_key",
 		"asset_identity":      "Distinct native assets by policy_id and name",
 		"asset_holding":       "Native asset quantity per utxo_id and asset_id",
-		"datum":               "Datum hashes and serialized CBOR",
+		"datum":               "Datum hashes and the block offset of each datum CBOR",
 		"block_nonce":         "Block hashes and nonces by slot",
 		"drep":                "DRep registration state",
 		"committee_member":    "Committee cold credentials and membership terms",
@@ -223,16 +229,15 @@ When forging blocks, Dingo utilizes standard Cardano operational certificates:
 - **Operational Certificate (` + "`OpCert`" + `)**: Binds the pool cold key to the current hot KES verification key and records the operational certificate sequence number (` + "`OpCertSequenceNumber`" + `).
 - **VRF Key & Leader Proof**: Validates that the pool was elected leader for the exact slot under Praos consensus.
 
-In Dingo's SQLite metadata store, whenever an operational certificate is observed or validated, it is tracked in:
-` + "`SELECT slot, sequence FROM pool_opcert_sequence WHERE pool_key_hash = ...;`" + `
+Dingo keeps each pool's latest operational certificate counter in the ledger state (the LedgerDB), where block validation checks it.
 
 ---
 
 ## 3. Durable Forge Fence (Double-Signing Prevention)
 
 To prevent forging two blocks in the same slot across process crashes, restarts, or node migrations, Dingo implements a durable **Forge Fence**:
-- The forge fence is backed by the SQLite ` + "`sync_state`" + ` table with key ` + "`forge_fence:<pool_key_hash>`" + `.
-- Format: JSON record storing the highest forged slot and timestamp.
+- The forge fence is block-store chain state under the key ` + "`chainstate/forge_fence:<pool_id>`" + `, written and synced before a header is signed. No SQL table holds it, and no MCP tool reads it.
+- Format: JSON record storing the format version, the pool id and the last forged slot.
 - A Dingo block producer will strictly refuse to start or forge if the current slot is less than or equal to the persisted fence.
 
 ---
@@ -262,11 +267,11 @@ const docsFAQContent = `# Dingo Frequently Asked Questions (FAQ)
 By default, Dingo sets the block header **Protocol Minor Version to ` + "`69`" + `** (` + "`BlockHeaderProtocolMinor = 69`" + `). While the major version indicates the protocol era (e.g. Conway 9 or 10), the minor version 69 identifies Dingo block producers on-chain. With CIP-0203 enabled, scheme 0 and the low byte (` + "`(proto_minor & 255) == 69`" + `) still identify Dingo, while the upper bits carry the release version.
 
 ### Q3: How does Dingo prevent slot double-signing?
-Dingo records a durable **Forge Fence** in SQLite (` + "`sync_state`" + ` table under ` + "`forge_fence:<pool_id>`" + `). It records the highest slot signed and fences against double-signing even across process restarts.
+Dingo records a durable **Forge Fence** in its block store (chain state ` + "`forge_fence:<pool_id>`" + `). It records the highest slot signed and fences against double-signing even across process restarts.
 
 ### Q4: What storage modes does Dingo support?
-- **Core Mode (` + "`--storage-mode core`" + `)**: Uses an embedded Badger DB for raw block blobs and an embedded SQLite database (` + "`metadata.sqlite`" + ` in WAL mode) for relational ledger state, accounts, UTxOs, and governance.
-- **API Mode (` + "`--storage-mode api`" + `)**: Extends storage with external databases (e.g., PostgreSQL) for heavy API indexing.
+- **Core Mode (` + "`--storage-mode core`" + `)**: Keeps blocks in the block store (Badger by default) and the ImmutableDB, and the UTxO set and the rest of the ledger state in the LedgerDB. It opens no SQL store.
+- **API Mode (` + "`--storage-mode api`" + `)**: Adds an IndexerDB (SQLite, PostgreSQL or MySQL) holding the indexes the APIs read.
 
 ### Q5: Can Dingo bootstrap quickly without full historical sync?
 Yes! Dingo supports fast bootstrapping from **Mithril** certified snapshots. It verifies Mithril cryptographic multi-signatures, reconstructs the active UTxO set and stake distributions, and begins following the tip in minutes rather than days.
@@ -278,7 +283,7 @@ Dingo provides a native Model Context Protocol (MCP) server over HTTP/SSE. AI as
 - Query pool delegation, performance, and rewards (` + "`get_pool_performance`" + `)
 - Inspect Conway Voltaire governance state (` + "`get_governance_state`" + `)
 - Resolve UTxOs and accounts (` + "`get_utxos`" + `, ` + "`get_account`" + `)
-- Run safe, read-only SQL queries directly against ledger tables (` + "`sqlite_query`" + `, ` + "`sqlite_explain`" + `)
+- Run safe, read-only SQL queries against the IndexerDB on a node that has one (` + "`sqlite_query`" + `, ` + "`sqlite_explain`" + `)
 - Learn table structures and guides via passive resources (` + "`dingo://docs/identity`" + `, ` + "`dingo://docs/faq`" + `, ` + "`dingo://schema/tables`" + `, ` + "`dingo://dbsync/cheatsheet`" + `)
 
 ### Q7: Where can I find more documentation?
@@ -309,11 +314,11 @@ Dingo is a modular, high-performance Cardano node written in Go.
    - VRF-based slot lottery evaluation under Praos rules.
    - Key Evolving Signatures (KES) and Operational Certificates (OpCert).
    - Stamps identifier 69 on forged blocks, optionally including the CIP-0203 release-version payload.
-   - Durable Forge Fence in SQLite to prevent double-signing.
+   - Durable Forge Fence in the block store to prevent double-signing.
 
 4. **Storage Subsystem**:
-   - **Core Mode**: Badger DB key-value store for immutable block blobs + SQLite WAL database ('metadata.sqlite') for ledger state, UTxO index, transactions, and governance.
-   - **API Mode**: Pluggable storage providers (e.g. PostgreSQL) for comprehensive API queries.
+   - **Core Mode**: The block store (Badger by default) and the ImmutableDB for blocks, and the LedgerDB for the UTxO set and the rest of the ledger state; no SQL store.
+   - **API Mode**: Core mode plus an IndexerDB (SQLite, PostgreSQL or MySQL) for the API indexes.
    - **Mithril Bootstrap**: Certified snapshot downloading and rapid ledger state reconstruction.
 
 5. **Model Context Protocol (MCP)**:

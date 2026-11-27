@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -152,7 +153,7 @@ func TestImportLedgerStateRejectsIncompleteEraHistoryBeforeMutation(
 					return 1, 100, nil
 				}
 			}
-			err = ImportLedgerState(context.Background(), ImportConfig{
+			err = importWholeState(t, context.Background(), ImportConfig{
 				UtxoSet:  importSetFor(t, db),
 				Database: db,
 				Logger: slog.New(
@@ -173,7 +174,7 @@ func TestImportLedgerStateRejectsIncompleteEraHistoryBeforeMutation(
 			})
 			require.ErrorContains(t, err, test.wantErr)
 			require.False(t, progressed)
-			epochs, err := db.Metadata().GetEpochs(nil)
+			epochs, err := ledgerDBFor(t, db).GetEpochs(nil)
 			require.NoError(t, err)
 			require.Empty(t, epochs)
 		})
@@ -223,6 +224,7 @@ func TestImportDRepsCarriesExpiryEpoch(t *testing.T) {
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	cfg = importTargetForTest(t, cfg)
 
 	require.NoError(t, importDReps(
 		context.Background(),
@@ -259,7 +261,7 @@ func TestImportDRepsCarriesExpiryEpoch(t *testing.T) {
 		tag, err := models.CredentialTagFromUint(uint(tc.cred.Type))
 		require.NoError(t, err, tc.name)
 
-		got, err := db.GetDrepByCredential(
+		got, err := ledgerDBFor(t, db).GetDrepByCredential(
 			context.Background(),
 			tag,
 			tc.cred.Hash,
@@ -410,13 +412,13 @@ func TestImportPParamsPersistsPreviewRewardHistory(t *testing.T) {
 
 	require.NoError(t, importPParams(context.Background(), cfg))
 
-	previousRows, err := db.Metadata().GetPParams(1396, EraConway, nil)
+	previousRows, err := storedPParamsForTest(t, db, 1396, EraConway, nil)
 	require.NoError(t, err)
 	require.Len(t, previousRows, 1)
 	require.Equal(t, previous, previousRows[0].Cbor)
 	require.Equal(t, uint64(1396), previousRows[0].Epoch)
 
-	currentRows, err := db.Metadata().GetPParams(1397, EraConway, nil)
+	currentRows, err := storedPParamsForTest(t, db, 1397, EraConway, nil)
 	require.NoError(t, err)
 	require.Len(t, currentRows, 1)
 	require.Equal(t, current, currentRows[0].Cbor)
@@ -445,13 +447,13 @@ func TestImportPParamsStoresCurrentWithoutUnavailableHistory(t *testing.T) {
 	for range 2 {
 		require.NoError(t, importPParams(context.Background(), cfg))
 
-		previousRows, queryErr := db.Metadata().GetPParams(
+		previousRows, queryErr := storedPParamsForTest(t, db,
 			1396, EraConway, nil,
 		)
 		require.NoError(t, queryErr)
 		require.Empty(t, previousRows)
 
-		currentRows, queryErr := db.Metadata().GetPParams(
+		currentRows, queryErr := storedPParamsForTest(t, db,
 			1397, EraConway, nil,
 		)
 		require.NoError(t, queryErr)
@@ -481,7 +483,7 @@ func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
 		EraConway, translatedPrevious, EraBabbage,
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.Metadata().SetPParams(
+	require.NoError(t, ledgerDBFor(t, db).SetPParams(
 		storedPrevious, 99_999, 1396, EraBabbage, nil,
 	))
 	cfg := previewPParamsImportConfig(t, db, current, translatedPrevious)
@@ -494,13 +496,13 @@ func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
 	for range 2 {
 		require.NoError(t, importPParams(context.Background(), cfg))
 
-		previousRows, queryErr := db.Metadata().GetPParams(
+		previousRows, queryErr := storedPParamsForTest(t, db,
 			1396, EraBabbage, nil,
 		)
 		require.NoError(t, queryErr)
 		require.Len(t, previousRows, 1)
 		require.Equal(t, expectedPrevious, previousRows[0].Cbor)
-		currentRows, queryErr := db.Metadata().GetPParams(
+		currentRows, queryErr := storedPParamsForTest(t, db,
 			1397, EraConway, nil,
 		)
 		require.NoError(t, queryErr)
@@ -533,7 +535,7 @@ func TestImportPParamsDowngradesTranslatedCrossEraHistory(t *testing.T) {
 
 	require.NoError(t, importPParams(context.Background(), cfg))
 
-	previousRows, queryErr := db.Metadata().GetPParams(
+	previousRows, queryErr := storedPParamsForTest(t, db,
 		1396, EraBabbage, nil,
 	)
 	require.NoError(t, queryErr)
@@ -543,7 +545,7 @@ func TestImportPParamsDowngradesTranslatedCrossEraHistory(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, expectedPrevious, previousRows[0].Cbor)
-	currentRows, queryErr := db.Metadata().GetPParams(
+	currentRows, queryErr := storedPParamsForTest(t, db,
 		1397, EraConway, nil,
 	)
 	require.NoError(t, queryErr)
@@ -583,8 +585,9 @@ func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(
 			return 1, 500, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 	noProgress := func(ImportProgress) {}
-	_, _, err = importCertState(
+	_, err = importCertState(
 		context.Background(), cfg, state.Tip.Slot, noProgress,
 	)
 	require.NoError(t, err)
@@ -593,13 +596,13 @@ func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(
 	require.NoError(t, importSnapShots(
 		context.Background(), cfg, state.Tip.Slot, noProgress, false,
 	))
-	preexistingGo, err := db.Metadata().GetRewardSnapshot(
+	preexistingGo, err := ledgerDBFor(t, db).GetRewardSnapshot(
 		state.Epoch-2, "mark", nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, preexistingGo)
 	require.False(t, preexistingGo.Authoritative)
-	preexistingPools, err := db.Metadata().GetRewardPoolInputs(
+	preexistingPools, err := ledgerDBFor(t, db).GetRewardPoolInputs(
 		state.Epoch-2, nil,
 	)
 	require.NoError(t, err)
@@ -613,27 +616,27 @@ func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(
 		context.Background(), cfg, state.Tip.Slot, noProgress, false,
 	))
 
-	goBasis, err := db.Metadata().GetRewardSnapshot(
+	goBasis, err := ledgerDBFor(t, db).GetRewardSnapshot(
 		state.Epoch-2, "mark", nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, goBasis,
 		"the Go basis remains usable after historical pparams are downgraded")
-	goPools, err := db.Metadata().GetRewardPoolInputs(state.Epoch-2, nil)
+	goPools, err := ledgerDBFor(t, db).GetRewardPoolInputs(state.Epoch-2, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, goPools)
-	goStake, err := db.Metadata().GetRewardStakeInputs(state.Epoch-2, nil)
+	goStake, err := ledgerDBFor(t, db).GetRewardStakeInputs(state.Epoch-2, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, goStake)
 	for _, epoch := range []uint64{state.Epoch - 1, state.Epoch} {
-		basis, queryErr := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		basis, queryErr := ledgerDBFor(t, db).GetRewardSnapshot(epoch, "mark", nil)
 		require.NoError(t, queryErr)
 		require.NotNil(t, basis,
 			"epoch %d does not depend on unavailable old-era history", epoch)
 	}
 
 	require.NoError(t, importPParams(context.Background(), cfg))
-	previousRows, err := db.Metadata().GetPParams(
+	previousRows, err := storedPParamsForTest(t, db,
 		state.Epoch-1, EraBabbage, nil,
 	)
 	require.NoError(t, err)
@@ -643,7 +646,7 @@ func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(
 	)
 	require.NoError(t, err)
 	require.Equal(t, expectedPrevious, previousRows[0].Cbor)
-	currentRows, err := db.Metadata().GetPParams(
+	currentRows, err := storedPParamsForTest(t, db,
 		state.Epoch, EraConway, nil,
 	)
 	require.NoError(t, err)
@@ -672,14 +675,15 @@ func TestImportSnapShotsPreservesAuthoritativeRewardBasis(t *testing.T) {
 			return 1, 500, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 	noProgress := func(ImportProgress) {}
-	_, _, err = importCertState(
+	_, err = importCertState(
 		context.Background(), cfg, state.Tip.Slot, noProgress,
 	)
 	require.NoError(t, err)
 
 	const retainedPoolCount = uint64(999)
-	require.NoError(t, db.Metadata().SaveRewardSnapshot(
+	require.NoError(t, ledgerDBFor(t, db).SaveRewardSnapshot(
 		&models.RewardSnapshot{
 			Epoch:          state.Epoch - 2,
 			SnapshotType:   "mark",
@@ -692,7 +696,7 @@ func TestImportSnapShotsPreservesAuthoritativeRewardBasis(t *testing.T) {
 		context.Background(), cfg, state.Tip.Slot, noProgress, false,
 	))
 
-	basis, err := db.Metadata().GetRewardSnapshot(
+	basis, err := ledgerDBFor(t, db).GetRewardSnapshot(
 		state.Epoch-2, "mark", nil,
 	)
 	require.NoError(t, err)
@@ -713,7 +717,7 @@ func seedRewardBasisMarkers(
 ) {
 	t.Helper()
 	for _, epoch := range epochs {
-		require.NoError(t, db.Metadata().SaveRewardSnapshot(
+		require.NoError(t, ledgerDBFor(t, db).SaveRewardSnapshot(
 			&models.RewardSnapshot{
 				Epoch:        epoch,
 				SnapshotType: "mark",
@@ -743,7 +747,7 @@ func previewPParamsImportConfig(
 	current []byte,
 	previous []byte,
 ) ImportConfig {
-	return ImportConfig{
+	return importTargetForTest(t, ImportConfig{
 		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger: slog.New(
@@ -761,7 +765,7 @@ func previewPParamsImportConfig(
 		EpochLength: func(uint) (uint, uint, error) {
 			return 1, 100, nil
 		},
-	}
+	})
 }
 
 func previewEraBounds() []EraBound {
@@ -813,6 +817,7 @@ func TestImportSnapShotsSeedsRewardInputs(t *testing.T) {
 			return 1, 500, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 	noProgress := func(ImportProgress) {}
 	ctx := context.Background()
 	slot := state.Tip.Slot
@@ -821,7 +826,7 @@ func TestImportSnapShotsSeedsRewardInputs(t *testing.T) {
 	// populates the pool registrations the seeding takes its parameters from.
 	// If this ever stops running before the snapshots, the seeding silently
 	// finds no parameters and writes nothing.
-	poolsImported, _, err := importCertState(ctx, cfg, slot, noProgress)
+	poolsImported, err := importCertState(ctx, cfg, slot, noProgress)
 	require.NoError(t, err)
 	require.Positive(t, poolsImported,
 		"the fixture must import pools, or the seeding below would be "+
@@ -834,13 +839,13 @@ func TestImportSnapShotsSeedsRewardInputs(t *testing.T) {
 	for _, epoch := range []uint64{
 		state.Epoch, state.Epoch - 1, state.Epoch - 2,
 	} {
-		snapshot, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		snapshot, err := ledgerDBFor(t, db).GetRewardSnapshot(epoch, "mark", nil)
 		require.NoError(t, err)
 		require.NotNil(t, snapshot,
 			"epoch %d has no reward snapshot after a full import, so its "+
 				"reward round would be skipped and never made up", epoch)
 
-		poolInputs, err := db.Metadata().GetRewardPoolInputs(epoch, nil)
+		poolInputs, err := ledgerDBFor(t, db).GetRewardPoolInputs(epoch, nil)
 		require.NoError(t, err)
 		require.Len(t, poolInputs, int(snapshot.TotalPoolCount))
 		for _, pool := range poolInputs {
@@ -850,7 +855,7 @@ func TestImportSnapShotsSeedsRewardInputs(t *testing.T) {
 					"pool-distr entries produce, and the ledger rejects it")
 		}
 
-		stakeInputs, err := db.Metadata().GetRewardStakeInputs(epoch, nil)
+		stakeInputs, err := ledgerDBFor(t, db).GetRewardStakeInputs(epoch, nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, stakeInputs)
 	}
@@ -858,7 +863,7 @@ func TestImportSnapShotsSeedsRewardInputs(t *testing.T) {
 	// The pots row is the other half of what a first reward round needs, and
 	// it is seeded by a different part of the import; assert the two agree on
 	// the epoch, since a mismatch leaves the round just as skipped.
-	pots, err := db.Metadata().GetRewardAdaPots(state.Epoch, nil)
+	pots, err := ledgerDBFor(t, db).GetRewardAdaPots(state.Epoch, nil)
 	require.NoError(t, err)
 	if pots != nil {
 		require.Equal(t, state.Epoch, pots.Epoch)
@@ -905,6 +910,7 @@ func TestImportSnapShotsSeedsAfterEveryPoolImportStage(t *testing.T) {
 			return 1, 500, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 
 	// No importCertState: this is the resume the fallback exists for, where
 	// the only pools this run learns about come from the fallback itself.
@@ -962,7 +968,7 @@ func TestImportSnapShotsSeedsAfterEveryPoolImportStage(t *testing.T) {
 
 	// And the seeding actually produced a basis, so the ordering above is
 	// ordering of work that happened rather than of a no-op.
-	snapshot, err := db.Metadata().GetRewardSnapshot(state.Epoch, "mark", nil)
+	snapshot, err := ledgerDBFor(t, db).GetRewardSnapshot(state.Epoch, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, snapshot,
 		"the epoch the snapshots describe must be seeded")
@@ -1014,8 +1020,7 @@ func importTestPool(
 	pool *models.Pool,
 ) {
 	t.Helper()
-	require.NoError(t, db.Metadata().ImportPool(
-		pool,
+	require.NoError(t, ledgerDBFor(t, db).ImportPool(
 		&models.PoolRegistration{
 			PoolKeyHash:                pool.PoolKeyHash,
 			VrfKeyHash:                 pool.VrfKeyHash,
@@ -1026,6 +1031,7 @@ func importTestPool(
 			Cost:                       pool.Cost,
 			AddedSlot:                  1,
 		},
+		false,
 		nil,
 	))
 }
@@ -1042,18 +1048,19 @@ func TestImportOpCertCountersStoresMaxUint64(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := bytes.Repeat([]byte{0x78}, 28)
-	txn := db.MetadataTxn(context.Background(), true)
-	require.NoError(t, importOpCertCounters(
-		db.Metadata(),
-		map[string]uint64{string(poolKeyHash): math.MaxUint64},
-		100,
-		txn.Metadata(),
-	))
-	require.NoError(t, txn.Commit())
-	txn.Release()
+	cfg := importTargetForTest(t, ImportConfig{Database: db})
+	require.NoError(t, cfg.LedgerDB.Run(nil, func(txn ledgerdb.Txn) error {
+		return importOpCertCounters(
+			t.Context(),
+			cfg.LedgerDB,
+			map[string]uint64{string(poolKeyHash): math.MaxUint64},
+			100,
+			txn,
+		)
+	}))
 
-	sequence, found, err := db.LatestPoolOpCertSequence(
-		context.Background(),
+	sequence, found, err := cfg.LedgerDB.LatestPoolOpCertSequence(
+		t.Context(),
 		testPoolKeyHash(poolKeyHash), nil,
 	)
 	require.NoError(t, err)
@@ -1145,9 +1152,10 @@ func TestImportSnapShotsPreservesBoundaryCaptureProvenance(t *testing.T) {
 			return 1, 500, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 	ctx := context.Background()
 	progress := func(ImportProgress) {}
-	_, _, err = importCertState(ctx, cfg, state.Tip.Slot, progress)
+	_, err = importCertState(ctx, cfg, state.Tip.Slot, progress)
 	require.NoError(t, err)
 	require.NoError(t, importSnapShots(
 		ctx,
@@ -1160,7 +1168,7 @@ func TestImportSnapShotsPreservesBoundaryCaptureProvenance(t *testing.T) {
 	snapshots, err := ParseSnapShots(state.SnapShotsData)
 	require.NoError(t, err)
 	for _, target := range snapshotImportTargets(state.Epoch, snapshots) {
-		rows, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		rows, err := ledgerDBFor(t, db).GetPoolStakeSnapshotsByEpoch(
 			target.targetEpoch,
 			models.PoolStakeSnapshotTypeMark,
 			nil,
@@ -1340,7 +1348,7 @@ func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
-	store := db.Metadata()
+	store := ledgerDBFor(t, db)
 	targetEpoch := uint64(100)
 	poolKeyHash := make([]byte, 28)
 	poolKeyHash[0] = 0x01
@@ -1371,14 +1379,14 @@ func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 
 	err = persistImportedSnapshot(
 		context.Background(),
-		ImportConfig{
+		importTargetForTest(t, ImportConfig{
 			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			State: &RawLedgerState{
 				Epoch:      102,
 				EpochNonce: []byte{0x01, 0x02, 0x03},
 			},
-		},
+		}),
 		999,
 		snapshotImportTarget{
 			name:        "set",
@@ -1441,16 +1449,16 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 		t,
 		persistImportedActivePoolDistribution(
 			context.Background(),
-			ImportConfig{
+			importTargetForTest(t, ImportConfig{
 				UtxoSet:  importSetFor(t, db),
 				Database: db,
 				State:    &RawLedgerState{Epoch: 298},
-			},
+			}),
 			rows,
 		),
 	)
 
-	stored, err := db.Metadata().GetPoolStakeSnapshot(
+	stored, err := ledgerDBFor(t, db).GetPoolStakeSnapshot(
 		298,
 		models.PoolStakeSnapshotTypeActive,
 		poolKeyHash,
@@ -1492,17 +1500,17 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 	}}
 	require.NoError(t, persistImportedSnapshot(
 		context.Background(),
-		ImportConfig{
+		importTargetForTest(t, ImportConfig{
 			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			State:    &RawLedgerState{Epoch: 102},
-		},
+		}),
 		999,
 		snapshotImportTarget{name: "set", targetEpoch: 101},
 		rows,
 	))
 
-	stored, err := db.Metadata().GetPoolStakeSnapshot(
+	stored, err := ledgerDBFor(t, db).GetPoolStakeSnapshot(
 		101,
 		models.PoolStakeSnapshotTypeMark,
 		poolKeyHash,
@@ -1520,7 +1528,7 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 	wantPossessionProof := append([]byte(nil), possessionProof...)
 	rows[0].LeiosKeyPublic[0] ^= 0xff
 	rows[0].LeiosKeyPossessionProof[0] ^= 0xff
-	again, err := db.Metadata().GetPoolStakeSnapshot(
+	again, err := ledgerDBFor(t, db).GetPoolStakeSnapshot(
 		101,
 		models.PoolStakeSnapshotTypeMark,
 		poolKeyHash,
@@ -1561,12 +1569,12 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 		PoolKeyHash:   poolKeyHash,
 		RewardAccount: rewardAccount,
 	})
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, ledgerDBFor(t, db).ImportAccount(&models.Account{
 		StakingKey: rewardAccount,
 		DrepType:   models.DrepTypeAlwaysAbstain,
 		AddedSlot:  1,
 		Active:     true,
-	}))
+	}, nil))
 
 	mkSnapshot := func(epoch uint64) []*models.PoolStakeSnapshot {
 		return []*models.PoolStakeSnapshot{
@@ -1610,14 +1618,14 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			err := persistImportedSnapshot(
 				context.Background(),
-				ImportConfig{
+				importTargetForTest(t, ImportConfig{
 					UtxoSet:  importSetFor(t, db),
 					Database: db,
 					State: &RawLedgerState{
 						Epoch:      102,
 						EpochNonce: []byte{0x01},
 					},
-				},
+				}),
 				999,
 				snapshotImportTarget{
 					name:        tc.name,
@@ -1627,7 +1635,7 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 			)
 			require.NoError(t, err)
 
-			stored, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+			stored, err := ledgerDBFor(t, db).GetPoolStakeSnapshotsByEpoch(
 				tc.targetEpoch, "mark", nil,
 			)
 			require.NoError(t, err)
@@ -1674,14 +1682,14 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 
 	err = persistImportedSnapshot(
 		context.Background(),
-		ImportConfig{
+		importTargetForTest(t, ImportConfig{
 			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			State: &RawLedgerState{
 				Epoch:      102,
 				EpochNonce: []byte{0x01},
 			},
-		},
+		}),
 		999,
 		snapshotImportTarget{
 			name:        "mark",
@@ -1691,7 +1699,7 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	stored, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(102, "mark", nil)
+	stored, err := ledgerDBFor(t, db).GetPoolStakeSnapshotsByEpoch(102, "mark", nil)
 	require.NoError(t, err)
 	require.Len(t, stored, 1)
 	require.False(t, stored[0].RewardAccountAutoVoteResolved,
@@ -1757,14 +1765,14 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 		AddedSlot:  1,
 		Active:     false,
 	}
-	require.NoError(t, db.Metadata().CreateAccount(nil, &inactive))
+	require.NoError(t, ledgerDBFor(t, db).ImportAccount(&inactive, nil))
 	// Active account delegated to AlwaysNoConfidence.
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, ledgerDBFor(t, db).ImportAccount(&models.Account{
 		StakingKey: rewardNoConf,
 		DrepType:   models.DrepTypeAlwaysNoConfidence,
 		AddedSlot:  1,
 		Active:     true,
-	}))
+	}, nil))
 
 	cases := []struct {
 		name         string
@@ -1803,20 +1811,20 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 			}}
 			require.NoError(t, persistImportedSnapshot(
 				context.Background(),
-				ImportConfig{
+				importTargetForTest(t, ImportConfig{
 					UtxoSet:  importSetFor(t, db),
 					Database: db,
 					State: &RawLedgerState{
 						Epoch:      102,
 						EpochNonce: []byte{0x01},
 					},
-				},
+				}),
 				999,
 				snapshotImportTarget{name: "mark", targetEpoch: 102},
 				snaps,
 			))
 
-			stored, err := db.Metadata().
+			stored, err := ledgerDBFor(t, db).
 				GetPoolStakeSnapshotsByEpoch(102, "mark", nil)
 			require.NoError(t, err)
 			var row *models.PoolStakeSnapshot
@@ -1861,12 +1869,12 @@ func TestPersistImportedSnapshotHistoricalLeftUnresolved(t *testing.T) {
 		PoolKeyHash:   poolKeyHash,
 		RewardAccount: rewardAccount,
 	})
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, ledgerDBFor(t, db).ImportAccount(&models.Account{
 		StakingKey: rewardAccount,
 		DrepType:   models.DrepTypeAlwaysAbstain,
 		AddedSlot:  1,
 		Active:     true,
-	}))
+	}, nil))
 
 	targetEpoch := uint64(101) // N-1, import epoch is 102
 	snaps := []*models.PoolStakeSnapshot{{
@@ -1879,14 +1887,14 @@ func TestPersistImportedSnapshotHistoricalLeftUnresolved(t *testing.T) {
 	}}
 	err = persistImportedSnapshot(
 		context.Background(),
-		ImportConfig{
+		importTargetForTest(t, ImportConfig{
 			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			State: &RawLedgerState{
 				Epoch:      102,
 				EpochNonce: []byte{0x01},
 			},
-		},
+		}),
 		999,
 		snapshotImportTarget{
 			name:        "set",
@@ -1904,7 +1912,7 @@ func TestPersistImportedSnapshotHistoricalLeftUnresolved(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	stored, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+	stored, err := ledgerDBFor(t, db).GetPoolStakeSnapshotsByEpoch(
 		targetEpoch, "mark", nil,
 	)
 	require.NoError(t, err)
@@ -2007,6 +2015,7 @@ func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
 		Reconcile:     true,
 		reconcileKeys: newReconcileKeys(),
 	}
+	cfg = importTargetForTest(t, cfg)
 	// The fixture's pool carries no reward account and the state no protocol
 	// parameters, so its reward basis cannot be seeded and the import fails
 	// there. The fallback pool import, and its key recording, run before it.
@@ -2033,12 +2042,12 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 	poolKeyHash := bytes.Repeat([]byte{0x42}, 28)
 	rewardAccount := bytes.Repeat([]byte{0x43}, 28)
 
-	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, ledgerDBFor(t, db).ImportAccount(&models.Account{
 		StakingKey: rewardAccount,
 		DrepType:   models.DrepTypeAlwaysAbstain,
 		AddedSlot:  1,
 		Active:     true,
-	}))
+	}, nil))
 
 	cfg := ImportConfig{
 		UtxoSet:  importSetFor(t, db),
@@ -2047,6 +2056,7 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 			slog.NewTextHandler(io.Discard, nil),
 		),
 	}
+	cfg = importTargetForTest(t, cfg)
 	// Simulate the fallback pool import that now runs BEFORE snapshot
 	// processing in importSnapShots.
 	require.NoError(t, importPools(
@@ -2074,20 +2084,20 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 	}}
 	require.NoError(t, persistImportedSnapshot(
 		context.Background(),
-		ImportConfig{
+		importTargetForTest(t, ImportConfig{
 			UtxoSet:  importSetFor(t, db),
 			Database: db,
 			State: &RawLedgerState{
 				Epoch:      102,
 				EpochNonce: []byte{0x01},
 			},
-		},
+		}),
 		999,
 		snapshotImportTarget{name: "mark", targetEpoch: 102},
 		poolSnapshots,
 	))
 
-	stored, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(102, "mark", nil)
+	stored, err := ledgerDBFor(t, db).GetPoolStakeSnapshotsByEpoch(102, "mark", nil)
 	require.NoError(t, err)
 	require.Len(t, stored, 1)
 	require.True(t, stored[0].RewardAccountAutoVoteResolved,
@@ -2129,10 +2139,11 @@ func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {
 			return 1, 100, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 
 	require.NoError(t, importPParams(context.Background(), cfg))
 
-	pparams, err := db.Metadata().GetPParams(1277, EraConway, nil)
+	pparams, err := storedPParamsForTest(t, db, 1277, EraConway, nil)
 	require.NoError(t, err)
 	require.Len(t, pparams, 1)
 	require.Equal(t, uint64(17_700), pparams[0].AddedSlot)
@@ -2158,6 +2169,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 			slog.NewTextHandler(io.Discard, nil),
 		),
 	}
+	cfg = importTargetForTest(t, cfg)
 
 	require.NoError(t, importAccounts(
 		context.Background(),
@@ -2202,7 +2214,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 		123,
 	))
 
-	keyAcct, err := db.GetAccountByCredential(
+	keyAcct, err := ledgerDBFor(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		stakeKey,
@@ -2213,7 +2225,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 	require.Equal(t, uint8(0), keyAcct.CredentialTag)
 	require.Equal(t, types.Uint64(1), keyAcct.Reward)
 
-	scriptAcct, err := db.GetAccountByCredential(
+	scriptAcct, err := ledgerDBFor(t, db).GetAccountByCredential(
 		context.Background(),
 		1,
 		stakeKey,
@@ -2233,7 +2245,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 		{name: "script", tag: 1, deposit: 3_000_000},
 	} {
 		t.Run(tc.name+" registration deposit", func(t *testing.T) {
-			registration, err := db.GetAccountImportRegistrationByCredential(
+			registration, err := ledgerDBFor(t, db).GetAccountImportRegistrationByCredential(
 				context.Background(),
 				tc.tag,
 				stakeKey,
@@ -2247,7 +2259,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 		})
 	}
 
-	zeroRegistration, err := db.GetAccountImportRegistrationByCredential(
+	zeroRegistration, err := ledgerDBFor(t, db).GetAccountImportRegistrationByCredential(
 		context.Background(),
 		0,
 		bytes.Repeat([]byte{0xA5}, 28),
@@ -2258,7 +2270,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 	require.NotNil(t, zeroRegistration.Deposit)
 	require.Zero(t, *zeroRegistration.Deposit)
 
-	unknownRegistration, err := db.GetAccountImportRegistrationByCredential(
+	unknownRegistration, err := ledgerDBFor(t, db).GetAccountImportRegistrationByCredential(
 		context.Background(),
 		0,
 		bytes.Repeat([]byte{0xA6}, 28),
@@ -2290,6 +2302,7 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 			slog.NewTextHandler(io.Discard, nil),
 		),
 	}
+	cfg = importTargetForTest(t, cfg)
 
 	require.NoError(t, importPools(
 		context.Background(),
@@ -2309,8 +2322,7 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 		nil,
 	))
 
-	pool, err := db.Metadata().GetPool(
-		testPoolKeyHash(poolKeyHash),
+	pool, err := ledgerDBFor(t, db).GetPool(t.Context(), testPoolKeyHash(poolKeyHash),
 		true,
 		nil,
 	)
@@ -2344,6 +2356,7 @@ func TestImportPoolsWritesPendingRetirementForBothQueries(t *testing.T) {
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State:    &RawLedgerState{Epoch: 650},
 	}
+	cfg = importTargetForTest(t, cfg)
 	require.NoError(t, importPools(
 		context.Background(),
 		cfg,
@@ -2357,13 +2370,13 @@ func TestImportPoolsWritesPendingRetirementForBothQueries(t *testing.T) {
 		map[uint64][][]byte{656: {poolKeyHash}},
 	))
 
-	retiring, err := db.Metadata().GetRetiringPools(650, nil)
+	retiring, err := ledgerDBFor(t, db).GetRetiringPools(650, nil)
 	require.NoError(t, err)
 	require.Len(t, retiring, 1)
 	require.Equal(t, poolKeyHash, retiring[0].PoolKeyHash)
 	require.Equal(t, uint64(656), retiring[0].Epoch)
 
-	refunds, err := db.GetPoolsRetiringAtEpoch(
+	refunds, err := ledgerDBFor(t, db).GetPoolsRetiringAtEpoch(
 		context.Background(),
 		656,
 		11,
@@ -2390,6 +2403,7 @@ func TestImportPoolsRejectsUnmatchedRetirementBeforeWritingRows(t *testing.T) {
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State:    &RawLedgerState{Epoch: 650},
 	}
+	cfg = importTargetForTest(t, cfg)
 	err = importPools(
 		context.Background(),
 		cfg,
@@ -2406,10 +2420,10 @@ func TestImportPoolsRejectsUnmatchedRetirementBeforeWritingRows(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not found in the pool table")
 
-	retiring, err := db.Metadata().GetRetiringPools(650, nil)
+	retiring, err := ledgerDBFor(t, db).GetRetiringPools(650, nil)
 	require.NoError(t, err)
 	require.Empty(t, retiring)
-	refunds, err := db.GetPoolsRetiringAtEpoch(
+	refunds, err := ledgerDBFor(t, db).GetPoolsRetiringAtEpoch(
 		context.Background(),
 		656,
 		11,
@@ -2433,6 +2447,7 @@ func TestImportPoolsRejectsPastPendingRetirement(t *testing.T) {
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State:    &RawLedgerState{Epoch: 650},
 	}
+	cfg = importTargetForTest(t, cfg)
 	err = importPools(
 		context.Background(),
 		cfg,
@@ -2445,7 +2460,7 @@ func TestImportPoolsRejectsPastPendingRetirement(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not after snapshot epoch")
-	retiring, err := db.Metadata().GetRetiringPools(650, nil)
+	retiring, err := ledgerDBFor(t, db).GetRetiringPools(650, nil)
 	require.NoError(t, err)
 	require.Empty(t, retiring)
 }
@@ -2463,7 +2478,7 @@ func TestImportPoolsRejectsPastPendingRetirement(t *testing.T) {
 func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	db, err := dbtest.NewReleasedDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, dbtest.CloseDatabase(db))
@@ -2572,6 +2587,7 @@ func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	cfg = importTargetForTest(t, cfg)
 
 	require.NoError(t, synthesizeRetiredScheduledPools(
 		context.Background(),
@@ -2593,7 +2609,7 @@ func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
 		epoch,
 		slot,
 	))
-	require.NoError(t, db.Metadata().SetEpoch(
+	require.NoError(t, ledgerDBFor(t, db).SetEpoch(
 		slot-100,
 		epoch,
 		nil,
@@ -2605,7 +2621,7 @@ func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
 		200,
 		nil,
 	))
-	active, err := db.Metadata().GetActivePoolKeyHashesAtSlot(slot, nil)
+	active, err := ledgerDBFor(t, db).GetActivePoolKeyHashesAtSlot(slot, nil)
 	require.NoError(t, err)
 	require.Contains(t, active, livePoolKeyHash)
 	require.NotContains(t, active, retiredPoolKeyHash)
@@ -2613,8 +2629,7 @@ func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
 	// The retired-but-scheduled pool now resolves with its VRF key hash on
 	// both the denormalized pool row and its registration, the two fields the
 	// header VRF-key binding check reads.
-	retired, err := db.Metadata().GetPool(
-		testPoolKeyHash(retiredPoolKeyHash),
+	retired, err := ledgerDBFor(t, db).GetPool(t.Context(), testPoolKeyHash(retiredPoolKeyHash),
 		true,
 		nil,
 	)
@@ -2637,8 +2652,7 @@ func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
 
 	// The already-registered pool is left untouched: no duplicate registration
 	// and no retirement tombstone.
-	live, err := db.Metadata().GetPool(
-		testPoolKeyHash(livePoolKeyHash),
+	live, err := ledgerDBFor(t, db).GetPool(t.Context(), testPoolKeyHash(livePoolKeyHash),
 		true,
 		nil,
 	)
@@ -2675,6 +2689,7 @@ func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
 			return 1, 100, nil
 		},
 	}
+	cfg = importTargetForTest(t, cfg)
 
 	require.NoError(t, importGovState(
 		context.Background(),
@@ -2682,8 +2697,7 @@ func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
 		func(ImportProgress) {},
 	))
 
-	proposal, err := db.Metadata().GetGovernanceProposal(
-		txHash,
+	proposal, err := ledgerDBFor(t, db).GetGovernanceProposal(t.Context(), txHash,
 		0,
 		nil,
 	)
@@ -2695,7 +2709,7 @@ func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
 	// slot for rollback/pruning purposes.
 	require.Equal(t, uint64(17_500), proposal.AddedSlot)
 
-	constitution, err := db.Metadata().GetConstitution(nil)
+	constitution, err := ledgerDBFor(t, db).GetConstitution(nil)
 	require.NoError(t, err)
 	require.NotNil(t, constitution)
 	require.Equal(t, uint64(17_700), constitution.AddedSlot)
@@ -3107,7 +3121,7 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 			}
 
 			var logOutput bytes.Buffer
-			err = ImportLedgerState(context.Background(), ImportConfig{
+			err = importWholeState(t, context.Background(), ImportConfig{
 				UtxoSet:  importSetFor(t, db),
 				Database: db,
 				Logger:   slog.New(slog.NewTextHandler(&logOutput, nil)),
@@ -3145,6 +3159,7 @@ func TestValidateImportStateRetainsStoredPreviousParameters(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 	current, previous := distinctConwayPParams(t)
 	cfg := previewPParamsImportConfig(t, db, current, previous)
+	cfg.Reconcile = true
 	cfg.State.Tip = &SnapshotTip{BlockHash: make([]byte, 32)}
 	require.NoError(t, importPParams(t.Context(), cfg))
 	cfg.State.PrevPParamsData = cbor.RawMessage{0xff}
@@ -3175,6 +3190,7 @@ func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State:    &RawLedgerState{Epoch: 659},
 	}
+	cfg = importTargetForTest(t, cfg)
 	current := ParsedPool{
 		PoolKeyHash:   poolKeyHash,
 		VrfKeyHash:    bytes.Repeat([]byte{0x84}, 32),
@@ -3205,7 +3221,7 @@ func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
 		1000,
 		map[uint64][][]byte{661: {poolKeyHash}},
 	))
-	currentRegs, err := db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+	currentRegs, err := ledgerDBFor(t, db).GetPoolRegistrationsEffectiveForEpoch(
 		[]lcommon.PoolKeyHash{testPoolKeyHash(poolKeyHash)},
 		0,
 		659,
@@ -3215,7 +3231,7 @@ func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, currentRegs, 1)
 	require.Equal(t, oldAccount, []byte(currentRegs[0].RewardAccount))
-	promotedRegs, err := db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+	promotedRegs, err := ledgerDBFor(t, db).GetPoolRegistrationsEffectiveForEpoch(
 		[]lcommon.PoolKeyHash{testPoolKeyHash(poolKeyHash)},
 		2000,
 		660,
@@ -3226,7 +3242,7 @@ func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
 	require.Len(t, promotedRegs, 1)
 	require.Equal(t, newAccount, []byte(promotedRegs[0].RewardAccount))
 
-	refunds, err := db.GetPoolsRetiringAtEpoch(
+	refunds, err := ledgerDBFor(t, db).GetPoolsRetiringAtEpoch(
 		context.Background(), 661, 2000, nil,
 	)
 	require.NoError(t, err)
@@ -3234,42 +3250,17 @@ func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
 	require.Equal(t, newAccount, []byte(refunds[0].RewardAccount))
 	require.Equal(t, deposit, uint64(refunds[0].DepositHeld))
 
-	pool, err := db.Metadata().GetPool(
-		testPoolKeyHash(poolKeyHash), true, nil,
-	)
+	pool, err := ledgerDBFor(t, db).GetPool(t.Context(), testPoolKeyHash(poolKeyHash), true, nil)
 	require.NoError(t, err)
 	require.Equal(t, newAccount, []byte(pool.RewardAccount))
 	require.NotEmpty(t, pool.Registration)
 	require.Equal(t, newAccount, []byte(pool.Registration[0].RewardAccount))
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	var registrations int
-	require.NoError(t, raw.QueryRow(
-		"SELECT COUNT(*) FROM pool_registration",
-	).Scan(&registrations))
-	require.Equal(t, 2, registrations)
-	rows, err := raw.Query(
-		"SELECT added_slot, registration_index FROM pool_registration " +
-			"ORDER BY registration_index",
+	regs, err := ledgerDBFor(t, db).GetPoolRegistrations(
+		testPoolKeyHash(poolKeyHash), nil,
 	)
 	require.NoError(t, err)
-	var positions [][2]uint64
-	for rows.Next() {
-		var row [2]uint64
-		require.NoError(t, rows.Scan(&row[0], &row[1]))
-		positions = append(positions, row)
-	}
-	require.NoError(t, rows.Err())
-	require.NoError(t, rows.Close())
-	require.Equal(t, [][2]uint64{{1000, 0}, {1000, 1}}, positions)
-	var earlierAccount []byte
-	var earlierSlot uint64
-	var earlierIndex uint
-	require.NoError(t, raw.QueryRow(
-		"SELECT reward_account, added_slot, registration_index "+
-			"FROM pool_registration ORDER BY registration_index LIMIT 1",
-	).Scan(&earlierAccount, &earlierSlot, &earlierIndex))
-	require.Equal(t, oldAccount, earlierAccount)
-	require.Equal(t, uint64(1000), earlierSlot)
-	require.Zero(t, earlierIndex)
+	require.Len(t, regs, 2, "the parameters in force and the staged ones")
+	accounts := [][]byte{regs[0].RewardAccount[:], regs[1].RewardAccount[:]}
+	require.Contains(t, accounts, oldAccount)
+	require.Contains(t, accounts, newAccount)
 }

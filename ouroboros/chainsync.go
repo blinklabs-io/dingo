@@ -1638,6 +1638,9 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 		// Wait for next block in a separate goroutine so we can
 		// also monitor the connection for errors. This avoids
 		// leaking the monitor goroutine when Next returns first.
+		if o.chainsyncServerAwaitNextHook != nil {
+			o.chainsyncServerAwaitNextHook()
+		}
 		done := make(chan struct{})
 		go func() {
 			defer close(done)

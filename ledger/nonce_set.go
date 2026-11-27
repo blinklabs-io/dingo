@@ -159,17 +159,6 @@ func (ls *LedgerState) setNoncesInSlotRange(
 	return v.sorted(), nil
 }
 
-// nonceStore returns the metadata store for a nonce read the set does not
-// answer. Only a set that holds outputs alone leaves its nonces there; one
-// that keeps the ledger-state families and cannot serve them is an error, as
-// its LedgerDB reads the nonces back through the ledger.
-func (ls *LedgerState) nonceStore() (ledgerdb.LedgerDB, error) {
-	if ls.keepsEpochState() || ls.familyDrained(nodesettings.FamilyNonces) {
-		return nil, ls.setFamilyUnserved(nodesettings.FamilyNonces)
-	}
-	return ls.ledgerDB(), nil
-}
-
 // blockNonce reads the nonce of the block at point from the store the read
 // mode selects.
 func (ls *LedgerState) blockNonce(
@@ -178,11 +167,7 @@ func (ls *LedgerState) blockNonce(
 ) ([]byte, error) {
 	r, mode := ls.nonceSetReader(txn)
 	if !mode || r == nil {
-		store, err := ls.nonceStore()
-		if err != nil {
-			return nil, err
-		}
-		return store.GetBlockNonce(point, txn)
+		return nil, ls.setFamilyUnserved(nodesettings.FamilyNonces)
 	}
 	ns, setErr := ls.setNoncesInSlotRange(r, txn, point.Slot, point.Slot+1)
 	if setErr != nil {
@@ -205,11 +190,7 @@ func (ls *LedgerState) blockNoncesInSlotRange(
 ) ([]models.BlockNonce, error) {
 	r, mode := ls.nonceSetReader(txn)
 	if !mode || r == nil {
-		store, err := ls.nonceStore()
-		if err != nil {
-			return nil, err
-		}
-		return store.GetBlockNoncesInSlotRange(start, end, txn)
+		return nil, ls.setFamilyUnserved(nodesettings.FamilyNonces)
 	}
 	return ls.setNoncesInSlotRange(r, txn, start, end)
 }
@@ -221,11 +202,9 @@ func (ls *LedgerState) latestBlockNonce(
 ) (models.BlockNonce, bool, error) {
 	r, mode := ls.nonceSetReader(txn)
 	if !mode || r == nil {
-		store, err := ls.nonceStore()
-		if err != nil {
-			return models.BlockNonce{}, false, err
-		}
-		return store.GetLatestBlockNonce(txn)
+		return models.BlockNonce{}, false, ls.setFamilyUnserved(
+			nodesettings.FamilyNonces,
+		)
 	}
 	return ls.setLatestNonce(r, txn)
 }
@@ -256,39 +235,6 @@ func (ls *LedgerState) setLatestNonce(
 		return models.BlockNonce{}, false, err
 	}
 	return ns[len(ns)-1], true, nil
-}
-
-// nonceDiff describes up to three entries only the metadata store holds and
-// three only the set holds, for a mismatch report.
-func nonceDiff(stored, set []models.BlockNonce) string {
-	key := func(n models.BlockNonce) string {
-		return fmt.Sprintf("%d/%x=%x/%t", n.Slot, n.Hash, n.Nonce, n.IsCheckpoint)
-	}
-	in := func(ns []models.BlockNonce) map[string]struct{} {
-		m := make(map[string]struct{}, len(ns))
-		for _, n := range ns {
-			m[key(n)] = struct{}{}
-		}
-		return m
-	}
-	only := func(ns []models.BlockNonce, other map[string]struct{}) []string {
-		var out []string
-		for _, n := range ns {
-			if _, ok := other[key(n)]; !ok && len(out) < 3 {
-				out = append(out, key(n))
-			}
-		}
-		return out
-	}
-	return fmt.Sprintf("store_only=%v set_only=%v (store %d, set %d)",
-		only(stored, in(set)), only(set, in(stored)), len(stored), len(set))
-}
-
-func sameNonces(a, b []models.BlockNonce) bool {
-	return slices.EqualFunc(a, b, func(x, y models.BlockNonce) bool {
-		return x.Slot == y.Slot && bytes.Equal(x.Hash, y.Hash) &&
-			bytes.Equal(x.Nonce, y.Nonce) && x.IsCheckpoint == y.IsCheckpoint
-	})
 }
 
 // utxoSetPin is the live UTxO set as of the moment a read transaction was

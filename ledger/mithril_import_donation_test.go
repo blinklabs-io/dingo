@@ -17,8 +17,10 @@ package ledger
 import (
 	"io"
 	"log/slog"
+	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
@@ -39,15 +41,10 @@ func TestMithrilImportedDonationReachesBoundaryTreasuryAndRatify(
 	const ada = uint64(1_000_000)
 	f := newTreasuryRolloverFixture(t, 100*ada)
 	destination, destinationReturn, _ := f.rewardAddress(t, 0x93)
-	withdrawal := f.addProposal(
-		t, 0x94, f.currentEpoch.StartSlot+20,
-		map[*lcommon.Address]uint64{destination: 120 * ada},
-		destinationReturn, 1*ada, false,
-	)
-	_, reservesBefore, _ := networkState(t, f.db)
+	_, reservesBefore, _ := fxNetworkState(t, f.db)
 
 	nonce := make([]byte, 32)
-	require.NoError(t, importLedgerStateForTest(
+	require.NoError(t, fxImportLedgerState(
 		t, f.ls,
 		ledgerstate.ImportConfig{
 			Database: f.db,
@@ -76,6 +73,30 @@ func TestMithrilImportedDonationReachesBoundaryTreasuryAndRatify(
 			},
 		},
 	))
+	// The import replaces the set with a snapshot that holds no governance
+	// state, so the committee and the proposal go in after it.
+	cold := repeatByte(28, 0xc1)
+	require.NoError(t, seedDB(t, f.db).SetCommitteeMembers(
+		t.Context(), []*models.CommitteeMember{{
+			ColdCredHash: cold,
+			ExpiresEpoch: f.currentEpoch.EpochId + 20,
+			AddedSlot:    1,
+		}}, nil,
+	))
+	require.NoError(t, seedDB(t, f.db).SetCommitteeQuorum(
+		t.Context(), big.NewRat(1, 1), 1, nil,
+	))
+	committeeSeedAuthorization(
+		t, f.db,
+		lcommon.Credential{Credential: lcommon.NewBlake2b224(cold)},
+		lcommon.Credential{Credential: lcommon.NewBlake2b224(f.hotCredential)},
+		1, 1,
+	)
+	withdrawal := f.addProposal(
+		t, 0x94, f.currentEpoch.StartSlot+20,
+		map[*lcommon.Address]uint64{destination: 120 * ada},
+		destinationReturn, 1*ada, false,
+	)
 
 	f.rollover(t, f.currentEpoch, f.currentPParams)
 	assert.NotNil(
@@ -83,7 +104,7 @@ func TestMithrilImportedDonationReachesBoundaryTreasuryAndRatify(
 		f.proposal(t, withdrawal).RatifiedEpoch,
 		"the imported donation counts toward the RATIFY treasury",
 	)
-	treasury, reserves, _ := networkState(t, f.db)
+	treasury, reserves, _ := fxNetworkState(t, f.db)
 	assert.Equal(t, 150*ada, treasury,
 		"the boundary credits the imported pre-anchor donation")
 	assert.Equal(t, reservesBefore, reserves)

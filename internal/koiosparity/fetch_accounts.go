@@ -279,11 +279,11 @@ func accountUniverseFresh(fetchedAt, notBefore time.Time) bool {
 // historical account list — see ResolveKoiosAccountUniverse) and Dingo's own
 // committed reward-account addresses at stakeEpoch (the koiosStakeEpoch(K-1)
 // derivation checkEpoch already uses for reward_account_output — see
-// koiosStakeEpoch's doc comment and ARCHITECTURE.md's Epoch alignment
+// koiosStakeEpoch's doc comment and README.md's Epoch alignment
 // section; the exact same offset applies here since reward_account_output
 // and reward_pool_output share one Epoch stamp, both written from
-// app.epochs.snapshot in ledger/reward_calculation.go's
-// saveStakeRewardOutputs).
+// app.epochs.snapshot in ledger/epochengine/reward_calculation.go's
+// SaveStakeRewardOutputs).
 //
 // The union — not just Koios's own list — is what lets a Dingo-only account
 // (one Dingo computed a reward for that Koios's /account_list has not yet
@@ -296,8 +296,7 @@ func accountUniverseFresh(fetchedAt, notBefore time.Time) bool {
 // rather than trusting either side alone.
 //
 // source may be nil — used when the caller has no Dingo database access
-// configured for accounts at all (e.g. the standalone CLI's `fetch` command
-// invoked without --metadata-*); the resulting universe is then Koios's list
+// configured for accounts at all; the resulting universe is then Koios's list
 // alone, which still lets every Koios-known account be checked, just unable
 // to also surface a Dingo-only account Koios has never indexed.
 //
@@ -371,7 +370,7 @@ func BuildAccountAddressUniverse(
 // shaping, mid-fetch resumable checkpointing across process restarts,
 // adaptive rate-limiting, and duplicate-page detection are out of scope for
 // this base chunking; see this function's own scope-boundary note in
-// ARCHITECTURE.md's Koios Parity Tracker "Per-account exact parity" subsection.
+// README.md's "Per-account exact parity" section.
 // A process restart mid-fetch simply redoes the whole epoch's account fetch
 // from scratch on the next attempt — safe (idempotent, same final state) even
 // if not maximally efficient, exactly like FetchEpochWithClient's identical

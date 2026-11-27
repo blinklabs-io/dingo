@@ -18,18 +18,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"errors"
 	"io"
 	"log/slog"
-	"strings"
 	"testing"
 
-	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
-	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -38,77 +32,6 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
-
-// TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker pins the
-// interaction between the deferred-index rebuild and the sync-state clear
-// that ends a Mithril sync.
-//
-// mithril sync rebuilds only the critical subset and deliberately leaves
-// deferred.SyncStateKey set so the first serve finishes the lazy manifest.
-// Completion cleanup must leave that marker untouched so the lazy indexes
-// are still built when the Mithril-bootstrapped database starts serving.
-func TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker(t *testing.T) {
-	t.Parallel()
-	db := newMithrilTestDB(t)
-	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
-	require.True(t, ok, "sqlite metadata store must manage deferred indexes")
-
-	// The Mithril sequence: drop the manifest, bulk load, rebuild the
-	// critical subset only.
-	require.NoError(t, manager.DropDeferredIndexes())
-	require.NoError(t, manager.BuildCriticalDeferredIndexes())
-	pending, err := manager.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.True(
-		t, pending,
-		"precondition: the critical rebuild leaves the lazy remainder pending",
-	)
-
-	ledgerStateHash := bytes.Repeat([]byte{0x55}, 32)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(30, ledgerStateHash),
-	}, nil))
-	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
-	require.NoError(
-		t,
-		db.SetSyncState(
-			metadata.PlannerStatsBackfillSyncKey,
-			"v1:30:30:checkpoint",
-			nil,
-		),
-	)
-
-	require.NoError(t, updateMithrilReadyState(
-		context.Background(),
-		db,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-		30,
-		ledgerStateHash,
-	))
-
-	pending, err = manager.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.True(
-		t, pending,
-		"the deferred-index pending marker must survive sync-state cleanup "+
-			"so the first serve builds the lazy manifest entries",
-	)
-	marker, err := db.GetSyncState(deferred.SyncStateKey, nil)
-	require.NoError(t, err)
-	require.Equal(t, deferred.SyncStateValue, marker)
-	statsMarker, err := db.GetSyncState(
-		metadata.PlannerStatsBackfillSyncKey,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, "v1:30:30:checkpoint", statsMarker)
-
-	// The clear still does its job for everything else.
-	status, err := db.GetSyncState("sync_status", nil)
-	require.NoError(t, err)
-	require.Empty(t, status, "sync_status must still be cleared")
-}
 
 // TestUpdateMithrilReadyStateKeepsForgeFence pins that the sync-state clear
 // ending a Mithril import leaves every pool's last-forged-slot fence in place.
@@ -126,24 +49,23 @@ func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
 	poolA := lcommon.PoolKeyHash{0xA1}
 	poolB := lcommon.PoolKeyHash{0xB2}
 	const fenceA, fenceB = uint64(12_345), uint64(777)
-	storeA := forging.NewSyncStateForgeFenceStore(db.Metadata(), poolA)
-	storeB := forging.NewSyncStateForgeFenceStore(db.Metadata(), poolB)
+	storeA := forging.NewChainStateForgeFenceStore(db, poolA)
+	storeB := forging.NewChainStateForgeFenceStore(db, poolB)
 	require.NoError(t, storeA.StoreLastForgedSlot(fenceA))
 	require.NoError(t, storeB.StoreLastForgedSlot(fenceB))
 
 	const identity = "example/v1"
-	require.NoError(t, db.SetSyncState(
-		nodeconsensus.DatabaseIdentitySyncKey, identity, nil,
+	require.NoError(t, db.SetChainState(
+		database.ConsensusProviderIdentityKey, identity, nil,
 	))
 
 	ledgerStateHash := bytes.Repeat([]byte{0x77}, 32)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(30, ledgerStateHash),
 	}, nil))
-	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
+	require.NoError(t, db.SetChainState("sync_status", "bootstrap", nil))
 
 	require.NoError(t, updateMithrilReadyState(
-		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
@@ -151,8 +73,8 @@ func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
 		ledgerStateHash,
 	))
 
-	gotIdentity, err := db.GetSyncState(
-		nodeconsensus.DatabaseIdentitySyncKey, nil,
+	gotIdentity, err := db.GetChainState(
+		database.ConsensusProviderIdentityKey, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(t, identity, gotIdentity)
@@ -162,7 +84,7 @@ func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
 		pool lcommon.PoolKeyHash
 		want uint64
 	}{{poolA, fenceA}, {poolB, fenceB}} {
-		restarted := forging.NewSyncStateForgeFenceStore(db.Metadata(), tc.pool)
+		restarted := forging.NewChainStateForgeFenceStore(db, tc.pool)
 		slot, found, err := restarted.LoadLastForgedSlot()
 		require.NoError(t, err)
 		require.True(t, found, "the fence must survive the import")
@@ -174,7 +96,7 @@ func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
 		require.Equal(t, tc.want, slot)
 	}
 
-	status, err := db.GetSyncState("sync_status", nil)
+	status, err := db.GetChainState("sync_status", nil)
 	require.NoError(t, err)
 	require.Empty(t, status, "sync_status must still be cleared")
 }
@@ -194,124 +116,62 @@ func newMithrilFileTestDB(t *testing.T) *database.Database {
 	return db
 }
 
-// TestMithrilSyncLeavesLazyManifestForTheFirstServe walks the composition a
-// Mithril-bootstrapped node actually takes: sync drops the manifest, rebuilds
-// the critical subset, and calls updateMithrilReadyState; the first
-// `dingo serve` then calls node.RepairDeferredIndexes, which finishes the
-// manifest only if the pending marker survived the sync's sync-state clear.
-//
-// Without the marker carried across the clear, RepairDeferredIndexes takes its
-// no-cycle-pending branch, every lazy manifest entry stays absent for the life
-// of the database, and Node.startDeferredIndexMaintenance reads the same wiped
-// marker and logs "deferred-index maintenance not needed".
-func TestMithrilSyncLeavesLazyManifestForTheFirstServe(t *testing.T) {
+// The mark of how far an immutable copy stored produced-UTxO offsets belongs
+// to the import that wrote it, so completion removes it with the other
+// transient state.
+func TestUpdateMithrilReadyStateClearsTheImmutableOffsetsMark(t *testing.T) {
 	t.Parallel()
-	db := newMithrilFileTestDB(t)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	db := newMithrilTestDB(t)
+	require.NoError(t, node.MarkImmutableUtxoOffsetsComplete(db, 30))
+	_, marked, err := node.ImmutableUtxoOffsetsTipSlot(db)
 	require.NoError(t, err)
-	lazy := dbtest.LazyManifestIndex(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	require.True(t, marked)
 
-	// The sync: drop for the bulk load, rebuild the critical subset only.
-	deferredIndexes := node.WithDeferredIndexes(t.Context(), db, logger)
-	require.NoError(t, deferredIndexes.BuildCritical())
-	require.False(
-		t,
-		dbtest.MetadataIndexExists(t, raw, lazy),
-		"precondition: %s is lazy and the critical rebuild skips it",
-		lazy,
-	)
-
-	ledgerStateHash := bytes.Repeat([]byte{0x66}, 32)
+	hash := bytes.Repeat([]byte{0x77}, 32)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(30, ledgerStateHash),
+		Point: ocommon.NewPoint(30, hash),
 	}, nil))
 	require.NoError(t, updateMithrilReadyState(
-		context.Background(),
-		db, logger, nil, 30, ledgerStateHash,
+		db,
+		slog.New(slog.DiscardHandler),
+		nil,
+		30,
+		hash,
 	))
-
-	// The first serve on a core-mode node.
-	require.NoError(t, node.RepairDeferredIndexes(t.Context(), db, logger))
-
-	require.True(
-		t,
-		dbtest.MetadataIndexExists(t, raw, lazy),
-		"the first serve after a Mithril sync must finish the lazy "+
-			"manifest entry %s",
-		lazy,
-	)
-	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
-	require.True(t, ok)
-	pending, err := manager.HasDeferredIndexesPending()
+	_, marked, err = node.ImmutableUtxoOffsetsTipSlot(db)
 	require.NoError(t, err)
-	require.False(
-		t, pending,
-		"the full rebuild clears the marker it consumed",
-	)
+	require.False(t, marked)
 }
 
-type fenceUntouchedMetadata struct {
-	metadata.MetadataStore
-}
-
-func (m fenceUntouchedMetadata) GetSyncState(
-	key string,
-	txn dbtypes.Txn,
-) (string, error) {
-	if strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
-		return "", errors.New(
-			"import must not snapshot a concurrently changing forge fence",
-		)
-	}
-	return m.MetadataStore.GetSyncState(key, txn)
-}
-
-func (m fenceUntouchedMetadata) DeleteSyncState(
-	key string,
-	txn dbtypes.Txn,
-) error {
-	if strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
-		return errors.New("import must not delete a forge fence")
-	}
-	return m.MetadataStore.DeleteSyncState(key, txn)
-}
-
-func TestUpdateMithrilReadyStateLeavesForgeFenceUntouched(t *testing.T) {
+// An import replaces the chain, so chain state describing the old one must
+// not outlive it: the mark of the highest block the old chain held would
+// bound rollbacks on the new one.
+func TestUpdateMithrilReadyStateClearsImportedChainState(t *testing.T) {
 	t.Parallel()
-	base := newMithrilTestDB(t)
-	pool := lcommon.PoolKeyHash{0xA1}
-	fence := forging.NewSyncStateForgeFenceStore(base.Metadata(), pool)
-	require.NoError(t, fence.StoreLastForgedSlot(12_345))
-	require.NoError(t, base.SetSyncState("sync_status", "bootstrap", nil))
-	db, err := database.New(context.Background(), nil, database.Stores{
-		Blob: base.Blob(), Metadata: fenceUntouchedMetadata{base.Metadata()},
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	hash := bytes.Repeat([]byte{0x77}, 32)
-	require.NoError(
-		t,
-		base.SetTip(ochainsync.Tip{Point: ocommon.NewPoint(30, hash)}, nil),
-	)
-	require.NoError(
-		t,
-		updateMithrilReadyState(
-			context.Background(),
-			db,
-			slog.New(slog.DiscardHandler),
-			nil,
-			30,
-			hash,
-		),
-	)
-	status, err := base.GetSyncState("sync_status", nil)
-	require.NoError(t, err)
-	require.Empty(t, status)
-	slot, found, err := fence.LoadLastForgedSlot()
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, uint64(12_345), slot)
+	for _, name := range []string{
+		database.RollbackHighWaterKey,
+		database.PendingTruncateKey,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			db := newMithrilTestDB(t)
+			require.NoError(t, db.SetChainState(name, "900", nil))
+			hash := bytes.Repeat([]byte{0x77}, 32)
+			require.NoError(t, db.SetTip(ochainsync.Tip{
+				Point: ocommon.NewPoint(30, hash),
+			}, nil))
+			require.NoError(t, updateMithrilReadyState(
+				db,
+				slog.New(slog.DiscardHandler),
+				nil,
+				30,
+				hash,
+			))
+			value, err := db.GetChainState(name, nil)
+			require.NoError(t, err)
+			require.Empty(t, value)
+		})
+	}
 }
 
 func newMithrilTestDB(t *testing.T) *database.Database {
@@ -348,7 +208,6 @@ func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
 	}, nil))
 
 	require.NoError(t, updateMithrilReadyState(
-		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
@@ -356,10 +215,10 @@ func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
 		ledgerStateHash,
 	))
 
-	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	slot, err := db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, "30", slot)
-	hash, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	hash, err := db.GetChainState(mithrilLedgerHashSyncKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, hex.EncodeToString(ledgerStateHash), hash)
 	storedTip, err := db.GetTip(nil)
@@ -433,14 +292,13 @@ func TestUpdateMithrilReadyStateClearsStaleTrustBoundaryHash(
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(30, nil),
 	}, nil))
-	require.NoError(t, db.SetSyncState(
+	require.NoError(t, db.SetChainState(
 		mithrilLedgerHashSyncKey,
 		hex.EncodeToString(bytes.Repeat([]byte{0x44}, 32)),
 		nil,
 	))
 
 	require.NoError(t, updateMithrilReadyState(
-		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
@@ -448,41 +306,12 @@ func TestUpdateMithrilReadyStateClearsStaleTrustBoundaryHash(
 		nil,
 	))
 
-	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	slot, err := db.GetChainState(mithrilLedgerSlotSyncKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, "30", slot)
-	hash, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	hash, err := db.GetChainState(mithrilLedgerHashSyncKey, nil)
 	require.NoError(t, err)
 	require.Empty(t, hash)
-}
-
-// TestUpdateMithrilReadyStateKeepsUtxoSetOnlyMark pins that the sync-state
-// clear ending a Mithril import keeps the mark of a database whose UTxO set is
-// only in the live UTxO set. Without it the next start reads the database as
-// one with a metadata UTxO set and refuses ledgerUtxoBadgerOnly.
-func TestUpdateMithrilReadyStateKeepsUtxoSetOnlyMark(t *testing.T) {
-	t.Parallel()
-	db := newMithrilTestDB(t)
-	ledgerStateHash := bytes.Repeat([]byte{0x55}, 32)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(30, ledgerStateHash),
-	}, nil))
-	require.NoError(t, db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil))
-	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
-	require.NoError(t, updateMithrilReadyState(
-		context.Background(),
-		db,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-		30,
-		ledgerStateHash,
-	))
-	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
-	require.NoError(t, err)
-	require.Equal(t, "1", marked)
-	status, err := db.GetSyncState("sync_status", nil)
-	require.NoError(t, err)
-	require.Empty(t, status, "sync_status must still be cleared")
 }
 
 func TestUpdateMithrilReadyStateKeepsHistoryExpiryCursor(t *testing.T) {
@@ -492,16 +321,48 @@ func TestUpdateMithrilReadyStateKeepsHistoryExpiryCursor(t *testing.T) {
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(30, hash),
 	}, nil))
-	require.NoError(t, db.SetSyncState(database.HistoryExpiryCursorSyncKey, "8640", nil))
-	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
+	require.NoError(t, db.SetChainState(database.HistoryExpiryCursorKey, "8640", nil))
+	require.NoError(t, db.SetChainState("sync_status", "bootstrap", nil))
 	require.NoError(t, updateMithrilReadyState(
-		t.Context(), db, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db, slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil, 30, hash,
 	))
-	cursor, err := db.GetSyncState(database.HistoryExpiryCursorSyncKey, nil)
+	cursor, err := db.GetChainState(database.HistoryExpiryCursorKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, "8640", cursor)
-	status, err := db.GetSyncState("sync_status", nil)
+	status, err := db.GetChainState("sync_status", nil)
 	require.NoError(t, err)
 	require.Empty(t, status)
+}
+
+func TestUpdateMithrilReadyStateClearsImportProgress(t *testing.T) {
+	t.Parallel()
+	db := newMithrilTestDB(t)
+	hash := bytes.Repeat([]byte{0x61}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, hash),
+	}, nil))
+	for _, key := range importProgressKeys {
+		require.NoError(t, db.SetChainState(key, "1", nil))
+	}
+	// The boundary of the import this one replaces.
+	require.NoError(t, db.SetImportedLedgerStateBoundary(
+		ocommon.NewPoint(10, bytes.Repeat([]byte{0x62}, 32)), nil,
+	))
+
+	require.NoError(t, updateMithrilReadyState(
+		db, slog.New(slog.DiscardHandler), nil, 30, hash,
+	))
+
+	for _, key := range importProgressKeys {
+		value, err := db.GetChainState(key, nil)
+		require.NoError(t, err)
+		require.Empty(t, value, "%s outlived the import", key)
+	}
+	slot, err := db.ImportedLedgerStateBoundarySlotStrict(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(30), slot)
+	gotHash, err := db.ImportedLedgerStateBoundaryHash()
+	require.NoError(t, err)
+	require.Equal(t, hex.EncodeToString(hash), gotHash)
 }

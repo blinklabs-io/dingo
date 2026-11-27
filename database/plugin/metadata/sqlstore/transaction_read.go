@@ -72,7 +72,7 @@ func (s *Store) GetTransactionByHash(
 	if err != nil {
 		return nil, err
 	}
-	ret, err := transactionFromSQLite(transactionRow(row))
+	ret, err := s.transactionFromSQLite(transactionRow(row))
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,10 @@ func (s *Store) GetTransactionMetadataByHash(
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	return metadata, err
+	if err != nil {
+		return nil, err
+	}
+	return s.resolvePayload(metadata)
 }
 
 func (s *Store) SumTransactionFeesInSlotRange(
@@ -201,7 +204,7 @@ func (s *Store) GetTransactionsByBlockHash(
 	for i := range rows {
 		converted[i] = transactionRow(rows[i])
 	}
-	ret, err := transactionsFromSQLite(converted)
+	ret, err := s.transactionsFromSQLite(converted)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +250,7 @@ FROM `+appliedTransactionFrom+` WHERE t.hash IN (`+bindPlaceholders(len(chunk))+
 				rows.Close()
 				return nil, err
 			}
-			item, err := transactionFromSQLite(row)
+			item, err := s.transactionFromSQLite(row)
 			if err != nil {
 				rows.Close()
 				return nil, err
@@ -263,54 +266,6 @@ FROM `+appliedTransactionFrom+` WHERE t.hash IN (`+bindPlaceholders(len(chunk))+
 	}
 	if err := s.hydrateTransactionSlice(ctx, db, ret); err != nil {
 		return nil, err
-	}
-	return ret, nil
-}
-
-func (s *Store) GetExistingTransactionHashes(
-	hashes [][]byte,
-	txn types.Txn,
-) ([][]byte, error) {
-	ret := [][]byte{}
-	if len(hashes) == 0 {
-		return ret, nil
-	}
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, err
-	}
-	for start := 0; start < len(hashes); start += s.dialect.ParameterLimit() {
-		end := min(start+s.dialect.ParameterLimit(), len(hashes))
-		chunk := hashes[start:end]
-		args := make([]any, len(chunk))
-		for i := range chunk {
-			args[i] = chunk[i]
-		}
-		rows, err := db.QueryContext(
-			ctx,
-			s.dialect.Rebind(
-				`SELECT t.hash FROM `+appliedTransactionFrom+
-					` WHERE t.hash IN (`+bindPlaceholders(len(chunk))+`)`,
-			),
-			args...,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("get existing tx hashes: %w", err)
-		}
-		for rows.Next() {
-			var hash []byte
-			if err := rows.Scan(&hash); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			ret = append(ret, hash)
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
-		}
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
 	}
 	return ret, nil
 }
@@ -385,6 +340,87 @@ func (s *Store) CountTransactionsByMetadataLabel(
 			label,
 			err,
 		)
+	}
+	return int(count), nil
+}
+
+// Labels are stored as the decimal text of a uint64, without leading zeros,
+// so ordering by length and then text is numeric order on every backend,
+// including labels above the signed 64-bit range an integer cast would clamp.
+const (
+	listMetadataLabelCountsAscSQL = `
+SELECT label, COUNT(*)
+FROM transaction_metadata_label
+GROUP BY label
+ORDER BY LENGTH(label) ASC, label ASC`
+	listMetadataLabelCountsDescSQL = `
+SELECT label, COUNT(*)
+FROM transaction_metadata_label
+GROUP BY label
+ORDER BY LENGTH(label) DESC, label DESC`
+	countMetadataLabelsSQL = `
+SELECT COUNT(DISTINCT label) FROM transaction_metadata_label`
+)
+
+func (s *Store) ListMetadataLabelCounts(
+	limit int,
+	offset int,
+	descending bool,
+	txn types.Txn,
+) ([]models.MetadataLabelCount, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := listMetadataLabelCountsAscSQL
+	if descending {
+		query = listMetadataLabelCountsDescSQL
+	}
+	query, args := addLimitOffset(query, nil, limit, offset)
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list metadata label counts: %w", err)
+	}
+	defer rows.Close()
+	ret := []models.MetadataLabelCount{}
+	for rows.Next() {
+		var (
+			label string
+			count int64
+		)
+		if err := rows.Scan(&label, &count); err != nil {
+			return nil, fmt.Errorf("scan metadata label count: %w", err)
+		}
+		parsed, err := strconv.ParseUint(label, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"parse stored metadata label %q: %w",
+				label,
+				err,
+			)
+		}
+		ret = append(ret, models.MetadataLabelCount{
+			Label: parsed,
+			Count: uint64(max(count, 0)),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list metadata label counts: %w", err)
+	}
+	return ret, nil
+}
+
+func (s *Store) CountMetadataLabels(txn types.Txn) (int, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	if err := db.QueryRowContext(
+		ctx,
+		s.dialect.Rebind(countMetadataLabelsSQL),
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count metadata labels: %w", err)
 	}
 	return int(count), nil
 }
@@ -866,7 +902,7 @@ func (s *Store) queryTransactions(
 		if err != nil {
 			return nil, err
 		}
-		item, err := transactionFromSQLite(row)
+		item, err := s.transactionFromSQLite(row)
 		if err != nil {
 			return nil, err
 		}
@@ -906,12 +942,12 @@ func addressTransactionPredicate(
 	}
 }
 
-func transactionsFromSQLite(
+func (s *Store) transactionsFromSQLite(
 	rows []transactionRow,
 ) ([]models.Transaction, error) {
 	ret := make([]models.Transaction, len(rows))
 	for i := range rows {
-		item, err := transactionFromSQLite(rows[i])
+		item, err := s.transactionFromSQLite(rows[i])
 		if err != nil {
 			return nil, err
 		}
@@ -920,9 +956,13 @@ func transactionsFromSQLite(
 	return ret, nil
 }
 
-func transactionFromSQLite(
+func (s *Store) transactionFromSQLite(
 	row transactionRow,
 ) (*models.Transaction, error) {
+	metadata, err := s.resolvePayload(row.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf("transaction metadata: %w", err)
+	}
 	fee, err := parseNullUint64("transaction fee", row.Fee)
 	if err != nil {
 		return nil, err
@@ -950,7 +990,7 @@ func transactionFromSQLite(
 		Inputs:          []models.Utxo{},
 		Redeemers:       []models.Redeemer{},
 		ReferenceInputs: []models.Utxo{},
-		Metadata:        row.Metadata,
+		Metadata:        metadata,
 		Slot:            uint64(row.Slot.Int64),
 		Type:            int(row.Type.Int64),
 		ID:              uint(row.ID),

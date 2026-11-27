@@ -17,6 +17,7 @@ package server_test
 import (
 	"context"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,16 +53,26 @@ func (fakeSlotTimer) TimeToSlot(t time.Time) (uint64, error) {
 	return uint64(delta), nil
 }
 
-// newTestDatabase returns an in-memory Database with a wide-open epoch row
-// (epoch 0 covers every slot used by these tests) plus fakeSlotTimer as the
-// server's SlotTimer.
+// newTestDatabase returns an IndexerDB, the database the node serves
+// Midnight from, with a wide-open epoch row (epoch 0 covers every slot used
+// by these tests) plus fakeSlotTimer as the server's SlotTimer.
 func newTestDatabase(t *testing.T) *database.Database {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{
+	consensus, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
+	db, err := dbtest.NewIndexerDatabase(t, consensus, dbtest.IndexerOptions{})
+	require.NoError(t, err)
+	consensusDBs.Store(db, consensus)
+	// testing keeps a finished test's cleanups reachable until the run
+	// ends; dropping the reference lets the closed database be collected.
+	closing := db
+	t.Cleanup(func() {
+		key := closing
+		closing = nil
+		consensusDBs.Delete(key)
+	})
 	require.NoError(t, db.SetEpoch(
 		0, 0,
 		[]byte("epoch-0-nonce"), nil, nil, nil,
@@ -69,6 +80,21 @@ func newTestDatabase(t *testing.T) *database.Database {
 		nil,
 	))
 	return db
+}
+
+// consensusDBs maps each IndexerDB newTestDatabase returns to the ledger's
+// database beside it, which owns the blocks the IndexerDB reads.
+var consensusDBs sync.Map
+
+// archives maps each IndexerDB to the payload archive its store reads from.
+var archives sync.Map
+
+// createBlock stores blk in the ledger's database beside the IndexerDB db.
+func createBlock(t *testing.T, db *database.Database, blk models.Block) {
+	t.Helper()
+	consensus, ok := consensusDBs.Load(db)
+	require.True(t, ok, "db is not an IndexerDB from newTestDatabase")
+	require.NoError(t, consensus.(*database.Database).BlockCreate(blk, nil))
 }
 
 // insertPlaceholderBlock uses a body the handlers never decode; they need
@@ -91,7 +117,7 @@ func insertPlaceholderBlock(
 		Cbor:   []byte{0x01},
 		Type:   1,
 	}
-	require.NoError(t, db.BlockCreate(blk, nil))
+	createBlock(t, db, blk)
 	return blk
 }
 
@@ -140,8 +166,7 @@ func TestGetTechnicalCommitteeDatum_AtOrBefore(t *testing.T) {
 	for i, blockNumber := range []uint64{10, 20, 30} {
 		require.NoError(
 			t,
-			db.InsertMidnightGovernanceDatum(
-				context.Background(),
+			midnightWriter(t, db).InsertGovernanceDatum(
 				&models.MidnightGovernanceDatum{
 					DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
 					TxHash:      []byte{byte(i), 1, 2, 3},
@@ -196,8 +221,7 @@ func TestGetCouncilDatum_DistinctFromTechnicalCommittee(t *testing.T) {
 	db := newTestDatabase(t)
 	require.NoError(
 		t,
-		db.InsertMidnightGovernanceDatum(
-			context.Background(),
+		midnightWriter(t, db).InsertGovernanceDatum(
 			&models.MidnightGovernanceDatum{
 				DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
 				TxHash:      []byte{1, 2, 3, 4},
@@ -209,8 +233,7 @@ func TestGetCouncilDatum_DistinctFromTechnicalCommittee(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.InsertMidnightGovernanceDatum(
-			context.Background(),
+		midnightWriter(t, db).InsertGovernanceDatum(
 			&models.MidnightGovernanceDatum{
 				DatumType:   models.MidnightGovernanceDatumTypeCouncil,
 				TxHash:      []byte{5, 6, 7, 8},
@@ -245,8 +268,7 @@ func TestGetAriadneParameters_AtOrBefore(t *testing.T) {
 	for i, epoch := range []uint64{1, 2, 3} {
 		require.NoError(
 			t,
-			db.UpsertMidnightAriadneParams(
-				context.Background(),
+			midnightWriter(t, db).UpsertAriadneParams(
 				&models.MidnightAriadneParams{
 					Epoch: epoch,
 					Datum: []byte{byte('a' + i)},
@@ -353,8 +375,7 @@ func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.UpsertMidnightEpochCandidates(
-			context.Background(),
+		midnightWriter(t, db).UpsertEpochCandidates(
 			&models.MidnightEpochCandidates{
 				Epoch:          7,
 				BlockNumber:    700,
@@ -485,8 +506,7 @@ func TestGetEpochCandidates_MissingRegistrationLeavesProvenanceZero(
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.UpsertMidnightEpochCandidates(
-			context.Background(),
+		midnightWriter(t, db).UpsertEpochCandidates(
 			&models.MidnightEpochCandidates{
 				Epoch:          9,
 				BlockNumber:    900,
@@ -657,7 +677,7 @@ func TestGetBlockByHash(t *testing.T) {
 	t.Parallel()
 	db := newTestDatabase(t)
 	blk := loadRealTestBlock(t)
-	require.NoError(t, db.BlockCreate(blk, nil))
+	createBlock(t, db, blk)
 	decoded, err := blk.Decode()
 	require.NoError(t, err)
 	wantTxCount := len(decoded.Transactions())

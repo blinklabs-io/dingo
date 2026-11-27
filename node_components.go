@@ -133,17 +133,54 @@ func (n *Node) newPeerGovernor() *peergov.PeerGovernor {
 }
 
 func (n *Node) newHistoryExpiryPruner() *historyexpiry.Pruner {
+	return historyexpiry.NewPruner(n.newHistoryExpiryPrunerConfig())
+}
+
+func (n *Node) newHistoryExpiryPrunerConfig() historyexpiry.PrunerConfig {
 	prunerFreq := n.config.historyExpiry.Frequency
 	if prunerFreq <= 0 {
 		prunerFreq = time.Hour
 	}
-	return historyexpiry.NewPruner(historyexpiry.PrunerConfig{
-		LedgerState: n.ledgerState,
-		DB:          n.db,
-		Logger:      n.config.logger,
-		Frequency:   prunerFreq,
-		Ceiling:     n.historyExpiryCeiling,
-	})
+	return historyexpiry.PrunerConfig{
+		LedgerState:  n.ledgerState,
+		DB:           n.db,
+		Logger:       n.config.logger,
+		Frequency:    prunerFreq,
+		Ceiling:      n.historyExpiryCeiling,
+		Held:         n.historyExpiryHeld,
+		BeforeExpire: n.prepareIndexerBlockExpiry,
+	}
+}
+
+// prepareIndexerBlockExpiry moves the IndexerDB's datum and script rows that
+// name a block about to expire to another block that carries their bytes, or
+// marks them expired so that a later carrier replaces them.
+func (n *Node) prepareIndexerBlockExpiry(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+) error {
+	if n.indexerDB == nil {
+		return nil
+	}
+	return n.indexerDB.PrepareBlockExpiry(ctx, slot, hash)
+}
+
+// historyExpiryHeld keeps a block while a payload column of the IndexerDB that
+// is still in use names its bytes, or that a Midnight rollback could still
+// read; see Database.BlockHoldsActivePayloads. Without an IndexerDB no column
+// names a block.
+func (n *Node) historyExpiryHeld(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+) (bool, error) {
+	if n.indexerDB == nil || n.ledgerState == nil {
+		return false, nil
+	}
+	return n.indexerDB.BlockHoldsActivePayloads(
+		ctx, slot, hash, n.ledgerState.CurrentEpoch(),
+	)
 }
 
 // historyExpiryCeiling keeps history expiry behind the IndexerDB writer,
@@ -254,16 +291,6 @@ func (n *Node) configureSnapshotManager() error {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
-	// When the Koios parity observer is enabled, retain reward_account_output
-	// without bound in CORE storage mode too: the observer only
-	// validates a closed epoch after fetching and comparing against Koios over
-	// the network, which can fall arbitrarily far behind chain progression
-	// during a from-genesis or catch-up sync, well past the fixed 4-epoch
-	// window cleanupOldSnapshots otherwise prunes reward_account_output to.
-	// Configure this before capture or startup locks the settings.
-	n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
-		n.config.koiosParity.Enabled,
-	)
 	// Prune pool snapshots through the deferred-header retention guard, so a
 	// snapshot a queued/deferred header still needs for leader validation is
 	// never pruned out from under it and misread as pool absence, and the
@@ -274,8 +301,8 @@ func (n *Node) configureSnapshotManager() error {
 	)
 	// Wire the authoritative epoch-boundary capture before block sync begins so
 	// each epoch rollover stages its mark snapshot atomically at the SNAP point.
-	// Set before CaptureGenesisSnapshot/sync; a nil hook (never set) would leave
-	// only the event-driven fallback capture.
+	// Set before CaptureGenesisSnapshot/sync; with a nil hook (never set) no
+	// mark snapshot is captured.
 	// The stake read runs at the SNAP point (after MIR and before POOLREAP/
 	// enactment) and the row write at the end of the rollover, both inside the
 	// same transaction.

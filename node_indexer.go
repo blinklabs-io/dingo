@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiready"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
@@ -34,7 +35,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/storageadopt"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -79,20 +79,20 @@ func (n *Node) apiReadiness() apiready.Check {
 // The consensus store always runs in core mode; an API node serves the APIs
 // from its IndexerDB.
 func (n *Node) apiStorageMode() StorageMode {
-	if n.splitIndexer() {
+	if n.hasIndexerDB() {
 		return StorageModeAPI
 	}
 	return StorageModeCore
 }
 
-func (n *Node) splitIndexer() bool {
-	return n.config.splitIndexer
+func (n *Node) hasIndexerDB() bool {
+	return n.config.hasIndexerDB
 }
 
 // indexerLayout is the layout recorded in the database's node settings.
 func (n *Node) indexerLayout() string {
-	if n.storageSelections().SplitIndexer {
-		return internalconfig.IndexerLayoutSplit
+	if n.storageSelections().IndexerDB {
+		return internalconfig.IndexerLayoutIndexerDB
 	}
 	return internalconfig.IndexerLayoutShared
 }
@@ -100,7 +100,7 @@ func (n *Node) indexerLayout() string {
 // openIndexerWriter opens the IndexerDB beside the consensus database and
 // builds the writer that fills it. It does nothing on a core node.
 func (n *Node) openIndexerWriter(ctx context.Context) error {
-	if !n.splitIndexer() {
+	if !n.hasIndexerDB() {
 		return nil
 	}
 	// A quiesce that failed without closing storage resumes through here
@@ -123,7 +123,38 @@ func (n *Node) openIndexerWriter(ctx context.Context) error {
 	}
 	n.warnMainnetIndexerCapacity(store, localIndexerCapacity)
 	n.indexerDB, n.indexerWriter, n.indexerStore = db, writer, store
+	n.db.SetRolledBackBlockHold(rolledBackBlockHold(store))
 	return nil
+}
+
+// rolledBackBlockHold reports the IndexerDB's tip as the block the ledger's
+// rolled-back bodies are held for.
+func rolledBackBlockHold(store *indexerdb.Store) database.RolledBackBlockHold {
+	return func() (ocommon.Point, bool, error) {
+		tip, err := store.Tip(nil)
+		if err != nil {
+			return ocommon.Point{}, false, err
+		}
+		if tip.IsZero() {
+			return ocommon.Point{}, false, nil
+		}
+		return ocommon.NewPoint(tip.Slot, tip.Hash), true, nil
+	}
+}
+
+// releaseRolledBackBlocks lets the ledger delete the rolled-back bodies the
+// IndexerDB no longer needs. The writer calls it from its own goroutine, so
+// the release runs on one of its own, at most one at a time: a pass that
+// finds one running leaves its work to that run's successor.
+func (n *Node) releaseRolledBackBlocks() {
+	ledgerState := n.ledgerState
+	if ledgerState == nil || !n.releasingBlocks.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer n.releasingBlocks.Store(false)
+		ledgerState.ReleaseRolledBackBlocks(context.Background())
+	}()
 }
 
 // buildIndexerWriter opens an IndexerDB over consensus, with its metadata
@@ -151,9 +182,8 @@ func (n *Node) buildIndexerWriter(
 	if err != nil {
 		return nil, nil, err
 	}
-	// The ledger answers fact reads from the live UTxO set for a family it has
-	// drained, and from the consensus metadata store otherwise.
-	var factRows metadata.FactRowReader
+	db.SetLiveOutputs(nodeLiveOutputs{node: n})
+	var factRows metadata.LedgerFacts
 	if n.ledgerState != nil && consensus == n.db {
 		factRows = n.ledgerState
 	}
@@ -167,6 +197,7 @@ func (n *Node) buildIndexerWriter(
 		SlotTime:                   n.indexerSlotTime,
 		MaxReadyLagBlocks:          n.config.indexerMaxReadyLagBlocks,
 		DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
+		Moved:                      n.releaseRolledBackBlocks,
 	})
 	if err != nil {
 		return nil, nil, errors.Join(
@@ -175,6 +206,23 @@ func (n *Node) buildIndexerWriter(
 		)
 	}
 	return db, writer, nil
+}
+
+// nodeLiveOutputs is the IndexerDB's read-only view of the ledger's live UTxO
+// set, followed across a live close and reopen of the set.
+type nodeLiveOutputs struct{ node *Node }
+
+// LiveUtxoCbor implements types.LiveOutputReader.
+func (l nodeLiveOutputs) LiveUtxoCbor(
+	_ types.Txn,
+	txID []byte,
+	index uint32,
+) ([]byte, bool, error) {
+	set := l.node.anchoredUtxoSet.Load()
+	if set == nil {
+		return nil, false, nil
+	}
+	return set.Get(txID, index)
 }
 
 // rollbackIndexerForTruncate rolls the IndexerDB back to the block a ledger
@@ -189,7 +237,7 @@ func (n *Node) rollbackIndexerForTruncate(
 	target models.Block,
 	opts ...lifecycle.TruncateOption,
 ) error {
-	if !n.splitIndexer() {
+	if !n.hasIndexerDB() {
 		return nil
 	}
 	// The ledger's refusals, including the live UTxO set's, run first: a
@@ -214,7 +262,9 @@ func (n *Node) rollbackIndexerForTruncate(
 	}); err != nil {
 		return fmt.Errorf("roll back indexer: %w", err)
 	}
-	return nil
+	return lifecycle.TruncateMidnightJournals(
+		ctx, db, ocommon.NewPoint(target.Slot, target.Hash), target.Number,
+	)
 }
 
 // startIndexerWriter starts the writer and wakes it on ledger tip and reward
@@ -269,6 +319,7 @@ func (n *Node) closeIndexerDatabase() error {
 	if n.indexerDB == nil {
 		return nil
 	}
+	n.db.SetRolledBackBlockHold(nil)
 	db := n.indexerDB
 	n.indexerDB = nil
 	n.indexerStore = nil
@@ -278,17 +329,6 @@ func (n *Node) closeIndexerDatabase() error {
 	return nil
 }
 
-// meshLedgerState is the ledger state the Mesh server reads. Its account
-// endpoints read the UTxO set from the IndexerDB, which holds it for the
-// APIs, and not from the consensus store, which keeps only what validation
-// needs.
-func (n *Node) meshLedgerState() mesh.MeshLedgerState {
-	return &indexerMeshLedger{
-		LedgerState: n.ledgerState,
-		db:          n.indexerDB,
-	}
-}
-
 // meshChain is the chain whose tip the Mesh server reports: the IndexerDB's
 // tip, since the ledger's tip is ahead of the rows the Mesh answers are built
 // from.
@@ -296,7 +336,8 @@ func (n *Node) meshChain() mesh.MeshChain {
 	return &indexerMeshChain{store: n.indexerStore}
 }
 
-// meshDatabase is the block and transaction store the Mesh server reads.
+// meshDatabase is the store the Mesh server reads blocks, transactions and
+// address UTxOs from: the IndexerDB, which holds them for the APIs.
 // Blocks above the IndexerDB's tip are hidden, since their transactions are
 // not indexed yet.
 func (n *Node) meshDatabase() mesh.MeshDatabase {
@@ -329,49 +370,39 @@ func (c *indexerMeshChain) Tip() ochainsync.Tip {
 	return tip
 }
 
-// indexerMeshLedger answers the Mesh UTxO reads from the IndexerDB and leaves
-// the rest to the ledger state.
-type indexerMeshLedger struct {
-	*ledger.LedgerState
-	db *database.Database
-}
-
-func (m *indexerMeshLedger) UtxosByAddress(
-	ctx context.Context,
-	addrs []lcommon.Address,
-) ([]models.Utxo, error) {
-	return m.db.UtxosByAddress(ctx, addrs, 0, nil)
-}
-
-func (m *indexerMeshLedger) ScanUtxosByAddress(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-	visit func([]models.UtxoWithOrdering) error,
-) (ochainsync.Tip, error) {
-	return m.db.ScanUtxosByAddress(ctx, q, maxCandidates, maxBytes, visit)
-}
-
-func (m *indexerMeshLedger) UtxoBalanceByAddressAtSlot(
-	ctx context.Context,
-	addr lcommon.Address,
-	slot uint64,
-) (models.AddressBalance, error) {
-	txn := database.NewTxnContext(ctx, m.db, false)
-	defer txn.Release()
-	return m.db.UtxoBalanceByAddressAtSlot(ctx, addr, slot, txn)
-}
-
-// utxorpcQueryDatabase is the store UTxO RPC queries read: the IndexerDB.
+// utxorpcQueryDatabase is the store UTxO RPC queries read: the IndexerDB when
+// present, otherwise the ledger's live UTxO set. The ledger's database holds
+// no UTxO, datum or transaction rows to read.
 func (n *Node) utxorpcQueryDatabase() utxorpc.QueryDatabase {
+	if n.indexerDB == nil {
+		return utxorpc.NewLedgerQueryDatabase(n.ledgerState)
+	}
 	return utxorpc.NewIndexerQueryDatabase(
 		n.indexerDB, n.indexerStore, n.apiReadiness(),
 	)
 }
 
+// mcpAddressLookup is the address lookup the MCP server reads UTxOs with: the
+// live UTxO set on a core node, whose consensus database holds no UTxO rows,
+// and nil, the IndexerDB's own lookup, on an API node.
+func (n *Node) mcpAddressLookup() func(
+	context.Context, *models.UtxoWithOrderingQuery, int,
+) (models.UtxoAddressPage, error) {
+	if n.indexerDB != nil || n.ledgerState == nil {
+		return nil
+	}
+	ls := n.ledgerState
+	return func(
+		ctx context.Context,
+		q *models.UtxoWithOrderingQuery,
+		maxCandidates int,
+	) (models.UtxoAddressPage, error) {
+		return ls.UtxosByAddressBoundedPage(ctx, q, maxCandidates, 0)
+	}
+}
+
 // checkServerAdopted refuses a PostgreSQL or MySQL API store a release
-// without the split layout wrote and startup has not adopted. The dingo
+// without the IndexerDB layout wrote and startup has not adopted. The dingo
 // command adopts it before any store opens; Run alone does not.
 func (n *Node) checkServerAdopted(
 	ctx context.Context,

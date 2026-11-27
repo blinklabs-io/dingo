@@ -24,14 +24,18 @@ import (
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	"github.com/blinklabs-io/dingo/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
-// IndexerService runs the split layout's writer: a DatabaseSource over the
+// IndexerService runs the IndexerDB's writer: a DatabaseSource over the
 // ledger database, the Backfill row writer over the IndexerDB, the ledger
 // facts copy, and the genesis seed.
 type IndexerService struct {
 	writer *indexer.Writer
 	store  *indexerdb.Store
+	// ledgerless is set for a service given no ledger facts: it can roll the
+	// IndexerDB back and cannot follow the ledger.
+	ledgerless bool
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -88,7 +92,9 @@ func NewIndexerService(
 	if err := w.Prepare(context.Background()); err != nil {
 		return nil, fmt.Errorf("record indexer anchor: %w", err)
 	}
-	return &IndexerService{writer: w, store: store}, nil
+	return &IndexerService{
+		writer: w, store: store, ledgerless: deps.FactRows == nil,
+	}, nil
 }
 
 // newIndexerWriter assembles the writer over src. Tests substitute a source
@@ -104,14 +110,7 @@ func newIndexerWriter(
 	if err != nil {
 		return nil, nil, err
 	}
-	var facts *indexer.MetadataFacts
-	if deps.FactRows != nil {
-		facts, err = indexer.NewFactsOver(
-			deps.Consensus, deps.FactRows, deps.Indexer,
-		)
-	} else {
-		facts, err = indexer.NewMetadataFacts(deps.Consensus, deps.Indexer)
-	}
+	facts, err := indexer.NewMetadataFacts(deps.FactRows, deps.Indexer)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -129,7 +128,12 @@ func newIndexerWriter(
 	).
 		WithFacts(facts).
 		WithGenesisSeed(bf.SeedGenesis).
-		WithProgress(metrics.Observe).
+		WithProgress(func(tip indexerdb.Tip, ledgerTip ochainsync.Tip) {
+			metrics.Observe(tip, ledgerTip)
+			if deps.Moved != nil {
+				deps.Moved()
+			}
+		}).
 		WithRollbackAncestorLost(metrics.NoRollbackAncestor).
 		WithFailureReport(metrics.RepeatedFailures).
 		WithDeferredIndexes(
@@ -156,6 +160,9 @@ func (s *IndexerService) Start(ctx context.Context) error {
 	defer s.mu.Unlock()
 	if s.started {
 		return errors.New("indexer service already started")
+	}
+	if s.ledgerless {
+		return indexer.ErrNoLedger
 	}
 	s.started = true
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))

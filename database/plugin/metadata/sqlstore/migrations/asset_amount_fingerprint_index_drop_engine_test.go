@@ -333,11 +333,16 @@ SELECT phase, dirty FROM schema_migrations WHERE version = $1`, 19).
 	// through v18 depends on it. v18 adds reward_snapshot.excluded_active_stake,
 	// so replaying its expand phase against the decoy proves that guard resolves
 	// the migrated schema's own relation too.
+	// A crash at v18 leaves v19 unrecorded, so replay with the registry
+	// that ends at v18.
+	_, err = db.Exec(`DELETE FROM schema_migrations WHERE version > $1`, 18)
+	require.NoError(t, err)
 	_, err = db.Exec(`
 UPDATE schema_migrations SET phase = 'expand', dirty = true, completed_at = NULL
 WHERE version = $1`, 18)
 	require.NoError(t, err)
 
+	runner.Registry = registry[:18]
 	require.NoError(
 		t,
 		runner.Run(context.Background()),
@@ -482,4 +487,22 @@ func mysqlEngineTestRootDSN(t *testing.T) string {
 		AllowNativePasswords: true,
 	}
 	return cfg.FormatDSN()
+}
+
+// registryThrough ends registry at version. An engine test that replays an
+// interrupted migration runs the registry only that far, because a database
+// never records a later migration complete while an earlier one is not.
+func registryThrough(
+	t *testing.T,
+	registry []migrations.Migration,
+	version int64,
+) []migrations.Migration {
+	t.Helper()
+	for i, migration := range registry {
+		if migration.Version == version {
+			return registry[:i+1]
+		}
+	}
+	t.Fatalf("migration %d is not in the registry", version)
+	return nil
 }

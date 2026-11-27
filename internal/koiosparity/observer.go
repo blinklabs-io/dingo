@@ -103,7 +103,7 @@ type ObserverConfig struct {
 	// AccountsEnabled runs the per-account exact-parity fetch+check
 	// phase (FetchAccountRewardsForEpoch / CompareAccountEpoch) alongside
 	// the existing epoch-aggregate/pool phases, for every epoch this
-	// observer processes. Unlike the standalone CLI's opt-in-only default
+	// observer processes. Unlike the opt-in-only library default
 	// (see FetchConfig.AccountsEnabled/CheckConfig.AccountsEnabled), the
 	// in-process observer is the operationally-real, continuously-driven
 	// path the observer exists to make possible, so this defaults to true at
@@ -749,6 +749,9 @@ func (o *Observer) stopping() bool {
 // The per-account phase never runs from here — see
 // processAccountEpoch — regardless of cfg.AccountsEnabled.
 func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
+	if o.skipPrunedEpoch(ctx, epoch, false) {
+		return
+	}
 	if err := o.fetchIfNeeded(ctx, epoch); err != nil {
 		if cancelled(ctx, err) {
 			o.cfg.Logger.Debug(
@@ -802,6 +805,10 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		o.reportError(epoch, false, fmt.Errorf("check: %w", err))
 		return
 	}
+	if result.Status == StatusNotChecked {
+		o.reportNotChecked(epoch, false, result)
+		return
+	}
 	o.scheduleErrorRetry(epoch, false, result.Status)
 	o.emitResult(result)
 	if result.Status != StatusPass {
@@ -834,6 +841,9 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 // collapses the two queues' overlapping calls into one round of Koios
 // requests.
 func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
+	if o.skipPrunedEpoch(ctx, epoch, true) {
+		return
+	}
 	if err := o.fetchIfNeeded(ctx, epoch); err != nil {
 		if cancelled(ctx, err) {
 			o.cfg.Logger.Debug(
@@ -906,6 +916,10 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 		o.reportError(epoch, true, fmt.Errorf("check: %w", err))
 		return
 	}
+	if result.Status == StatusNotChecked {
+		o.reportNotChecked(epoch, true, result)
+		return
+	}
 	if result.CoversScope(ScopeAccount) {
 		var accountMismatches, aggregateMismatches []CheckMismatch
 		for _, mismatch := range result.Mismatches {
@@ -948,6 +962,43 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 		"scopes", result.CheckedScopes)
 }
 
+// skipPrunedEpoch reports an epoch whose reward state the source has already
+// pruned as not checked before any Koios request is spent on it. A failed
+// retention read is left to the check, which reads it again.
+func (o *Observer) skipPrunedEpoch(
+	ctx context.Context,
+	epoch uint64,
+	accounts bool,
+) bool {
+	result, err := prunedEpochResult(
+		ctx, o.cfg.Source, o.cfg.Network, epoch, accounts,
+	)
+	if err != nil || result == nil {
+		return false
+	}
+	o.reportNotChecked(epoch, accounts, result)
+	return true
+}
+
+// reportNotChecked emits a NOT_CHECKED result. It is neither a pass nor a
+// failure: strict validation continues, the stored verdict is left as it
+// was, and no retry is scheduled, since the state it needs will not return.
+func (o *Observer) reportNotChecked(
+	epoch uint64,
+	accounts bool,
+	result *EpochCompareResult,
+) {
+	o.scheduleErrorRetry(epoch, accounts, result.Status)
+	o.emitResult(result)
+	o.cfg.Logger.Warn(
+		"koiosparity observer: epoch not checked",
+		"network", o.cfg.Network,
+		"epoch", epoch,
+		"scopes", result.CheckedScopes,
+		"reason", result.NotCheckedReason,
+	)
+}
+
 // cancelled reports whether err is (or wraps) a context cancellation/
 // deadline error attributable to ctx itself having already been
 // cancelled/expired — i.e. a clean Observer.Stop-driven shutdown racing
@@ -968,9 +1019,9 @@ func cancelled(ctx context.Context, err error) bool {
 }
 
 // deferForHistory handles a fetch or check that stopped on
-// ErrTransactionHistoryPending: the IndexerDB an API node samples from trails
-// the ledger, so at an epoch boundary it has usually not indexed the epoch
-// that just closed. That is neither a parity result nor a failure, so nothing
+// ErrTransactionHistoryPending or ErrRewardHistoryPending: the IndexerDB an
+// API node reads from trails the ledger, so at an epoch boundary it has
+// usually not indexed the epoch that just closed. That is neither a parity result nor a failure, so nothing
 // is emitted and strict validation continues. The queue's ERROR status is
 // persisted and the epoch retried on the ERROR schedule, as reportError does,
 // so a restart before the retry still selects it. It reports false, leaving
@@ -981,7 +1032,7 @@ func (o *Observer) deferForHistory(
 	accountsChecked bool,
 	err error,
 ) bool {
-	if !errors.Is(err, ErrTransactionHistoryPending) {
+	if !historyPending(err) {
 		return false
 	}
 	if persistErr := o.cache.RecordObserverError(
@@ -991,7 +1042,7 @@ func (o *Observer) deferForHistory(
 	}
 	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
 	o.cfg.Logger.Info(
-		"koiosparity observer: transaction history not indexed yet, epoch deferred",
+		"koiosparity observer: IndexerDB has not reached the epoch, epoch deferred",
 		"network", o.cfg.Network,
 		"epoch", epoch,
 		"retry_in", o.cfg.ErrorRetryDelay,

@@ -15,8 +15,6 @@
 package ledger
 
 import (
-	"context"
-
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -117,7 +115,7 @@ func witnessedRewardCredentials(
 // so they witness nothing under CIP-0163 and are skipped here to keep the
 // witnessed set identical to the credentials the ledger actually wrote.
 //
-// RenewAccountExpirations only updates existing account rows, so this must run
+// The renewal only updates existing accounts, so this must run
 // inside the same database transaction as the block's account writes and after
 // them: a stake-key registration in this block creates the row that a later
 // (or same) witnessing event in the same block then renews. Passing
@@ -125,14 +123,13 @@ func witnessedRewardCredentials(
 // monotonic — a witness in the current epoch always yields an expiration >= any
 // earlier renewal, and re-witnessing within an epoch is idempotent.
 func (ls *LedgerState) renewWitnessedAccountExpirations(
-	ctx context.Context,
 	txn ledgerdb.Txn,
 	currentEpoch uint64,
 	slot uint64,
 	txs []lcommon.Transaction,
-) error {
+) {
 	if !ls.config.DelegatorInactivityEnabled {
-		return nil
+		return
 	}
 	expiration := currentEpoch + ls.config.DelegatorInactivity
 	seen := make(map[string]struct{})
@@ -151,11 +148,7 @@ func (ls *LedgerState) renewWitnessedAccountExpirations(
 		}
 	}
 	if len(refs) == 0 {
-		return nil
-	}
-	if err := ls.ledgerDB().RenewAccountExpirations(ctx, refs, expiration, txn); err != nil {
-		return err
+		return
 	}
 	ls.stageAccountExpirations(txn, refs, expiration, slot) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	return nil
 }

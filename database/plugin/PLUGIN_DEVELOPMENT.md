@@ -22,7 +22,10 @@ bodies. A provider returns `immutable.ImmutableDB`: the chunk directory
 appends, syncs, reads by location, looks up points and truncates), marker reads
 (`ReadBlockAt`), file listing (`ListFiles`) and streamed file reads
 (`ReadFile`). The built-in `chunkfile` provider in
-`database/plugin/immutable/chunkfile` is registered in every build. Builds
+`database/plugin/immutable/chunkfile` is registered in every build; its
+`compression: mithril` keeps completed chunks as Mithril-layout archives, and a
+provider that compresses implements `ChunkArchiver` so Mithril adoption can
+archive the chunks it takes in. Builds
 with `dingo_extra_plugins` also register `s3` and `gcs` ImmutableDB
 providers, selected automatically with the matching blob provider and reusing
 its released bucket, namespace, and credentials configuration. Remote chunks
@@ -163,7 +166,7 @@ path while the old provider may still be closing in the background.
 
 Test strict configuration decoding, construction/start failures, normal stop,
 and the subsystem contract. Storage providers must preserve transaction,
-iterator-lifetime, commit-timestamp, optimization, and persisted-format
+iterator-lifetime, optimization, and persisted-format
 semantics. Run both:
 
 ```text

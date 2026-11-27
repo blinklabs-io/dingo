@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -33,8 +32,12 @@ import (
 type BatchAccumulator = types.MetadataBatchAccumulator
 
 // NewBatchAccumulator creates an accumulator for the configured metadata
-// plugin.
+// plugin, or returns nil for a database without a metadata store, as the
+// ledger's is: there are no metadata rows to accumulate.
 func (d *Database) NewBatchAccumulator() BatchAccumulator {
+	if d.metadata == nil {
+		return nil
+	}
 	return d.transactionStore().NewBatchAccumulator()
 }
 
@@ -47,16 +50,6 @@ func (d *Database) NewLeiosClosureBatchAccumulator() BatchAccumulator {
 		return nil
 	}
 	return store.NewLeiosClosureBatchAccumulator()
-}
-
-// NewValidatedBlockBatchAccumulator creates an API-detail accumulator whose
-// consensus state remains immediate. Unsupported providers return nil.
-func (d *Database) NewValidatedBlockBatchAccumulator() BatchAccumulator {
-	store, ok := d.transactionStore().(metadata.ValidatedBlockBatcher)
-	if !ok {
-		return nil
-	}
-	return store.NewValidatedBlockBatchAccumulator()
 }
 
 // FlushBatch writes accumulated metadata rows for the active metadata plugin.
@@ -77,33 +70,6 @@ func (d *Database) FlushBatch(
 	return d.transactionStore().FlushBatch(acc, metadataTxn)
 }
 
-// EnableBatchUtxoOverlay attaches a batch UTxO overlay to acc for the rest
-// of txn when the metadata plugin supports one (see
-// metadata.BatchUtxoOverlay). It reports false, and changes nothing, when it
-// does not.
-func (d *Database) EnableBatchUtxoOverlay(
-	acc BatchAccumulator,
-	txn *Txn,
-	inputs []models.UtxoId,
-	deleteOnSpend []models.UtxoId,
-	producers [][]byte,
-) (bool, error) {
-	if acc == nil || txn == nil {
-		return false, nil
-	}
-	overlay, ok := d.transactionStore().(metadata.BatchUtxoOverlay)
-	if !ok {
-		return false, nil
-	}
-	metadataTxn := txn.Metadata()
-	if metadataTxn == nil {
-		return false, types.ErrNilTxn
-	}
-	return overlay.EnableBatchUtxoOverlay(
-		acc, metadataTxn, inputs, deleteOnSpend, producers,
-	)
-}
-
 // EnableLeiosClosureUtxoOverlay enables retained UTxO staging when the
 // provider supports the complete closure. Unsupported providers or closures
 // continue through the ordinary ordered API writer.
@@ -112,6 +78,9 @@ func (d *Database) EnableLeiosClosureUtxoOverlay(
 ) (bool, error) {
 	if acc == nil || txn == nil {
 		return false, nil
+	}
+	if err := d.requireStore("EnableLeiosClosureUtxoOverlay"); err != nil {
+		return false, err
 	}
 	overlay, ok := d.transactionStore().(metadata.LeiosClosureUtxoOverlay)
 	if !ok {
@@ -131,6 +100,9 @@ func (d *Database) PrepareLeiosClosureBatch(
 ) (int, error) {
 	if len(transactions) == 0 || acc == nil || txn == nil {
 		return len(transactions), nil
+	}
+	if err := d.requireStore("PrepareLeiosClosureBatch"); err != nil {
+		return 0, err
 	}
 	preparer, ok := d.transactionStore().(metadata.LeiosClosureBatchPreparer)
 	if !ok {
@@ -153,25 +125,6 @@ func (d *Database) PrepareLeiosClosureBatch(
 		)
 	}
 	return n, nil
-}
-
-// WithBatchUtxoOverlayError joins err with the error acc's batch UTxO overlay
-// recorded. A read barrier inside QueryRowContext cannot return its error, so
-// the statement and those after it run against tables the barrier failed to
-// write, and the failure a caller then reports does not name the overlay. A
-// caller that answers an overlay conflict with a per-row retry passes the
-// errors of everything it ran under the overlay through this. err is
-// returned unchanged when it is nil or acc records nothing.
-func WithBatchUtxoOverlayError(acc BatchAccumulator, err error) error {
-	recorder, ok := acc.(interface{ BatchUtxoOverlayError() error })
-	if err == nil || !ok {
-		return err
-	}
-	overlayErr := recorder.BatchUtxoOverlayError()
-	if overlayErr == nil || errors.Is(err, overlayErr) {
-		return err
-	}
-	return errors.Join(overlayErr, err)
 }
 
 // BatchedTxIngestOpts toggles optional behaviors of SetTransactionBatched.
@@ -295,33 +248,6 @@ type transactionStoreHistoricalBackfill interface {
 // producer that will be created (and spent) by the pending FlushBatch.
 type inFlightProducerLookup interface {
 	HasInFlightProducer(txId []byte, outputIdx uint32) bool
-}
-
-type transactionStoreStakeDeltaFlusher interface {
-	FlushBatchStakeDeltas(types.MetadataBatchAccumulator, types.Txn) error
-}
-
-// FlushBatchStakeDeltas applies pending live-stake changes while leaving the
-// accumulator's other batched rows queued for FlushBatch.
-func (d *Database) FlushBatchStakeDeltas(
-	acc BatchAccumulator,
-	txn *Txn,
-) error {
-	if acc == nil {
-		return nil
-	}
-	flusher, ok := d.transactionStore().(transactionStoreStakeDeltaFlusher)
-	if !ok {
-		return nil
-	}
-	var metadataTxn types.Txn
-	if txn != nil {
-		metadataTxn = txn.Metadata()
-		if metadataTxn == nil {
-			return types.ErrNilTxn
-		}
-	}
-	return flusher.FlushBatchStakeDeltas(acc, metadataTxn)
 }
 
 // SetTransactionBatched stores transaction blob offsets and immediate
@@ -505,8 +431,15 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	if setter, ok := acc.(withdrawalDebitSetter); ok {
 		setter.SetDebitWithdrawals(opts.DebitWithdrawals)
 	}
+	bindPayloadLocator(metadataTxn, offsets)
+	if setter, ok := acc.(types.PayloadLocatorSetter); ok && offsets != nil {
+		setter.SetPayloadLocator(offsets.Payloads)
+	}
 	var metadataErr error
 	if closureBatch {
+		if err := d.requireStore("SetTransactionBatchedWithOpts"); err != nil {
+			return err
+		}
 		store, ok := d.transactionStore().(metadata.LeiosClosureBatcher)
 		if !ok {
 			return errors.New("metadata provider does not support closure batching")
@@ -537,7 +470,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 
 	if len(pparamUpdates) > 0 && tx.IsValid() {
 		for genesisHash, update := range pparamUpdates {
-			if d.pparamsDrained() {
+			if d.pparamsFromSource() {
 				break
 			}
 			if err := d.SetPParamUpdate(

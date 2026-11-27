@@ -65,11 +65,12 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
+	mockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -131,13 +132,27 @@ type liveNodeOption func(*liveNodeSeed)
 type liveNodeSeed struct {
 	livedIn bool
 	legacy  bool
+	alonzo  bool
+	host    *plugin.Host
+	// holdSeed runs while the seed ledger is open, between Start and Close.
+	holdSeed func()
 }
 
-// withLegacyStorageFixture leaves the database as a released version left it,
-// with its UTxO set and ledger state in the metadata store. The harness
-// neither moves it into the live UTxO set nor starts the ledger: the test
-// runs the startup sequence itself.
-func withLegacyStorageFixture(seed *liveNodeSeed) { seed.legacy = true }
+// withSeedLedgerHold runs hold while the seed ledger that writes the epoch rows
+// is open, so a test can give it time to apply loaded blocks.
+func withSeedLedgerHold(hold func()) liveNodeOption {
+	return func(seed *liveNodeSeed) { seed.holdSeed = hold }
+}
+
+// withAlonzoBlocks seeds the chain with Alonzo blocks, the era of the ledger
+// the harness builds from the genesis files, so a test that validates blocks
+// against that ledger has parents of an era it can extend.
+func withAlonzoBlocks(seed *liveNodeSeed) { seed.alonzo = true }
+
+// withPluginHost runs the node on host instead of a fresh built-in one.
+func withPluginHost(host *plugin.Host) liveNodeOption {
+	return func(seed *liveNodeSeed) { seed.host = host }
+}
 
 // withLivedInUtxoSet seeds the live UTxO set as one a node holds after it
 // started on an empty database and applied the blocks one at a time: the
@@ -157,6 +172,7 @@ func seedLedgerEpochsForLoadedBlocks(
 	t *testing.T,
 	n *Node,
 	points []ocommon.Point,
+	hold func(),
 ) {
 	t.Helper()
 	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
@@ -166,29 +182,47 @@ func seedLedgerEpochsForLoadedBlocks(
 		return
 	}
 	cfg := n.ledgerStateConfig()
-	cfg.UtxoSet = livesettest.New()
+	// Without this the seed ledger replays the loaded blocks from the origin
+	// between Start and Close, writing epoch rows and UTxO state up to an
+	// arbitrary slot before the fixture derives the rest.
+	cfg.ManualBlockProcessing = true
+	// The node's own set, loaded at the origin as a node's first start loads
+	// it, so its journal still reaches back to the first block.
+	tip, err := n.db.GetTip(nil)
+	require.NoError(t, err)
+	require.NoError(t, n.db.SetTip(ochainsync.Tip{}, nil))
+	set := livesettest.OpenLedgerDBAt(t, cfg.Database, n.config.cfg.DatabasePath)
+	cfg.UtxoSet = set
 	seedLedger, err := ledger.NewLedgerState(cfg)
 	require.NoError(t, err)
 	require.NoError(t, seedLedger.Start(context.Background()))
+	if hold != nil {
+		hold()
+	}
+	// A ledger that applied any loaded block moved off the origin; the epoch
+	// row count alone would miss blocks that stay within the genesis epoch.
+	require.Equal(
+		t, uint64(0), seedLedger.Tip().Point.Slot,
+		"seed ledger applied a loaded block before Close",
+	)
 	require.NoError(t, seedLedger.Close())
-	epochs, err := n.db.GetEpochs(nil)
+	epochs, err := set.Epochs()
 	require.NoError(t, err)
 	require.Len(t, epochs, 1)
 	first := epochs[0]
+	later := make([]models.Epoch, 0, lastEpoch)
 	for id := uint64(1); id <= lastEpoch; id++ {
-		require.NoError(t, n.db.SetEpoch(
-			first.StartSlot+id*uint64(first.LengthInSlots),
-			id,
-			first.Nonce,
-			first.EvolvingNonce,
-			first.CandidateNonce,
-			first.LastEpochBlockNonce,
-			first.EraId,
-			first.SlotLength,
-			first.LengthInSlots,
-			nil,
-		))
+		e := first
+		e.ID = 0
+		e.EpochId = id
+		e.StartSlot = first.StartSlot + id*uint64(first.LengthInSlots)
+		later = append(later, e)
 	}
+	require.NoError(t, set.ApplyLedgerChanges(
+		nil, ledger.LedgerChanges{Epochs: later},
+	))
+	require.NoError(t, livesettest.CloseLedgerDB(cfg.Database))
+	require.NoError(t, n.db.SetTip(tip, nil))
 }
 
 // newLiveLifecycleTestNodeWithStorageMode is newLiveLifecycleTestNodeWithGenesis
@@ -228,8 +262,12 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	pluginHost, err := internalplugins.NewHost()
-	require.NoError(t, err)
+	pluginHost := seed.host
+	if pluginHost == nil {
+		var err error
+		pluginHost, err = internalplugins.NewHost()
+		require.NoError(t, err)
+	}
 	storageSelections := internalplugins.StorageSelections{
 		Blob: plugin.Selection{Provider: "badger", Config: map[string]any{
 			"memTableSize": int64(8 << 20),
@@ -265,7 +303,7 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	)
 
 	points := loadLiveLifecycleTestBlocksAtBlock(
-		t, db, cm.PrimaryChain(), numBlocks, startBlockNumber,
+		t, db, cm.PrimaryChain(), numBlocks, startBlockNumber, seed.alonzo,
 	)
 	finalTip := ochainsync.Tip{
 		Point:       points[len(points)-1],
@@ -316,7 +354,7 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	// restore/truncate is compared against identical production wiring on
 	// both sides rather than against a harness config that happens to omit
 	// the field under test.
-	seedLedgerEpochsForLoadedBlocks(t, n, points)
+	seedLedgerEpochsForLoadedBlocks(t, n, points, seed.holdSeed)
 	if storageMode == StorageModeCore && !seed.legacy {
 		seedLiveUtxoSet(t, db, tmpDir, points, finalTip, seed.livedIn,
 			uint64(n.config.cardanoNodeConfig.ShelleyGenesis().EpochLength))
@@ -432,7 +470,7 @@ func loadLiveLifecycleTestBlocks(
 	numBlocks int,
 ) []ocommon.Point {
 	t.Helper()
-	return loadLiveLifecycleTestBlocksAtBlock(t, db, c, numBlocks, 1)
+	return loadLiveLifecycleTestBlocksAtBlock(t, db, c, numBlocks, 1, false)
 }
 
 func loadLiveLifecycleTestBlocksAtBlock(
@@ -441,29 +479,30 @@ func loadLiveLifecycleTestBlocksAtBlock(
 	c *chain.Chain,
 	numBlocks int,
 	startBlockNumber uint64,
+	alonzoBlocks bool,
 ) []ocommon.Point {
 	t.Helper()
-	blocks, err := testfixtures.GenerateBabbageChainAt(
-		startBlockNumber, 2, numBlocks,
-	)
+	generate := testfixtures.GenerateBabbageChainAt
+	if alonzoBlocks {
+		generate = func(
+			startBlockNumber, startSlot uint64,
+			count int,
+		) ([]gledger.Block, error) {
+			return mockfixtures.GenerateAlonzoChain(
+				startBlockNumber, lcommon.Blake2b256{}, startSlot, 20, count,
+			)
+		}
+	}
+	blocks, err := generate(startBlockNumber, 2, numBlocks)
 	require.NoError(t, err)
 
 	var points []ocommon.Point
-	for i, block := range blocks {
+	for _, block := range blocks {
 		require.NoError(t, c.AddBlock(context.Background(), block, nil))
 		points = append(points, ocommon.Point{
 			Slot: block.SlotNumber(),
 			Hash: block.Hash().Bytes(),
 		})
-		if i == 0 {
-			require.NoError(t, db.SetBlockNonce(
-				block.Hash().Bytes(),
-				block.SlotNumber(),
-				bytes.Repeat([]byte{0x5c}, 32),
-				true, // isCheckpoint
-				nil,
-			))
-		}
 	}
 	require.NotEmpty(t, points, "no blocks loaded from testdata")
 	require.Len(t, points, numBlocks)
@@ -696,8 +735,7 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 // CIP-0163 delegator-inactivity expiry must keep that gate enabled, with its
 // exact configured window, after a live truncate rebuilds its LedgerState
 // and snapshot manager. The Limit on Patience settings must reach the rebuilt
-// chainsync state, and the rebuilt planner statistics manager must already
-// have optimized the replacement database handle.
+// chainsync state.
 func TestLiveTruncateReinitializationPreservesConfig(
 	t *testing.T,
 ) {
@@ -759,19 +797,6 @@ func TestLiveTruncateReinitializationPreservesConfig(
 	tc := n.chainsyncState.GetTrackedClient(conn)
 	require.NotNil(t, tc)
 	assert.InDelta(t, 7, tc.Patience.Tokens, 1e-9)
-
-	// The replacement handle may never have been analyzed, so the rebuilt
-	// planner statistics manager must run its startup pass on it and a
-	// further pass finds nothing to change.
-	require.NotNil(t, n.plannerStatsMgr)
-	result, err := n.plannerStatsMgr.RunStartup(context.Background())
-	require.NoError(t, err)
-	require.True(t, result.Supported)
-	require.False(
-		t,
-		result.Changed,
-		"the replacement handle must already have been optimized",
-	)
 }
 
 // genesisSelectionTestWindowSlots is the Genesis density window the test
@@ -802,6 +827,7 @@ func newGenesisSelectionTestNode(
 		genesisForkTestCardanoNodeConfig(t, keys),
 		disabledLiveLifecycleTestWorkerPoolCfg,
 		withLivedInUtxoSet,
+		withAlonzoBlocks,
 	)
 	// Reuse the connection manager the harness ouroboros was built with, so
 	// the ledger's liveness gate and its blockfetch requests resolve the
@@ -932,7 +958,31 @@ func registerGenesisForkTestPeer(
 	return oConn.Id()
 }
 
-// generateValidatedConwayForkChain is fixtures.GenerateConwayChain's
+// alonzoEmptyBody returns the body hash and declared size of an Alonzo block
+// with no transactions, the way the header commits to them.
+func alonzoEmptyBody(t testing.TB) (lcommon.Blake2b256, uint64) {
+	t.Helper()
+	tmp, err := cbor.Encode(&alonzo.AlonzoBlock{
+		BlockHeader: &alonzo.AlonzoBlockHeader{},
+	})
+	require.NoError(t, err)
+	var comps []cbor.RawMessage
+	_, err = cbor.Decode(tmp, &comps)
+	require.NoError(t, err)
+	require.Len(t, comps, 5)
+	var concat []byte
+	var size uint64
+	for _, c := range comps[1:] {
+		h := lcommon.Blake2b256Hash(c)
+		concat = append(concat, h.Bytes()...)
+		size += uint64(len(c))
+	}
+	return lcommon.Blake2b256Hash(concat), size
+}
+
+// generateValidatedAlonzoForkChain builds Alonzo blocks, the era of the test
+// ledger, so the full candidate validation accepts them. It is
+// fixtures.GenerateConwayChain's
 // structural counterpart with genuine VRF/KES crypto: header admission
 // requires real cryptographic verification (previously
 // skipped whenever ValidateHistorical was disabled, the ordinary bulk-sync
@@ -950,7 +1000,7 @@ func registerGenesisForkTestPeer(
 // match the given epoch nonce -- so any real, non-degenerate keypair
 // suffices, and this chains multiple blocks by real prevHash/hash linkage
 // the way a peer's actual fork would.
-func generateValidatedConwayForkChain(
+func generateValidatedAlonzoForkChain(
 	t *testing.T,
 	keys genesisForkTestKeys,
 	epochNonce []byte,
@@ -969,7 +1019,7 @@ func generateValidatedConwayForkChain(
 	binary.BigEndian.PutUint64(opCertBody[40:48], uint64(opCertKesPeriod))
 	opCertSig := ed25519.Sign(keys.coldPrivKey, opCertBody[:])
 
-	bodyHash := testutil.ConwayEmptyBodyHash(t)
+	bodyHash, bodySize := alonzoEmptyBody(t)
 
 	var issuerVkey lcommon.IssuerVkey
 	copy(issuerVkey[:], keys.coldPubKey)
@@ -980,30 +1030,40 @@ func generateValidatedConwayForkChain(
 		slot := startSlot + uint64(i)*slotIncrement
 		blockNumber := startBlockNumber + uint64(i)
 
-		vrfInput, err := vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+		nonceSeed, err := vrf.MkSeedTPraos(
+			int64(slot), epochNonce, vrf.SeedEta(), //nolint:gosec
+		)
 		require.NoError(t, err)
-		vrfProof, vrfOutput, err := vrf.Prove(keys.vrfSk, vrfInput)
+		nonceProof, nonceOutput, err := vrf.Prove(keys.vrfSk, nonceSeed)
+		require.NoError(t, err)
+		leaderSeed, err := vrf.MkSeedTPraos(
+			int64(slot), epochNonce, vrf.SeedL(), //nolint:gosec
+		)
+		require.NoError(t, err)
+		leaderProof, leaderOutput, err := vrf.Prove(keys.vrfSk, leaderSeed)
 		require.NoError(t, err)
 
-		headerBody := babbage.BabbageBlockHeaderBody{
+		headerBody := shelley.ShelleyBlockHeaderBody{
 			BlockNumber: blockNumber,
 			Slot:        slot,
 			PrevHash:    currentPrev,
 			IssuerVkey:  issuerVkey,
 			VrfKey:      keys.vrfPk,
-			VrfResult: lcommon.VrfResult{
-				Output: vrfOutput,
-				Proof:  vrfProof,
+			NonceVrf: lcommon.VrfResult{
+				Output: nonceOutput,
+				Proof:  nonceProof,
 			},
-			BlockBodySize: testutil.ConwayEmptyBodySize(t),
-			BlockBodyHash: bodyHash,
-			OpCert: babbage.BabbageOpCert{
-				HotVkey:        keys.kesPk,
-				SequenceNumber: opCertSeqNum,
-				KesPeriod:      opCertKesPeriod,
-				Signature:      opCertSig,
+			LeaderVrf: lcommon.VrfResult{
+				Output: leaderOutput,
+				Proof:  leaderProof,
 			},
-			ProtoVersion: babbage.BabbageProtoVersion{Major: 10},
+			BlockBodySize:        bodySize,
+			BlockBodyHash:        bodyHash,
+			OpCertHotVkey:        keys.kesPk,
+			OpCertSequenceNumber: opCertSeqNum,
+			OpCertKesPeriod:      opCertKesPeriod,
+			OpCertSignature:      opCertSig,
+			ProtoMajorVersion:    6,
 		}
 		headerBodyCbor, err := cbor.Encode(headerBody)
 		require.NoError(t, err)
@@ -1018,9 +1078,9 @@ func generateValidatedConwayForkChain(
 		)
 		require.NoError(t, err)
 
-		block := &conway.ConwayBlock{
-			BlockHeader: &conway.ConwayBlockHeader{
-				BabbageBlockHeader: babbage.BabbageBlockHeader{
+		block := &alonzo.AlonzoBlock{
+			BlockHeader: &alonzo.AlonzoBlockHeader{
+				ShelleyBlockHeader: shelley.ShelleyBlockHeader{
 					Body:      headerBody,
 					Signature: kesSig,
 				},
@@ -1029,7 +1089,7 @@ func generateValidatedConwayForkChain(
 		raw, err := cbor.Encode(block)
 		require.NoError(t, err)
 
-		decoded, err := conway.NewConwayBlockFromCbor(raw)
+		decoded, err := alonzo.NewAlonzoBlockFromCbor(raw)
 		require.NoError(t, err)
 
 		blocks = append(blocks, decoded)
@@ -1068,6 +1128,8 @@ func requireGenesisDeepForkWins(
 	t.Helper()
 	require.Greater(t, len(points), ancestorIdx+1)
 	ancestor := points[ancestorIdx]
+	ancestorBlock, err := n.ledgerState.GetBlock(ancestor)
+	require.NoError(t, err)
 	localTipBefore := n.ledgerState.Tip()
 	require.Greater(
 		t,
@@ -1099,11 +1161,11 @@ func requireGenesisDeepForkWins(
 	const genesisOverlaySlotInterval = uint64(10)
 	startSlot := (ancestor.Slot/genesisOverlaySlotInterval + 1) *
 		genesisOverlaySlotInterval
-	forkBlocks := generateValidatedConwayForkChain(
+	forkBlocks := generateValidatedAlonzoForkChain(
 		t,
 		keys,
 		epochNonce,
-		uint64(ancestorIdx)+1,
+		ancestorBlock.Number+1,
 		lcommon.NewBlake2b256(ancestor.Hash),
 		startSlot,
 		genesisOverlaySlotInterval,
@@ -1131,6 +1193,57 @@ func requireGenesisDeepForkWins(
 	}
 
 	connId := registerGenesisForkTestPeer(t, n)
+	// The ledger fetches the candidate's bodies and validates them before it
+	// rolls back, so serve them the way the peer's blockfetch would.
+	var requestID atomic.Uint64
+	serve := func(
+		id gouroboros.ConnectionId,
+		start ocommon.Point,
+		end ocommon.Point,
+	) (uint64, error) {
+		reqID := requestID.Add(1)
+		go func() {
+			serving := false
+			for _, blk := range forkBlocks {
+				point := ocommon.NewPoint(blk.SlotNumber(), blk.Hash().Bytes())
+				if point.Slot == start.Slot {
+					serving = true
+				}
+				if serving {
+					n.eventBus.Publish(
+						ledger.BlockfetchEventType,
+						event.NewEvent(
+							ledger.BlockfetchEventType,
+							ledger.BlockfetchEvent{
+								ConnectionId: id,
+								Block:        blk,
+								Point:        point,
+								Type:         uint(blk.Type()),
+								RequestId:    reqID,
+							},
+						),
+					)
+				}
+				if point.Slot == end.Slot {
+					break
+				}
+			}
+			n.eventBus.Publish(
+				ledger.BlockfetchEventType,
+				event.NewEvent(
+					ledger.BlockfetchEventType,
+					ledger.BlockfetchEvent{
+						ConnectionId: id,
+						BatchDone:    true,
+						RequestId:    reqID,
+					},
+				),
+			)
+		}()
+		return reqID, nil
+	}
+	n.blockfetchRangeOverride.Store(&serve)
+	t.Cleanup(func() { n.blockfetchRangeOverride.Store(nil) })
 	for _, blk := range forkBlocks {
 		verificationGeneration, err := n.ledgerState.
 			ValidateChainSelectionHeaderCryptoWithGeneration(blk.Header())
@@ -1152,19 +1265,30 @@ func requireGenesisDeepForkWins(
 		)
 	}
 
+	// The candidate's bodies are already validated and fetched, so the ledger
+	// applies them right after the rollback: the intersection tip is only a
+	// transient. Ending on the fork tip, which is behind and shorter than
+	// the local chain, proves the fork won.
 	require.EventuallyWithT(
 		t,
 		func(collect *assert.CollectT) {
+			tip := n.ledgerState.Tip().Point
 			assert.Equal(
 				collect,
-				ancestor.Slot,
-				n.ledgerState.Tip().Point.Slot,
+				forkTipBlock.SlotNumber(),
+				tip.Slot,
 				"current ledger tip slot",
+			)
+			assert.Equal(
+				collect,
+				forkTipBlock.Hash().Bytes(),
+				tip.Hash,
+				"current ledger tip hash",
 			)
 		},
 		10*time.Second,
 		20*time.Millisecond,
-		"ledger did not roll back to the Genesis-selected fork intersection at slot %d",
+		"ledger did not switch to the Genesis-selected fork rooted at slot %d",
 		ancestor.Slot,
 	)
 }
@@ -1281,10 +1405,33 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
-	// Expire the operation context while deferred-index maintenance is still
-	// running, so its drain cannot be confirmed. The durable Badger provider
-	// still closes to completion afterward.
-	n.deferredIndexMaintenanceDone = make(chan struct{})
+	// A provider that returns at the deadline leaves its close unconfirmed.
+	// The durable Badger provider still closes to completion afterward.
+	require.NoError(t, plugin.Register[string, struct{}, struct{}](
+		n.pluginHost,
+		plugin.Descriptor{
+			Capability: plugin.CapabilityStorageBlob,
+			Name:       "test-stop-at-deadline",
+		},
+		func() struct{} { return struct{}{} },
+		func(context.Context, struct{}, struct{}) (string, plugin.Instance, error) {
+			return "test", plugin.Lifecycle{
+				StopFunc: func(ctx context.Context) error {
+					<-ctx.Done()
+					return ctx.Err()
+				},
+			}, nil
+		},
+	))
+	_, err := plugin.Resolve[string](
+		context.Background(),
+		n.pluginHost,
+		plugin.CapabilityStorageBlob,
+		"test-stop-at-deadline",
+		nil,
+		struct{}{},
+	)
+	require.NoError(t, err)
 
 	// Capture the blob store's own completion signal before Truncate closes
 	// n.db out from under it: BlobStoreBadger.Closed() closes only once its
@@ -1307,7 +1454,7 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	defer cancel()
 
 	targetSlot := points[len(points)/2].Slot
-	_, err := n.Truncate(
+	_, err = n.Truncate(
 		shortCtx,
 		dblifecycle.TruncateTarget{Slot: &targetSlot},
 	)
@@ -1517,7 +1664,7 @@ func TestLiveTruncateRefusedPendingResumeDoesNotResumeNode(t *testing.T) {
 	require.NoError(t, err)
 	_, err = lifecycle.Truncate(
 		&errAfterNChecks{Context: context.Background(), n: 3},
-		n.db, target, 1, false, 0,
+		n.db, target, 1,
 		setOpts...,
 	)
 	require.ErrorIs(t, err, context.Canceled)
@@ -1525,7 +1672,7 @@ func TestLiveTruncateRefusedPendingResumeDoesNotResumeNode(t *testing.T) {
 	pending, err := lifecycle.GetPendingTruncate(n.db)
 	require.NoError(t, err)
 	require.NotNil(t, pending)
-	require.NoError(t, n.db.SetSyncState("sync_status", "in_progress", nil))
+	require.NoError(t, n.db.SetChainState("sync_status", "in_progress", nil))
 
 	targetSlot := points[2].Slot
 	_, err = n.Truncate(
@@ -1540,95 +1687,9 @@ func TestLiveTruncateRefusedPendingResumeDoesNotResumeNode(t *testing.T) {
 	require.NotErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 }
 
-// TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure guards against
-// a real storage-lock leak: Truncate's tmpDB (opened purely
-// to resolve the truncate target) used to only be deferred-closed AFTER
-// checking database.New's error — but database.New can return a non-nil
-// *Database alongside a non-nil, recoverable CommitTimestampError (see
-// its own doc comment, "database is available for recovery, so return it
-// with error"), and an early return on that error before the defer
-// statement executes skips the deferred Close entirely. tmpDB's badger
-// directory lock would then still be held when reinitializeAndResume's
-// reinitializeCoreStorage tries to reopen that very same data directory a
-// moment later, turning what should be a gracefully recovered
-// CommitTimestampError into a hard lock-contention failure that brings
-// the whole node down instead of resuming it.
-//
-// This reproduces exactly that CommitTimestampError condition (metadata
-// commit timestamp set without a matching blob one, mirroring
-// TestCheckCommitTimestamp_MetadataOnly in the database package) via the
-// node's own already-open db handle, then invokes Truncate with a target
-// that is deliberately in range, so the corrupted commit timestamp is the
-// only thing that can classify the result as
-// lifecycle.ErrTruncateNotStarted (nothing on disk was touched, so resume
-// is expected to succeed). If tmpDB leaked its lock, reinitializeCoreStorage's
-// own reopen attempt fails with a lock error instead of gracefully
-// recovering the very same CommitTimestampError, and reinitializeAndResume
-// fails ("resume also failed"); with the fix, it must succeed and leave
-// the node fully usable.
-func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
-	t.Parallel()
-
-	const numBlocks = 10
-	n, points := newLiveLifecycleTestNode(t, numBlocks)
-
-	// Nothing may commit between the corruption below and Truncate's tmpDB
-	// open: a both-store read-write commit rewrites BOTH commit timestamps
-	// to time.Now() (database.Txn.Commit's updateCommitTimestamp), which
-	// heals the injected mismatch, so the truncate below would really run
-	// and succeed instead of being classified ErrTruncateNotStarted. The
-	// helper leaves the ledger's startup work running (block processing,
-	// the database worker pool, the reward precompute), and Truncate only
-	// drains it later, inside its own quiesce -- so close the ledger state
-	// first, before the corruption lands. Truncate closes it again, which
-	// LedgerState.Close replays from its memoized result.
-	require.NoError(t, n.ledgerState.Close())
-
-	// Corrupt the on-disk commit timestamps via the node's own already-open
-	// db handle: set metadata's without touching blob's, so the NEXT fresh
-	// database.New against this same data directory (Truncate's tmpDB, and
-	// later reinitializeCoreStorage's reopen) observes a mismatch and
-	// returns a recoverable CommitTimestampError.
-	metaTxn := n.db.Metadata().Transaction(t.Context())
-	require.NoError(t, n.db.Metadata().SetCommitTimestamp(123456789, metaTxn))
-	require.NoError(t, metaTxn.Commit())
-
-	oldCtx := n.ctx
-	// The target itself is never actually validated: the corrupted commit
-	// timestamp above makes Truncate's tmpDB open fail before
-	// dblifecycle.ResolveTarget is ever reached, so any in-range target
-	// exercises the same path.
-	targetSlot := points[len(points)/2].Slot
-
-	_, err := n.Truncate(
-		context.Background(),
-		dblifecycle.TruncateTarget{Slot: &targetSlot},
-	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
-	require.NotContains(
-		t, err.Error(), "resume also failed",
-		"a leaked tmpDB lock must not turn a recoverable CommitTimestampError "+
-			"into a failed resume",
-	)
-
-	// The node must have come back up fully usable, not been torn down.
-	require.Same(t, oldCtx, n.ctx)
-	require.NoError(t, n.ctx.Err())
-	require.NotNil(t, n.mempool)
-	require.NotNil(t, n.chainsyncState)
-	require.NotNil(t, n.connManager)
-	require.NotNil(t, n.peerGov)
-
-	tip, tipErr := n.db.GetTip(nil)
-	require.NoError(t, tipErr)
-	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
-}
-
-// A live restore/truncate reinitialization follows its own commit-timestamp
-// recovery path. It must run the same deferred settings checks as ordinary
-// startup before resuming any component, including the Alonzo pparams
-// provenance gate added for gouroboros v0.205.7.
+// A live truncate reopens the database, which runs the same settings checks
+// as ordinary startup before resuming any component, including the Alonzo
+// protocol-parameter unit marker.
 func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
 	t.Parallel()
 
@@ -1642,17 +1703,12 @@ func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
 	))
 	require.NoError(
 		t,
-		n.db.Metadata().SetNodeSettingsGates(context.Background(),
+		n.db.SetNodeSettingsGates(context.Background(),
 			nodesettings.Values{
 				nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
 			},
-			0,
-			0,
 		),
 	)
-	metaTxn := n.db.Metadata().Transaction(t.Context())
-	require.NoError(t, n.db.Metadata().SetCommitTimestamp(123456789, metaTxn))
-	require.NoError(t, metaTxn.Commit())
 
 	targetSlot := points[len(points)/2].Slot
 	_, err := n.Truncate(
@@ -1661,8 +1717,7 @@ func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "resume also failed")
-	require.ErrorContains(t, err, "legacy")
-	require.ErrorContains(t, err, "protocol parameters are drained")
+	require.ErrorIs(t, err, database.ErrAlonzoPParamsUnitNoRows)
 }
 
 // TestLiveRestoreRebuildsStorageAndKeepsNodeUsable verifies the Restore
@@ -1683,7 +1738,7 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	oldCtx := n.ctx
 	restoredManifest, err := n.Restore(context.Background(), snapshotDir)
 	require.NoError(t, err)
-	require.Equal(t, manifest.CommitTimestamp, restoredManifest.CommitTimestamp)
+	require.Equal(t, manifest.TipSlot, restoredManifest.TipSlot)
 
 	require.Same(t, oldCtx, n.ctx)
 	require.NoError(t, n.ctx.Err())
@@ -2382,6 +2437,21 @@ func TestWaitForEpochTransitionWindowResetsOnProgress(t *testing.T) {
 	})
 }
 
+// requireLedgerAtChainTip waits for the ledger to apply every block on the
+// primary chain. The harness and a live truncate both start a ledger that
+// catches up from its stored tip in the background, so an epoch-boundary
+// test that truncates or adds blocks without this wait acts on whatever
+// prefix has been applied. A boundary block then finds the ledger still
+// in an earlier epoch and skips an epoch in one rollover, which publishes no
+// block-based transition event.
+func requireLedgerAtChainTip(t *testing.T, n *Node) {
+	t.Helper()
+	testutil.WaitForCondition(t, func() bool {
+		return n.ledgerState.Tip().Point.Slot ==
+			n.chainManager.PrimaryChain().Tip().Point.Slot
+	}, testutil.AsyncWait, "the ledger must apply the primary chain")
+}
+
 // addBlocksSerially waits for each block-based epoch transition to commit
 // before entering the next epoch. This orders ledger commits only; snapshot
 // events run in their own serial loop and reward precomputation coalesces
@@ -2393,6 +2463,7 @@ func addBlocksSerially(
 	epochLength uint64,
 ) {
 	t.Helper()
+	requireLedgerAtChainTip(t, n)
 	// With no upstream connection and reachedTip unlatched, the ledger loop
 	// holds each lone new block for about two seconds waiting for more. A
 	// live truncate or restore builds a new ledger with the flag clear, so
@@ -2468,6 +2539,7 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	// (block 20, slot 402), whose block-based epoch event confirms every
 	// preceding block committed.
 	target1 := points[9].Slot
+	requireLedgerAtChainTip(t, n)
 	_, err := n.Truncate(
 		context.Background(),
 		dblifecycle.TruncateTarget{Slot: &target1},
@@ -2636,7 +2708,6 @@ func TestLiveLifecycleRejectionsLeaveNodeIntact(t *testing.T) {
 // writes blocks and the tip directly, which no ledger commit journals.
 func seedLiveUtxoSetJournal(
 	t *testing.T,
-	db *database.Database,
 	dataDir string,
 	points []ocommon.Point,
 	livedIn bool,
@@ -2645,8 +2716,7 @@ func seedLiveUtxoSetJournal(
 	t.Helper()
 	require.Positive(t, epochLength)
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(dataDir), Only: true, Authoritative: true,
-		CheckpointDir: utxoset.CheckpointDirFor(dataDir),
+		Dir: utxoset.DirFor(dataDir), CheckpointDir: utxoset.CheckpointDirFor(dataDir),
 	})
 	require.NoError(t, err)
 	// The first commit has no tip before it, and a journal reaches back only
@@ -2695,9 +2765,6 @@ func seedLiveUtxoSetJournal(
 		require.NoError(t, set.ApplyLedgerChanges(&p, changes))
 	}
 	require.NoError(t, set.Close())
-	require.NoError(
-		t, db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil),
-	)
 }
 
 // seedLiveUtxoSet gives the data directory the live UTxO set of a node that
@@ -2719,7 +2786,7 @@ func seedLiveUtxoSet(
 		loadLiveUtxoSetFamiliesAtOrigin(t, db, dataDir)
 		require.NoError(t, db.SetTip(tip, nil))
 	}
-	seedLiveUtxoSetJournal(t, db, dataDir, points, livedIn, epochLength)
+	seedLiveUtxoSetJournal(t, dataDir, points, livedIn, epochLength)
 }
 
 // loadLiveUtxoSetFamiliesAtOrigin does what a node's first start does on an
@@ -2734,9 +2801,7 @@ func loadLiveUtxoSetFamiliesAtOrigin(
 	dataDir string,
 ) {
 	t.Helper()
-	set, err := utxoset.Open(utxoset.Config{
-		Dir: utxoset.DirFor(dataDir), Only: true, Authoritative: true,
-	})
+	set, err := utxoset.Open(utxoset.Config{Dir: utxoset.DirFor(dataDir)})
 	require.NoError(t, err)
 	require.NoError(t, set.Reconcile(t.Context(), dbadapter.New(db), nil))
 	require.NoError(t, set.Close())
@@ -2753,6 +2818,9 @@ func TestReinitializeAPIServersPreservesListenerFactory(t *testing.T) {
 	)
 	WithStorageMode(StorageModeAPI)(&n.config)
 	n.config.syncCompatFields()
+	storageFeatures, err := n.storagePlan()
+	require.NoError(t, err)
+	n.config.storageFeatures = storageFeatures
 	indexer, err := dbtest.NewDatabase(t, &database.Config{})
 	require.NoError(t, err)
 	store, err := indexerdb.NewStore(indexer, indexer, 10)

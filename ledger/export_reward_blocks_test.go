@@ -16,20 +16,16 @@ package ledger
 
 import (
 	"bytes"
-	"context"
 	"math/big"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/epochengine"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -60,49 +56,29 @@ type RewardBlocksScenario struct {
 	// InvalidInputs commits a phase-2-invalid transaction whose collateral
 	// is the live output id, less a collateral return of ret.
 	InvalidInputs func(slot uint64, id byte, ret uint64)
-	// Collateral creates an output of amount under id in the metadata store
-	// and the set.
+	// Collateral creates an output of amount under id in the set.
 	Collateral func(id byte, amount uint64)
-	// FeeAroundTheSet and BlockAroundTheSet write to the metadata store
-	// without staging the change for the set.
-	FeeAroundTheSet   func(slot, fee uint64)
-	BlockAroundTheSet func(slot uint64, pool []byte)
 	// Counts and Fees are the reward round's reads for an epoch.
 	Counts func(epoch uint64) (map[string]uint64, uint64, bool, error)
 	Fees   func(epoch uint64) (uint64, error)
 	// EpochCounts is the boundary capture's count of the blocks the pools
 	// minted in epoch, overlay slots included.
 	EpochCounts func(epoch uint64) (map[string]uint64, uint64, bool, error)
-	// Inputs and StoreInputs are the reward snapshot inputs of epoch as the
-	// ledger's LedgerDB and the metadata store itself answer.
-	Inputs      func(epoch uint64) RewardInputsAnswer
-	StoreInputs func(epoch uint64) RewardInputsAnswer
-	// InputsAroundTheSet changes epoch's pots, pool inputs and stake inputs
-	// in the metadata store without staging the change for the set.
-	InputsAroundTheSet func(epoch uint64)
+	// Inputs are the reward snapshot inputs of epoch as the ledger's
+	// LedgerDB answers.
+	Inputs func(epoch uint64) RewardInputsAnswer
 	// AddSetStake adds a live output of amount, held by the stake
 	// credential key, to the set alone, which the harness created in the
 	// metadata store only.
 	AddSetStake func(key []byte, amount uint64)
 	// PruneBefore runs the epoch-boundary prune of reward state below epoch.
 	PruneBefore func(epoch uint64)
-	// Outputs and StoreOutputs are the derived reward rows of the snapshot
-	// epoch and the credited rounds as the ledger's LedgerDB and the
-	// metadata store itself answer.
-	Outputs      func(epoch uint64) RewardOutputsAnswer
-	StoreOutputs func(epoch uint64) RewardOutputsAnswer
-	// OutputsAroundTheSet changes epoch's pool outputs, and its account
-	// outputs when accounts is set, in the metadata store without staging
-	// the change for the set.
-	OutputsAroundTheSet func(epoch uint64, accounts bool)
+	// Outputs are the derived reward rows of the snapshot epoch and the
+	// credited rounds as the ledger's LedgerDB answers.
+	Outputs func(epoch uint64) RewardOutputsAnswer
 	// PrecomputeRound runs the background precompute of the round the
 	// boundary into epoch 6 applies, to completion.
 	PrecomputeRound func() error
-	// PrecomputeRoundWithBlockCommit runs PrecomputeRound and, while a
-	// chunk's transaction is open, commits a write transaction on another
-	// goroutine. It reports whether that commit completed while the chunk was
-	// still open.
-	PrecomputeRoundWithBlockCommit func() (bool, error)
 	// DeregisterMember deregisters the harness's delegator credential in the
 	// metadata store and the set at slot 11, with no certificate row.
 	DeregisterMember func()
@@ -122,23 +98,18 @@ type RewardBlocksScenario struct {
 	// StageNoncesInSet gives the set nonces the harness wrote only to the
 	// metadata store.
 	StageNoncesInSet func(rows []models.BlockNonce)
-	// WaitDeferred waits for the writer of a boundary's stake inputs.
-	WaitDeferred func()
-	// StakeInputsIncomplete is LedgerState.RewardStakeInputsIncompleteCommitted.
-	StakeInputsIncomplete func(from, through uint64) (bool, error)
-	// PotsFees is the fee total the boundary stored for epoch.
-	PotsFees func(epoch uint64) uint64
 	// Boundary applies the rollover into epoch 6.
 	Boundary func()
 	// RollbackBeforeBoundary rolls the ledger back to slot 10.
 	RollbackBeforeBoundary func()
 	// HideStoreReads is BoundaryEpochStateScenario.HideStoreReads.
 	HideStoreReads func(names ...string) (func() int64, func(bool))
-	// DrainFamilies publishes the drained mask to the ledger.
-	DrainFamilies func(mask nodesettings.FamilyMask)
-	// InstallDrainedSources is BoundaryEpochStateScenario.InstallDrainedSources.
-	InstallDrainedSources func()
-	LedgerDB              func() ledgerdb.LedgerDB
+	// FailSet makes the ledger treat its set as failed, as an update the
+	// set refused does.
+	FailSet func()
+	// InstallSetSources is BoundaryEpochStateScenario.InstallSetSources.
+	InstallSetSources func()
+	LedgerDB          func() ledgerdb.LedgerDB
 }
 
 // RewardInputsAnswer is what a read of an epoch's reward snapshot inputs
@@ -242,15 +213,24 @@ func NewRewardBlocksScenarioForTest(
 		StatementGuard: guard,
 	})
 	require.NoError(t, err)
-	h := newBoundaryReplayHarnessWithSet(t, db, set)
-	require.NoError(t, db.Metadata().SetNetworkState(1_000, 9_000, 0, nil))
-	require.NoError(
-		t,
-		db.Metadata().IterateAccounts(nil, func(a *models.Account) error {
-			c := *a
-			return db.Metadata().ImportAccount(&c, nil)
-		}),
-	)
+	poolA := bytes.Repeat([]byte{0xa1}, 28)
+	poolB := bytes.Repeat([]byte{0xb2}, 28)
+	poolIdle := bytes.Repeat([]byte{0xc3}, 28)
+	if set != nil {
+		// The caller's set is the database's LedgerDB set from here on, so
+		// everything seeded below lands in it.
+		AdoptLiveSetForTest(t, db, set)
+	}
+	h := newBoundaryReplayHarnessSeeded(t, db, false, func() {
+		require.NoError(t, seedDB(t, db).SetNetworkState(1_000, 9_000, 0, nil))
+		fxImportAccountBaselines(t, db)
+		if opts.Imported {
+			seedRewardBlocksAnchor(t, db, poolA, poolB, poolIdle)
+		}
+		if opts.Round {
+			seedRewardRound(t, db, poolB)
+		}
+	})
 	var generation uint64
 	if tip := h.ls.loadTipSnapshot(); tip != nil {
 		generation = tip.generation
@@ -262,42 +242,7 @@ func NewRewardBlocksScenarioForTest(
 		currentPParams: h.ls.currentPParams,
 		epochCache:     h.ls.epochCache,
 	})
-	poolA := bytes.Repeat([]byte{0xa1}, 28)
-	poolB := bytes.Repeat([]byte{0xb2}, 28)
-	poolIdle := bytes.Repeat([]byte{0xc3}, 28)
-	if opts.Imported {
-		require.NoError(t, db.SetSyncState("mithril_ledger_slot", "8", nil))
-		meta := db.Metadata()
-		require.NoError(t, meta.SaveImportedPoolBlockCounts(
-			[]models.ImportedPoolBlockCount{
-				{
-					PoolKeyHash:    poolB,
-					Epoch:          3,
-					BlocksProduced: 2,
-					CapturedSlot:   8,
-				},
-				{
-					PoolKeyHash:    poolIdle,
-					Epoch:          3,
-					BlocksProduced: 1,
-					CapturedSlot:   8,
-				},
-				{
-					PoolKeyHash:    poolA,
-					Epoch:          4,
-					BlocksProduced: 3,
-					CapturedSlot:   8,
-				},
-			}, nil))
-		require.NoError(t, meta.SaveImportedEpochBlockTotal(3, 3, 8, nil))
-		require.NoError(t, meta.SaveImportedEpochBlockTotal(4, 3, 8, nil))
-		fees := types.Uint64(1_000)
-		require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
-			Epoch: 4, ImportedEpochFees: &fees, CapturedSlot: 8,
-		}, nil))
-	}
 	if opts.Round {
-		seedRewardRound(t, db, poolB)
 		window := uint64(0)
 		h.ls.rewardUpdateWindowOverride = &window
 	}
@@ -409,28 +354,7 @@ func NewRewardBlocksScenarioForTest(
 				16: map[uint]any{0: addr(), 1: ret},
 			}, false)
 		},
-		FeeAroundTheSet: func(slot, fee uint64) {
-			submitVia(func() ledgerdb.LedgerDB { return dbadapter.New(db) },
-				slot, map[uint]any{0: []any{input()}, 1: []any{}, 2: fee}, true,
-				false)
-		},
-		BlockAroundTheSet: func(slot uint64, pool []byte) {
-			seq++
-			ldb := dbadapter.New(db)
-			txn := ldb.Begin(t.Context(), true)
-			defer txn.Release()
-			require.NoError(t, ldb.UpdatePoolOpCertSequence(
-				t.Context(), lcommon.PoolKeyHash(pool), seq, slot, txn,
-			))
-			require.NoError(t, txn.Commit())
-		},
 		Collateral: func(id byte, amount uint64) {
-			require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
-				TxId: bytes.Repeat([]byte{id}, 32), OutputIdx: 0,
-				Amount: types.Uint64(amount), AddedSlot: 5,
-				Address:    addr(),
-				StakingKey: bytes.Repeat([]byte{0xab}, 28),
-			}))
 			out, err := cbor.Encode(map[uint]any{0: addr(), 1: amount})
 			require.NoError(t, err)
 			point := ocommon.NewPoint(5, bytes.Repeat([]byte{0x05}, 32))
@@ -451,15 +375,15 @@ func NewRewardBlocksScenarioForTest(
 				{PoolKeyHash: poolA}, {PoolKeyHash: poolB},
 				{PoolKeyHash: poolIdle},
 			}
-			return h.ls.rewardBlockCounts(
-				h.ls.LedgerDB(), nil, epoch, inputs, big.NewRat(1, 2),
+			return h.ls.engine().RewardBlockCounts(
+				h.ls.LedgerDB(), nil, epoch, inputs,
 			)
 		},
 		Fees: func(epoch uint64) (uint64, error) {
 			row, err := db.GetEpoch(epoch, nil)
 			require.NoError(t, err)
 			require.NotNil(t, row)
-			return h.ls.rewardEpochFeesFor(h.ls.LedgerDB(), nil, *row)
+			return h.ls.rewardEpochFeesFor(nil, *row)
 		},
 		EpochCounts: func(epoch uint64) (map[string]uint64, uint64, bool, error) {
 			start := epoch * uint64(replayBoundaryLength)
@@ -491,44 +415,6 @@ func NewRewardBlocksScenarioForTest(
 			}
 			a.Stakes, a.Err = ldb.GetRewardStakeInputs(epoch, nil)
 			return normalizeInputs(a)
-		},
-		StoreInputs: func(epoch uint64) RewardInputsAnswer {
-			var a RewardInputsAnswer
-			meta := db.Metadata()
-			if a.Pots, a.Err = meta.GetRewardAdaPots(epoch, nil); a.Err != nil {
-				return a
-			}
-			a.Snapshot, a.Err = meta.GetRewardSnapshot(epoch, "mark", nil)
-			if a.Err != nil {
-				return a
-			}
-			a.Failure, a.Err = meta.GetRewardSeedFailure(epoch, "mark", nil)
-			if a.Err != nil {
-				return a
-			}
-			if a.Pools, a.Err = meta.GetRewardPoolInputs(epoch, nil); a.Err != nil {
-				return a
-			}
-			a.Stakes, a.Err = meta.GetRewardStakeInputs(epoch, nil)
-			return normalizeInputs(a)
-		},
-		InputsAroundTheSet: func(epoch uint64) {
-			meta := db.Metadata()
-			pots, err := meta.GetRewardAdaPots(epoch, nil)
-			require.NoError(t, err)
-			require.NotNil(t, pots)
-			pots.Treasury++
-			require.NoError(t, meta.SaveRewardAdaPots(pots, nil))
-			pools, err := meta.GetRewardPoolInputs(epoch, nil)
-			require.NoError(t, err)
-			require.NotEmpty(t, pools)
-			pools[0].Pledge++
-			require.NoError(t, meta.SaveRewardPoolInputs(pools[:1], nil))
-			stakes, err := meta.GetRewardStakeInputs(epoch, nil)
-			require.NoError(t, err)
-			require.NotEmpty(t, stakes)
-			stakes[0].Stake++
-			require.NoError(t, meta.SaveRewardStakeInputs(stakes[:1], nil))
 		},
 		AddSetStake: func(key []byte, amount uint64) {
 			a, err := lcommon.NewAddressFromParts(
@@ -562,31 +448,6 @@ func NewRewardBlocksScenarioForTest(
 		Outputs: func(epoch uint64) RewardOutputsAnswer {
 			return readOutputs(h.ls.LedgerDB(), epoch)
 		},
-		StoreOutputs: func(epoch uint64) RewardOutputsAnswer {
-			a := readOutputs(dbadapter.New(db), epoch)
-			a.Cursor, a.Err = db.GetSyncState(
-				rewardPrecomputeCursorKey(epoch),
-				nil,
-			)
-			return normalizeOutputs(a)
-		},
-		OutputsAroundTheSet: func(epoch uint64, accounts bool) {
-			meta := db.Metadata()
-			pools, err := meta.GetRewardPoolOutputs(epoch, nil)
-			require.NoError(t, err)
-			require.NotEmpty(t, pools)
-			pools[0].TotalReward++
-			require.NoError(t, meta.SaveRewardPoolOutputs(pools[:1], nil))
-			if !accounts {
-				return
-			}
-			rows, err := meta.GetRewardAccountOutputs(epoch, nil)
-			require.NoError(t, err)
-			if len(rows) > 0 {
-				rows[0].Amount++
-				require.NoError(t, meta.SaveRewardAccountOutputs(rows[:1], nil))
-			}
-		},
 		PrecomputeRound: func() error {
 			_, err := h.ls.runChunkedStakeRewardPrecomputeRound(
 				replayBoundaryNewEpoch,
@@ -594,49 +455,6 @@ func NewRewardBlocksScenarioForTest(
 				replayBoundaryNewEpoch*uint64(replayBoundaryLength),
 			)
 			return err
-		},
-		PrecomputeRoundWithBlockCommit: func() (bool, error) {
-			type result struct {
-				err error
-			}
-			var once sync.Once
-			done := make(chan result, 1)
-			started, committedInChunk := false, false
-			h.ls.rewardPrecomputeBeforeSaveHook = func() {
-				once.Do(func() {
-					started = true
-					go func() {
-						ctx, cancel := context.WithTimeout(
-							context.Background(), time.Minute,
-						)
-						defer cancel()
-						txn := db.Transaction(ctx, true)
-						done <- result{err: txn.Do(func(txn *database.Txn) error {
-							return db.SetSyncState("block-commit-probe", "1", txn)
-						})}
-					}()
-					select {
-					case r := <-done:
-						require.NoError(t, r.err)
-						committedInChunk = true
-					case <-time.After(5 * time.Second):
-					}
-				})
-			}
-			_, err := h.ls.runChunkedStakeRewardPrecomputeRound(
-				replayBoundaryNewEpoch,
-				replayBoundaryEndedEra*uint64(replayBoundaryLength),
-				replayBoundaryNewEpoch*uint64(replayBoundaryLength),
-			)
-			h.ls.rewardPrecomputeBeforeSaveHook = nil
-			// A round that returns before the hook fires never starts the
-			// probe, so only a started probe that stayed behind the chunk is
-			// waited out; that keeps it from outliving the test.
-			if started && !committedInChunk {
-				r := <-done
-				require.NoError(t, r.err)
-			}
-			return committedInChunk, err
 		},
 		DeregisterMember: func() {
 			ref := models.NewStakeCredentialRef(
@@ -651,7 +469,7 @@ func NewRewardBlocksScenarioForTest(
 			require.NotNil(t, acct)
 			acct.Active = false
 			stored := *acct
-			require.NoError(t, db.Metadata().ImportAccount(&stored, nil))
+			require.NoError(t, fxImporter(t, db).ImportAccount(&stored, nil))
 			writer, ok := h.ls.config.UtxoSet.(LedgerChangesWriter)
 			require.True(t, ok)
 			require.NoError(t, writer.ApplyLedgerChanges(nil, LedgerChanges{
@@ -723,14 +541,6 @@ func NewRewardBlocksScenarioForTest(
 		StageNoncesInSet: func(rows []models.BlockNonce) {
 			h.ls.stageBlockNonces(nil, rows, 0)
 		},
-		WaitDeferred:          h.ls.deferredStakeInputsWG.Wait,
-		StakeInputsIncomplete: h.ls.RewardStakeInputsIncompleteCommitted,
-		PotsFees: func(epoch uint64) uint64 {
-			pots, err := db.Metadata().GetRewardAdaPots(epoch, nil)
-			require.NoError(t, err)
-			require.NotNil(t, pots)
-			return uint64(pots.Fees)
-		},
 		Boundary:               func() { h.applyBoundaryQuiet() },
 		RollbackBeforeBoundary: h.rollbackBeforeBoundary,
 		HideStoreReads: func(names ...string) (func() int64, func(bool)) {
@@ -743,8 +553,8 @@ func NewRewardBlocksScenarioForTest(
 			blind.off.Store(false)
 			return blind.hits.Load, func(on bool) { blind.off.Store(!on) }
 		},
-		DrainFamilies: h.ls.SetDrainedFamilies,
-		InstallDrainedSources: func() {
+		FailSet: func() { h.ls.utxoSetFailed.Store(true) },
+		InstallSetSources: func() {
 			h.ls.installNonceSource()
 			h.ls.installEpochSource()
 			h.ls.installPParamsSource()
@@ -761,19 +571,42 @@ func readOutputs(ldb ledgerdb.LedgerDB, epoch uint64) RewardOutputsAnswer {
 	if a.Accounts, a.Err = ldb.GetRewardAccountOutputs(epoch, nil); a.Err != nil {
 		return a
 	}
-	if a.Cursor, a.Err = ldb.GetSyncState(rewardPrecomputeCursorKey(epoch), nil); a.Err != nil {
+	if a.Cursor, a.Err = ldb.GetSyncState(epochengine.RewardPrecomputeCursorKey(epoch), nil); a.Err != nil {
 		return a
 	}
 	a.Rounds, a.Err = ldb.GetPendingRewardCreditRounds(nil)
 	return normalizeOutputs(a)
 }
 
+// seedRewardBlocksAnchor writes what a Mithril import at slot 8 leaves:
+// the block counts and fees of epochs 3 and 4, which the anchor hides.
+func seedRewardBlocksAnchor(
+	t *testing.T,
+	db *database.Database,
+	poolA, poolB, poolIdle []byte,
+) {
+	t.Helper()
+	ldb := seedDB(t, db)
+	require.NoError(t, db.SetImportedLedgerStateBoundary(
+		ocommon.Point{Slot: 8}, nil,
+	))
+	fees := types.Uint64(1_000)
+	require.NoError(t, ldb.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch: 4, ImportedEpochFees: &fees, CapturedSlot: 8,
+	}, nil))
+	fxImportRewardBlocks(t, db, 8, []models.ImportedPoolBlockCount{
+		{PoolKeyHash: poolB, Epoch: 3, BlocksProduced: 2, CapturedSlot: 8},
+		{PoolKeyHash: poolIdle, Epoch: 3, BlocksProduced: 1, CapturedSlot: 8},
+		{PoolKeyHash: poolA, Epoch: 4, BlocksProduced: 3, CapturedSlot: 8},
+	}, map[uint64]uint64{3: 3, 4: 3})
+}
+
 // seedRewardRound replaces the empty reward basis of snapshot epoch 3 with
 // one pool, owned by the harness's owner credential, and two staked
-// credentials, in the metadata store, for a set that loads them.
+// credentials, in db's LedgerDB set.
 func seedRewardRound(t *testing.T, db *database.Database, pool []byte) {
 	t.Helper()
-	meta := db.Metadata()
+	meta := seedDB(t, db)
 	owner := bytes.Repeat([]byte{0x71}, 28)
 	member := bytes.Repeat([]byte{0x72}, 28)
 	const slot = uint64(10)
@@ -788,7 +621,7 @@ func seedRewardRound(t *testing.T, db *database.Database, pool []byte) {
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.SetPParams(encoded, 8, 4, eras.ShelleyEraDesc.Id, nil),
+		seedDB(t, db).SetPParams(encoded, 8, 4, eras.ShelleyEraDesc.Id, nil),
 	)
 	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch: 5, Treasury: 1_000, Reserves: 9_000, CapturedSlot: slot,

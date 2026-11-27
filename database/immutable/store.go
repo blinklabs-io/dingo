@@ -154,6 +154,8 @@ type Store struct {
 	hasTip  bool
 	tip     StoreTip
 	closed  bool
+	// compress stores each chunk the store completes as an archive.
+	compress bool
 	// syncFile fsyncs one file. Tests replace it to count durability points;
 	// nil means (*os.File).Sync.
 	syncFile func(*os.File) error
@@ -162,13 +164,30 @@ type Store struct {
 // OpenStore opens dir for appending, creating it if needed, and recovers a
 // torn tail left by an interrupted append.
 func OpenStore(dir string, geom Geometry) (*Store, error) {
+	return OpenStoreWithOptions(dir, geom, StoreOptions{})
+}
+
+// StoreOptions configures a Store.
+type StoreOptions struct {
+	// Compress stores each chunk the store completes as an archive in the
+	// Mithril immutable archive layout (see ArchiveExtension). Chunks already
+	// on disk keep their form; a store reads both.
+	Compress bool
+}
+
+// OpenStoreWithOptions is OpenStore with options.
+func OpenStoreWithOptions(
+	dir string,
+	geom Geometry,
+	opts StoreOptions,
+) (*Store, error) {
 	if !geom.Valid() {
 		return nil, fmt.Errorf("immutable store: invalid geometry %+v", geom)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("immutable store: create directory: %w", err)
 	}
-	s := &Store{dir: dir, geom: geom}
+	s := &Store{dir: dir, geom: geom, compress: opts.Compress}
 	if err := s.recover(); err != nil {
 		_ = s.Close()
 		return nil, err
@@ -181,26 +200,129 @@ func (s *Store) path(num uint64, ext string) string {
 }
 
 // listChunks returns the chunk numbers present, ascending, that have a
-// .chunk file.
+// .chunk file or an archive.
 func (s *Store) listChunks() ([]uint64, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, err
 	}
+	seen := map[uint64]bool{}
 	nums := make([]uint64, 0, len(entries))
 	for _, e := range entries {
 		base, ext, ok := strings.Cut(e.Name(), ".")
-		if !ok || ext != "chunk" || !isCanonicalChunkName(base) {
+		if !ok || (ext != "chunk" && "."+ext != ArchiveExtension) ||
+			!isCanonicalChunkName(base) {
+			continue
+		}
+		n, err := strconv.ParseUint(base, 10, 64)
+		if err != nil || seen[n] {
+			continue
+		}
+		seen[n] = true
+		nums = append(nums, n)
+	}
+	sortUint64(nums)
+	return nums, nil
+}
+
+// isArchived reports whether chunk num is stored as an archive.
+func (s *Store) isArchived(num uint64) (bool, error) {
+	_, err := os.Stat(s.path(num, ".chunk"))
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	_, err = os.Stat(filepath.Join(s.dir, ArchiveName(num)))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// settleArchives removes what an interrupted pack or unpack left: temporary
+// files, and the plain files of a chunk whose archive was renamed into place,
+// which is then the chunk's only complete form.
+func (s *Store) settleArchives() error {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasSuffix(name, ".tmp") {
+			base, _, _ := strings.Cut(name, ".")
+			if isCanonicalChunkName(base) {
+				if err := os.Remove(filepath.Join(s.dir, name)); err != nil &&
+					!errors.Is(err, fs.ErrNotExist) {
+					return err
+				}
+			}
+			continue
+		}
+		base, ok := strings.CutSuffix(name, ArchiveExtension)
+		if !ok || !isCanonicalChunkName(base) {
 			continue
 		}
 		n, err := strconv.ParseUint(base, 10, 64)
 		if err != nil {
 			continue
 		}
-		nums = append(nums, n)
+		if err := removePlainChunk(s.dir, n); err != nil {
+			return err
+		}
 	}
-	sortUint64(nums)
-	return nums, nil
+	return fsyncdir.Sync(s.dir)
+}
+
+// plainForTruncate leaves chunk num in plain files only, ready to be cut. An
+// archive beside plain files is what an interrupted pack leaves, holding the
+// same bytes; it is removed, since recovery would otherwise prefer it to the
+// cut plain files and restore what the truncate removed. An archive alone is
+// unpacked.
+func (s *Store) plainForTruncate(num uint64) error {
+	archive := filepath.Join(s.dir, ArchiveName(num))
+	if _, err := os.Stat(archive); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if _, err := os.Stat(s.path(num, ".chunk")); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return unpackChunk(s.dir, num)
+	}
+	sharedArchiveCache.forget(archive)
+	if err := os.Remove(archive); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return fsyncdir.Sync(s.dir)
+}
+
+// packCompleted archives chunks from..to-1, which the store has completed.
+func (s *Store) packCompleted(from, to uint64) error {
+	if !s.compress {
+		return nil
+	}
+	for n := from; n < to; n++ {
+		archived, err := s.isArchived(n)
+		if err != nil {
+			return err
+		}
+		if archived {
+			continue
+		}
+		if err := packChunk(s.dir, n, s.syncFile); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sortUint64(v []uint64) {
@@ -316,6 +438,9 @@ func validPrimaryPrefix(offs []uint32) ([]uint32, bool) {
 // recover reads the highest chunk and trims it to its last entry that the
 // primary index, the secondary index and the chunk bytes all agree on.
 func (s *Store) recover() error {
+	if err := s.settleArchives(); err != nil {
+		return fmt.Errorf("immutable store: settle archives: %w", err)
+	}
 	nums, err := s.listChunks()
 	if err != nil {
 		return fmt.Errorf("immutable store: list chunks: %w", err)
@@ -326,6 +451,17 @@ func (s *Store) recover() error {
 		return nil
 	}
 	for i, num := range slices.Backward(nums) {
+		// Only the open chunk is ever appended to or trimmed, so the chunk
+		// recovery settles on is kept in plain files.
+		archived, err := s.isArchived(num)
+		if err != nil {
+			return err
+		}
+		if archived {
+			if err := unpackChunk(s.dir, num); err != nil {
+				return fmt.Errorf("immutable store: unpack chunk %d: %w", num, err)
+			}
+		}
 		found, err := s.recoverChunk(num)
 		if err != nil {
 			return err
@@ -350,6 +486,11 @@ func (s *Store) recover() error {
 }
 
 func (s *Store) removeChunk(num uint64) error {
+	archive := filepath.Join(s.dir, ArchiveName(num))
+	sharedArchiveCache.forget(archive)
+	if err := os.Remove(archive); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("immutable store: remove %s: %w", archive, err)
+	}
 	for _, ext := range []string{".chunk", ".secondary", ".primary"} {
 		if err := os.Remove(s.path(num, ext)); err != nil &&
 			!errors.Is(err, fs.ErrNotExist) {
@@ -719,12 +860,16 @@ func (s *Store) Append(b WriteBlock) (Location, error) {
 		if err := fsyncdir.Sync(s.dir); err != nil {
 			return Location{}, err
 		}
+		if err := s.packCompleted(0, chunkNo); err != nil {
+			return Location{}, err
+		}
 	} else {
 		if chunkNo < s.chunkNo || (chunkNo == s.chunkNo && rel < s.nextRel &&
 			s.secSize > 0) {
 			return Location{}, ErrStoreOutOfOrder
 		}
 		advanced := false
+		from := s.chunkNo
 		for s.chunkNo < chunkNo {
 			if err := s.completeChunk(); err != nil {
 				return Location{}, err
@@ -736,6 +881,9 @@ func (s *Store) Append(b WriteBlock) (Location, error) {
 		}
 		if advanced {
 			if err := fsyncdir.Sync(s.dir); err != nil {
+				return Location{}, err
+			}
+			if err := s.packCompleted(from, s.chunkNo); err != nil {
 				return Location{}, err
 			}
 		}
@@ -864,12 +1012,7 @@ func (s *Store) Close() error {
 
 // ReadLocation reads the block at loc and returns its inner CBOR and era type.
 func (s *Store) ReadLocation(loc Location) (uint, []byte, error) {
-	f, err := os.Open(s.path(loc.Chunk, ".chunk"))
-	if err != nil {
-		return 0, nil, fmt.Errorf("immutable store: open chunk: %w", err)
-	}
-	defer f.Close()
-	return readWrapped(f, loc)
+	return ReadBlockAt(s.dir, loc)
 }
 
 func readWrapped(f io.ReaderAt, loc Location) (uint, []byte, error) {
@@ -956,14 +1099,14 @@ func (s *Store) GetBlock(slot uint64, hash []byte) (*Block, *Location, error) {
 // lookup finds the secondary entry for a relative slot, or nil when the slot
 // or chunk is empty or absent.
 func (s *Store) lookup(chunkNo, rel uint64) (*secEntry, *Location, error) {
-	pri, err := os.Open(s.path(chunkNo, ".primary"))
+	pri, closePri, err := openChunkFileReader(s.dir, chunkNo, ".primary")
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil, nil
 		}
 		return nil, nil, err
 	}
-	defer pri.Close()
+	defer closePri()
 	var offs [8]byte
 	n, err := pri.ReadAt(offs[:], int64(1+4*rel)) // #nosec G115
 	if n < 8 {
@@ -977,11 +1120,11 @@ func (s *Store) lookup(chunkNo, rel uint64) (*secEntry, *Location, error) {
 	if end <= start {
 		return nil, nil, nil
 	}
-	sec, err := os.Open(s.path(chunkNo, ".secondary"))
+	sec, closeSec, err := openChunkFileReader(s.dir, chunkNo, ".secondary")
 	if err != nil {
 		return nil, nil, err
 	}
-	defer sec.Close()
+	defer closeSec()
 	// This entry and, when present, the next one, whose offset bounds it.
 	var buf [2 * secondaryIndexEntrySize]byte
 	n, err = sec.ReadAt(buf[:], int64(start))
@@ -996,11 +1139,11 @@ func (s *Store) lookup(chunkNo, rel uint64) (*secEntry, *Location, error) {
 	if n >= 2*secondaryIndexEntrySize {
 		endOffset = decodeSecEntry(buf[secondaryIndexEntrySize:]).BlockOffset
 	} else {
-		st, err := os.Stat(s.path(chunkNo, ".chunk"))
+		size, err := chunkFileSize(s.dir, chunkNo)
 		if err != nil {
 			return nil, nil, err
 		}
-		endOffset = uint64(st.Size()) // #nosec G115
+		endOffset = size
 	}
 	if endOffset <= entry.BlockOffset ||
 		endOffset-entry.BlockOffset > uint64(maxBlockSize) {
@@ -1038,6 +1181,9 @@ func (s *Store) TruncateAfter(slot uint64, hash []byte) error {
 		if err := s.removeChunk(nums[i]); err != nil {
 			return err
 		}
+	}
+	if err := s.plainForTruncate(loc.Chunk); err != nil {
+		return err
 	}
 	// Cut the point's chunk right after the point: chunk and secondary first
 	// so the primary, rewritten last, never claims more than they hold.
@@ -1131,12 +1277,10 @@ func (s *Store) TruncateAll() error {
 // ReadBlockAt reads the block at loc from the chunk files in dir without a
 // Store, which is all a reader holding a marker needs.
 func ReadBlockAt(dir string, loc Location) (uint, []byte, error) {
-	f, err := os.Open(
-		filepath.Join(dir, ChunkName(loc.Chunk)+chunkFileExtension),
-	)
+	f, done, err := openChunkReader(dir, loc.Chunk)
 	if err != nil {
 		return 0, nil, fmt.Errorf("immutable store: open chunk: %w", err)
 	}
-	defer f.Close()
+	defer done()
 	return readWrapped(f, loc)
 }

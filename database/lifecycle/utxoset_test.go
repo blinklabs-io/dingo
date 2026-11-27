@@ -59,7 +59,12 @@ func openUtxoSetStore(t *testing.T, dir string) *badgerutxo.Store {
 	t.Helper()
 	store, err := badgerutxo.Open(dir)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
+	closing := store
+	t.Cleanup(func() {
+		target := closing
+		closing = nil
+		_ = target.Close()
+	})
 	return store
 }
 
@@ -97,11 +102,11 @@ func TestTruncateRollsTheUtxoSetBack(t *testing.T) {
 			store := openUtxoSetStore(t, t.TempDir())
 			applyBlocks(t, store, 1, tc.applied)
 			_, err := lifecycle.Truncate(
-				context.Background(), f.db, f.blocks[2], 0, false, 0,
+				context.Background(), f.db, f.blocks[2], 0,
 				lifecycle.WithTruncateUtxoSet(
 					dblifecycle.TruncateUtxoSet{Store: store},
-				),
-			)
+				))
+
 			require.NoError(t, err)
 			requireSetAt(t, store, tc.wantID)
 		})
@@ -123,8 +128,8 @@ func TestTruncateRefusesATargetBelowTheUtxoSetJournalFloor(t *testing.T) {
 	)
 
 	_, err := lifecycle.Truncate(
-		context.Background(), f.db, f.blocks[1], 0, false, 0, set,
-	)
+		context.Background(), f.db, f.blocks[1], 0, set)
+
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 	require.ErrorContains(t, err, "journal floor")
 	for _, b := range f.blocks {
@@ -139,8 +144,8 @@ func TestTruncateRefusesATargetBelowTheUtxoSetJournalFloor(t *testing.T) {
 	requireSetAt(t, store, 5)
 
 	_, err = lifecycle.Truncate(
-		context.Background(), f.db, f.blocks[2], 0, false, 0, set,
-	)
+		context.Background(), f.db, f.blocks[2], 0, set)
+
 	require.NoError(t, err)
 	requireSetAt(t, store, 3)
 }
@@ -318,7 +323,7 @@ func openCheckpointedSet(
 	applyBlocks(t, store, 1, checkpointAt)
 	require.NoError(t, store.Close())
 	set, err := utxoset.Open(utxoset.Config{
-		Dir: dir, Only: true, Authoritative: true, CheckpointDir: ckptDir,
+		Dir: dir, CheckpointDir: ckptDir,
 	})
 	require.NoError(t, err)
 	_, err = set.WriteCheckpoint(t.Context())
@@ -351,8 +356,8 @@ func TestTruncateBelowTheUtxoSetJournalUsesACheckpoint(t *testing.T) {
 	})
 
 	_, err = lifecycle.Truncate(
-		context.Background(), f.db, f.blocks[1], 0, false, 0, opts,
-	)
+		context.Background(), f.db, f.blocks[1], 0, opts)
+
 	require.NoError(t, err)
 	tip, err := f.db.GetTip(nil)
 	require.NoError(t, err)
@@ -378,8 +383,8 @@ func TestTruncateBelowEveryUtxoSetCheckpointNamesTheEarliestSlot(
 	})
 
 	_, err := lifecycle.Truncate(
-		context.Background(), f.db, f.blocks[0], 0, false, 0, opts,
-	)
+		context.Background(), f.db, f.blocks[0], 0, opts)
+
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 	require.ErrorContains(t, err, "journal floor")
 	require.ErrorContains(

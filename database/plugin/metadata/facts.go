@@ -31,7 +31,7 @@ import (
 
 // FactTable describes a table of ledger facts: rows the ledger derives at
 // epoch boundaries and from governance and reward rules, which block replay
-// alone cannot reproduce. A split IndexerDB receives them from the ledger's
+// alone cannot reproduce. An IndexerDB receives them from the ledger's
 // store by natural key, so a store's own row ids never cross between stores.
 type FactTable struct {
 	// Name is the SQL table name.
@@ -117,22 +117,31 @@ type FactRowReader interface {
 	) (rows FactRows, next int64, err error)
 }
 
-// PendingStakeInputsReader is the optional capability of a FactRowReader
-// whose ledger records the snapshots it has not finished writing stake inputs
-// for somewhere other than the metadata store's sync state.
+// PendingStakeInputsReader serves the ledger's record of the snapshots it has
+// not finished writing stake inputs for.
 type PendingStakeInputsReader interface {
 	// RewardStakeInputsPendingState returns the pending record as the ledger
 	// stores it, or the empty string when none exists.
 	RewardStakeInputsPendingState() (string, error)
 }
 
-// RewardPrecomputeCursorReader is the optional capability of a FactRowReader
-// whose ledger keeps the reward precompute cursors somewhere other than the
-// metadata store's sync state.
+// RewardPrecomputeCursorReader serves the ledger's reward precompute
+// cursors.
 type RewardPrecomputeCursorReader interface {
 	// RewardPrecomputeCursors returns each retained cursor record as the
 	// ledger stores it, by snapshot epoch.
 	RewardPrecomputeCursors() (map[uint64]string, error)
+}
+
+// LedgerFacts is the ledger state an IndexerDB writer copies: the fact rows,
+// the records of the rows the ledger has not finished writing, and the state
+// a snapshot import established at its anchor.
+type LedgerFacts interface {
+	FactRowReader
+	PendingStakeInputsReader
+	RewardPrecomputeCursorReader
+	AnchorOpCertSource
+	AnchorStateSource
 }
 
 // ErrFactCursorLost is returned by a fact read whose cursor names an export
@@ -151,7 +160,7 @@ type CommitSyncer interface {
 }
 
 // FactRowStore copies fact rows by natural key. It is an optional capability
-// of a metadata store: the split indexer requires it on both of its stores,
+// of a metadata store: the IndexerDB requires it on both of its stores,
 // which hold the same schema.
 type FactRowStore interface {
 	// ReadFactRows returns rows of table with a slot column in [from,
@@ -225,43 +234,17 @@ type UtxoSetDigest struct {
 // and reference scripts.
 type UtxoOutputResolver func(txHash []byte, outputIdx uint32) ([]byte, error)
 
-// AnchorStateStore is the optional capability a split IndexerDB uses to take
+// AnchorStateStore is the optional capability an IndexerDB uses to take
 // over the ledger state a snapshot import established, and to check its own
 // history against it.
 type AnchorStateStore interface {
-	// ReadImportedAccounts returns accounts whose import baseline was
-	// established at or after anchor, ordered by account id, at most limit
-	// of them after cursor (zero to start). Reward is the balance now. The
-	// returned cursor continues the read and is zero at the end.
-	ReadImportedAccounts(
-		ctx context.Context,
-		anchor uint64,
-		cursor int64,
-		limit int,
-		txn types.Txn,
-	) ([]ImportedAccount, int64, error)
-	// ReadRewardJournalAfter returns the reward journal entries dated after
-	// slot, ordered by id, at most limit after cursor (zero to start).
-	ReadRewardJournalAfter(
-		ctx context.Context,
-		slot uint64,
-		cursor int64,
-		limit int,
-		txn types.Txn,
-	) ([]RewardJournalEntry, int64, error)
 	// WriteImportedAccounts records the import baseline of each account and
 	// sets the balance of an account the store already holds. An account it
 	// does not hold is left absent.
 	WriteImportedAccounts(accounts []ImportedAccount, txn types.Txn) error
-	// LiveUtxoDigest digests the outputs created at or before atSlot and not
-	// spent at or before it, streaming them in pages.
-	LiveUtxoDigest(
-		ctx context.Context,
-		atSlot uint64,
-		txn types.Txn,
-	) (UtxoSetDigest, error)
-	// LiveUtxoDigestWithOutputs is LiveUtxoDigest with each output's stored
-	// CBOR, from resolve, folded into the digest.
+	// LiveUtxoDigestWithOutputs digests the outputs created at or before
+	// atSlot and not spent at or before it, streaming them in pages, with
+	// each output's stored CBOR, from resolve, folded into the digest.
 	LiveUtxoDigestWithOutputs(
 		ctx context.Context,
 		atSlot uint64,
@@ -271,18 +254,10 @@ type AnchorStateStore interface {
 	// AppliedTransactionCount returns the number of applied transaction
 	// rows.
 	AppliedTransactionCount(ctx context.Context, txn types.Txn) (uint64, error)
-	// ReadOpCertCountersAt returns the op-cert sequence recorded at exactly
-	// slot for each pool that has one, ordered by pool.
-	ReadOpCertCountersAt(
-		ctx context.Context,
-		slot uint64,
-		txn types.Txn,
-	) ([]OpCertCounter, error)
 }
 
-// AnchorOpCertSource is the optional capability of a FactRowReader that
-// serves the op-cert counters a snapshot import established, for a ledger
-// that no longer keeps them in its metadata store.
+// AnchorOpCertSource serves the op-cert counters a snapshot import
+// established.
 type AnchorOpCertSource interface {
 	// AnchorOpCertCounters returns the counters recorded at the anchor slot.
 	AnchorOpCertCounters(
@@ -291,7 +266,7 @@ type AnchorOpCertSource interface {
 	) ([]OpCertCounter, error)
 }
 
-// FactTables lists the ledger-fact tables a split IndexerDB receives. Rollback
+// FactTables lists the ledger-fact tables an IndexerDB receives. Rollback
 // of the ones whose block-derived counterpart the rollback sweep already
 // removes is covered there as well; deleting again is harmless.
 var FactTables = []FactTable{
@@ -364,18 +339,6 @@ var FactTables = []FactTable{
 		Name:        "reward_credit_round",
 		SlotColumns: []string{"boundary_slot"},
 		Key:         []string{"snapshot_epoch"},
-	},
-	{
-		Name:        "reward_likelihood_state",
-		SlotColumns: []string{"boundary_slot"},
-		Key:         []string{"epoch"},
-		Paged:       true,
-	},
-	{
-		Name:        "reward_pool_likelihood",
-		SlotColumns: []string{"boundary_slot"},
-		Key:         []string{"epoch", "pool_key_hash"},
-		Paged:       true,
 	},
 	{
 		Name:        "network_state",
@@ -499,7 +462,7 @@ var AccountRewardCreditTable = FactTable{
 	FilterColumn: "withdrawal", FilterValue: false,
 }
 
-// RewardFoldStore is the optional capability a split IndexerDB uses to keep
+// RewardFoldStore is the optional capability an IndexerDB uses to keep
 // its reward outputs consistent with the reward credits it copies. The
 // ledger folds a credited round lazily, journaling each credit under the
 // round's boundary slot only when its credential is next touched, so a
@@ -526,19 +489,18 @@ var ErrAnchorDigestUnavailable = errors.New(
 	"the ledger no longer holds the UTxO set at the anchor",
 )
 
-// AnchorStateSource is the optional capability of a FactRowReader that serves
-// the state a snapshot import established, for a ledger that drained it from
-// its metadata store into a live UTxO set. The accounts and reward journal
-// come from the set's records and the UTxO set at the anchor from its
-// journal; a ledger that kept them in the metadata store serves them from
-// there.
+// AnchorStateSource serves the state a snapshot import established. The
+// accounts and reward journal come from the live UTxO set's records and the
+// UTxO set at the anchor from its journal.
 type AnchorStateSource interface {
 	// AnchorStateReady returns nil when the imported accounts and the reward
 	// journal after the anchor can be served, and the reason they cannot
 	// otherwise.
 	AnchorStateReady(ctx context.Context) error
-	// AnchorImportedAccounts is AnchorStateStore.ReadImportedAccounts with an
-	// opaque cursor: nil to start, nil returned at the end.
+	// AnchorImportedAccounts returns the accounts whose import baseline was
+	// established at or after anchor, at most limit of them after cursor (nil
+	// to start). Reward is the balance now. The returned cursor continues the
+	// read and is nil at the end.
 	AnchorImportedAccounts(
 		ctx context.Context,
 		anchor uint64,
@@ -556,10 +518,6 @@ type AnchorStateSource interface {
 	// CBOR, and wraps ErrAnchorDigestUnavailable when the set cannot rebuild
 	// the anchor.
 	AnchorUtxoDigest(ctx context.Context, anchor uint64) (UtxoSetDigest, error)
-	// AnchorUtxoInMetadata reports whether the ledger's metadata store, not a
-	// live UTxO set, holds the UTxO set a digest is taken of. It fails when
-	// that cannot be told, rather than answer for a set it could not read.
-	AnchorUtxoInMetadata(anchor uint64) (bool, error)
 }
 
 // AnchorStateViewer is an optional capability of an AnchorStateSource whose

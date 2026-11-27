@@ -79,14 +79,6 @@ func utxoPlanScenarios() []utxoPlanScenario {
 			},
 		},
 		{
-			name: "spent prune window",
-			run: func(t *testing.T, store *Store) {
-				_, err := store.GetUtxosDeletedBeforeSlot(spentFrom, 100, nil)
-				require.NoError(t, err)
-			},
-			indexes: []string{"idx_utxo_deleted_staking_amount"},
-		},
-		{
 			name: "spent rows missing an address",
 			run: func(t *testing.T, store *Store) {
 				_, err := store.GetSpentUtxosMissingAddressAfterSlot(

@@ -21,17 +21,108 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// HistoryExpiryCursorSyncKey is the sync_state key holding the slot below
-// which every block has already been expired. The history-expiry pruner
+// HistoryExpiryCursorKey names the block-store chain state holding the slot
+// below which every block has already been expired. The history-expiry pruner
 // resumes its scan there, so a round costs the newly eligible blocks rather
 // than every tombstone left by earlier rounds. A rollback or truncate lowers
 // it to the rollback point, the slot above which replay stores new blocks.
-const HistoryExpiryCursorSyncKey = "history_expiry_cursor"
+const HistoryExpiryCursorKey = "history_expiry_cursor"
+
+// HistoryExpiryHeldKey names the block-store chain state holding the blocks
+// the history-expiry pruner passed over because a payload column in use still
+// names their bytes. The cursor moves past them, so they are kept here and
+// checked again each round until they can expire.
+const HistoryExpiryHeldKey = "history_expiry_held"
+
+// HeldBlock identifies a block that history expiry has not expired because an
+// active payload names its bytes.
+type HeldBlock struct {
+	Hash []byte
+	Slot uint64
+}
+
+// HistoryExpiryHeld returns the blocks the pruner is holding, in the order
+// stored. An unreadable entry is an error: dropping it would leave the block
+// unexpired forever.
+func (d *Database) HistoryExpiryHeld() ([]HeldBlock, error) {
+	raw, err := d.GetChainState(HistoryExpiryHeldKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("read history expiry held blocks: %w", err)
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	entries := strings.Split(raw, ";")
+	held := make([]HeldBlock, 0, len(entries))
+	for _, entry := range entries {
+		slotText, hashText, ok := strings.Cut(entry, ":")
+		if !ok {
+			return nil, fmt.Errorf("malformed held block entry %q", entry)
+		}
+		slot, err := strconv.ParseUint(slotText, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("malformed held block slot %q: %w", entry, err)
+		}
+		hash, err := hex.DecodeString(hashText)
+		if err != nil {
+			return nil, fmt.Errorf("malformed held block hash %q: %w", entry, err)
+		}
+		held = append(held, HeldBlock{Slot: slot, Hash: hash})
+	}
+	return held, nil
+}
+
+// SetHistoryExpiryHeld replaces the held blocks.
+func (d *Database) SetHistoryExpiryHeld(held []HeldBlock) error {
+	return d.writeHistoryExpiryHeld(held, nil)
+}
+
+func (d *Database) writeHistoryExpiryHeld(
+	held []HeldBlock,
+	txn *Txn,
+) error {
+	entries := make([]string, 0, len(held))
+	for _, block := range held {
+		entries = append(entries, fmt.Sprintf(
+			"%d:%s", block.Slot, hex.EncodeToString(block.Hash),
+		))
+	}
+	if err := d.SetChainState(
+		HistoryExpiryHeldKey, strings.Join(entries, ";"), txn,
+	); err != nil {
+		return fmt.Errorf("write history expiry held blocks: %w", err)
+	}
+	return nil
+}
+
+// lowerHistoryExpiryHeld drops the held blocks above slot, which a rollback
+// abandons: they would otherwise be checked and expired by a hash the chain no
+// longer stores. The transaction handling is that of lowerHistoryExpiryCursor.
+func (d *Database) lowerHistoryExpiryHeld(slot uint64, txn *Txn) error {
+	if txn != nil && txn.Blob() == nil {
+		txn = nil
+	}
+	held, err := d.HistoryExpiryHeld()
+	if err != nil {
+		return err
+	}
+	kept := held[:0:0]
+	for _, block := range held {
+		if block.Slot <= slot {
+			kept = append(kept, block)
+		}
+	}
+	if len(kept) == len(held) {
+		return nil
+	}
+	return d.writeHistoryExpiryHeld(kept, txn)
+}
 
 // oldestRetainedScanLimit bounds how many consecutive expired blocks
 // RefreshOldestRetainedSlot walks past the history-expiry cursor before giving
@@ -52,7 +143,7 @@ func (d *Database) oldestRetainedSlot(
 	ctx context.Context,
 	limit int,
 ) (slot uint64, ok bool, err error) {
-	raw, err := d.GetSyncState(HistoryExpiryCursorSyncKey, nil)
+	raw, err := d.GetChainState(HistoryExpiryCursorKey, nil)
 	if err != nil {
 		return 0, false, fmt.Errorf("read history expiry cursor: %w", err)
 	}
@@ -89,8 +180,20 @@ func (d *Database) oldestRetainedSlot(
 // at or below slot, or an absent one, is left unchanged: blocks at or below
 // the rollback point survive it, so a routine rollback does not send the
 // pruner back over every expired block.
+//
+// The write shares txn when it carries a blob handle and commits on its own
+// otherwise. Committing ahead of the rollback is safe: the cursor is a lower
+// bound, so a lowered cursor whose rollback never commits only sends the
+// pruner back over blocks it has already expired.
+//
+// The read never shares txn. The pruner saves the cursor from a transaction
+// of its own while a rollback is open, and a blob store that detects
+// conflicts would fail the rollback's commit over a key it had read.
 func (d *Database) lowerHistoryExpiryCursor(slot uint64, txn *Txn) error {
-	raw, err := d.GetSyncState(HistoryExpiryCursorSyncKey, txn)
+	if txn != nil && txn.Blob() == nil {
+		txn = nil
+	}
+	raw, err := d.GetChainState(HistoryExpiryCursorKey, nil)
 	if err != nil {
 		return fmt.Errorf("read history expiry cursor: %w", err)
 	}
@@ -101,8 +204,8 @@ func (d *Database) lowerHistoryExpiryCursor(slot uint64, txn *Txn) error {
 		cursor <= slot {
 		return nil
 	}
-	if err := d.SetSyncState(
-		HistoryExpiryCursorSyncKey,
+	if err := d.SetChainState(
+		HistoryExpiryCursorKey,
 		strconv.FormatUint(slot, 10),
 		txn,
 	); err != nil {
@@ -144,63 +247,18 @@ func (d *Database) PruneBlock(
 	slot uint64,
 	hash []byte,
 ) (int, error) {
-	// Read UTxO refs for this slot from metadata. This is a separate
-	// transaction so the blob write txn below has a single, simple commit
-	// scope. A UTxO consumed between this read and the blob write is
-	// handled below: GetUtxo will return ErrBlobKeyNotFound and the entry
-	// is skipped. Release the read txn as soon as the refs are
-	// materialized so the connection is freed before the blob write txn
-	// and block operations run.
-	mdTxn := d.MetadataTxn(ctx, false)
-	var (
-		utxoRefs []models.UtxoId
-		err      error
-	)
-	if d.config.StorageMode == types.StorageModeAPI {
-		utxoRefs, err = d.utxoStore().GetUtxosBySlot(slot, mdTxn.Metadata())
-	} else {
-		utxoRefs, err = d.utxoStore().GetLiveUtxosBySlot(slot, mdTxn.Metadata())
-	}
-	mdTxn.Release()
+	utxoRefs, err := d.offsetUtxoRefsAtSlot(ctx, slot)
 	if err != nil {
-		return 0, fmt.Errorf(
-			"prune block (slot=%d): list utxos: %w",
-			slot,
-			err,
-		)
-	}
-
-	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
 	var materialized int
 	blobTxn := d.BlockBlobTxn()
 	if err := blobTxn.Do(func(txn *Txn) error {
-		if err := ctx.Err(); err != nil {
+		n, err := d.materializeUtxosTxn(ctx, txn, slot, hash, utxoRefs)
+		if err != nil {
 			return err
 		}
-		blobStore := txn.BlobStore()
-		if blobStore == nil {
-			return types.ErrBlobStoreUnavailable
-		}
-		blockCbor, _, err := blobStore.GetBlock(txn.Blob(), slot, hash)
-		if err != nil {
-			return fmt.Errorf(
-				"prune block (slot=%d): get block: %w",
-				slot,
-				err,
-			)
-		}
-		for _, ref := range utxoRefs {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			n, err := d.materializeUtxo(txn, slot, hash, blockCbor, ref)
-			if err != nil {
-				return err
-			}
-			materialized += n
-		}
+		materialized = n
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -215,6 +273,98 @@ func (d *Database) PruneBlock(
 		return nil
 	}); err != nil {
 		return 0, err
+	}
+	return materialized, nil
+}
+
+// offsetUtxoRefsAtSlot lists the UTxOs added at slot whose blob entries may
+// be offsets into that slot's block. The read is a transaction of its own,
+// released before the blob write that rewrites them; a UTxO consumed in
+// between has no blob entry left and is skipped there.
+func (d *Database) offsetUtxoRefsAtSlot(
+	ctx context.Context,
+	slot uint64,
+) ([]models.UtxoId, error) {
+	// With the live UTxO set holding the outputs, no UTxO entry is an offset
+	// into a block.
+	if d.metadata == nil || d.liveUtxo {
+		return nil, ctx.Err()
+	}
+	var (
+		utxoRefs []models.UtxoId
+		err      error
+	)
+	mdTxn := d.MetadataTxn(ctx, false)
+	if d.config.StorageMode == types.StorageModeAPI {
+		utxoRefs, err = d.utxoStore().GetUtxosBySlot(slot, mdTxn.Metadata())
+	} else {
+		utxoRefs, err = d.utxoStore().GetLiveUtxosBySlot(
+			slot, mdTxn.Metadata(),
+		)
+	}
+	mdTxn.Release()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"prune block (slot=%d): list utxos: %w",
+			slot,
+			err,
+		)
+	}
+	return utxoRefs, ctx.Err()
+}
+
+// materializeUtxosTxn rewrites refs' offset entries into the block at (slot,
+// hash) as raw CBOR within txn.
+func (d *Database) materializeUtxosTxn(
+	ctx context.Context,
+	txn *Txn,
+	slot uint64,
+	hash []byte,
+	refs []models.UtxoId,
+) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	blobStore := txn.BlobStore()
+	if blobStore == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
+	blockCbor, _, err := blobStore.GetBlock(txn.Blob(), slot, hash)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"prune block (slot=%d): get block: %w",
+			slot,
+			err,
+		)
+	}
+	return d.materializeUtxosTxnBlock(ctx, txn, slot, hash, blockCbor, refs)
+}
+
+func (d *Database) materializeUtxosTxnBlock(
+	ctx context.Context,
+	txn *Txn,
+	slot uint64,
+	hash []byte,
+	blockCbor []byte,
+	refs []models.UtxoId,
+) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	blobStore := txn.BlobStore()
+	if blobStore == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
+	materialized := 0
+	for _, ref := range refs {
+		if err := ctx.Err(); err != nil {
+			return materialized, err
+		}
+		n, err := d.materializeUtxo(txn, slot, hash, blockCbor, ref)
+		if err != nil {
+			return materialized, err
+		}
+		materialized += n
 	}
 	return materialized, nil
 }

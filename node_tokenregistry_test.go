@@ -72,8 +72,11 @@ func TestNewTokenRegistrySyncSendsConfiguredHeaders(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+	idx, err := dbtest.NewIndexerDatabase(t, db, dbtest.IndexerOptions{})
+	require.NoError(t, err)
 	n := &Node{
-		db: db,
+		db:        db,
+		indexerDB: idx,
 		config: Config{
 			tokenRegistry: TokenRegistryConfig{
 				HTTPClient:            server.Client(),

@@ -18,8 +18,6 @@ internal/test/archive-demo/tmp/
 .devnet/
 .validation/
 .tools/
-koios-parity
-leios-db-bench
 node-parity
 *.prof
 *.test

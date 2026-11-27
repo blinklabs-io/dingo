@@ -46,7 +46,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -146,7 +145,7 @@ func TestDRepVotingPowerFromLiveStakeMatchesDefinition(t *testing.T) {
 				}
 				require.NoError(
 					t,
-					db.CreateAccount(context.Background(), nil, account),
+					db.Metadata().CreateAccount(nil, account),
 				)
 				for u := range 3 {
 					txID := make([]byte, 32)
@@ -383,7 +382,7 @@ func seedRewardBatchAccounts(t *testing.T, db *database.Database, n int) {
 	for i := range n {
 		require.NoError(
 			t,
-			db.CreateAccount(context.Background(), nil, &models.Account{
+			db.Metadata().CreateAccount(nil, &models.Account{
 				StakingKey: rewardBatchKey(0x31, i),
 				Pool:       rewardBatchKey(0x41, i%7),
 				Reward:     types.Uint64(1_000 + i),
@@ -542,7 +541,7 @@ func TestSaveRewardStakeInputsBatchUpsertsLikeRowByRow(t *testing.T) {
 			} {
 				inputs := build(base)
 				require.NoError(
-					t, db.Metadata().SaveRewardStakeInputs(inputs, nil),
+					t, dbadapter.New(db).SaveRewardStakeInputs(inputs, nil),
 				)
 				want := make(map[string]*models.RewardStakeInput)
 				for index, input := range inputs {
@@ -605,7 +604,7 @@ func TestPendingRewardCreditStoreAcrossBackends(t *testing.T) {
 			for i := range n {
 				require.NoError(
 					t,
-					db.CreateAccount(context.Background(), nil, &models.Account{
+					db.Metadata().CreateAccount(nil, &models.Account{
 						StakingKey: rewardBatchKey(0xf1, i),
 						Pool:       pool,
 						Drep:       drep,
@@ -759,7 +758,7 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 		backend rewardRaceBackend,
 		perPool bool,
 	) string {
-		db, raw, _ := backend.open(t)
+		db, _, _ := backend.open(t)
 		ls := &LedgerState{
 			db:         db,
 			currentEra: eras.ShelleyEraDesc,
@@ -770,6 +769,7 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 				),
 			},
 		}
+		attachTestLiveSet(t, ls)
 		seedMultiPoolRewardInputs(t, db, pools, delegators, 7)
 		if perPool {
 			ls.rewardPrecomputeChunkPoolsOverride = 2
@@ -780,59 +780,20 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 		} else {
 			txn := db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				return ls.precomputeStakeRewards(txn, 4, 200, 1_200)
+				return ls.precomputeStakeRewardsForTest(txn, 4, 200, 1_200)
 			}))
 		}
 		for _, index := range deregistered {
-			ref := models.NewStakeCredentialRef(
-				0, chunkedFixtureCredential(0x60, index),
+			fxDeregisterStake(
+				t, db, chunkedFixtureCredential(0x60, index), 300+index,
 			)
-			require.NoError(t, db.Metadata().DeactivateAccounts(
-				nil, []models.StakeCredentialRef{ref}, 300+uint64(index),
-			))
-			_, err := raw.Exec(backendRebind(backend.name, `
-INSERT INTO deregistration (added_slot, staking_key, credential_tag, amount)
-VALUES (?, ?, 0, '2000000')`), 300+index, ref.Key)
-			require.NoError(t, err)
 		}
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.applyStakeRewards(context.Background(), txn, 4, 1_200, false)
+			return ls.engine().ApplyStakeRewards(context.Background(), txn, 4, 1_200, false)
 		}))
 		settleRewardCredits(t, ls)
-		var sb strings.Builder
-		for _, query := range []string{
-			`SELECT slot, treasury, reserves FROM network_state ORDER BY slot`,
-			`SELECT epoch, treasury, reserves, fees, rewards FROM reward_ada_pots
-ORDER BY epoch`,
-			`SELECT pool_key_hash, total_reward, leader_reward, member_reward_total,
-    undistributed, unspendable FROM reward_pool_output ORDER BY pool_key_hash`,
-			`SELECT credential_tag, staking_key, pool_key_hash, reward_type, amount,
-    spendable, guarded FROM reward_account_output
-ORDER BY credential_tag, staking_key, pool_key_hash, reward_type`,
-		} {
-			rows, err := raw.Query(query)
-			require.NoError(t, err)
-			cols, err := rows.Columns()
-			require.NoError(t, err)
-			for rows.Next() {
-				values := make([]any, len(cols))
-				ptrs := make([]any, len(cols))
-				for i := range values {
-					ptrs[i] = &values[i]
-				}
-				require.NoError(t, rows.Scan(ptrs...))
-				for _, v := range values {
-					if b, ok := v.([]byte); ok {
-						v = fmt.Sprintf("%x", b)
-					}
-					fmt.Fprintf(&sb, "%v|", v)
-				}
-				sb.WriteString("\n")
-			}
-			require.NoError(t, rows.Close())
-		}
-		return sb.String() + dumpRewardBatchTables(t, raw)
+		return ledgerDBDigest(t, ls)
 	}
 	for _, backend := range rewardBatchBackends() {
 		t.Run(backend.name, func(t *testing.T) {
@@ -972,8 +933,8 @@ func TestRewardPrecomputeWriteCannotOutliveConcurrentRollback(
 	for _, backend := range backends {
 		t.Run(backend.name, func(t *testing.T) {
 			t.Parallel()
-			db, raw, placeholder := backend.open(t)
-			testRewardPrecomputeWriteRacesRollback(t, db, raw, placeholder)
+			db, _, _ := backend.open(t)
+			testRewardPrecomputeWriteRacesRollback(t, db)
 		})
 	}
 }
@@ -981,21 +942,20 @@ func TestRewardPrecomputeWriteCannotOutliveConcurrentRollback(
 func testRewardPrecomputeWriteRacesRollback(
 	t *testing.T,
 	db *database.Database,
-	raw *sql.DB,
-	dialect string,
 ) {
+	set := OpenLiveSetForTest(t, db)
 	seedRewardPrecomputeTimingInputs(t, db, 6)
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	nonce := testHashBytes("reward-epoch")
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		200, 3, nonce, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, 1_000, nil,
 	))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           NewMemLiveSetForTest(),
+		UtxoSet:           set,
 		ChainManager:      cm,
 		CardanoNodeConfig: newRewardCalculationTestNodeConfig(t),
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1003,23 +963,17 @@ func testRewardPrecomputeWriteRacesRollback(
 	require.NoError(t, err)
 	ls.metrics.init(prometheus.NewRegistry())
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
-	epoch, err := db.Metadata().GetEpoch(3, nil)
+	epoch, err := seedDB(t, db).GetEpoch(3, nil)
 	require.NoError(t, err)
 	ls.currentEpoch = *epoch
 	ls.currentEra = eras.ShelleyEraDesc
-	cutoff, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 3)
+	cutoff, err := ls.engine().RewardPrefilterSlot(ls.ledgerDB(), nil, 3)
 	require.NoError(t, err)
 	member := rewardCalcHash(0x6a)
 	// The abandoned chain deregisters member after the rollback point and
 	// before the RUPD slot, so its precompute excludes member.
-	seedRewardRaceStakeCert(
-		t, raw, dialect, 21, member, 150,
-		uint(lcommon.CertificateTypeStakeRegistration),
-	)
-	seedRewardRaceStakeCert(
-		t, raw, dialect, 22, member, cutoff-5,
-		uint(lcommon.CertificateTypeStakeDeregistration),
-	)
+	fxStakeCert(t, db, 21, 0, member, 150, true)
+	fxStakeCert(t, db, 22, 0, member, cutoff-5, false)
 	ancestor := chain.RawBlock{
 		Slot: cutoff - 10, Hash: testHashBytes("race-ancestor"),
 		BlockNumber: 1, Type: 1, Cbor: []byte{0x80},
@@ -1034,7 +988,7 @@ func testRewardPrecomputeWriteRacesRollback(
 		[]chain.RawBlock{ancestor, abandoned},
 	))
 	for _, block := range []chain.RawBlock{ancestor, abandoned} {
-		require.NoError(t, db.SetBlockNonce(
+		require.NoError(t, seedBlockNonce(t, db,
 			block.Hash, block.Slot, nonce, true, nil,
 		))
 	}
@@ -1043,6 +997,7 @@ func testRewardPrecomputeWriteRacesRollback(
 		BlockNumber: abandoned.BlockNumber,
 	}
 	require.NoError(t, db.SetTip(ls.currentTip, nil))
+	fxJournalChain(t, ls)
 
 	rollbackDone := make(chan error, 1)
 	var hookCalls atomic.Int32
@@ -1078,7 +1033,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	))
 	ls.rewardPrecomputeWG.Wait()
 
-	outputs, err := db.Metadata().GetRewardAccountOutputs(1, nil)
+	outputs, err := seedDB(t, db).GetRewardAccountOutputs(1, nil)
 	require.NoError(t, err)
 	assert.Empty(t, outputs,
 		"an output from the abandoned chain survived the rollback")
@@ -1095,13 +1050,13 @@ func testRewardPrecomputeWriteRacesRollback(
 	var wantMember uint64
 	readTxn := db.Transaction(context.Background(), false)
 	require.NoError(t, readTxn.Do(func(txn *database.Txn) error {
-		want, ok, err := ls.calculateStakeRewardApplication(
+		want, ok, err := ls.engine().CalculateStakeRewardApplication(
 			context.Background(),
 			txn, 4, replacement.Slot, 1_200, false,
 		)
 		require.NoError(t, err)
 		require.True(t, ok)
-		for _, output := range want.accountOutputs {
+		for _, output := range want.AccountOutputs {
 			if string(output.StakingKey) == string(member) {
 				wantMember += uint64(output.Amount)
 			}
@@ -1112,10 +1067,10 @@ func testRewardPrecomputeWriteRacesRollback(
 		"control: the surviving chain pays member")
 	writeTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 4, 1_200, false)
+		return ls.engine().ApplyStakeRewards(context.Background(), txn, 4, 1_200, false)
 	}))
 	settleRewardCredits(t, ls)
-	account, err := db.GetAccountByCredential(
+	account, err := seedDB(t, db).GetAccountByCredential(
 		context.Background(),
 		0,
 		member,
@@ -1128,61 +1083,15 @@ func testRewardPrecomputeWriteRacesRollback(
 		"the boundary must credit member from the surviving chain")
 }
 
-func seedRewardRaceStakeCert(
-	t *testing.T,
-	raw *sql.DB,
-	dialect string,
-	id uint,
-	stakingKey []byte,
-	slot uint64,
-	certType uint,
-) {
-	t.Helper()
-	table := `"transaction"`
-	bind := func(n int) string { return fmt.Sprintf("$%d", n) }
-	if dialect == "mysql" {
-		table = "`transaction`"
-		bind = func(int) string { return "?" }
-	} else if dialect == "sqlite" {
-		bind = func(int) string { return "?" }
-	}
-	hash := make([]byte, 32)
-	binary.BigEndian.PutUint64(hash[24:], uint64(id))
-	_, err := raw.Exec(fmt.Sprintf(
-		"INSERT INTO %s (id, hash) VALUES (%s, %s)",
-		table, bind(1), bind(2),
-	), id, hash)
-	require.NoError(t, err)
-	_, err = raw.Exec(fmt.Sprintf(
-		"INSERT INTO applied_transaction (tx_id, slot, block_index) "+
-			"VALUES (%s, %s, 0)",
-		bind(1), bind(2),
-	), id, slot)
-	require.NoError(t, err)
-	_, err = raw.Exec(fmt.Sprintf(
-		"INSERT INTO certs (id, transaction_id, cert_index, slot, cert_type) "+
-			"VALUES (%s, %s, 0, %s, %s)",
-		bind(1), bind(2), bind(3), bind(4),
-	), id, id, slot, certType)
-	require.NoError(t, err)
-	certTable := "stake_registration"
-	if certType == uint(lcommon.CertificateTypeStakeDeregistration) {
-		certTable = "stake_deregistration"
-	}
-	_, err = raw.Exec(fmt.Sprintf(
-		"INSERT INTO %s "+
-			"(id, staking_key, credential_tag, certificate_id, added_slot) "+
-			"VALUES (%s, %s, 0, %s, %s)",
-		certTable, bind(1), bind(2), bind(3), bind(4),
-	), id, stakingKey, id, slot)
-	require.NoError(t, err)
-}
-
 func openSQLiteRewardRaceBackend(
 	t *testing.T,
 ) (*database.Database, *sql.DB, string) {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	// The writers under test are the SQL metadata store's, which only a
+	// v0.94.2 database keeps for the ledger state.
+	db, err := dbtest.NewReleasedDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
@@ -1271,6 +1180,7 @@ func openPostgresRewardRaceBackend(
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{
 			DataDir: filepath.Join(t.TempDir(), "blob"),
+			Role:    database.RoleReleased,
 		},
 		Metadata: dbtest.StorageProvider{
 			Name:     "postgres",
@@ -1325,6 +1235,7 @@ func openMySQLRewardRaceBackend(
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{
 			DataDir: filepath.Join(t.TempDir(), "blob"),
+			Role:    database.RoleReleased,
 		},
 		Metadata: dbtest.StorageProvider{
 			Name:     "mysql",

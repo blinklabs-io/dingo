@@ -54,7 +54,7 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Gate off: no-op, no database access.
-	require.NoError(t, checkMithrilInactivityCompat(
+	require.NoError(t, checkMithrilInactivityCompat(t.Context(),
 		&config.Config{DelegatorInactivityEnabled: false},
 		logger,
 	))
@@ -67,7 +67,7 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 	}
 
 	// Gate on, fresh (non-bootstrapped) database: allowed.
-	require.NoError(t, checkMithrilInactivityCompat(cfg, logger))
+	require.NoError(t, checkMithrilInactivityCompat(t.Context(), cfg, logger))
 
 	// Mark the database as Mithril-bootstrapped, then confirm serving is
 	// refused. The key mirrors mithril's durable immutable-import marker
@@ -77,10 +77,10 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 		Logger:  logger,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetSyncState("mithril_immutable_max", "26887", nil))
+	require.NoError(t, db.SetChainState("mithril_immutable_max", "26887", nil))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
-	err = checkMithrilInactivityCompat(cfg, logger)
+	err = checkMithrilInactivityCompat(t.Context(), cfg, logger)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cannot use Mithril bootstrap")
 }
@@ -109,10 +109,10 @@ func TestCheckMithrilInactivityCompatLegacyMarker(t *testing.T) {
 		Logger:  logger,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetSyncState("mithril_ledger_slot", "12345678", nil))
+	require.NoError(t, db.SetChainState("mithril_ledger_slot", "12345678", nil))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
-	err = checkMithrilInactivityCompat(cfg, logger)
+	err = checkMithrilInactivityCompat(t.Context(), cfg, logger)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cannot use Mithril bootstrap")
 }
@@ -154,20 +154,20 @@ func TestServeAllowsInactivityGateAfterStream(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.SetSyncState("mithril_immutable_stream_only", "1", nil),
+		db.SetChainState("mithril_immutable_stream_only", "1", nil),
 	)
-	require.NoError(t, db.SetSyncState("mithril_immutable_max", "26887", nil))
+	require.NoError(t, db.SetChainState("mithril_immutable_max", "26887", nil))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
-	require.NoError(t, checkMithrilInactivityCompat(cfg, logger))
+	require.NoError(t, checkMithrilInactivityCompat(t.Context(), cfg, logger))
 }
 
 // Not t.Parallel: swaps the package-level runMithrilSyncForCommand seam.
 //
-// TestMithrilSyncRunsOnTheSplitLayout pins that `mithril sync` reaches the
+// TestMithrilSyncFillsTheIndexerDB pins that `mithril sync` reaches the
 // bootstrap for an API node instead of refusing, and that the bootstrap
 // records the layout gate.
-func TestMithrilSyncRunsOnTheSplitLayout(t *testing.T) {
+func TestMithrilSyncFillsTheIndexerDB(t *testing.T) {
 	origRun := runMithrilSyncForCommand
 	t.Cleanup(func() { runMithrilSyncForCommand = origRun })
 	ran := false
@@ -183,8 +183,11 @@ func TestMithrilSyncRunsOnTheSplitLayout(t *testing.T) {
 	cmd.SetContext(config.WithContext(context.Background(), cfg))
 
 	require.NoError(t, mithrilSyncRunE(cmd, nil))
-	require.True(t, ran, "the split layout must not stop mithril sync")
+	require.True(t, ran, "the IndexerDB layout must not stop mithril sync")
 
 	require.Equal(t, "split", mithrilSyncIndexerLayout(cfg))
-	require.Empty(t, mithrilSyncIndexerLayout(&config.Config{StorageMode: "core"}))
+	require.Empty(
+		t,
+		mithrilSyncIndexerLayout(&config.Config{StorageMode: "core"}),
+	)
 }

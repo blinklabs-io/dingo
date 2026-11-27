@@ -10,7 +10,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	"github.com/blinklabs-io/gouroboros"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -86,6 +86,7 @@ func TestPeerChainSelectionEpochNonceAncestorAfterCutoffWithoutStoredNonce(t *te
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	OpenLiveSetForTest(t, db)
 
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -138,14 +139,6 @@ func TestPeerChainSelectionEpochNonceAncestorAfterCutoffWithoutStoredNonce(t *te
 			CardanoNodeConfig: cfg,
 		},
 	}
-	ls.slotsPerKESPeriod.Store(ancestorBlock.slotsPerKesPeriod)
-	ls.publishSnapshotsLocked()
-
-	// Verify ancestor has no nonce in DB
-	storedNonce, err := ls.db.GetBlockNonce(ancestorPoint, nil)
-	require.NoError(t, err)
-	require.Empty(t, storedNonce, "ancestor should have no nonce in DB")
-
 	// Set up peer header lookup to return the fork header when asked for ancestor's child
 	peerLookup := func(peerHeader *testBlockResult) PeerHeaderLookupFunc {
 		point := ocommon.NewPoint(
@@ -175,6 +168,15 @@ func TestPeerChainSelectionEpochNonceAncestorAfterCutoffWithoutStoredNonce(t *te
 	seedBlockPoolRegistration(t, db, forkHeader.block)
 	forkPool := forkHeader.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshot(t, db, 4, forkPool[:], 1_000_000_000)
+
+	attachTestLiveSet(t, ls)
+	ls.slotsPerKESPeriod.Store(ancestorBlock.slotsPerKesPeriod)
+	ls.publishSnapshotsLocked()
+
+	// Verify ancestor has no nonce in DB
+	storedNonce, err := ls.ledgerDB().GetBlockNonce(ancestorPoint, nil)
+	require.NoError(t, err)
+	require.Empty(t, storedNonce, "ancestor should have no nonce in DB")
 
 	nonce, _, _, err := ls.peerChainSelectionEpochNonce(t.Context(),
 		ouroboros.ConnectionId{},

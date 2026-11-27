@@ -32,18 +32,18 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
@@ -82,7 +82,7 @@ func (s *govDiffScenario) proposalByMarker(
 	marker byte,
 ) *models.GovernanceProposal {
 	t.Helper()
-	p, err := s.db.GetGovernanceProposal(
+	p, err := seedDB(t, s.db).GetGovernanceProposal(
 		context.Background(),
 		repeatByte(32, marker),
 		0,
@@ -113,7 +113,7 @@ func TestNextBoundaryWritesUndeliveredRatification(t *testing.T) {
 
 	release()
 	require.NoError(t, s.ls.WaitEpochBoundaryJob(t.Context()))
-	rec, err := loadPendingRatification(s.db, nil)
+	rec, err := loadPendingRatification(s.ls.ledgerDB(), nil)
 	require.NoError(t, err)
 	require.Nil(t, rec)
 	require.Equal(t, uint64(743), *s.proposalByMarker(t, 0x71).EnactedEpoch)
@@ -196,27 +196,46 @@ func TestRollbackDiscardsRatificationOfRemovedBoundary(t *testing.T) {
 			t.Parallel()
 			s := newGovDiffScenario(t)
 			held, release := holdRatificationApply(t, s)
+			// The tips the rollback returns to, on either side of the
+			// boundary the record is journaled at.
+			fxTip(t, s.ls, fxPoint(74_199))
 			s.run(t, 1, func(*LedgerState) {})
 			requireHeld(t, held, 742)
+			fxTip(t, s.ls, fxPoint(74_200))
+			rec, err := loadPendingRatification(s.ls.ledgerDB(), nil)
+			require.NoError(t, err)
+			require.NotNil(t, rec, "the boundary left no pending record")
 
+			// The record goes with the set's rollback, so the rollback
+			// transaction rolls the set back as a chain rollback does.
 			txn := s.db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				return s.ls.discardPendingRatificationAfterSlot(
-					txn, tc.rollbackTo,
-				)
+				s.ls.stageUtxoSetRollback(txn, fxPoint(tc.rollbackTo))
+				s.ls.discardPendingRatificationAfterSlot(txn, tc.rollbackTo)
+				return nil
 			}))
-			release()
+			require.False(t, s.ls.utxoSetFailed.Load())
+			// Read before the job is released: its own write deletes the
+			// record too.
+			after, err := loadPendingRatification(s.ls.ledgerDB(), nil)
+			require.NoError(t, err)
 			if tc.keeps {
+				require.Equal(t, rec, after,
+					"a rollback that keeps the boundary dropped its record")
+				release()
 				require.NoError(
 					t, s.ls.WaitEpochBoundaryJob(t.Context()),
 				)
 				require.NotNil(t, s.proposalByMarker(t, 0x71).RatifiedEpoch)
 				return
 			}
+			require.Nil(t, after,
+				"a rollback below the boundary kept its record")
+			release()
 			require.NoError(t, s.ls.WaitEpochBoundaryJob(t.Context()))
 			// The job's own write runs after release; let it finish.
 			s.ls.ratificationWG.Wait()
-			rec, err := loadPendingRatification(s.db, nil)
+			rec, err = loadPendingRatification(s.ls.ledgerDB(), nil)
 			require.NoError(t, err)
 			require.Nil(t, rec)
 			require.Nil(t, s.proposalByMarker(t, 0x71).RatifiedEpoch,
@@ -267,16 +286,21 @@ func TestResumePendingRatificationRewindsOrFails(t *testing.T) {
 			db := newTestDB(t)
 			const boundary = 1_000
 			seedResumeBlocks(t, db, boundary-1, tc.blocks)
+			// The record names a boundary the store's tip is past.
+			require.NoError(t, db.SetTip(ochainsync.Tip{
+				Point: ocommon.NewPoint(boundary+1, repeatByte(32, 0x0b)),
+			}, nil))
 			raw, err := json.Marshal(pendingRatificationRecord{
 				Epoch: 10, BoundarySlot: boundary, ID: 1,
 			})
 			require.NoError(t, err)
-			require.NoError(t, db.SetSyncState(
+			require.NoError(t, seedDB(t, db).SetSyncState(
 				pendingRatificationSyncKey, string(raw), nil,
 			))
 			ls := &LedgerState{db: db, config: LedgerStateConfig{
 				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			}}
+			fxAttachLedgerDB(t, ls)
 			err = ls.resumePendingRatificationIntent(context.Background())
 			if tc.fails {
 				require.ErrorIs(t, err, errRollbackIntentTooLarge)
@@ -317,7 +341,7 @@ func TestLedgerRollbackDiscardsPendingRatification(t *testing.T) {
 			}
 			raw, err := json.Marshal(rec)
 			require.NoError(t, err)
-			require.NoError(t, ls.db.SetSyncState(
+			require.NoError(t, seedDB(t, ls.db).SetSyncState(
 				pendingRatificationSyncKey, string(raw), nil,
 			))
 			job := &ratificationJob{
@@ -334,7 +358,7 @@ func TestLedgerRollbackDiscardsPendingRatification(t *testing.T) {
 				ls.rollback(context.Background(), fixture.ancestorTip.Point),
 			)
 
-			stored, err := loadPendingRatification(ls.db, nil)
+			stored, err := loadPendingRatification(ls.ledgerDB(), nil)
 			require.NoError(t, err)
 			if tc.keeps {
 				require.Equal(t, &rec, stored)
@@ -369,7 +393,7 @@ func TestLedgerStateQueryWaitsForBoundaryJob(t *testing.T) {
 	require.Never(t, func() bool { return len(answered) > 0 },
 		300*time.Millisecond, 10*time.Millisecond,
 		"a ledger-state query answered before the boundary job wrote")
-	rows, err := s.db.GetPoolStakeSnapshotsByEpoch(742, "mark", nil)
+	rows, err := seedDB(t, s.db).GetPoolStakeSnapshotsByEpoch(742, "mark", nil)
 	require.NoError(t, err)
 	require.Empty(t, rows, "the boundary wrote the mark snapshot itself")
 
@@ -379,7 +403,7 @@ func TestLedgerStateQueryWaitsForBoundaryJob(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("query still waiting after the boundary job wrote")
 	}
-	rows, err = s.db.GetPoolStakeSnapshotsByEpoch(742, "mark", nil)
+	rows, err = seedDB(t, s.db).GetPoolStakeSnapshotsByEpoch(742, "mark", nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, rows)
 }
@@ -451,6 +475,10 @@ func newGovDiffScenario(t *testing.T) *govDiffScenario {
 // (delaying actions enact one per boundary) and orphan competing roots.
 type govDiffScenarioOptions struct {
 	noProposals bool
+	// beforeMigration writes to the metadata store what a v0.94.2 node left
+	// in it, before the LedgerDB set opens and takes it over as an upgraded
+	// node's first start does.
+	beforeMigration func(*database.Database)
 }
 
 func newGovDiffScenarioWithOptions(
@@ -458,21 +486,36 @@ func newGovDiffScenarioWithOptions(
 	opts govDiffScenarioOptions,
 ) *govDiffScenario {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	dbCfg := &database.Config{DataDir: t.TempDir()}
+	if opts.beforeMigration != nil {
+		// Only the v0.94.2 migration source keeps SQL ledger state.
+		dbCfg.Role = database.RoleReleased
+	}
+	db, err := dbtest.NewDatabase(t, dbCfg)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	closing := db
+	t.Cleanup(func() {
+		target := closing
+		closing = nil
+		require.NoError(t, dbtest.CloseDatabase(target))
+	})
+	if opts.beforeMigration != nil {
+		opts.beforeMigration(db)
+	}
+	// Everything below is seeded into the database's LedgerDB set.
+	OpenLiveSetForTest(t, db)
 
 	const startEpoch = 741
 	epoch := newTestEpoch(
 		startEpoch, startEpoch*govDiffEpochLength, govDiffEpochLength,
 		eras.ConwayEraDesc.Id,
 	)
-	require.NoError(t, db.SetEpoch(
+	require.NoError(t, seedDB(t, db).SetEpoch(
 		epoch.StartSlot, epoch.EpochId, epoch.Nonce, epoch.EvolvingNonce,
 		epoch.CandidateNonce, epoch.LastEpochBlockNonce, epoch.EraId,
 		epoch.SlotLength, epoch.LengthInSlots, nil,
 	))
-	require.NoError(t, db.Metadata().SetNetworkState(
+	require.NoError(t, seedDB(t, db).SetNetworkState(
 		1_000_000, 10_000_000, epoch.StartSlot, nil,
 	))
 	pparams := donationTestConwayPParams(10)
@@ -488,7 +531,7 @@ func newGovDiffScenarioWithOptions(
 
 	s := &govDiffScenario{db: db, epoch: epoch, pparams: pparams}
 	s.seedRetiringPool(t, startEpoch+1)
-	require.NoError(t, db.Metadata().AddNetworkDonation(
+	require.NoError(t, seedDB(t, db).AddNetworkDonation(
 		epoch.StartSlot+5, startEpoch, 5_000, nil,
 	))
 	account := func(
@@ -504,7 +547,7 @@ func newGovDiffScenarioWithOptions(
 		}
 		require.NoError(
 			t,
-			db.CreateAccount(context.Background(), nil, &models.Account{
+			seedCreateAccount(t, db, context.Background(), nil, &models.Account{
 				StakingKey: cred,
 				Drep:       drep,
 				Pool:       poolKey,
@@ -514,15 +557,8 @@ func newGovDiffScenarioWithOptions(
 			}),
 		)
 		if utxo > 0 {
-			require.NoError(
-				t,
-				db.CreateUtxo(context.Background(), nil, &models.Utxo{
-					TxId:       repeatByte(32, marker),
-					OutputIdx:  0,
-					StakingKey: cred,
-					Amount:     types.Uint64(utxo),
-					AddedSlot:  epoch.StartSlot,
-				}),
+			seedTestStakedOutput(
+				t, seedLedgerOf(t, db), repeatByte(32, marker), 0, cred, utxo,
 			)
 		}
 		s.credentials = append(s.credentials, cred)
@@ -540,7 +576,7 @@ func newGovDiffScenarioWithOptions(
 	}
 
 	s.drep = repeatByte(28, 0xe1)
-	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+	require.NoError(t, seedCreateDrep(t, db, context.Background(), nil, &models.Drep{
 		Credential:  s.drep,
 		AddedSlot:   epoch.StartSlot,
 		ExpiryEpoch: startEpoch + 100,
@@ -559,7 +595,7 @@ func newGovDiffScenarioWithOptions(
 	hotCredential := repeatByte(28, 0xd2)
 	require.NoError(
 		t,
-		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+		seedDB(t, db).SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 			ColdCredHash: coldCredential,
 			ExpiresEpoch: startEpoch + 100,
 			AddedSlot:    1,
@@ -567,15 +603,17 @@ func newGovDiffScenarioWithOptions(
 	)
 	require.NoError(
 		t,
-		db.SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil),
+		seedDB(t, db).SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil),
 	)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO auth_committee_hot (
-    cold_credential, host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)`, coldCredential, hotCredential, 1, 1)
-	require.NoError(t, err)
+	fxSeed(t, db, LedgerChanges{Committee: []CommitteeChange{{
+		Slot: 1,
+		Auth: &models.AuthCommitteeHot{
+			ColdCredential: coldCredential,
+			HotCredential:  hotCredential,
+			CertificateID:  1,
+			AddedSlot:      1,
+		},
+	}}})
 
 	newMember := lcommon.Credential{
 		CredType:   lcommon.CredentialTypeAddrKeyHash,
@@ -661,13 +699,14 @@ INSERT INTO auth_committee_hot (
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, epoch, pparams)
+	fxAttachLedgerDB(t, s.ls)
 	s.snapshotMgr = snapshot.NewManager(
-		dbadapter.New(db),
+		s.ls.LedgerDB(),
 		newTestEventBus(t, nil),
 		nil,
 	)
 	s.wireSnapshotHooks()
-	seedEmptyRewardBasisForRollover(t, db, epoch, pparams)
 	return s
 }
 
@@ -737,9 +776,9 @@ func (s *govDiffScenario) addProposal(
 	}
 	require.NoError(
 		t,
-		s.db.SetGovernanceProposal(context.Background(), proposal, nil),
+		seedDB(t, s.db).SetGovernanceProposal(context.Background(), proposal, nil),
 	)
-	loaded, err := s.db.GetGovernanceProposal(
+	loaded, err := seedDB(t, s.db).GetGovernanceProposal(
 		context.Background(),
 		proposal.TxHash,
 		0,
@@ -761,7 +800,7 @@ func (s *govDiffScenario) castVote(
 	t.Helper()
 	require.NoError(
 		t,
-		s.db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+		seedDB(t, s.db).SetGovernanceVote(context.Background(), &models.GovernanceVote{
 			ProposalID:      p.ID,
 			VoterType:       voterType,
 			VoterCredential: credential,
@@ -838,7 +877,7 @@ func (s *govDiffScenario) prepareRollover(
 	seedEmptyRewardBasisForRollover(t, s.db, epoch, pparams)
 	// The reward application reads the performance epoch's parameters
 	// from the table a real node writes every boundary.
-	stored, err := s.db.GetPParams(
+	stored, err := seedDB(t, s.db).GetPParams(
 		epoch.EpochId, eras.ConwayEraDesc.Id,
 		eras.ConwayEraDesc.DecodePParamsFunc, nil,
 	)
@@ -846,7 +885,7 @@ func (s *govDiffScenario) prepareRollover(
 	if stored == nil {
 		encoded, err := cbor.Encode(&pparams)
 		require.NoError(t, err)
-		require.NoError(t, s.db.SetPParams(
+		require.NoError(t, seedDB(t, s.db).SetPParams(
 			encoded, epoch.StartSlot, epoch.EpochId,
 			eras.ConwayEraDesc.Id, nil,
 		))
@@ -859,7 +898,7 @@ func (s *govDiffScenario) dump(
 	pparams lcommon.ProtocolParameters,
 ) govDiffEpochDump {
 	t.Helper()
-	treasury, reserves, _ := networkState(t, s.db)
+	treasury, reserves, _ := fxNetworkState(t, s.db)
 	d := govDiffEpochDump{
 		Epoch:     epoch,
 		Treasury:  treasury,
@@ -869,7 +908,7 @@ func (s *govDiffScenario) dump(
 		Mark:      map[string]uint64{},
 	}
 	for _, cred := range s.credentials {
-		account, err := s.db.GetAccountByCredential(
+		account, err := seedDB(t, s.db).GetAccountByCredential(
 			context.Background(),
 			0,
 			cred,
@@ -881,7 +920,7 @@ func (s *govDiffScenario) dump(
 		d.Rewards[hex.EncodeToString(cred[:4])] = uint64(account.Reward)
 	}
 	for _, p := range s.proposals {
-		loaded, err := s.db.GetGovernanceProposal(
+		loaded, err := seedDB(t, s.db).GetGovernanceProposal(
 			context.Background(),
 			p.TxHash,
 			p.ActionIndex,
@@ -901,7 +940,7 @@ func (s *govDiffScenario) dump(
 			DeletedAfter: loaded.DeletedSlot,
 		})
 	}
-	members, err := s.db.GetCommitteeMembers(context.Background(), nil)
+	members, err := seedDB(t, s.db).GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	for _, m := range members {
 		d.Committee[hex.EncodeToString(m.ColdCredHash[:4])] = m.ExpiresEpoch
@@ -909,7 +948,7 @@ func (s *govDiffScenario) dump(
 	encoded, err := cbor.Encode(pparams)
 	require.NoError(t, err)
 	d.PParams = hex.EncodeToString(encoded)
-	rows, err := s.db.GetPoolStakeSnapshotsByEpoch(epoch, "mark", nil)
+	rows, err := seedDB(t, s.db).GetPoolStakeSnapshotsByEpoch(epoch, "mark", nil)
 	require.NoError(t, err)
 	for _, row := range rows {
 		d.Mark[hex.EncodeToString(row.PoolKeyHash)] = uint64(row.TotalStake)
@@ -923,7 +962,7 @@ func (s *govDiffScenario) dump(
 		))
 	}
 	sort.Strings(d.MarkRows)
-	summary, err := s.db.Metadata().GetEpochSummary(epoch, nil)
+	summary, err := seedDB(t, s.db).GetEpochSummary(epoch, nil)
 	require.NoError(t, err)
 	if summary != nil {
 		d.Summary = fmt.Sprintf(
@@ -934,7 +973,7 @@ func (s *govDiffScenario) dump(
 		)
 	}
 	d.StakeInputs = s.stakeInputRows(t, epoch)
-	d.DRepPower, err = s.db.GetDRepVotingPower(
+	d.DRepPower, err = seedDB(t, s.db).GetDRepVotingPower(
 		context.Background(),
 		0,
 		s.drep,
@@ -944,7 +983,7 @@ func (s *govDiffScenario) dump(
 	require.NoError(t, err)
 	deposits, _, err := governance.ActiveProposalDepositDRepPower(
 		context.Background(),
-		dbadapter.New(s.db),
+		seedDB(t, s.db),
 		nil,
 		epoch,
 		0,
@@ -962,14 +1001,7 @@ func (s *govDiffScenario) seedRetiringPool(t *testing.T, retireEpoch uint64) {
 	pool := repeatByte(28, 0xb1)
 	owner := repeatByte(28, 0xb2)
 	delegator := repeatByte(28, 0xb3)
-	require.NoError(t, s.db.ImportPool(context.Background(), nil, &models.Pool{
-		PoolKeyHash:   pool,
-		VrfKeyHash:    make([]byte, 32),
-		Pledge:        1_000_000,
-		Cost:          340_000_000,
-		Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
-		RewardAccount: owner,
-	}, &models.PoolRegistration{
+	reg := &models.PoolRegistration{
 		PoolKeyHash:   pool,
 		AddedSlot:     s.epoch.StartSlot,
 		Pledge:        1_000_000,
@@ -978,7 +1010,15 @@ func (s *govDiffScenario) seedRetiringPool(t *testing.T, retireEpoch uint64) {
 		VrfKeyHash:    make([]byte, 32),
 		RewardAccount: owner,
 		DepositAmount: types.Uint64(500),
-	}))
+	}
+	require.NoError(t, fxImportPool(t, s.db, context.Background(), nil, &models.Pool{
+		PoolKeyHash:   pool,
+		VrfKeyHash:    make([]byte, 32),
+		Pledge:        1_000_000,
+		Cost:          340_000_000,
+		Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+		RewardAccount: owner,
+	}, reg))
 	for _, account := range []*models.Account{
 		{StakingKey: owner, Pool: []byte(hfrLiveYesPool)},
 		{StakingKey: delegator, Pool: pool},
@@ -987,44 +1027,30 @@ func (s *govDiffScenario) seedRetiringPool(t *testing.T, retireEpoch uint64) {
 		account.Active = true
 		require.NoError(
 			t,
-			s.db.CreateAccount(context.Background(), nil, account),
+			seedCreateAccount(t, s.db, context.Background(), nil, account),
 		)
 		s.credentials = append(s.credentials, account.StakingKey)
 	}
-	require.NoError(t, s.db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId:       repeatByte(32, 0xb4),
-		OutputIdx:  0,
-		StakingKey: delegator,
-		Amount:     types.Uint64(2_222),
-		AddedSlot:  s.epoch.StartSlot,
-	}))
-	raw, err := dbtest.RawSQLiteMetadata(t, s.db)
-	require.NoError(t, err)
-	var poolID int64
-	require.NoError(t, raw.QueryRow(
-		`SELECT id FROM pool WHERE pool_key_hash = ?`, pool,
-	).Scan(&poolID))
-	res, err := testutil.ExecTransactionInsert(raw,
-		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, ?)`,
-		repeatByte(32, 0xb5), s.epoch.StartSlot+1, 0,
+	seedTestStakedOutput(
+		t, seedLedgerOf(t, s.db), repeatByte(32, 0xb4), 0, delegator, 2_222,
 	)
-	require.NoError(t, err)
-	txID, err := res.LastInsertId()
-	require.NoError(t, err)
-	res, err = raw.Exec(
-		`INSERT INTO certs (transaction_id, slot, cert_index) VALUES (?, ?, ?)`,
-		txID, s.epoch.StartSlot+1, 0,
-	)
-	require.NoError(t, err)
-	certID, err := res.LastInsertId()
-	require.NoError(t, err)
-	_, err = raw.Exec(`
-INSERT INTO pool_retirement (
-    pool_id, pool_key_hash, certificate_id, epoch, added_slot
-) VALUES (?, ?, ?, ?, ?)`,
-		poolID, pool, certID, retireEpoch, s.epoch.StartSlot+1,
-	)
-	require.NoError(t, err)
+	retireSlot := s.epoch.StartSlot + 1
+	deposit := uint64(500)
+	fxSeed(t, s.db, LedgerChanges{
+		Pools: []PoolChange{{
+			Slot: retireSlot,
+			State: PoolState{
+				Pool:          pool,
+				Params:        CleanPoolRegistration(reg),
+				RetiringEpoch: &retireEpoch,
+				DepositHeld:   &deposit,
+			},
+		}},
+		PoolEvents: []PoolEventChange{{
+			Pool:  pool,
+			Event: PoolEvent{Slot: retireSlot, RetiringEpoch: retireEpoch},
+		}},
+	})
 }
 
 func (s *govDiffScenario) stakeInputRows(
@@ -1032,30 +1058,19 @@ func (s *govDiffScenario) stakeInputRows(
 	epoch uint64,
 ) []string {
 	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, s.db)
+	rows, err := seedDB(t, s.db).GetRewardStakeInputs(epoch, nil)
 	require.NoError(t, err)
-	rows, err := raw.Query(`
-SELECT hex(pool_key_hash), credential_tag, hex(staking_key), stake, owner,
-    registered, captured_slot, boundary_slot
-FROM reward_stake_input WHERE epoch = ?
-ORDER BY pool_key_hash, credential_tag, staking_key`, epoch)
-	require.NoError(t, err)
-	defer rows.Close()
-	var ret []string
-	for rows.Next() {
-		var pool, key, stake string
-		var tag, captured, boundary int64
-		var owner, registered bool
-		require.NoError(t, rows.Scan(
-			&pool, &tag, &key, &stake, &owner, &registered, &captured,
-			&boundary,
-		))
+	ret := make([]string, 0, len(rows))
+	for _, r := range rows {
 		ret = append(ret, fmt.Sprintf(
-			"%s/%d/%s=%s owner=%t registered=%t captured=%d boundary=%d",
-			pool, tag, key, stake, owner, registered, captured, boundary,
+			"%X/%d/%X=%d owner=%t registered=%t captured=%d boundary=%d",
+			r.PoolKeyHash, r.CredentialTag, r.StakingKey, uint64(r.Stake),
+			r.Owner, r.Registered, r.CapturedSlot, r.BoundarySlot,
 		))
 	}
-	require.NoError(t, rows.Err())
+	// The digest orders rows by pool, credential tag and key; their hex
+	// forms have one length each, so sorting the rendered rows does that.
+	sort.Strings(ret)
 	return ret
 }
 
@@ -1135,7 +1150,7 @@ func TestConsumePendingRatificationValidationOnlyKeepsStagedStakeInputs(
 			rec := pendingRatificationRecord{Epoch: 1, BoundarySlot: 100, ID: 7}
 			raw, err := json.Marshal(rec)
 			require.NoError(t, err)
-			require.NoError(t, ls.db.SetSyncState(
+			require.NoError(t, seedDB(t, ls.db).SetSyncState(
 				pendingRatificationSyncKey, string(raw), nil,
 			))
 			job := &ratificationJob{

@@ -32,6 +32,9 @@ func (d *Database) GetMIRCertsInSlotRange(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	if err := d.requireStore("GetMIRCertsInSlotRange"); err != nil {
+		return nil, err
+	}
 	return d.certificateStore().GetMIRCertsInSlotRange(
 		startSlot,
 		endSlot,

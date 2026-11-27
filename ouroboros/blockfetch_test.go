@@ -698,7 +698,7 @@ func newBlockfetchRangeFixtureWithSlotsConfigAndTypes(
 	}))
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
-		UtxoSet:           livesettest.New(),
+		UtxoSet:           livesettest.OpenLedgerDB(t, db),
 		ChainManager:      cm,
 		CardanoNodeConfig: cardanoConfig,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),

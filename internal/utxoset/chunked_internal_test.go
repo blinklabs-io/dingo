@@ -38,9 +38,10 @@ func chunkTestPoint(slot uint64) ocommon.Point {
 // batch, so the ledger replays onto the set it expects.
 func TestReconcileRewindsAChunkedBatchStoppedBeforeItsTip(t *testing.T) {
 	t.Parallel()
-	set, err := Open(Config{Dir: t.TempDir(), Only: true})
+	set, err := Open(Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
+	require.NoError(t, set.store.LoadMissingFamiliesEmpty())
 	for slot := uint64(1); slot <= 3; slot++ {
 		tip := chunkTestPoint(slot)
 		_, err := set.store.Apply(tip, []badgerutxo.Output{{

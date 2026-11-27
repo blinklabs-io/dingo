@@ -563,8 +563,8 @@ func acquireWithRetry(
 // for everything that actually happens on-chain.
 //
 // A failure here (most commonly the point having already aged out of
-// Dingo's UTxO retention floor before this call ran -- see
-// checkUtxoRetentionWindow, or a transient dial/connection error) is
+// the live UTxO set's journal before this call ran, or a transient
+// dial/connection error) is
 // non-fatal to the caller: the UTxO half of this comparison is simply
 // unavailable this epoch, but protocol-params and stake-distribution
 // checking continues regardless. It is not permanently disabled for the

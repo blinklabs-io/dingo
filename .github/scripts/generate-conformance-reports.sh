@@ -3,6 +3,9 @@
 # Generate the CBOR, ledger-rules, UPLC conformance and UPLC turbo reports for
 # a release tag.
 #
+# Each report is written by a go test in the package that builds it, selected
+# with -run and configured through DINGO_CONFORMANCE_* variables.
+#
 # Reporting never stops a release. A generator exits non-zero when it records
 # failures, and that is fine: the report file is what counts. When a generator
 # crashes or its inputs cannot be prepared, an error report naming the scenario
@@ -15,7 +18,12 @@
 #   RELEASE_TAG           required, for example v0.71.0
 #   DIST_DIR              optional, defaults to dist
 #   CONFORMANCE_DIR       optional, defaults to .conformance; holds the
-#                         node-diversity-conformance checkout
+#                         Amaru checkout
+#   AMARU_LEDGER_DIR      optional, defaults to $CONFORMANCE_DIR/amaru; the
+#                         checked out pragma-org/amaru repository
+#   AMARU_LEDGER_REVISION required, the pinned Amaru commit that last changed
+#                         the ledger-rules scenario corpus; the report names it
+#                         as its dataset_commit
 #   CBOR_DATASET_DIR      required, the checked out cardano-cbor-dataset
 #   CBOR_DATASET_REVISION required, the pinned dataset commit
 #   UPLC_CORPUS_SHA256     required, digest of the NDC UPLC corpus archive
@@ -28,13 +36,28 @@ set -euo pipefail
 : "${RELEASE_TAG:?RELEASE_TAG must be set}"
 : "${CBOR_DATASET_DIR:?CBOR_DATASET_DIR must be set}"
 : "${CBOR_DATASET_REVISION:?CBOR_DATASET_REVISION must be set}"
+: "${AMARU_LEDGER_REVISION:?AMARU_LEDGER_REVISION must be set}"
 : "${UPLC_CORPUS_SHA256:?UPLC_CORPUS_SHA256 must be set}"
 : "${TURBO_CORPUS_SHA256:?TURBO_CORPUS_SHA256 must be set}"
 
 DIST_DIR="${DIST_DIR:-dist}"
 CONFORMANCE_DIR="${CONFORMANCE_DIR:-.conformance}"
+AMARU_LEDGER_DIR="${AMARU_LEDGER_DIR:-${CONFORMANCE_DIR}/amaru}"
 TURBO_SAMPLES="${TURBO_SAMPLES:-50}"
 TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-0}"
+
+# go test runs each test binary in its package directory, so every path handed
+# to a generator must be absolute.
+absolute_path() {
+  case "$1" in
+  /*) printf '%s\n' "$1" ;;
+  *) printf '%s/%s\n' "$PWD" "$1" ;;
+  esac
+}
+DIST_DIR="$(absolute_path "$DIST_DIR")"
+CONFORMANCE_DIR="$(absolute_path "$CONFORMANCE_DIR")"
+CBOR_DATASET_DIR="$(absolute_path "$CBOR_DATASET_DIR")"
+AMARU_LEDGER_DIR="$(absolute_path "$AMARU_LEDGER_DIR")"
 
 # The report step has a 60-minute limit. Generator budgets total 43 minutes;
 # corpus preparation is capped at six minutes, leaving 11 minutes for gzip.
@@ -109,6 +132,7 @@ valid_report() {
           (.failures | type == "array")
         elif $scenario == "ledger-rules" then
           (.implementation.name | type == "string" and length > 0) and
+          (.dataset_commit | type == "string" and length > 0) and
           (.scenarios | type == "array") and
           all(.scenarios[]; (.id | type == "string") and (.result | type == "string"))
         elif $scenario == "uplc-conformance" then
@@ -156,7 +180,8 @@ run_generator() {
   rm -f "$report"
   local log status=0
   log="$(mktemp)"
-  timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$@" 2>"$log" || status=$?
+  # go test reports a failing test on stdout, so the log keeps both streams.
+  timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$@" >"$log" 2>&1 || status=$?
   redact_log <"$log" >&2
   if [ "$status" -eq 124 ]; then
     write_error_report "$report" "$scenario" \
@@ -206,20 +231,31 @@ if ! dataset_revision="$(git -C "$CBOR_DATASET_DIR" rev-parse HEAD 2>"$dataset_l
     "cannot read the CBOR dataset revision: $(log_excerpt "$dataset_log")"
 elif [ "$dataset_revision" = "$CBOR_DATASET_REVISION" ]; then
   run_generator "${prefix}-cbor-conformance.json" cbor-decoding "$CBOR_GENERATOR_TIMEOUT_SECONDS" \
-    go run ./internal/cborconformance/cmd \
-    -dataset "${CBOR_DATASET_DIR}/dataset/conway" \
-    -corpus-revision "$dataset_revision" \
-    -output "${prefix}-cbor-conformance.json"
+    env DINGO_CONFORMANCE_INPUT="${CBOR_DATASET_DIR}/dataset/conway" \
+    DINGO_CONFORMANCE_REVISION="$dataset_revision" \
+    DINGO_CONFORMANCE_OUTPUT="${prefix}-cbor-conformance.json" \
+    go test -count=1 -run '^TestWriteConformanceReport$' ./internal/cborconformance
 else
   write_error_report "${prefix}-cbor-conformance.json" cbor-decoding \
     "CBOR dataset checkout does not match the pinned revision ${CBOR_DATASET_REVISION}"
 fi
 rm -f "$dataset_log"
 
-run_generator "${prefix}-ledger-rules.json" ledger-rules "$LEDGER_GENERATOR_TIMEOUT_SECONDS" \
-  go run ./internal/ledgerrulesconformance/cmd \
-  -fixtures "${CONFORMANCE_DIR}/node-diversity-conformance/scenarios/ledger-rules/fixtures" \
-  -output "${prefix}-ledger-rules.json"
+ledger_log="$(mktemp)"
+if ! ledger_revision="$(git -C "$AMARU_LEDGER_DIR" rev-parse HEAD 2>"$ledger_log")"; then
+  write_error_report "${prefix}-ledger-rules.json" ledger-rules \
+    "cannot read the Amaru checkout revision: $(log_excerpt "$ledger_log")"
+elif [ "$ledger_revision" = "$AMARU_LEDGER_REVISION" ]; then
+  run_generator "${prefix}-ledger-rules.json" ledger-rules "$LEDGER_GENERATOR_TIMEOUT_SECONDS" \
+    env DINGO_CONFORMANCE_INPUT="${AMARU_LEDGER_DIR}/crates/amaru-ledger/tests/data/transaction" \
+    DINGO_CONFORMANCE_REVISION="$ledger_revision" \
+    DINGO_CONFORMANCE_OUTPUT="${prefix}-ledger-rules.json" \
+    go test -count=1 -run '^TestWriteConformanceReport$' ./internal/ledgerrulesconformance
+else
+  write_error_report "${prefix}-ledger-rules.json" ledger-rules \
+    "Amaru checkout does not match the pinned revision ${AMARU_LEDGER_REVISION}"
+fi
+rm -f "$ledger_log"
 
 uplc_dir="$(mktemp -d)"
 turbo_dir="$(mktemp -d)"
@@ -228,9 +264,9 @@ if prepare_ndc_corpus "$uplc_dir" uplc-conformance.tar.zst "$UPLC_CORPUS_SHA256"
   "$UPLC_CORPUS_TIMEOUT_SECONDS" \
   2>"${uplc_dir}/prepare.log"; then
   run_generator "${prefix}-uplc-conformance.json" uplc-conformance "$UPLC_GENERATOR_TIMEOUT_SECONDS" \
-    go run ./internal/uplcconformance/cmd \
-    -corpus "${uplc_dir}/corpus" \
-    -output "${prefix}-uplc-conformance.json"
+    env DINGO_CONFORMANCE_INPUT="${uplc_dir}/corpus" \
+    DINGO_CONFORMANCE_OUTPUT="${prefix}-uplc-conformance.json" \
+    go test -count=1 -run '^TestWriteConformanceReport$' ./internal/uplcconformance
 else
   prepare_status=$?
   if [ "$prepare_status" -eq 124 ] || [ "$prepare_status" -eq 137 ]; then
@@ -246,11 +282,12 @@ if prepare_ndc_corpus "$turbo_dir" turbo.tar.zst "$TURBO_CORPUS_SHA256" \
   "$TURBO_CORPUS_TIMEOUT_SECONDS" \
   2>"${turbo_dir}/prepare.log"; then
   run_generator "${prefix}-uplc-turbo.json" uplc-turbo "$TURBO_GENERATOR_TIMEOUT_SECONDS" \
-    go run ./internal/uplcconformance/turbocmd \
-    -corpus "${turbo_dir}/corpus" \
-    -samples "$TURBO_SAMPLES" \
-    -max-programs "$TURBO_MAX_PROGRAMS" \
-    -output "${prefix}-uplc-turbo.json"
+    env DINGO_CONFORMANCE_INPUT="${turbo_dir}/corpus" \
+    DINGO_CONFORMANCE_SAMPLES="$TURBO_SAMPLES" \
+    DINGO_CONFORMANCE_MAX_PROGRAMS="$TURBO_MAX_PROGRAMS" \
+    DINGO_CONFORMANCE_OUTPUT="${prefix}-uplc-turbo.json" \
+    go test -count=1 -timeout "${TURBO_GENERATOR_TIMEOUT_SECONDS}s" \
+    -run '^TestWriteTurboReport$' ./internal/uplcconformance
 else
   prepare_status=$?
   if [ "$prepare_status" -eq 124 ] || [ "$prepare_status" -eq 137 ]; then

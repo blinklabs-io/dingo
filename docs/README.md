@@ -15,7 +15,8 @@ current branch.
 | --- | --- |
 | How do I decode or enable block producer version signalling? | [CIP-0203 payload](cip-0203.md) |
 | How do I build, configure, or run Dingo? | The repository [README](../README.md) and [`dingo.yaml.example`](../dingo.yaml.example) |
-| How are components wired and what owns a behavior? | [Architecture](../ARCHITECTURE.md) |
+| What are the system responsibilities, boundaries and principal flows? | [Architecture](../ARCHITECTURE.md) |
+| Which Koios fields does the parity tracker compare? | [Koios parity reference](../internal/koiosparity/README.md) |
 | How are storage, schemas, and persisted formats designed? | [Database reference](../DATABASE.md) |
 | How does secure from-origin synchronization work? | [Ouroboros Genesis operator guide](../GENESIS_SYNC.md) |
 | What does a Go package or exported symbol do? | [Go code reference](code-reference.md), package `doc.go` files, and `go doc` |
@@ -23,6 +24,7 @@ current branch.
 | How do I run the multi-node DevNet test harness? | [DevNet harness](../internal/test/devnet/README.md) |
 | How do I run Dingo locally against a single-node devnet? | [Single-node local DevNet](devnet.md) |
 | How do I run benchmarks or collect profiles? | [Benchmarks and profiling](benchmarks.md) |
+| What belongs in the published container image? | [Container image policy](container-image.md) |
 | How do I run conformance tests? | [Conformance tests](../internal/test/conformance/README.md) |
 | How do I exercise archive and history-expiry behavior? | [Dingo archive node demo](https://github.com/blinklabs-io/cardano-compose-stacks/tree/main/dingo-archive-demo) |
 | How do I connect AI assistants (Claude, Cursor, Codex) to Dingo via MCP? | [MCP Guide](mcp/README.md) |

@@ -22,7 +22,7 @@ import (
 )
 
 // BlobStore defines the interface for a blob storage provider.
-// All transactional methods (Get, Set, Delete, NewIterator, SetCommitTimestamp)
+// All transactional methods (Get, Set, Delete, NewIterator)
 // require a non-nil types.Txn created by NewTransaction(). Passing nil will
 // result in types.ErrNilTxn.
 //
@@ -45,12 +45,6 @@ type BlobStore interface {
 		txn types.Txn,
 		opts types.BlobIteratorOptions,
 	) types.BlobIterator
-
-	// Commit timestamp management
-	GetCommitTimestamp() (int64, error)
-	// SetCommitTimestamp stores the last commit timestamp; parameter order is
-	// (timestamp, txn) to keep the transaction as the final parameter.
-	SetCommitTimestamp(int64, types.Txn) error
 
 	// Block operations
 	SetBlock(
@@ -101,9 +95,9 @@ type BlobStore interface {
 	// This exists because committing a blob transaction is not the same as
 	// making it durable. The combined blob+metadata commit in database.Txn
 	// deliberately commits blob first so the blob store can only ever be ahead
-	// of the metadata tip, never behind -- startup reconciliation knows how to
-	// trim a blob store that is ahead (cleanupOrphanedBlobs) but cannot
-	// reconstruct blocks the metadata tip already references. That ordering
+	// of the metadata tip, never behind: blocks above the metadata tip are
+	// indexed again, but blocks the metadata tip already references cannot be
+	// reconstructed. That ordering
 	// only holds on disk if the blob commit is durable before the metadata
 	// commit is, so Txn.Commit calls Sync between the two. Skipping it inverts
 	// the invariant on an unclean host shutdown, because the two stores flush on
@@ -142,9 +136,8 @@ type WriteConflictDetector interface {
 // only a bounded number of staged mutations.
 //
 // badger is one: it rejects every further staged write once a transaction
-// reaches its per-transaction entry count or byte budget, and the last write
-// any combined transaction makes is the commit timestamp Txn.Commit puts into
-// that same blob transaction. Staging an unbounded set therefore does not
+// reaches its per-transaction entry count or byte budget, including the
+// writes a caller stages after the set. Staging an unbounded set therefore does not
 // cost the caller only the tail of that set -- it costs the caller the whole
 // commit, which on the startup rollback path leaves a node that fails
 // identically on every start. Callers that stage a
@@ -158,8 +151,8 @@ type TxnBudget interface {
 	// RemainingTxnEntries reports how many further mutations, each costing
 	// entryBytes of key plus value, txn will still accept. Staging all of
 	// them fills the transaction, so a caller with anything left to write
-	// into it afterwards -- and every combined transaction has the commit
-	// timestamp -- keeps headroom of its own.
+	// into it afterwards -- and a combined transaction's commit writes its
+	// tip -- keeps headroom of its own.
 	//
 	// The bool is false when the store cannot answer for this transaction
 	// -- a nil, finished, or foreign handle -- which callers read the same

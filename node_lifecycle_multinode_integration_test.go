@@ -27,8 +27,10 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/topology"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -220,6 +222,9 @@ func newDevnetForgerNode(
 		WithCardanoNodeConfig(cardanoCfg),
 		WithListeners(ListenerConfig{Listener: ln}),
 		WithShutdownTimeout(5*time.Second),
+		// UTxO RPC starts on core nodes at a fixed default port, which the
+		// two nodes in this process would both claim.
+		WithUtxorpcPort(0),
 		WithBlockProducer(true),
 		WithShelleyVRFKey(vrfPath),
 		WithShelleyKESKey(kesPath),
@@ -262,6 +267,7 @@ func newDevnetSyncNode(
 			},
 		}),
 		WithShutdownTimeout(5*time.Second),
+		WithUtxorpcPort(0),
 	)
 	n, err := New(cfg)
 	require.NoError(t, err)
@@ -270,12 +276,20 @@ func newDevnetSyncNode(
 
 // runNodeInBackground starts n.Run in a goroutine and registers cleanup to
 // stop it, mirroring how cmd/dingo actually runs a node (Run blocks until
-// shutdown).
+// shutdown). A Run that returns before cleanup fails the test with its
+// error, so a startup failure is reported as itself rather than as a later
+// wait timing out.
 func runNodeInBackground(t *testing.T, n *Node) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- n.Run(ctx) }()
+	go func() {
+		err := n.Run(ctx)
+		if ctx.Err() == nil {
+			t.Errorf("node Run returned before cleanup: %v", err)
+		}
+		done <- err
+	}()
 	t.Cleanup(func() {
 		cancel()
 		_ = n.Stop()
@@ -347,6 +361,9 @@ func startTwoNodeDevnet(
 func waitForTipSlotAtLeast(t *testing.T, n *Node, minSlot uint64) {
 	t.Helper()
 	require.Eventually(t, func() bool {
+		if t.Failed() {
+			return true
+		}
 		n.liveLifecycleMu.Lock()
 		db := n.db
 		n.liveLifecycleMu.Unlock()
@@ -359,6 +376,9 @@ func waitForTipSlotAtLeast(t *testing.T, n *Node, minSlot uint64) {
 		}
 		return tip.Point.Slot >= minSlot
 	}, liveNodeSyncTimeout, 20*time.Millisecond)
+	if t.Failed() {
+		t.FailNow()
+	}
 }
 
 // requireInboundListenerAcceptsConnections dials ln's own resolved address
@@ -425,6 +445,19 @@ func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 	syncer.liveLifecycleMu.Unlock()
 	require.NoError(t, err)
 
+	// The tip is read before sync resumes: the forger still serves the
+	// removed blocks, so the resumed syncer can fetch them back before a
+	// read after Truncate returns.
+	var tipAfterTruncate ochainsync.Tip
+	var tipAfterTruncateErr error
+	var tipAfterTruncateRead bool
+	syncer.liveLifecycleMu.Lock()
+	syncer.afterTruncate = func(db *database.Database) {
+		tipAfterTruncateRead = true
+		tipAfterTruncate, tipAfterTruncateErr = db.GetTip(nil)
+	}
+	syncer.liveLifecycleMu.Unlock()
+
 	targetSlot := earlyTip.Point.Slot
 	blocksRemoved, err := syncer.Truncate(
 		context.Background(),
@@ -435,11 +468,9 @@ func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 	require.NoError(t, err)
 	require.NotZero(t, blocksRemoved)
 	requireInboundListenerAcceptsConnections(t, syncerLn)
-
-	syncer.liveLifecycleMu.Lock()
-	tipAfterTruncate, err := syncer.db.GetTip(nil)
-	syncer.liveLifecycleMu.Unlock()
-	require.NoError(t, err)
+	require.True(t, tipAfterTruncateRead, "afterTruncate did not run")
+	require.NoError(t, tipAfterTruncateErr)
+	require.NotZero(t, tipAfterTruncate.Point.Slot)
 	require.LessOrEqual(t, tipAfterTruncate.Point.Slot, targetSlot)
 
 	// The forger keeps producing blocks throughout; the syncer must pick

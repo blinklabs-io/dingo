@@ -42,8 +42,8 @@ func (b *syncLogBuffer) String() string {
 }
 
 // An in-memory test database must start from the migrated schema: the
-// migration runner's upgrade check reports the version it found before
-// running anything, and a database that migrates from scratch reports 0.
+// migration runner's upgrade check reports its applied migration count, and
+// a database that migrates from scratch reports 0.
 func TestInMemoryTestDatabaseStartsFromMigratedSchema(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{"", "api"} {
@@ -53,6 +53,7 @@ func TestInMemoryTestDatabaseStartsFromMigratedSchema(t *testing.T) {
 			db, err := newTestDatabase(t, &Config{
 				DataDir:     "",
 				StorageMode: mode,
+				Role:        RoleIndexer,
 				Logger:      slog.New(slog.NewTextHandler(&logs, nil)),
 			})
 			require.NoError(t, err)
@@ -66,7 +67,7 @@ func TestInMemoryTestDatabaseStartsFromMigratedSchema(t *testing.T) {
 			}
 			require.NotEmpty(t, check, "migration runner never reported")
 			require.NotContains(
-				t, check, "current_version=0 ",
+				t, check, "completed_migrations=0 ",
 				"in-memory database ran its own migrations",
 			)
 		})
