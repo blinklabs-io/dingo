@@ -1793,6 +1793,10 @@ func RunFromGenesis(
 		go keepNtCConnAlive(sessionCtx, csConn, ntcKeepaliveInterval)
 
 		var sessionErr error
+		var (
+			peerErr   error
+			peerErrOk bool
+		)
 		select {
 		case <-ctx.Done():
 			endSession()
@@ -1800,7 +1804,25 @@ func RunFromGenesis(
 			csConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 			retireSession()
 			return ctx.Err()
-		case err, ok := <-csConn.ErrorChan():
+		case <-csConn.Muxer().DoneChan():
+			// The connection's error, or the close of ErrorChan, comes only
+			// once the callback running at this moment has returned, and
+			// that callback queries Dingo until the session ends. End the
+			// session first, so the callback stops and the shutdown can
+			// finish.
+			endSession()
+			select {
+			case peerErr, peerErrOk = <-csConn.ErrorChan():
+			case <-ctx.Done():
+				stopOnCancel()
+				csConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
+				retireSession()
+				return ctx.Err()
+			}
+		case peerErr, peerErrOk = <-csConn.ErrorChan():
+		}
+		{
+			err, ok := peerErr, peerErrOk
 			endSession()
 			stopOnCancel()
 			csConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
