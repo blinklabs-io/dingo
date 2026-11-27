@@ -169,6 +169,7 @@ VALUES (?, ?, ?, ?, ?, ?)`,
 	}
 	require.Equal(t, want, poolCurrentStateRows(t, db))
 
+	exec(`DELETE FROM schema_migrations WHERE version > 67`)
 	exec(`UPDATE schema_migrations
 SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = 67`)
 	run()

@@ -25,6 +25,7 @@ import (
 	"io/fs"
 	"net"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -38,7 +39,7 @@ import (
 
 // migrationSQL contains immutable, versioned migration resources.
 //
-//go:embed v*/*/*.sql
+//go:embed v*/*/*.sql migration-manifests
 var migrationSQL embed.FS
 
 const (
@@ -126,12 +127,18 @@ const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
 // renumbering must not silently reclassify rows this backfill already read.
 const alonzoEraID = 4
 
-// schemaVersions names every migration in ascending version order.
-var schemaVersions = []struct {
-	Version int
+// schemaVersions keeps the released sequential identifiers 1 through 75
+// unchanged. Each later migration declares its name, stable version, and
+// predecessor in its own manifest, so parallel additions do not edit a shared
+// registry list.
+type schemaVersion struct {
+	Version int64
 	Name    string
 	Dir     string
-}{
+	After   int64
+}
+
+var schemaVersions = []schemaVersion{
 	{Version: 1, Name: initialSchemaRelease, Dir: "v1"},
 	{Version: 2, Name: leiosKeySchemaRelease, Dir: "v2"},
 	{Version: 3, Name: tokenRegistrySchemaRelease, Dir: "v3"},
@@ -313,6 +320,134 @@ var schemaVersions = []struct {
 	{Version: 75, Name: indexerOffsetsSchemaRelease, Dir: "v75"},
 }
 
+func orderedSchemaVersions(versions []schemaVersion) ([]schemaVersion, error) {
+	byVersion := make(map[int64]schemaVersion, len(versions))
+	seenVersions := make(map[int64]struct{}, len(versions))
+	for _, version := range versions {
+		if version.Version <= 0 {
+			return nil, fmt.Errorf(
+				"%w: invalid migration version %d",
+				ErrInvalidRegistry,
+				version.Version,
+			)
+		}
+		if _, exists := seenVersions[version.Version]; exists {
+			return nil, fmt.Errorf(
+				"%w: duplicate version %d",
+				ErrInvalidRegistry,
+				version.Version,
+			)
+		}
+		seenVersions[version.Version] = struct{}{}
+		after := version.After
+		if version.Version <= lastSequentialVersion {
+			after = version.Version - 1
+		}
+		version.After = after
+		byVersion[version.Version] = version
+	}
+
+	children := make(map[int64][]schemaVersion, len(versions))
+	for _, version := range byVersion {
+		if version.After != 0 {
+			if _, exists := byVersion[version.After]; !exists {
+				return nil, fmt.Errorf(
+					"%w: version %d follows unregistered version %d",
+					ErrInvalidRegistry,
+					version.Version,
+					version.After,
+				)
+			}
+		}
+		children[version.After] = append(children[version.After], version)
+	}
+	for parent := range children {
+		sort.Slice(children[parent], func(i, j int) bool {
+			return children[parent][i].Version < children[parent][j].Version
+		})
+	}
+
+	roots := children[0]
+	if len(roots) != 1 {
+		return nil, fmt.Errorf(
+			"%w: migration registry must have one initial version, got %d",
+			ErrInvalidRegistry,
+			len(roots),
+		)
+	}
+	if roots[0].Version != 1 {
+		return nil, fmt.Errorf(
+			"%w: initial migration must have version 1, got %d",
+			ErrInvalidRegistry,
+			roots[0].Version,
+		)
+	}
+	ordered := make([]schemaVersion, 0, len(versions))
+	ready := append([]schemaVersion(nil), roots...)
+	for len(ready) > 0 {
+		sort.Slice(ready, func(i, j int) bool {
+			return ready[i].Version < ready[j].Version
+		})
+		version := ready[0]
+		ready = ready[1:]
+		ordered = append(ordered, version)
+		ready = append(ready, children[version.Version]...)
+	}
+	if len(ordered) != len(versions) {
+		return nil, fmt.Errorf(
+			"%w: migration predecessors contain a cycle",
+			ErrInvalidRegistry,
+		)
+	}
+	return ordered, nil
+}
+
+type schemaManifest struct {
+	Version int64  `json:"version"`
+	Name    string `json:"name"`
+	After   int64  `json:"after"`
+}
+
+func allSchemaVersions() ([]schemaVersion, error) {
+	return schemaVersionsFrom(migrationSQL, schemaVersions)
+}
+
+func schemaVersionsFrom(
+	resources fs.FS,
+	base []schemaVersion,
+) ([]schemaVersion, error) {
+	versions := append([]schemaVersion(nil), base...)
+	manifests, err := fs.Glob(resources, "migration-manifests/*.json")
+	if err != nil {
+		return nil, fmt.Errorf("list schema migration manifests: %w", err)
+	}
+	for _, manifestPath := range manifests {
+		data, err := fs.ReadFile(resources, manifestPath)
+		if err != nil {
+			return nil, fmt.Errorf("read migration manifest %s: %w", manifestPath, err)
+		}
+		var manifest schemaManifest
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			return nil, fmt.Errorf("parse migration manifest %s: %w", manifestPath, err)
+		}
+		if manifest.Version <= lastSequentialVersion {
+			return nil, fmt.Errorf(
+				"%w: migration manifest %s uses reserved version %d",
+				ErrInvalidRegistry,
+				manifestPath,
+				manifest.Version,
+			)
+		}
+		versions = append(versions, schemaVersion{
+			Version: manifest.Version,
+			Name:    manifest.Name,
+			Dir:     fmt.Sprintf("v%d", manifest.Version),
+			After:   manifest.After,
+		})
+	}
+	return versions, nil
+}
+
 // SQLiteRegistry returns the checked-in SQLite migration registry.
 func SQLiteRegistry() ([]Migration, error) {
 	return registryForDialect("sqlite")
@@ -331,7 +466,15 @@ func MySQLRegistry() ([]Migration, error) {
 }
 
 func registryForDialect(dialect string) ([]Migration, error) {
-	loaded := make([]SQL, 0, len(schemaVersions))
+	registeredVersions, err := allSchemaVersions()
+	if err != nil {
+		return nil, err
+	}
+	versions, err := orderedSchemaVersions(registeredVersions)
+	if err != nil {
+		return nil, err
+	}
+	loaded := make([]SQL, 0, len(versions))
 	// Every CREATE TABLE lives in the initial version, and MySQL's translation
 	// reads them to learn which columns are blobs. A later version indexing an
 	// existing blob column carries no CREATE TABLE of its own, so it is
@@ -339,7 +482,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 	// statements -- otherwise MySQL would be handed a BLOB key with no prefix
 	// length, which it rejects.
 	var wholeSchema []string
-	for _, version := range schemaVersions {
+	for _, version := range versions {
 		expand, err := loadSQL(version.Dir + "/sqlite/expand.sql")
 		if err != nil {
 			return nil, err
@@ -353,8 +496,8 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		wholeSchema = append(wholeSchema, contract...)
 	}
 
-	ret := make([]Migration, 0, len(schemaVersions))
-	for index, version := range schemaVersions {
+	ret := make([]Migration, 0, len(versions))
+	for index, version := range versions {
 		sqlForDialect := loaded[index]
 		if dialect != "sqlite" {
 			nativeExpand, nativeExpandErr := loadOptionalSQL(
@@ -376,6 +519,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 				}
 				ret = append(ret, Migration{
 					Version:          version.Version,
+					After:            version.After,
 					Name:             version.Name,
 					BackfillRevision: "none",
 					SQL: map[string]SQL{
@@ -397,6 +541,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		}
 		migration := Migration{
 			Version:          version.Version,
+			After:            version.After,
 			Name:             version.Name,
 			BackfillRevision: "none",
 			SQL: map[string]SQL{
@@ -497,6 +642,9 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BatchSize = assetIdentityHoldingsBatchSize
 		}
 		ret = append(ret, migration)
+	}
+	if err := validateRegistry(ret, dialect); err != nil {
+		return nil, err
 	}
 	return ret, nil
 }
