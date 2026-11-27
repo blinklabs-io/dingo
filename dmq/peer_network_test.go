@@ -357,12 +357,11 @@ func TestTwoTopicsShareARegistry(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	build := func(topic string, magic uint32) *Stack {
 		s, err := NewStack(StackConfig{
-			PromRegistry:   reg,
-			Topic:          topic,
-			NetworkMagic:   magic,
-			SocketPath:     shortSocketPath(t),
-			Authenticator:  newTestAuthenticator(),
-			MessageBodyMin: 1,
+			PromRegistry:  reg,
+			Topic:         topic,
+			NetworkMagic:  magic,
+			SocketPath:    shortSocketPath(t),
+			Authenticator: newTestAuthenticator(),
 			Peers: &PeerConfig{
 				MaxPeers:    2,
 				ListenAddrs: []ListenAddr{{Address: loopbackAny}},

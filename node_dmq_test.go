@@ -137,11 +137,7 @@ func TestDMQStakeAuthorityWithoutLedger(t *testing.T) {
 	_, err := auth.PoolActiveStake(ocommon.PoolKeyHash{})
 	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
 	require.ErrorIs(t, err, errDMQLedgerDetached)
-	_, err = auth.CurrentSlot()
-	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
 	_, err = auth.CurrentKESPeriod()
-	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
-	_, _, err = auth.PoolOpCertIssueNumber(ocommon.PoolKeyHash{})
 	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
 }
 
@@ -452,7 +448,6 @@ func submitDMQ(
 	magic uint32,
 ) ocommon.RejectReason {
 	t.Helper()
-	verdict := make(chan ocommon.RejectReason, 1)
 	conn, err := ouroboros.NewConnection(
 		ouroboros.WithDMQ(true),
 		ouroboros.WithNetworkMagic(magic),
@@ -464,28 +459,15 @@ func submitDMQ(
 				localmessagesubmission.WithTTLValidator(
 					ocommon.NewNoOpTTLValidator(nil),
 				),
-				localmessagesubmission.WithAcceptMessageFunc(
-					func(localmessagesubmission.CallbackContext) {
-						verdict <- nil
-					},
-				),
-				localmessagesubmission.WithRejectMessageFunc(
-					func(
-						_ localmessagesubmission.CallbackContext,
-						reason ocommon.RejectReason,
-					) {
-						verdict <- reason
-					},
-				),
 			),
 		),
 	)
 	require.NoError(t, err)
 	require.NoError(t, conn.Dial("unix", socket))
-	defer conn.Close()
+	defer func() { _ = conn.Close(context.Background()) }()
 	// #nosec G115 -- test fixture timestamp
 	expiry := uint32(time.Now().Add(10 * time.Minute).Unix())
-	require.NoError(t, conn.LocalMessageSubmission().Client.SubmitMessage(
+	err = conn.LocalMessageSubmission().Client.SubmitMessage(
 		&ocommon.DmqMessage{
 			Payload: ocommon.DmqMessagePayload{
 				MessageBody: bytes.Repeat([]byte("node"), 100),
@@ -501,14 +483,13 @@ func submitDMQ(
 			},
 			ColdVerificationKey: make([]byte, 32),
 		},
-	))
-	select {
-	case r := <-verdict:
-		return r
-	case <-time.After(10 * time.Second):
-		require.FailNow(t, "no verdict from the dmq socket")
+	)
+	if err == nil {
 		return nil
 	}
+	var rejected localmessagesubmission.MessageRejectedError
+	require.ErrorAs(t, err, &rejected)
+	return rejected.Reason
 }
 
 func TestDMQStakeAuthorityLedgerPeerSnapshot(t *testing.T) {
@@ -669,12 +650,11 @@ func newDMQPeerStack(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
 	s, err := dmq.NewStack(dmq.StackConfig{
-		PromRegistry:   prometheus.NewRegistry(),
-		NetworkMagic:   magic,
-		SocketPath:     filepath.Join(socketDir, "dmq.sock"),
-		Authenticator:  ocommon.NewNoOpAuthenticator(nil),
-		MessageBodyMin: 1,
-		Peers:          peers,
+		PromRegistry:  prometheus.NewRegistry(),
+		NetworkMagic:  magic,
+		SocketPath:    filepath.Join(socketDir, "dmq.sock"),
+		Authenticator: ocommon.NewNoOpAuthenticator(nil),
+		Peers:         peers,
 	})
 	require.NoError(t, err)
 	require.NoError(t, s.Start(t.Context()))

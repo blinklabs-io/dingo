@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/localmessagenotification"
 	"github.com/blinklabs-io/gouroboros/protocol/localmessagesubmission"
@@ -78,9 +80,6 @@ func newTestStack(
 		cfg.MinPoolMessageInterval = -1
 	}
 	// The fixtures use short bodies; the size limits have tests of their own.
-	if cfg.MessageBodyMin == 0 {
-		cfg.MessageBodyMin = 1
-	}
 	cfg.SocketPath = filepath.Join(dir, "dmq.sock")
 	cfg.NetworkMagic = testDMQMagic
 	if cfg.Authenticator == nil {
@@ -125,50 +124,37 @@ func dialClient(
 	return conn
 }
 
-// submitter returns a function that submits msg and waits for the server's
+// submitter returns a function that submits msg and returns the server's
 // verdict: nil for accept, the reject reason otherwise.
 func submitter(
 	t *testing.T,
 	s *Stack,
 ) func(ocommon.DmqMessage) ocommon.RejectReason {
 	t.Helper()
-	accepted := make(chan struct{}, 1)
-	rejected := make(chan ocommon.RejectReason, 1)
 	conn := dialClient(
 		t,
 		s,
-		localmessagesubmission.NewConfig(
-			localmessagesubmission.WithAcceptMessageFunc(
-				func(localmessagesubmission.CallbackContext) {
-					accepted <- struct{}{}
-				},
-			),
-			localmessagesubmission.WithRejectMessageFunc(
-				func(
-					_ localmessagesubmission.CallbackContext,
-					reason ocommon.RejectReason,
-				) {
-					rejected <- reason
-				},
-			),
-		),
+		localmessagesubmission.NewConfig(),
 		localmessagenotification.NewConfig(),
 	)
 	return func(msg ocommon.DmqMessage) ocommon.RejectReason {
-		require.NoError(
+		return submissionVerdict(
 			t,
 			conn.LocalMessageSubmission().Client.SubmitMessage(&msg),
 		)
-		select {
-		case <-accepted:
-			return nil
-		case reason := <-rejected:
-			return reason
-		case <-time.After(10 * time.Second):
-			require.FailNow(t, "no accept or reject from server")
-			return nil
-		}
 	}
+}
+
+// submissionVerdict turns SubmitMessage's result into the server's verdict:
+// nil for accept, the reject reason otherwise.
+func submissionVerdict(t *testing.T, err error) ocommon.RejectReason {
+	t.Helper()
+	if err == nil {
+		return nil
+	}
+	var rejected localmessagesubmission.MessageRejectedError
+	require.ErrorAs(t, err, &rejected)
+	return rejected.Reason
 }
 
 // consumer returns blocking and non-blocking request functions that each
@@ -218,7 +204,7 @@ func (c *consumer) reply(t *testing.T) []ocommon.DmqMessage {
 func bodies(msgs []ocommon.DmqMessage) []string {
 	out := make([]string, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, string(m.Payload.MessageBody))
+		out = append(out, strings.TrimRight(string(m.Payload.MessageBody), "."))
 	}
 	return out
 }
@@ -271,6 +257,8 @@ func newStakeAuthenticator(
 	t.Helper()
 	auth, err := ocommon.NewMessageAuthenticator(
 		ocommon.MessageAuthenticatorConfig{
+			// Tests send one pool's messages back to back.
+			MinSigDelay:    -1,
 			StakeAuthority: stake,
 			CurrentSlot: func() (uint64, error) {
 				return 0, nil
@@ -289,11 +277,11 @@ func TestStackSubmissionAdmitsToMempool(t *testing.T) {
 	s, reg := newTestStack(t, StackConfig{})
 	submit := submitter(t, s)
 
-	require.Nil(t, submit(newTestMessage([]byte("one"), soonExpiry())))
+	require.Nil(t, submit(newTestMessage(testBody("one"), soonExpiry())))
 	require.Equal(t, 1, s.Mempool().Len())
 	got, ok := s.Mempool().NextForPeer("probe")
 	require.True(t, ok)
-	require.Equal(t, []byte("one"), got.Payload.MessageBody)
+	require.Equal(t, testBody("one"), got.Payload.MessageBody)
 	require.Equal(
 		t,
 		1.0,
@@ -324,34 +312,34 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 	}{
 		{
 			name:  "expired",
-			msg:   newTestMessage([]byte("old"), 1),
+			msg:   newTestMessage(testBody("old"), 1),
 			want:  ocommon.ExpiredReason{},
 			label: reasonExpired,
 		},
 		{
 			name: "duplicate",
 			first: func() *ocommon.DmqMessage {
-				m := newTestMessage([]byte("dup"), soon)
+				m := newTestMessage(testBody("dup"), soon)
 				return &m
 			}(),
-			msg:   newTestMessage([]byte("dup"), soon),
+			msg:   newTestMessage(testBody("dup"), soon),
 			want:  ocommon.AlreadyReceivedReason{},
 			label: reasonAlreadyReceived,
 		},
 		{
 			name: "duplicate in pool",
 			pooled: func() *ocommon.DmqMessage {
-				m := newTestMessage([]byte("pooled"), soon)
+				m := newTestMessage(testBody("pooled"), soon)
 				return &m
 			}(),
-			msg:   newTestMessage([]byte("pooled"), soon),
+			msg:   newTestMessage(testBody("pooled"), soon),
 			want:  ocommon.AlreadyReceivedReason{},
 			label: reasonAlreadyReceived,
 		},
 		{
 			name:  "unauthorized pool",
 			cfg:   StackConfig{Authenticator: newNoStakeAuthenticator(t)},
-			msg:   newTestMessage([]byte("anon"), soon),
+			msg:   newTestMessage(testBody("anon"), soon),
 			want:  ocommon.InvalidReason{},
 			label: reasonInvalid,
 		},
@@ -360,13 +348,13 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 			cfg: StackConfig{
 				Authenticator: newStakeAuthenticator(t, unavailableStake{}),
 			},
-			msg:   newTestMessage([]byte("unknown"), soon),
+			msg:   newTestMessage(testBody("unknown"), soon),
 			want:  ocommon.OtherReason{},
 			label: reasonOther,
 		},
 		{
 			name:  "expiry beyond message ttl",
-			msg:   newTestMessage([]byte("far"), tooFar),
+			msg:   newTestMessage(testBody("far"), tooFar),
 			want:  ocommon.InvalidReason{},
 			label: reasonInvalid,
 		},
@@ -375,7 +363,7 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 			cfg: StackConfig{CurrentKESPeriod: func() (uint64, error) {
 				return 0, nil
 			}},
-			msg:   newTestMessage([]byte("future"), soon),
+			msg:   newTestMessage(testBody("future"), soon),
 			want:  ocommon.InvalidReason{},
 			label: reasonInvalid,
 		},
@@ -384,14 +372,14 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 			cfg: StackConfig{CurrentKESPeriod: func() (uint64, error) {
 				return 1 + ocommon.DefaultMaxKESEvolutions, nil
 			}},
-			msg:   newTestMessage([]byte("stale"), soon),
+			msg:   newTestMessage(testBody("stale"), soon),
 			want:  ocommon.InvalidReason{},
 			label: reasonInvalid,
 		},
 		{
 			name:  "pool full",
 			cfg:   StackConfig{MaxMempoolBytes: 1},
-			msg:   newTestMessage([]byte("big"), soon),
+			msg:   newTestMessage(testBody("big"), soon),
 			want:  ocommon.OtherReason{},
 			label: reasonOther,
 		},
@@ -432,8 +420,8 @@ func TestStackNotificationNonBlocking(t *testing.T) {
 	t.Parallel()
 	s, reg := newTestStack(t, StackConfig{})
 	submit := submitter(t, s)
-	require.Nil(t, submit(newTestMessage([]byte("a"), soonExpiry())))
-	require.Nil(t, submit(newTestMessage([]byte("b"), soonExpiry())))
+	require.Nil(t, submit(newTestMessage(testBody("a"), soonExpiry())))
+	require.Nil(t, submit(newTestMessage(testBody("b"), soonExpiry())))
 
 	first := newConsumer(t, s)
 	second := newConsumer(t, s)
@@ -483,7 +471,7 @@ func TestStackNotificationBlockingWaitsForMessage(t *testing.T) {
 	}
 
 	submit := submitter(t, s)
-	require.Nil(t, submit(newTestMessage([]byte("late"), soonExpiry())))
+	require.Nil(t, submit(newTestMessage(testBody("late"), soonExpiry())))
 	require.Equal(t, []string{"late"}, bodies(c.reply(t)))
 }
 
@@ -684,13 +672,13 @@ func TestStackServesConnectionsAfterInboundStall(t *testing.T) {
 	c := newConsumer(t, s)
 	require.NoError(t, c.client().RequestMessagesBlocking())
 	submit := submitter(t, s)
-	require.Nil(t, submit(newTestMessage([]byte("after"), soonExpiry())))
+	require.Nil(t, submit(newTestMessage(testBody("after"), soonExpiry())))
 	require.Equal(t, []string{"after"}, bodies(c.reply(t)))
 }
 
 // A consumer that ends both local protocols with MsgDone and MsgClientDone
-// moves the server side of each to its terminal state, and the stack keeps
-// serving other connections.
+// starts a new run of each server on its connection, as dmq-node's do, and
+// the stack keeps serving other connections.
 func TestStackHandlesClientDone(t *testing.T) {
 	t.Parallel()
 	s, _ := newTestStack(t, StackConfig{})
@@ -706,23 +694,29 @@ func TestStackHandlesClientDone(t *testing.T) {
 	}, 10*time.Second, 10*time.Millisecond)
 	server := s.connMgr.GetConnectionById(id)
 	require.NotNil(t, server)
+	submissionRun := server.LocalMessageSubmission().Server.ProtocolInstance()
+	notificationRun := server.LocalMessageNotification().Server.ProtocolInstance()
 	require.NoError(t, done.conn.LocalMessageSubmission().Client.Stop(context.Background()))
 	require.NoError(t, done.client().Stop(context.Background()))
+	// Each server passes through Done before its restart installs a new run,
+	// so wait for a live run other than the one the client ended.
 	require.Eventually(t, func() bool {
-		return server.LocalMessageSubmission().Server.IsDone() &&
-			server.LocalMessageNotification().Server.IsDone()
+		submission := server.LocalMessageSubmission().Server.ProtocolInstance()
+		notification := server.LocalMessageNotification().Server.ProtocolInstance()
+		return submission != submissionRun && !submission.IsDone() &&
+			notification != notificationRun && !notification.IsDone()
 	}, 10*time.Second, 10*time.Millisecond)
 
 	c := newConsumer(t, s)
 	require.NoError(t, c.client().RequestMessagesBlocking())
 	submit := submitter(t, s)
-	require.Nil(t, submit(newTestMessage([]byte("next"), soonExpiry())))
+	require.Nil(t, submit(newTestMessage(testBody("next"), soonExpiry())))
 	require.Equal(t, []string{"next"}, bodies(c.reply(t)))
 }
 
-// MsgClientDone ends notification while the connection stays open for
-// submission; the connection's feeder must stop and release its cursor
-// rather than keep offering messages to a finished server.
+// MsgClientDone ends one notification run; the server restarts for the next
+// on the same connection and keeps its queue, so the feeder keeps the cursor
+// until the connection closes, and then releases it.
 func TestStackStopsFeederOnClientDone(t *testing.T) {
 	t.Parallel()
 	s, _ := newTestStack(t, StackConfig{})
@@ -759,7 +753,9 @@ func TestStackStopsFeederOnClientDone(t *testing.T) {
 	}, 10*time.Second, 10*time.Millisecond)
 
 	require.NoError(t, c.client().Stop(context.Background()))
-	require.Nil(t, submit(newTestMessage([]byte("after"), soonExpiry())))
+	require.Nil(t, submit(newTestMessage(testBody("after"), soonExpiry())))
+	require.True(t, hasCursor(consumerID))
+	require.NoError(t, c.conn.Close(context.Background()))
 	require.Eventually(t, func() bool {
 		return !hasCursor(consumerID)
 	}, 10*time.Second, 10*time.Millisecond)
@@ -775,11 +771,12 @@ func TestStackAdmitsCertificateLastKESPeriod(t *testing.T) {
 		},
 	})
 	submit := submitter(t, s)
-	require.Nil(t, submit(newTestMessage([]byte("last"), soonExpiry())))
+	require.Nil(t, submit(newTestMessage(testBody("last"), soonExpiry())))
 }
 
-// A consumer that sends MsgClientDone while the pool is idle must still have
+// A consumer whose connection closes while the pool is idle must still have
 // its feeder stop and its cursor released, with no admission to wake on.
+// MsgClientDone alone does not release it: the server restarts.
 func TestStackReleasesCursorOnIdleClientDone(t *testing.T) {
 	t.Parallel()
 	s, _ := newTestStack(t, StackConfig{})
@@ -800,6 +797,8 @@ func TestStackReleasesCursorOnIdleClientDone(t *testing.T) {
 		return hasCursor()
 	}, 10*time.Second, 10*time.Millisecond)
 	require.NoError(t, c.client().Stop(context.Background()))
+	require.True(t, hasCursor())
+	require.NoError(t, c.conn.Close(context.Background()))
 	require.Eventually(t, func() bool {
 		return !hasCursor()
 	}, 10*time.Second, 10*time.Millisecond)
@@ -914,37 +913,43 @@ func TestStackAdmissionUsesPoolClock(t *testing.T) {
 	require.Nil(t, s.admit(&msg))
 }
 
-// A message that breaks CIP-0137's sizes is one dmq-node refuses to decode, so
-// a local client's is refused too, with the default limits.
+// A message whose body breaks CIP-0137's sizes is one dmq-node refuses to
+// decode, and gouroboros refuses it the same way: the local connection ends
+// instead of answering. In-range bodies are admitted, and a key or signature
+// of the wrong length is refused by the stack with a reason.
 func TestStackRefusesMessagesOutsideTheSizeLimits(t *testing.T) {
 	t.Parallel()
-	s, reg := newTestStack(t, StackConfig{
-		MessageBodyMin: DefaultMessageBodyMin,
-		MessageBodyMax: DefaultMessageBodyMax,
-	})
-	submit := submitter(t, s)
+	s, reg := newTestStack(t, StackConfig{})
 	exp := soonExpiry()
 	body := func(n int) []byte { return bytes.Repeat([]byte{'x'}, n) }
 
 	for _, n := range []int{0, 1, 89, 2001, 5000} {
-		reason := submit(newTestMessage(body(n), exp))
-		invalid, ok := reason.(ocommon.InvalidReason)
-		require.True(t, ok, "body of %d bytes: %v", n, reason)
-		require.Contains(t, invalid.Message, "body is")
+		conn := dialClient(
+			t,
+			s,
+			localmessagesubmission.NewConfig(),
+			localmessagenotification.NewConfig(),
+		)
+		msg := newSizedTestMessage(body(n), exp)
+		err := conn.LocalMessageSubmission().Client.SubmitMessage(&msg)
+		require.ErrorIs(
+			t, err, protocol.ErrProtocolShuttingDown, "body of %d bytes", n,
+		)
 	}
 	require.Zero(t, s.Mempool().Len())
+	submit := submitter(t, s)
 	for _, n := range []int{90, 1000, 2000} {
-		require.Nil(t, submit(newTestMessage(body(n), exp)), "%d bytes", n)
+		require.Nil(t, submit(newSizedTestMessage(body(n), exp)), "%d bytes", n)
 	}
 	require.Equal(t, 3, s.Mempool().Len())
-	require.Equal(
-		t,
-		5.0,
-		metricValue(t, reg, "dingo_dmq_validation_failures_total", "invalid"),
-	)
 
 	// A signature or key of the wrong length is refused as well.
-	short := newTestMessage(body(400), exp)
+	short := newSizedTestMessage(body(400), exp)
 	short.KESSignature = make([]byte, 447)
 	require.IsType(t, ocommon.InvalidReason{}, submit(short))
+	require.Equal(
+		t,
+		1.0,
+		metricValue(t, reg, "dingo_dmq_validation_failures_total", "invalid"),
+	)
 }

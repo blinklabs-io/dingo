@@ -17,6 +17,7 @@ package dmq
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,7 +61,7 @@ func announcedBodies(t *testing.T, s *Stack, ids []ocommon.MessageIDAndSize) []s
 	for _, item := range ids {
 		msg, ok := s.pool.Get(item.MessageID)
 		require.True(t, ok)
-		bodies = append(bodies, string(msg.Payload.MessageBody))
+		bodies = append(bodies, strings.TrimRight(string(msg.Payload.MessageBody), "."))
 	}
 	return bodies
 }
@@ -218,7 +219,7 @@ func TestPeerDropsAnExpiredHeldMessageWithoutDelayingItsPool(t *testing.T) {
 	// #nosec G115 -- test fixture timestamp
 	soon := uint32(now.Add(90 * time.Second).Unix())
 	first := poolMessage(t, "a1", 1)
-	short := newTestMessage([]byte("a2"), soon)
+	short := newTestMessage(testBody("a2"), soon)
 	short.ColdVerificationKey = bytes.Repeat([]byte{1}, 32)
 	last := poolMessage(t, "a3", 1)
 	for _, m := range []ocommon.DmqMessage{first, short, last} {
