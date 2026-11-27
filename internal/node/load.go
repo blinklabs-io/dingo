@@ -794,7 +794,7 @@ func LoadWithDB(
 	if err := ls.Start(context.WithoutCancel(ctx)); err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
-	defer ls.Close()
+	defer ls.Close() //nolint:contextcheck // Close has no caller context; it bounds its own waits.
 	defer startLoadAnchorUpdater(ctx, ls, utxoSet)()
 
 	// Capture the genesis stake snapshot (epoch 0) now that ls.Start has

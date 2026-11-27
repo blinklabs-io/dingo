@@ -62,15 +62,15 @@ func buildDecodableTestBlock(
 	require.NoError(t, err)
 	hash := decoded.Hash().Bytes()
 	return models.Block{
-			Slot:   slot,
-			Hash:   hash,
-			Number: blockNumber,
-			Type:   gledger.BlockTypeConway,
-			Cbor:   raw,
-		}, ocommon.Point{
-			Slot: slot,
-			Hash: hash,
-		}
+		Slot:   slot,
+		Hash:   hash,
+		Number: blockNumber,
+		Type:   gledger.BlockTypeConway,
+		Cbor:   raw,
+	}, ocommon.Point{
+		Slot: slot,
+		Hash: hash,
+	}
 }
 
 func testLogger() *slog.Logger {
@@ -108,7 +108,7 @@ func TestDecodeReadChainBatchSerialAndPipelineAgree(t *testing.T) {
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(ctx))
 	defer func() {
-		require.NoError(t, pipelineLS.blockPipeline.Stop())
+		require.NoError(t, pipelineLS.blockPipeline.Stop(context.Background()))
 	}()
 	pipelineDecoded, ok := pipelineLS.decodeReadChainBatch(ctx, rawBatch)
 	require.True(t, ok)
@@ -157,7 +157,7 @@ func TestDecodeReadChainBatchPropagatesDecodeErrorBothModes(t *testing.T) {
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(ctx))
 	defer func() {
-		require.NoError(t, pipelineLS.blockPipeline.Stop())
+		require.NoError(t, pipelineLS.blockPipeline.Stop(context.Background()))
 	}()
 	_, ok = pipelineLS.decodeReadChainBatch(ctx, rawBatch)
 	assert.False(t, ok)
@@ -258,7 +258,7 @@ func TestLedgerReadChainIteratorPipelineMatchesSerial(t *testing.T) {
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(t.Context()))
 	defer func() {
-		require.NoError(t, pipelineLS.blockPipeline.Stop())
+		require.NoError(t, pipelineLS.blockPipeline.Stop(context.Background()))
 	}()
 	pipelineBlocks := run(t, pipelineLS)
 
@@ -334,7 +334,7 @@ func TestLedgerReadChainIteratorRollbackTrimMatchesBothModes(t *testing.T) {
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(t.Context()))
 	defer func() {
-		require.NoError(t, pipelineLS.blockPipeline.Stop())
+		require.NoError(t, pipelineLS.blockPipeline.Stop(context.Background()))
 	}()
 	pipelineResult := run(t, pipelineLS)
 	require.False(t, pipelineResult.rollback)
@@ -382,7 +382,7 @@ func TestBlockPipelineLifecycleNoGoroutineLeak(t *testing.T) {
 		require.True(t, ok)
 		require.Len(t, decoded, 1)
 
-		require.NoError(t, ls.blockPipeline.Stop())
+		require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 	}
 
 	runtime.GC()
@@ -605,7 +605,7 @@ func TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts(t *testing.T) {
 			)
 		}
 
-		require.NoError(t, ls.blockPipeline.Stop())
+		require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 	}
 }
 
@@ -651,7 +651,7 @@ func TestBlockPipelineLifecycleNoGoroutineLeakWithValidation(t *testing.T) {
 		require.True(t, ok)
 		require.Len(t, decoded, 1)
 
-		require.NoError(t, ls.blockPipeline.Stop())
+		require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 	}
 
 	runtime.GC()
@@ -749,7 +749,7 @@ func TestLedgerReadChainIteratorRollbackTrimMatchesValidateEnabled(
 	)
 	require.NoError(t, validateLS.blockPipeline.Start(t.Context()))
 	defer func() {
-		require.NoError(t, validateLS.blockPipeline.Stop())
+		require.NoError(t, validateLS.blockPipeline.Stop(context.Background()))
 	}()
 	validateResult := run(t, validateLS)
 	require.False(t, validateResult.rollback)
@@ -835,7 +835,7 @@ func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 	}()
 	defer func() {
 		release()
-		require.NoError(t, ls.blockPipeline.Stop())
+		require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 		<-resultsDone
 	}()
 
@@ -926,7 +926,7 @@ func TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline(
 			)
 			require.NoError(t, fixture.ls.blockPipeline.Start(t.Context()))
 			t.Cleanup(func() {
-				require.NoError(t, fixture.ls.blockPipeline.Stop())
+				require.NoError(t, fixture.ls.blockPipeline.Stop(context.Background()))
 			})
 		}
 		// Use the identical fork content ("same-fork") for both scenarios
