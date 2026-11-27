@@ -592,12 +592,8 @@ func (p *PeerGovernor) enforcePeerLimits(
 
 	// Enforce established (warm) peer target
 	if p.config.TargetNumberOfEstablishedPeers > 0 {
-		events = append(events, p.enforceStateLimit(
-			PeerStateWarm,
+		events = append(events, p.demoteExcessWarmPeersLocked(
 			p.config.TargetNumberOfEstablishedPeers,
-			false,
-			removedCount,
-			closes,
 		)...)
 	}
 
@@ -625,6 +621,81 @@ func (p *PeerGovernor) enforcePeerLimits(
 		)...)
 	}
 
+	return events
+}
+
+// demoteExcessWarmPeersLocked makes outbound warm peers over limit cold,
+// lowest source priority and score first, and closes their connections. A
+// demoted peer stays known: removing it would let the next peer-sharing or
+// ledger round add and dial it again. Topology peers and inbound peers are
+// never demoted here.
+// Returns events that should be published after releasing the lock.
+// Must be called with p.mu held.
+func (p *PeerGovernor) demoteExcessWarmPeersLocked(limit int) []pendingEvent {
+	var warm, candidates []*Peer
+	for _, peer := range p.peers {
+		if peer == nil || peer.State != PeerStateWarm ||
+			peer.Source == PeerSourceInboundConn {
+			continue
+		}
+		warm = append(warm, peer)
+		if !p.isTopologyPeer(peer.Source) {
+			candidates = append(candidates, peer)
+		}
+	}
+	demoteCount := min(len(warm)-limit, len(candidates))
+	if demoteCount <= 0 {
+		return nil
+	}
+	slices.SortFunc(candidates, func(a, b *Peer) int {
+		if c := cmp.Compare(
+			p.peerSourcePriority(a.Source),
+			p.peerSourcePriority(b.Source),
+		); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.PerformanceScore, b.PerformanceScore)
+	})
+	var events []pendingEvent
+	for _, peer := range candidates[:demoteCount] {
+		oldSource := peer.Source
+		oldConn := clonePeerConnection(peer.Connection)
+		p.config.Logger.Debug(
+			"demoting peer due to established limit exceeded",
+			"address", peer.Address,
+			"source", peer.Source,
+			"limit", limit,
+		)
+		if peer.Connection != nil && p.config.ConnManager != nil {
+			conn := p.config.ConnManager.GetConnectionById(peer.Connection.Id)
+			if conn != nil {
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"error closing connection for peer demoted due to limit exceeded",
+					"address",
+					peer.Address,
+				)
+			}
+		}
+		peer.Connection = nil
+		p.recordPeerStateChange(peer.State, PeerStateCold)
+		peer.State = PeerStateCold
+		events = p.appendChainSelectionEventsLocked(
+			events,
+			p.bootstrapExited,
+			oldSource,
+			oldConn,
+			peer,
+		)
+		events = append(events, pendingEvent{
+			PeerDemotedEventType,
+			PeerStateChangeEvent{
+				Address: peer.Address,
+				Reason:  "limit exceeded",
+			},
+		})
+	}
 	return events
 }
 

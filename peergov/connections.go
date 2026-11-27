@@ -219,16 +219,45 @@ func (p *PeerGovernor) startOutboundConnections() {
 
 	for _, tmpPeer := range peers {
 		if tmpPeer != nil {
-			p.spawnOutboundConnection(tmpPeer)
+			p.mu.Lock()
+			p.spawnBelowEstablishedTargetLocked(tmpPeer)
+			p.mu.Unlock()
 		}
 	}
 }
 
-// spawnOutboundConnection serializes work registration with Stop. Callers
-// already holding p.mu use spawnOutboundConnectionLocked instead.
-func (p *PeerGovernor) spawnOutboundConnection(peer *Peer) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// establishedOrDialingCountLocked returns the number of outbound peers that
+// are connected or have a dial in flight. Inbound peers have their own
+// bounds and do not count. Callers must hold p.mu.
+func (p *PeerGovernor) establishedOrDialingCountLocked() int {
+	n := 0
+	for _, peer := range p.peers {
+		if peer == nil || peer.Source == PeerSourceInboundConn {
+			continue
+		}
+		if peer.State != PeerStateCold ||
+			(peer.Reconnecting && peer.Connection == nil) {
+			n++
+		}
+	}
+	return n
+}
+
+// spawnBelowEstablishedTargetLocked dials a peer found by discovery or held
+// at start. A topology peer is always dialled. Any other peer is dialled
+// only while established peers and dials in flight are below
+// TargetNumberOfEstablishedPeers (0 means unlimited); otherwise it stays
+// known and cold, and reconcile's redial path decides about it later.
+// Must be called with p.mu held.
+func (p *PeerGovernor) spawnBelowEstablishedTargetLocked(peer *Peer) {
+	if peer == nil {
+		return
+	}
+	target := p.config.TargetNumberOfEstablishedPeers
+	if !p.isTopologyPeer(peer.Source) && target > 0 &&
+		p.establishedOrDialingCountLocked() >= target {
+		return
+	}
 	p.spawnOutboundConnectionLocked(peer)
 }
 
