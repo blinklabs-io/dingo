@@ -4901,11 +4901,12 @@ from the potentially lagging IndexerDB again. A database of another network or m
 `mithril sync` imports ledger state and may retain block history that starts
 after the chain origin. An empty IndexerDB derives its rows by replaying the
 complete canonical block history from genesis; imported ledger state is not a
-source of IndexerDB facts. If its first retained block has a parent or a
-nonzero block number, the writer returns `indexer.ErrChainNotFromGenesis` and
-stops rather than serving incomplete history. Complete block history must be
-available before an empty IndexerDB can be built. An IndexerDB that already
-contains indexed history continues from its own tip.
+source of IndexerDB facts. The writer returns `indexer.ErrChainNotFromGenesis`
+when the first retained block has both a nonzero block number and a non-null
+previous-block hash. A first block numbered zero, or a first block without a
+previous-block hash, is accepted as the chain origin. Complete block history
+must be available before an empty IndexerDB can be built. An IndexerDB that
+already contains indexed history continues from its own tip.
 
 ### Serving from the IndexerDB
 
