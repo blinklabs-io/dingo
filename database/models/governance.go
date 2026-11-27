@@ -90,6 +90,18 @@ type GovernanceProposal struct {
 	DeletedSlot *uint64
 }
 
+// RecordedEnactedEpoch returns the epoch the proposal was enacted in, or nil
+// when it is not enacted or the epoch is unknown. A ledger-state import seeds
+// each per-purpose root as enacted at the snapshot anchor with AddedSlot 0,
+// so governance resolves it as the purpose's current root; the snapshot does
+// not record when the root was enacted, so that anchor is not its epoch.
+func (p *GovernanceProposal) RecordedEnactedEpoch() *uint64 {
+	if p.AddedSlot == 0 {
+		return nil
+	}
+	return p.EnactedEpoch
+}
+
 // GovernanceVote represents a vote cast by a Constitutional Committee member,
 // DRep, or Stake Pool Operator on a governance proposal.
 type GovernanceVote struct {

@@ -181,7 +181,10 @@ func (ls *LedgerState) governanceProposalFactRows(
 	}
 	for _, p := range props {
 		rE, rS := group(p.RatifiedEpoch, p.RatifiedSlot)
-		eE, eS := group(p.EnactedEpoch, p.EnactedSlot)
+		var eE, eS any
+		if p.RecordedEnactedEpoch() != nil {
+			eE, eS = group(p.EnactedEpoch, p.EnactedSlot)
+		}
 		xE, xS := group(p.ExpiredEpoch, p.ExpiredSlot)
 		var del any
 		if asOfSlot(p.DeletedSlot, through) {

@@ -468,7 +468,7 @@ func proposalReadOf(p *models.GovernanceProposal) *proposalRead {
 		actionType:     int(p.ActionType),
 		proposedEpoch:  int(p.ProposedEpoch), //nolint:gosec // an epoch number
 		expiresEpoch:   int(p.ExpiresEpoch),  //nolint:gosec // an epoch number
-		enacted:        epochPtr(p.EnactedEpoch),
+		enacted:        epochPtr(p.RecordedEnactedEpoch()),
 		ratified:       epochPtr(p.RatifiedEpoch),
 		expired:        epochPtr(p.ExpiredEpoch),
 		deposit:        uint64(p.Deposit),
