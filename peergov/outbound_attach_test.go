@@ -238,7 +238,9 @@ func TestCreateOutboundConnection_StaleWorkerDoesNotReplaceNewEntry(
 	pg.peers = []*Peer{first}
 	pg.mu.Unlock()
 
-	pg.spawnOutboundConnection(first)
+	pg.mu.Lock()
+	pg.spawnOutboundConnectionLocked(first)
+	pg.mu.Unlock()
 	waitDone(t, firstDialing, "the first dial")
 
 	// The known-peer limit forgets the cold entry while its worker dials,
@@ -337,7 +339,9 @@ func TestCreateOutboundConnection_StaleWorkerFailureLeavesNewEntry(
 	pg.peers = []*Peer{first}
 	pg.mu.Unlock()
 
-	pg.spawnOutboundConnection(first)
+	pg.mu.Lock()
+	pg.spawnOutboundConnectionLocked(first)
+	pg.mu.Unlock()
 	waitDone(t, firstDialing, "the first dial")
 	pg.mu.Lock()
 	removed := 0
@@ -412,7 +416,9 @@ func TestCreateOutboundConnection_KeepsClientConnectionRecordedDuringDial(
 	pg.peers = []*Peer{target}
 	pg.mu.Unlock()
 
-	pg.spawnOutboundConnection(target)
+	pg.mu.Lock()
+	pg.spawnOutboundConnectionLocked(target)
+	pg.mu.Unlock()
 	waitDone(t, dialing, "the dial")
 	inboundId := closeLaneConnId(1)
 	pg.mu.Lock()
