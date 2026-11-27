@@ -95,7 +95,11 @@ func TestConnectionClosedEventsSurviveGovernorLockBacklog(t *testing.T) {
 	}
 	pg.mu.Unlock()
 
-	go publish(heldId)
+	heldDone := make(chan struct{})
+	go func() {
+		defer close(heldDone)
+		publish(heldId)
+	}()
 	require.Eventually(t, func() bool {
 		pg.mu.Lock()
 		defer pg.mu.Unlock()
@@ -106,5 +110,10 @@ func TestConnectionClosedEventsSurviveGovernorLockBacklog(t *testing.T) {
 	case <-backlogDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("backlog publisher did not finish")
+	}
+	select {
+	case <-heldDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close publisher did not finish")
 	}
 }
