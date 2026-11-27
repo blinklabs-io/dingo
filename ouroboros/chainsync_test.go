@@ -4386,7 +4386,7 @@ func (f *chainsyncServerFixture) requireConnectionClosed(
 
 // requireClientUnparked asserts the server dropped the transport, which is the
 // only thing that releases a peer the server has parked in MustReply short of
-// gouroboros' randomized 135-269s MustReply timer. The harness surfaces the
+// gouroboros' randomized 601-911s MustReply timer. The harness surfaces the
 // drop by closing its observed-message stream, so Observe returns
 // csmock.ErrClosed; a server that abandons the wait silently instead leaves
 // Observe blocking until the deadline.
@@ -5537,7 +5537,7 @@ func TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply(
 // Once AwaitReply is on the wire the server holds agency in MustReply, so a
 // waiter that gives up without a reply must drop the transport. Every test
 // below asserts the client was released rather than left to gouroboros'
-// randomized 135-269s MustReply timeout, which is what produced the observed
+// randomized 601-911s MustReply timeout, which is what produced the observed
 // reconnect-and-park loop.
 // =============================================================================
 
@@ -5775,11 +5775,8 @@ func TestEffectiveChainsyncBlockTimeoutUsesProtocolMaxAsFloor(t *testing.T) {
 		ochainsync.MustReplyTimeoutMax,
 		effectiveChainsyncBlockTimeout(time.Minute),
 	)
-	require.Equal(
-		t,
-		10*time.Minute,
-		effectiveChainsyncBlockTimeout(10*time.Minute),
-	)
+	above := ochainsync.MustReplyTimeoutMax + time.Minute
+	require.Equal(t, above, effectiveChainsyncBlockTimeout(above))
 }
 
 func TestDecodeChainsyncHeaderAcceptsFullByronEbb(t *testing.T) {
