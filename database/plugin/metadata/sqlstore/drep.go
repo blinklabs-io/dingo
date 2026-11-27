@@ -1368,27 +1368,13 @@ ORDER BY COALESCE(first_seen.slot, drep.added_slot), drep.id`
 	return ret, nil
 }
 
-func (s *Store) GetDrepsPage(
-	page models.DrepListPageQuery,
-	txn types.Txn,
-) ([]models.DrepListRow, int, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, 0, err
-	}
-	if page.Limit < 1 || page.Offset < 0 {
-		return []models.DrepListRow{}, 0, nil
-	}
-	currentEpoch, err := checkedInt64(page.CurrentEpoch)
-	if err != nil {
-		return nil, 0, err
-	}
-	inactivity, err := checkedInt64(page.InactivityPeriod)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	ctes := `
+// drepPageCTEs lists every DRep and classifies it as retired or expired; its
+// four arguments are the current epoch, whether the inactivity period is
+// known, the period, and the current epoch again. Each row's registration
+// epoch is the newest epoch starting at or before the registration, read by
+// seeking idx_epoch_start_slot: MAX(epoch_id) over the same range walks the
+// epoch table once per DRep, and the list builds every DRep before LIMIT.
+const drepPageCTEs = `
 WITH first_seen AS (
     SELECT cred, tag, MIN(slot) AS slot FROM (
         SELECT drep_credential AS cred, credential_tag AS tag,
@@ -1436,8 +1422,9 @@ listed AS (
            drep.last_activity_epoch, drep.expiry_epoch, drep.active,
            COALESCE(first_seen.slot, drep.added_slot) first_seen_slot,
            COALESCE(last_reg.slot, 0) last_registration_slot,
-           COALESCE((SELECT MAX(epoch_id) FROM epoch
-                     WHERE start_slot <= COALESCE(NULLIF(last_reg.slot, 0), drep.added_slot)), 0)
+           COALESCE((SELECT epoch_id FROM epoch
+                     WHERE start_slot <= COALESCE(NULLIF(last_reg.slot, 0), drep.added_slot)
+                     ORDER BY start_slot DESC, epoch_id DESC LIMIT 1), 0)
                registration_epoch,
            NULL predefined
     FROM drep
@@ -1463,6 +1450,28 @@ classified AS (
            END expired
     FROM listed
 ) `
+
+func (s *Store) GetDrepsPage(
+	page models.DrepListPageQuery,
+	txn types.Txn,
+) ([]models.DrepListRow, int, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, 0, err
+	}
+	if page.Limit < 1 || page.Offset < 0 {
+		return []models.DrepListRow{}, 0, nil
+	}
+	currentEpoch, err := checkedInt64(page.CurrentEpoch)
+	if err != nil {
+		return nil, 0, err
+	}
+	inactivity, err := checkedInt64(page.InactivityPeriod)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	ctes := drepPageCTEs
 	baseArgs := []any{
 		currentEpoch,
 		page.InactivityKnown,
