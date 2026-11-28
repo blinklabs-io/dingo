@@ -59,6 +59,10 @@ type densityCandidate struct {
 	baseBlock uint64
 	idling    bool
 	held      bool
+	// latestSlot is the slot of the newest header the peer has sent,
+	// including one still waiting for the ledger forecast horizon that is not
+	// yet part of points.
+	latestSlot uint64
 }
 
 func (c densityCandidate) fragment() CandidateFragment {
@@ -68,12 +72,15 @@ func (c densityCandidate) fragment() CandidateFragment {
 // fragmentWindowBounds returns the lower and upper bound on the number of
 // blocks a candidate has in (after, windowEnd] along its own chain. The lower
 // bound is what it has delivered. The upper bound adds every slot between its
-// head and windowEnd unless the head already reached windowEnd.
+// head and windowEnd unless the head already reached windowEnd or latestSlot,
+// the newest header it has sent, is past windowEnd: headers are sent in slot
+// order, so nothing else can fall in the window.
 //
 // A peer that has not sent MsgAwaitReply still gets the trailing slots: its tip
 // can move forward, so advertised-tip equality alone does not make it idle.
 func fragmentWindowBounds(
 	points []ocommon.Point,
+	latestSlot uint64,
 	after uint64,
 	windowEnd uint64,
 ) (uint64, uint64) {
@@ -86,7 +93,7 @@ func fragmentWindowBounds(
 	// #nosec G115 -- both indexes are within points and pastWindow >= first.
 	lower := uint64(pastWindow - first)
 	head := points[len(points)-1].Slot
-	if head >= windowEnd {
+	if head >= windowEnd || latestSlot > windowEnd {
 		return lower, lower
 	}
 	return lower, safeAddUint64(lower, windowEnd-head)
@@ -142,17 +149,23 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 				b.points,
 				b.baseBlock,
 			)
-			if !ok ||
-				intersection.Slot == a.points[len(a.points)-1].Slot ||
-				intersection.Slot == b.points[len(b.points)-1].Slot {
+			if !ok || intersection.Slot == a.points[len(a.points)-1].Slot {
 				continue
 			}
 			windowEnd := safeAddUint64(intersection.Slot, window)
+			// A peer with nothing after the intersection is compared only
+			// when it is idling or has already sent a header past the
+			// window; otherwise its next header may still change the
+			// outcome.
+			if intersection.Slot == b.points[len(b.points)-1].Slot &&
+				!b.idling && b.latestSlot <= windowEnd {
+				continue
+			}
 			dominating, _ := fragmentWindowBounds(
-				a.points, intersection.Slot, windowEnd,
+				a.points, a.latestSlot, intersection.Slot, windowEnd,
 			)
 			minDensity, maxDensity := fragmentWindowBounds(
-				b.points, intersection.Slot, windowEnd,
+				b.points, b.latestSlot, intersection.Slot, windowEnd,
 			)
 			rivalStart := sort.Search(len(a.points), func(i int) bool {
 				return a.points[i].Slot > intersection.Slot
@@ -206,15 +219,20 @@ func (cs *ChainSelector) densityCandidatesLocked() []densityCandidate {
 			!cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		if len(peerTip.observedPoints) == 0 {
+		points, baseBlock, unverifiedStaged := cs.verifiedFrontierLocked(
+			connId, peerTip,
+		)
+		if len(points) == 0 {
 			continue
 		}
 		candidates = append(candidates, densityCandidate{
 			connId:    connId,
-			points:    peerTip.observedPoints,
-			baseBlock: peerTip.observedPointBaseBlock,
-			idling:    peerTip.isIdling(),
-			held:      peerTip.eagernessPaused > 0,
+			points:    points,
+			baseBlock: baseBlock,
+			// A peer with staged headers has sent more since it idled.
+			idling:     peerTip.isIdling() && len(cs.pendingPeerTips[connId]) == 0,
+			held:       peerTip.eagernessPaused > 0,
+			latestSlot: cs.latestHeaderSlotLocked(connId, points, unverifiedStaged),
 		})
 	}
 	slices.SortFunc(candidates, func(a, b densityCandidate) int {
@@ -255,10 +273,10 @@ func (cs *ChainSelector) eagernessStandoffDisconnectsLocked(
 				fragmentB.HeadPoint().Slot,
 			)
 			countA, _ := fragmentWindowBounds(
-				a.points, intersection.Slot, compared,
+				a.points, a.latestSlot, intersection.Slot, compared,
 			)
 			countB, _ := fragmentWindowBounds(
-				b.points, intersection.Slot, compared,
+				b.points, b.latestSlot, intersection.Slot, compared,
 			)
 			winner, loser := a, b
 			winnerCount, loserCount := countA, countB
@@ -295,4 +313,67 @@ func (cs *ChainSelector) markDensityDisconnectedLocked(
 		)
 	}
 	cs.genesisDensityDisconnected[connId] = struct{}{}
+}
+
+// verifiedFrontierLocked returns the header frontier density may count for
+// connId: the admitted points plus the staged points whose crypto verification
+// was not deferred. A staged header without a verification generation passed
+// no cryptographic check, so counting it would let one peer's unauthenticated
+// headers decide another peer's disconnect; the frontier stops before the
+// first such header. unverifiedStaged reports that staged headers remain
+// outside the returned points, in which case no later header follows the
+// frontier directly.
+func (cs *ChainSelector) verifiedFrontierLocked(
+	connId ouroboros.ConnectionId,
+	committed *PeerChainTip,
+) (points []ocommon.Point, baseBlock uint64, unverifiedStaged bool) {
+	points = committed.observedPoints
+	baseBlock = committed.observedPointBaseBlock
+	pending := cs.pendingPeerTips[connId]
+	if len(pending) == 0 {
+		return points, baseBlock, false
+	}
+	staged := cs.latestPeerTipCandidateLocked(connId)
+	if staged == nil || len(staged.observedPoints) == 0 {
+		return points, baseBlock, true
+	}
+	cut := len(staged.observedPoints)
+	for _, candidate := range pending {
+		if !candidate.plausible ||
+			candidate.update.HeaderCryptoVerificationGeneration != 0 {
+			continue
+		}
+		cut = -1
+		for i, p := range slices.Backward(staged.observedPoints) {
+			if pointsEqual(p, candidate.update.ObservedTip.Point) {
+				cut = i
+				break
+			}
+		}
+		break
+	}
+	switch {
+	case cut < 0 || cut == 0:
+		return points, baseBlock, true
+	case cut < len(staged.observedPoints):
+		return staged.observedPoints[:cut],
+			staged.observedPointBaseBlock, true
+	}
+	return staged.observedPoints, staged.observedPointBaseBlock, false
+}
+
+// latestHeaderSlotLocked returns the slot of the newest header connId has
+// sent beyond points, the counted frontier. A header held at the ledger
+// forecast horizon is the one uncounted header allowed to close the bound, and
+// only when nothing else is staged between it and points.
+func (cs *ChainSelector) latestHeaderSlotLocked(
+	connId ouroboros.ConnectionId,
+	points []ocommon.Point,
+	unverifiedStaged bool,
+) uint64 {
+	latest := points[len(points)-1].Slot
+	if held, ok := cs.forecastHeldSlots[connId]; ok && !unverifiedStaged {
+		latest = max(latest, held.slot)
+	}
+	return latest
 }

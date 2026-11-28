@@ -331,12 +331,15 @@ type ChainSelector struct {
 	// verified candidates while that peer waits for the forecast horizon. It
 	// is excluded from every selection and admission path.
 	forecastHorizonWitnesses map[ouroboros.ConnectionId]forecastHorizonWitness
-	committedPeerTips        map[ouroboros.ConnectionId]uint64
-	eligible                 map[ouroboros.ConnectionId]bool
-	priority                 map[ouroboros.ConnectionId]int
-	evaluationTrigger        chan struct{}
-	bestPeerConn             *ouroboros.ConnectionId
-	localTip                 ochainsync.Tip
+	// forecastHeldSlots records forecast-held header slots for Genesis
+	// density, independent of corroboration. Guarded by mutex.
+	forecastHeldSlots map[ouroboros.ConnectionId]forecastHeldSlot
+	committedPeerTips map[ouroboros.ConnectionId]uint64
+	eligible          map[ouroboros.ConnectionId]bool
+	priority          map[ouroboros.ConnectionId]int
+	evaluationTrigger chan struct{}
+	bestPeerConn      *ouroboros.ConnectionId
+	localTip          ochainsync.Tip
 	// localTipKnown records that localTip came from applied ledger state or
 	// an explicitly trusted checkpoint. Its zero value is a valid origin, so
 	// the tip's block number cannot encode this provenance.
@@ -590,6 +593,15 @@ func (cs *ChainSelector) prunePeerTipRejectionReportsLocked() {
 	}
 }
 
+// forecastHeldSlot is the slot of a header a connection has sent that waits
+// for the ledger forecast horizon. Genesis density uses it as the peer's
+// latest header slot; unlike forecastHorizonWitness it is recorded whether or
+// not corroboration is active.
+type forecastHeldSlot struct {
+	admissionID uint64
+	slot        uint64
+}
+
 type forecastHorizonWitness struct {
 	admissionID uint64
 	peerTip     *PeerChainTip
@@ -767,6 +779,7 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		pendingPeerTipFrontiers: make(
 			map[ouroboros.ConnectionId]*PeerChainTip,
 		),
+		forecastHeldSlots: make(map[ouroboros.ConnectionId]forecastHeldSlot),
 		forecastHorizonWitnesses: make(
 			map[ouroboros.ConnectionId]forecastHorizonWitness,
 		),
@@ -1360,12 +1373,19 @@ func (cs *ChainSelector) PrepareForecastHorizonWitness(
 	}
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
-	if !cs.genesisCorroborationActiveLocked() {
-		return nil
-	}
 	base := cs.latestPeerTipCandidateLocked(update.ConnectionId)
 	if base == nil {
 		base = cs.peerTips[update.ConnectionId]
+	}
+	if base != nil &&
+		update.ObservedTip.Point.Slot > base.ObservedTip.Point.Slot {
+		cs.forecastHeldSlots[update.ConnectionId] = forecastHeldSlot{
+			admissionID: update.AdmissionID,
+			slot:        update.ObservedTip.Point.Slot,
+		}
+	}
+	if !cs.genesisCorroborationActiveLocked() {
+		return nil
 	}
 	if base == nil || update.ObservedTip.Point.Slot <= base.ObservedTip.Point.Slot ||
 		len(update.ObservedPrevHash) == 0 ||
@@ -1401,6 +1421,10 @@ func (cs *ChainSelector) RemoveForecastHorizonWitness(
 ) {
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
+	if held, ok := cs.forecastHeldSlots[update.ConnectionId]; ok &&
+		held.admissionID == update.AdmissionID {
+		delete(cs.forecastHeldSlots, update.ConnectionId)
+	}
 	witness, ok := cs.forecastHorizonWitnesses[update.ConnectionId]
 	if ok && witness.admissionID == update.AdmissionID {
 		delete(cs.forecastHorizonWitnesses, update.ConnectionId)
@@ -3220,6 +3244,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.pendingPeerTips, connId)
 	delete(cs.pendingPeerTipFrontiers, connId)
 	delete(cs.forecastHorizonWitnesses, connId)
+	delete(cs.forecastHeldSlots, connId)
 	delete(cs.jumpRecords, connId)
 	delete(cs.committedPeerTips, connId)
 	delete(cs.eligible, connId)
