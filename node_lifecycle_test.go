@@ -692,6 +692,7 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	require.NotSame(t, ouroBeforeRestore, n.ouroboros())
 	require.Same(t, n.ledgerState, n.ouroboros().LedgerState())
 	require.Same(t, n.mempool, n.ouroboros().Mempool())
+	require.Same(t, n.chainMempool, n.ouroboros().ChainMempool())
 	require.Same(t, n.chainsyncState, n.ouroboros().ChainsyncState())
 	require.Same(t, n.connManager, n.ouroboros().ConnManager())
 	require.Same(t, n.peerGov, n.ouroboros().PeerGov())
@@ -1812,8 +1813,9 @@ func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedCon
 	})
 
 	n := &Node{
-		config:      NewConfig(WithLogger(logger)),
-		connManager: cm,
+		config:       NewConfig(WithLogger(logger)),
+		connManager:  cm,
+		chainMempool: &configTestMempoolRole{},
 	}
 
 	// An empty connection manager may complete cleanly or report the expired
@@ -1830,6 +1832,7 @@ func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedCon
 	if err != nil {
 		require.ErrorIs(t, err, errStorageDrainUnconfirmed)
 	}
+	require.Nil(t, n.chainMempool)
 }
 
 func newSwapTestNode(t *testing.T, dataDir string) *Node {

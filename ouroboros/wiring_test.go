@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
+	sdkcardano "github.com/blinklabs-io/dingo/sdk/cardano"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -108,12 +109,16 @@ func newWiringTestDeps(t *testing.T) OuroborosConfig {
 	connManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{Logger: logger},
 	)
+	pool := &mempool.FIFO{Mempool: m}
+	role, err := sdkcardano.NewMempoolRole(pool)
+	require.NoError(t, err)
 	return OuroborosConfig{
 		Logger:                  logger,
 		EventBus:                bus,
 		LedgerState:             ls,
 		LeiosAnnouncementLedger: ls,
-		Mempool:                 &mempool.FIFO{Mempool: m},
+		Mempool:                 pool,
+		ChainMempool:            role,
 		ChainsyncState:          chainsync.NewState(bus, ls),
 		ConnManager:             connManager,
 		PeerGov: peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
@@ -188,6 +193,17 @@ func TestNewOuroborosRequiresAnnouncementLedgerWhenLeiosEnabled(t *testing.T) {
 	require.Nil(t, o)
 	require.ErrorIs(t, err, ErrMissingDependency)
 	require.ErrorContains(t, err, "LeiosAnnouncementLedger")
+}
+
+func TestNewOuroborosAllowsMissingChainMempool(t *testing.T) {
+	t.Parallel()
+
+	cfg := newWiringTestDeps(t)
+	cfg.ChainMempool = nil
+
+	o, err := NewOuroboros(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
 }
 
 func TestNewOuroborosRejectsChainsyncCapacityOverflow(t *testing.T) {

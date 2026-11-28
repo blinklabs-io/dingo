@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/mempool"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -44,6 +45,9 @@ const (
 )
 
 var (
+	errTxsubmissionMempoolUnavailable = errors.New(
+		"tx-submission: mempool unavailable",
+	)
 	errTxsubmissionAdmissionRetriesExhausted = errors.New(
 		"txsubmission admission retries exhausted",
 	)
@@ -727,10 +731,15 @@ func (o *Ouroboros) txsubmissionServerInit(
 					for {
 						err = retryTxsubmissionAdmission(
 							func() error {
-								return o.mempool.AddTransaction(
+								if isNilInterface(o.chainMempool) {
+									return errTxsubmissionMempoolUnavailable
+								}
+								return o.chainMempool.AddTx(
 									validationCtx,
-									uint(txBody.EraId),
-									txBody.TxBody,
+									sdkchain.NewPayload(
+										sdkchain.TxView{Type: uint(txBody.EraId)},
+										txBody.TxBody,
+									),
 								)
 							},
 							waitForHeadroom,

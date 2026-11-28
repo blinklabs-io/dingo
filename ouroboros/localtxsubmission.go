@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/mempool"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -93,7 +94,7 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 			"local-tx-submission: unexpected transaction content type",
 		)
 	}
-	if o.mempool == nil {
+	if isNilInterface(o.chainMempool) {
 		return errLocalTxSubmissionMempoolUnavailable
 	}
 	// The listener starts protocols before registering the connection, so the
@@ -118,7 +119,10 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 			}
 		}()
 	}
-	err := o.mempool.AddTransaction(valCtx, uint(tx.EraId), rawTx)
+	err := o.chainMempool.AddTx(
+		valCtx,
+		sdkchain.NewPayload(sdkchain.TxView{Type: uint(tx.EraId)}, rawTx),
+	)
 	if err != nil {
 		o.config.Logger.Error(
 			fmt.Sprintf(

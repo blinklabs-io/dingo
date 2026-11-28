@@ -308,6 +308,12 @@ type importBoundaryRule struct {
 // explicit. Update ARCHITECTURE.md when that changes an ownership boundary.
 var importBoundaryRules = []importBoundaryRule{
 	{
+		from:      "mempool",
+		forbidden: []string{"sdk"},
+		reason: "built-in mempool providers stay below the chain-role boundary; " +
+			"node composition adapts them to the SDK role",
+	},
+	{
 		from: "ledger",
 		forbidden: []string{
 			"connmanager",

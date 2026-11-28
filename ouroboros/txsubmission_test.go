@@ -36,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/mempool"
+	sdkcardano "github.com/blinklabs-io/dingo/sdk/cardano"
 	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -901,8 +902,16 @@ func newTxSubmissionTestOuroboros(
 			Logger: logger,
 		},
 	)
-	o.mempool = &mempool.FIFO{Mempool: m}
+	setTestMempool(t, o, &mempool.FIFO{Mempool: m})
 	return o, txsubmissionTestConnId(t)
+}
+
+func setTestMempool(t *testing.T, o *Ouroboros, source mempool.Service) {
+	t.Helper()
+	role, err := sdkcardano.NewMempoolRole(source)
+	require.NoError(t, err)
+	o.mempool = source
+	o.chainMempool = role
 }
 
 func txsubmissionTestConnId(t *testing.T) ouroboros.ConnectionId {
@@ -1378,7 +1387,7 @@ func newTxSubmissionRelayHarnessWithOpts(
 		Logger:       logger,
 		PromRegistry: opts.promRegistryA,
 	})
-	nodeA.mempool = nodeAMempool
+	setTestMempool(t, nodeA, nodeAMempool)
 	nodeA.txSubmissionRateLimiter = opts.rateLimiterA
 	nodeB := newOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
 	nodeBMempool := mempool.Service(&mempool.FIFO{Mempool: mB})
@@ -1400,7 +1409,7 @@ func newTxSubmissionRelayHarnessWithOpts(
 			onBlockingNextTx: opts.onBlockingNextTxB,
 		}
 	}
-	nodeB.mempool = nodeBMempool
+	setTestMempool(t, nodeB, nodeBMempool)
 	nodeBClientOpts := nodeB.txsubmissionClientConnOpts()
 	if opts.advertiseSizeDelta != 0 {
 		nodeBClientOpts = append(

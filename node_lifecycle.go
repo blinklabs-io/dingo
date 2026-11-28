@@ -503,6 +503,7 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		}
 	}
 	n.mempool = nil
+	n.chainMempool = nil
 	if n.connManager != nil {
 		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
 			// Unconfirmed connection shutdown leaves traffic able to write
@@ -964,6 +965,10 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to recreate mempool: %w", err)
 	}
+	n.chainMempool, err = newCardanoMempoolRole(n.mempool)
+	if err != nil {
+		return fmt.Errorf("failed to recreate mempool chain role: %w", err)
+	}
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
 
 	n.publishChainsyncState(chainsync.NewStateWithConfig(
@@ -1015,6 +1020,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	ouroborosCfg.LedgerState = n.ledgerState
 	ouroborosCfg.LeiosAnnouncementLedger = n.ledgerState
 	ouroborosCfg.Mempool = n.mempool
+	ouroborosCfg.ChainMempool = n.chainMempool
 	ouroborosCfg.ChainsyncState = n.chainsyncState
 	ouroborosCfg.ConnManager = n.connManager
 	ouroborosCfg.PeerGov = n.peerGov

@@ -433,9 +433,12 @@ is not proof that the rest of the node has stopped.
 
 The SDK is a separate module for plugin and chain-role contracts. It cannot
 import the node module or its internal packages, and Cardano-specific types
-are isolated under `sdk/cardano`. The current role adapters describe seams;
-they do not yet replace the node's execution paths. Import-boundary checks
-cover both modules.
+are isolated under `sdk/cardano`. Node composition adapts the selected built-in
+Cardano mempool provider to the optional SDK mempool role; network transaction
+admission uses that role, while relay, forging and query paths retain the
+domain-owned mempool service. Cardano's default, FIFO and DAG implementations
+remain built in rather than externally supplied. Import-boundary checks keep
+the built-in providers below the SDK role adapter and cover both modules.
 
 ## Concurrency and communication
 
