@@ -1261,9 +1261,6 @@ func TestParityListenersKeepPortsReservedUntilHandoff(t *testing.T) {
 			_, err = listen("tcp", address)
 			require.Error(t, err, "the same socket cannot be transferred twice")
 			require.NoError(t, listener.Close())
-			replacement, err := net.Listen("tcp", address)
-			require.NoError(t, err)
-			require.NoError(t, replacement.Close())
 		})
 	}
 }

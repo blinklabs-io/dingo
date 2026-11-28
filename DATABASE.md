@@ -9330,13 +9330,23 @@ sum `DECIMAL(20, 0)` and the store rejects a total past 64 bits). The holdings
 are all read, with no holding cap. The scan runs under the caller's
 transaction context and stops when that context ends.
 
+On SQLite these reads, and the `GetAssetHolders` statements, write the
+liveness test as `+u.deleted_slot = 0`. `deleted_slot = 0` matches nearly every
+row, yet with no planner statistics, or with the bounded statistics the store
+gathers, SQLite ranks `idx_utxo_deleted_payment_script (deleted_slot=?)` above
+the asset's holdings and probes `asset_holding` once per live output, so one
+asset's lookup costs the whole live UTxO set. The unary plus keeps that index
+out of the plan: the asset's identity row and its holdings drive, and `utxo` is
+reached by primary key. Other backends keep the plain predicate.
+
 `GetAssetQuantitiesByPolicyAndName` (the Blockfrost `/assets` and
 `/assets/policy/{policy_id}` page quantities) totals a whole page of assets
 with the same join, filtered by an `OR` of `(i.policy_id = ? AND i.name = ?)`
-pairs and grouped by `h.asset_id, i.policy_id, i.name`; leading with the
-holding's `asset_id` keeps SQLite searching `asset_identity` once per pair
-rather than scanning its unique index for the grouping order. Each pair binds two parameters, so
-a page wider than half the dialect's parameter limit is split into chunks. The
+pairs, with the same liveness predicate, and grouped by
+`h.asset_id, i.policy_id, i.name`; leading with the holding's `asset_id`
+keeps SQLite searching `asset_identity` once per pair rather than scanning
+its unique index for the grouping order. Each pair binds two parameters, so a
+page wider than half the dialect's parameter limit is split into chunks. The
 result is aligned with the requested assets; an asset with no live holding
 totals zero, and the overflow rule above applies per asset.
 

@@ -22,7 +22,7 @@ require (
 	github.com/blinklabs-io/go-scls v0.2.0
 	github.com/blinklabs-io/gouroboros v0.220.4
 	github.com/blinklabs-io/ouroboros-mock v0.21.2
-	github.com/blinklabs-io/plutigo v0.12.2
+	github.com/blinklabs-io/plutigo v0.13.1
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.22.0
