@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -476,6 +477,7 @@ func TestCheckpointWALResetsWALUnderSaturatedWriter(t *testing.T) {
 		pageSize           = 4096
 		ticks              = 8
 		commitsPerTick     = 30
+		maxBusyAttempts    = 5
 	)
 	var commits atomic.Int64
 	stop := make(chan struct{})
@@ -538,13 +540,35 @@ func TestCheckpointWALResetsWALUnderSaturatedWriter(t *testing.T) {
 			30*time.Second,
 			"the writer stopped committing",
 		)
-		before := commits.Load()
-		require.NoError(t, tick(t.Context(), true))
-		info, statErr := os.Stat(
-			filepath.Join(dataDir, "metadata.sqlite-wal"),
-		)
-		require.NoError(t, statErr)
-		after := commits.Load()
+		// A tick may legitimately end busy -- the store's own checkpoint
+		// ticker can run at the same instant, and the runner leaves a busy
+		// attempt to the next tick -- so retry a busy tick before asserting.
+		// Without the hold every TRUNCATE attempt is busy, and the retries
+		// run out.
+		var before, after int64
+		var info os.FileInfo
+		for attempt := 0; ; attempt++ {
+			logs.Reset()
+			before = commits.Load()
+			require.NoError(t, tick(t.Context(), true))
+			var statErr error
+			info, statErr = os.Stat(
+				filepath.Join(dataDir, "metadata.sqlite-wal"),
+			)
+			require.NoError(t, statErr)
+			after = commits.Load()
+			if !strings.Contains(logs.String(), "will retry next tick") {
+				break
+			}
+			require.Less(
+				t,
+				attempt,
+				maxBusyAttempts-1,
+				"every attempt of tick %d was busy (%s)",
+				i,
+				logs.String(),
+			)
+		}
 		require.LessOrEqual(
 			t,
 			info.Size(),
