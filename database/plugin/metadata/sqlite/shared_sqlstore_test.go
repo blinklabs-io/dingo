@@ -3475,9 +3475,4 @@ func TestWriteConnectionKeepsTempStoreInMemory(t *testing.T) {
 		"write connection must keep statement journals in memory")
 	require.NotEqual(t, tempStoreMemory, tempStore(readDB),
 		"read pool must not hold temporaries in memory")
-
-	require.NoError(t, store.SetBulkLoadPragmas())
-	require.NoError(t, store.RestoreNormalPragmas())
-	require.Equal(t, tempStoreMemory, tempStore(writeDB),
-		"RestoreNormalPragmas must keep the steady-state temp_store")
 }

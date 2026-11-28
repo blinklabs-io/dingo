@@ -318,12 +318,6 @@ func (m *Manager) run(
 			"error", err,
 		)
 	case !result.Supported:
-	case result.Skipped:
-		m.logger.Debug(
-			"planner statistics run skipped",
-			"component", "plannerstats",
-			"trigger", trigger,
-		)
 	case result.Changed:
 		m.logger.Info(
 			"planner statistics optimized",

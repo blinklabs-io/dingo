@@ -1633,16 +1633,15 @@ func (s *Store) pruneRewardRowsBeforeEpoch(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		sqlTransaction, release, err := s.beginWriteTx(ctx)
+		sqlTransaction, err := s.beginWriteTx(ctx)
 		if err != nil {
 			return err
 		}
 		started := s.rewardStatePruneClock()
 		state := &sqlTxn{
-			owner:   s,
-			tx:      sqlTransaction,
-			ctx:     ctx,
-			release: release,
+			owner: s,
+			tx:    sqlTransaction,
+			ctx:   ctx,
 		}
 		db := s.instrumentedQueryer(sqlTransaction)
 		ids, err := s.selectRewardRowIDs(

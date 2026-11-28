@@ -97,7 +97,7 @@ behavior, and persisted formats are unchanged. Library callers of Mithril
 local `badger` blob and `sqlite` metadata providers.
 
 The ledger's database keeps no metadata store, so a Mithril import into it
-takes no planner statistics, sets no bulk-load pragmas and drops no deferred
+takes no planner statistics and drops no deferred
 indexes; those belong to the IndexerDB. The `metadata_planner_stats_backfill` sync-state key is a row only a
 v0.94.2 API database holds, recording the history backfill checkpoint its
 statistics were taken after; nothing writes it now. Mithril ready-state cleanup
@@ -147,8 +147,8 @@ limit restored afterwards) on the write connection, outside any transaction, at 
 after each epoch rollover commits, and once a minute in between, though a
 periodic pass starts no sooner than nine times the last pass's duration after
 it ended, so a pass that outlasts the minute is not followed by another at
-once. A pass excludes bulk-mode transitions but not WAL checkpoints, which keep
-the WAL bounded while it runs. `PRAGMA
+once. A pass excludes other planner-statistics passes but not WAL checkpoints,
+which keep the WAL bounded while it runs. `PRAGMA
 optimize` is not used because it re-analyzes a table only after a large change
 in its row count, leaving a steadily growing table with stale statistics. The
 pass holds one write connection throughout, because `analysis_limit` is per
@@ -165,8 +165,8 @@ table, however little it changed since the last one, and sampling bounds the
 index work of each. The write pool has one connection, so writers still wait
 for the run. Sampled analysis updates
 `sqlite_stat1` and does not compute full `sqlite_stat4` histograms; explicit
-full `ANALYZE` remains available for completed backfills. The run is skipped
-during a bulk load. PostgreSQL and MySQL report the operation unsupported.
+full `ANALYZE` remains available for completed backfills. PostgreSQL and MySQL
+report the operation unsupported.
 
 Statistics taken over an imported ledger state misdescribe `utxo`. Every
 imported UTxO is unspent and shares one `added_slot`, so the statistics record
@@ -650,8 +650,7 @@ jitter between runs, so they do not recur at the same offset every day. A run
 that comes due while any connection in the shared SQL pool is in use is
 postponed and rechecked after the shorter of the interval and one minute. For
 PostgreSQL and MySQL, read and write handles share one pool, so read traffic can
-also postpone a run; a bulk-load session that retains a pool connection also
-holds maintenance until that session ends. A job postponed ten consecutive
+also postpone a run. A job postponed ten consecutive
 times logs a warning naming the job.
 
 Dingo stores chain state in two sibling stores:
@@ -1152,9 +1151,7 @@ checksum drift, missing predecessors, unknown phases, inconsistent completion
 state, and a database newer than the binary are hard startup errors. File-backed
 SQLite uses a cross-process lock file and in-memory SQLite uses a process lock. Store
 readiness remains false until the locked, offline run succeeds. PostgreSQL/MySQL
-advisory locks are connection-owned for the complete migration run. Bulk-load
-session settings are held on a dedicated connection for the duration of a bulk
-window and restored before that connection returns to the pool. Optional SQLite
+advisory locks are connection-owned for the complete migration run. Optional SQLite
 VACUUM receives the provider stop context. The SQLite driver requests
 `sqlite3_interrupt` when an `ExecContext` or `QueryContext` context is canceled.
 A progress callback retains cancellation observed before execution, so
@@ -7237,8 +7234,7 @@ SQLite moves that journal to an anonymous temp file once it exceeds its
 64 KiB in-memory threshold; with `temp_store=MEMORY` it stays in RAM, bounded
 by the pages one statement touches. Sorter, materialised-subquery and
 index-build temporaries on that connection also stay in RAM. `synchronous` and
-`journal_mode` are unchanged, and `RestoreNormalPragmas` restores
-`temp_store=MEMORY` rather than the SQLite default.
+`journal_mode` are unchanged.
 
 **Periodic forced WAL checkpoint (`checkpointWAL`,
 `database/plugin/metadata/sqlite/shared_sqlstore.go`).** Moving the checkpoint
@@ -7277,21 +7273,6 @@ data, so running it beside the ledger import would create two independent
 SQLite metadata writers. Both phases retain idempotent resume behavior; an
 interruption retries incomplete work without requiring their metadata
 transactions to overlap.
-
-Explicit bulk mode, used by Mithril ledger-state import and by unvalidated
-ledger replay, pauses this scheduled checkpoint callback. Entering bulk mode
-first drains an in-flight callback, so a TRUNCATE attempt cannot take the
-writer lock during the import's metadata writes; restoring normal pragmas
-re-enables it. Bulk mode also caps SQLite auxiliary sorter threads at
-`min(4, GOMAXPROCS-1)` for index builds; normal-mode restore returns the
-setting to 4, the value every connection gets from `sqliteCommonPragmas`, so
-the deferred index rebuild that runs after the restore still sorts with
-helper threads. The writer's `wal_autocheckpoint` stays 0 throughout, so the
-same ticker runs `sqlstore.Config.BulkCheckpoint` instead: `passiveCheckpointWAL`
-issues PASSIVE on its own connection, which never takes the writer lock, and
-keeps backfilling committed import frames so the WAL does not hold the whole
-import. If the caller's final pragma restore fails, the next scheduled
-checkpoint retries it and runs TRUNCATE only after recovery succeeds.
 
 Startup migrations commit on the write connection before `Store.Start` marks
 the store ready and starts the scheduled ticker. `Store.Start` therefore runs

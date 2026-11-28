@@ -127,18 +127,6 @@ func (m sqlitePlannerStatsMetrics) observe(
 	}
 }
 
-// lockPlannerStatsPass admits a planner-statistics pass: it holds
-// plannerStatsMu until unlock, so no bulk-mode transition runs meanwhile, and
-// reports whether bulk mode is on. It does not hold scheduledWorkMu, so WAL
-// checkpoints keep running for the length of the pass.
-func (s *Store) lockPlannerStatsPass() (bulk bool, unlock func()) {
-	s.plannerStatsMu.Lock()
-	s.scheduledWorkMu.Lock()
-	bulk = s.bulkMode
-	s.scheduledWorkMu.Unlock()
-	return bulk, s.plannerStatsMu.Unlock
-}
-
 // OptimizePlannerStatsContext runs the backend's incremental planner
 // statistics maintenance (a bounded ANALYZE on SQLite). When the stored
 // statistics changed it then refreshes the read pool and the cached hot
@@ -146,8 +134,7 @@ func (s *Store) lockPlannerStatsPass() (bulk bool, unlock func()) {
 // without an incremental form report Supported=false and are left alone.
 //
 // The run holds one write connection for its duration and so pauses
-// writers; it never runs inside a transaction. It is skipped while a bulk
-// load owns the database.
+// writers; it never runs inside a transaction.
 func (s *Store) OptimizePlannerStatsContext(
 	ctx context.Context,
 	trigger string,
@@ -156,20 +143,14 @@ func (s *Store) OptimizePlannerStatsContext(
 	if s.closed.Load() || !s.ready.Load() {
 		return result, errors.New("sqlstore: store is not ready")
 	}
-	// Before the bulk-mode check and the fingerprint: the fingerprint reads
+	// Before the fingerprint: it reads
 	// SQLite's catalog, which other backends do not have.
 	if !s.dialect.HasIncrementalPlannerStats() {
 		return result, nil
 	}
-	bulk, unlock := s.lockPlannerStatsPass()
-	defer unlock()
+	s.plannerStatsMu.Lock()
+	defer s.plannerStatsMu.Unlock()
 	started := time.Now()
-	if bulk {
-		result.Supported = true
-		result.Skipped = true
-		s.plannerStats.observe(trigger, "skipped", time.Since(started))
-		return result, nil
-	}
 	before, _, err := s.plannerStatsFingerprint(ctx)
 	if err != nil {
 		return s.plannerStatsFailed(trigger, started, result, err)

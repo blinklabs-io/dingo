@@ -19,7 +19,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"runtime"
 	"strings"
 )
 
@@ -34,8 +33,6 @@ type Dialect interface {
 	QuoteIdentifier(string) string
 	ParameterLimit() int
 	BeginOptions(readOnly bool) *sql.TxOptions
-	SetBulkMode(context.Context, Execer) error
-	RestoreNormalMode(context.Context, Execer) error
 	UpdatePlannerStats(context.Context, Execer) error
 	// OptimizePlannerStats runs the backend's incremental statistics
 	// maintenance. supported is false, with no statement issued, for a
@@ -73,8 +70,6 @@ type dialect struct {
 	parameterLimit int
 	rebind         func(string) string
 	beginOptions   func(bool) *sql.TxOptions
-	setBulk        func(context.Context, Execer) error
-	restore        func(context.Context, Execer) error
 	analyze        func(context.Context, Execer) error
 	optimize       func(context.Context, Execer) error
 	updateFromJoin func(string, string, string, []JoinAssignment) string
@@ -99,14 +94,6 @@ func (d dialect) ParameterLimit() int {
 
 func (d dialect) BeginOptions(readOnly bool) *sql.TxOptions {
 	return d.beginOptions(readOnly)
-}
-
-func (d dialect) SetBulkMode(ctx context.Context, exec Execer) error {
-	return d.setBulk(ctx, exec)
-}
-
-func (d dialect) RestoreNormalMode(ctx context.Context, exec Execer) error {
-	return d.restore(ctx, exec)
 }
 
 func (d dialect) UpdatePlannerStats(ctx context.Context, exec Execer) error {
@@ -275,40 +262,6 @@ func SQLiteDialect() Dialect {
 		beginOptions: func(readOnly bool) *sql.TxOptions {
 			return &sql.TxOptions{ReadOnly: readOnly}
 		},
-		setBulk: func(ctx context.Context, exec Execer) error {
-			if err := execStatements(
-				"PRAGMA synchronous = OFF",
-				"PRAGMA cache_size = -200000",
-				"PRAGMA temp_store = MEMORY",
-				"PRAGMA wal_autocheckpoint = 0",
-			)(ctx, exec); err != nil {
-				return err
-			}
-			// Leave one P for the goroutine driving CREATE INDEX and cap
-			// SQLite's auxiliary sorter workers.
-			workers := min(4, max(0, runtime.GOMAXPROCS(0)-1))
-			_, err := exec.ExecContext(
-				ctx,
-				fmt.Sprintf("PRAGMA threads = %d", workers),
-			)
-			return err
-		},
-		// wal_autocheckpoint stays 0, the value the write connection's DSN
-		// sets (sqliteWritePragmas in database/plugin/metadata/sqlite/
-		// shared_sqlstore.go): the store's own checkpointer drains the WAL,
-		// so a commit never runs the checkpoint itself.
-		//
-		// temp_store is restored to MEMORY for the same reason: the write
-		// connection runs with it from the DSN (sqliteWritePragmas) so
-		// statement journals never spill to a temp file, and DEFAULT here
-		// would silently bring those spills back after the first bulk load.
-		restore: execStatements(
-			"PRAGMA synchronous = NORMAL",
-			"PRAGMA cache_size = -50000",
-			"PRAGMA temp_store = MEMORY",
-			"PRAGMA threads = 4",
-			"PRAGMA wal_autocheckpoint = 0",
-		),
 		analyze: execStatements("ANALYZE"),
 		// A bounded ANALYZE of every table rather than PRAGMA optimize:
 		// optimize re-analyzes a table only once its row count has moved by
@@ -340,14 +293,6 @@ func PostgresDialect() Dialect {
 				ReadOnly:  true,
 			}
 		},
-		setBulk: execStatements(
-			"SET synchronous_commit = OFF",
-			"SET session_replication_role = replica",
-		),
-		restore: execStatements(
-			"SET session_replication_role = DEFAULT",
-			"SET synchronous_commit = DEFAULT",
-		),
 		analyze:        execStatements("ANALYZE"),
 		updateFromJoin: standardUpdateFromJoinSQL,
 	}
@@ -369,14 +314,6 @@ func MySQLDialect() Dialect {
 				ReadOnly:  true,
 			}
 		},
-		setBulk: execStatements(
-			"SET foreign_key_checks = 0",
-			"SET unique_checks = 0",
-		),
-		restore: execStatements(
-			"SET unique_checks = 1",
-			"SET foreign_key_checks = 1",
-		),
 		analyze: func(context.Context, Execer) error {
 			// MySQL requires a table list. The store's deferred-index manager
 			// supplies it where planner refresh is needed.
