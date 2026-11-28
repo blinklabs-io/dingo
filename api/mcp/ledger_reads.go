@@ -446,11 +446,15 @@ type proposalRead struct {
 	actionIndex, actionType     int
 	proposedEpoch, expiresEpoch int
 	enacted, ratified, expired  *int64
-	deposit                     uint64
-	anchorURL                   string
-	anchorURLValid              bool
-	anchorHash, returnAddress   []byte
-	tally                       map[string]map[string]int
+	// enactedEpochUnknown marks an enacted ledger-state root whose stored
+	// enacted epoch is the snapshot anchor rather than its enactment, so it
+	// prints as enacted without an epoch.
+	enactedEpochUnknown       bool
+	deposit                   uint64
+	anchorURL                 string
+	anchorURLValid            bool
+	anchorHash, returnAddress []byte
+	tally                     map[string]map[string]int
 }
 
 func epochPtr(p *uint64) *int64 {
@@ -476,7 +480,16 @@ func proposalReadOf(p *models.GovernanceProposal) *proposalRead {
 		anchorURLValid: true,
 		anchorHash:     p.AnchorHash,
 		returnAddress:  p.ReturnAddress,
+		enactedEpochUnknown: p.EnactedEpoch != nil &&
+			p.RecordedEnactedEpoch() == nil,
 	}
+}
+
+// seededEnactedEpoch reports whether a row read from SQL is a ledger-state
+// root with no recorded enactment epoch, matching
+// models.GovernanceProposal.RecordedEnactedEpoch.
+func seededEnactedEpoch(enacted *int64, addedSlot uint64) bool {
+	return enacted != nil && addedSlot == 0
 }
 
 // proposalDetailFromLedger reads the proposal txHash#actionIndex through ldb
@@ -561,7 +574,8 @@ func proposalDetailFromSQL(
 	//nolint:gosec // whereClause consists only of fixed lifecycle predicates.
 	row := db.QueryRowContext(ctx, `
 				SELECT id, tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
-				       enacted_epoch, ratified_epoch, expired_epoch, anchor_url, anchor_hash, deposit, return_address
+				       enacted_epoch, ratified_epoch, expired_epoch, anchor_url, anchor_hash, deposit, return_address,
+				       added_slot
 				FROM governance_proposal
 				WHERE tx_hash = ? AND action_index = ? AND deleted_slot IS NULL AND (`+whereClause+`)
 				LIMIT 1`,
@@ -569,6 +583,7 @@ func proposalDetailFromSQL(
 	)
 	var (
 		id                                                   int64
+		addedSlot                                            uint64
 		out                                                  proposalRead
 		enactedEpoch, ratifiedEpoch, expiredEpoch            sql.NullInt64
 		anchorURL                                            sql.NullString
@@ -588,6 +603,7 @@ func proposalDetailFromSQL(
 		&out.anchorHash,
 		&out.deposit,
 		&out.returnAddress,
+		&addedSlot,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -599,6 +615,7 @@ func proposalDetailFromSQL(
 	out.proposedEpoch, out.expiresEpoch = proposedEpoch, expiresEp
 	out.enacted, out.ratified, out.expired = nullEpoch(enactedEpoch),
 		nullEpoch(ratifiedEpoch), nullEpoch(expiredEpoch)
+	out.enactedEpochUnknown = seededEnactedEpoch(out.enacted, addedSlot)
 	out.anchorURL, out.anchorURLValid = anchorURL.String, anchorURL.Valid
 
 	voteRows, err := db.QueryContext(ctx, `
@@ -675,7 +692,8 @@ func proposalListFromSQL(
 	//nolint:gosec // whereClause contains only fixed predicates selected above.
 	query := fmt.Sprintf(`
 			SELECT id, tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
-			       enacted_epoch, ratified_epoch, expired_epoch, deposit, anchor_url
+			       enacted_epoch, ratified_epoch, expired_epoch, deposit, anchor_url,
+			       added_slot
 			FROM governance_proposal
 			WHERE deleted_slot IS NULL AND (%s)
 			ORDER BY id DESC
@@ -689,6 +707,7 @@ func proposalListFromSQL(
 	for rows.Next() {
 		var (
 			id                                        int64
+			addedSlot                                 uint64
 			p                                         proposalRead
 			enactedEpoch, ratifiedEpoch, expiredEpoch sql.NullInt64
 			anchorURL                                 sql.NullString
@@ -696,7 +715,7 @@ func proposalListFromSQL(
 		if scanErr := rows.Scan(
 			&id, &p.txHash, &p.actionIndex, &p.actionType, &p.proposedEpoch,
 			&p.expiresEpoch, &enactedEpoch, &ratifiedEpoch, &expiredEpoch,
-			&p.deposit, &anchorURL,
+			&p.deposit, &anchorURL, &addedSlot,
 		); scanErr != nil {
 			return nil, fmt.Errorf("scan governance proposal: %w", scanErr)
 		}
@@ -706,6 +725,7 @@ func proposalListFromSQL(
 			ratifiedEpoch,
 		)
 		p.expired = nullEpoch(expiredEpoch)
+		p.enactedEpochUnknown = seededEnactedEpoch(p.enacted, addedSlot)
 		out = append(out, &p)
 	}
 	if rErr := rows.Err(); rErr != nil {
@@ -732,6 +752,9 @@ func proposalStatus(p *proposalRead, withEpoch bool) string {
 	}
 	switch {
 	case p.enacted != nil:
+		if p.enactedEpochUnknown {
+			return "Enacted"
+		}
 		return "Enacted" + suffix(p.enacted)
 	case p.ratified != nil:
 		return "Ratified" + suffix(p.ratified)

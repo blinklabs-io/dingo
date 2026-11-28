@@ -370,7 +370,7 @@ func (a *NodeAdapter) GovernanceProposal(
 		Deposit:                strconv.FormatUint(proposal.Deposit, 10),
 		ReturnAddress:          returnAddress.String(),
 		RatifiedEpoch:          proposal.RatifiedEpoch,
-		EnactedEpoch:           proposal.EnactedEpoch,
+		EnactedEpoch:           proposal.RecordedEnactedEpoch(),
 		DroppedEpoch:           proposal.DroppedEpoch,
 		ExpiredEpoch:           proposal.ExpiredEpoch,
 		Expiration:             proposal.ExpiresEpoch,

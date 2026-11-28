@@ -4971,7 +4971,12 @@ address only its own `tip` row.
 A copy is as of the segment's last slot where the ledger records when a column
 changed. The outcome columns of `governance_proposal` are copied per outcome:
 ratified, enacted, expired and deleted values dated after the segment are left
-null until their own segment. A DRep's activity and expiry epochs are set from
+null until their own segment. A per-purpose root a ledger-state import seeded
+(`added_slot` 0) is held enacted at the snapshot anchor only so governance
+resolves it as the current root; its enactment epoch is unknown, so its
+enacted columns are copied as null, and the Blockfrost and MCP proposal reads
+report no enactment epoch for it. MCP still lists it, and matches it, as
+enacted. A DRep's activity and expiry epochs are set from
 its `drep_expiry_history` as of that slot, because the ledger renews them in
 place without moving the row's slot. The columns with no such record are the
 ledger's current value when the row's slot falls in a segment: `drep.active`,
