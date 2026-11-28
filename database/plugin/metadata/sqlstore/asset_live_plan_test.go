@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -108,6 +109,14 @@ func TestAssetReadsDoNotDriveFromLiveUtxoIndex(t *testing.T) {
 			t.Parallel()
 			store, policy, name := newAssetPlanStore(t, analyze)
 			holders := assetHolderGroups("sqlite")
+			batch, batchArgs := assetQuantitiesQuery(
+				"sqlite", "dingo_uint64_sum(h.amount)",
+				[]models.MintedAsset{
+					{PolicyId: policy, Name: name},
+					{PolicyId: policy, Name: append([]byte{}, 'x')},
+					{PolicyId: policy, Name: append([]byte{}, 'y')},
+				},
+			)
 			reads := []struct {
 				label string
 				query string
@@ -116,6 +125,7 @@ func TestAssetReadsDoNotDriveFromLiveUtxoIndex(t *testing.T) {
 				{"asset quantity", assetQuantityQuery(
 					"sqlite", "dingo_uint64_sum(h.amount)",
 				), []any{policy, name}},
+				{"asset quantities", batch, batchArgs},
 				{"asset holder address check",
 					assetHolderAddressCheckQuery("sqlite"),
 					[]any{policy, name}},

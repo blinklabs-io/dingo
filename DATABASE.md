@@ -9339,6 +9339,17 @@ asset's lookup costs the whole live UTxO set. The unary plus keeps that index
 out of the plan: the asset's identity row and its holdings drive, and `utxo` is
 reached by primary key. Other backends keep the plain predicate.
 
+`GetAssetQuantitiesByPolicyAndName` (the Blockfrost `/assets` and
+`/assets/policy/{policy_id}` page quantities) totals a whole page of assets
+with the same join, filtered by an `OR` of `(i.policy_id = ? AND i.name = ?)`
+pairs, with the same liveness predicate, and grouped by
+`h.asset_id, i.policy_id, i.name`; leading with the holding's `asset_id`
+keeps SQLite searching `asset_identity` once per pair rather than scanning
+its unique index for the grouping order. Each pair binds two parameters, so a
+page wider than half the dialect's parameter limit is split into chunks. The
+result is aligned with the requested assets; an asset with no live holding
+totals zero, and the overflow rule above applies per asset.
+
 `GetAssetMintBurnInfo` (Blockfrost `/assets/{asset}` `initial_mint_tx_hash` and
 `mint_or_burn_count`) reads the mint/burn history rather than live holdings:
 

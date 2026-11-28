@@ -173,6 +173,19 @@ func TestAssetReadsNeverScanAssetTables(t *testing.T) {
 	plan("asset quantity",
 		assetQuantityQuery("sqlite", "dingo_uint64_sum(h.amount)"),
 		policy, name)
+	for _, n := range []int{1, 2, 3, 20} {
+		page := make([]models.MintedAsset, 0, n)
+		for k := range n {
+			page = append(page, models.MintedAsset{
+				PolicyId: []byte{byte(k % 5)},
+				Name:     []byte(fmt.Sprintf("n%d", k+1)),
+			})
+		}
+		query, args := assetQuantitiesQuery(
+			"sqlite", "dingo_uint64_sum(h.amount)", page,
+		)
+		plan(fmt.Sprintf("asset quantities (%d assets)", n), query, args...)
+	}
 	plan("live utxos by asset", liveUtxosByAssetQuery("sqlite"), policy, name)
 	plan("live utxos by asset policy", liveUtxosByAssetPolicyQuery("sqlite"), policy)
 	plan("asset holders count",

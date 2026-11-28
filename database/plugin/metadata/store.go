@@ -2868,6 +2868,15 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// GetAssetQuantitiesByPolicyAndName returns the sum of live quantities
+	// for each asset, aligned with the input; an asset with no live holding
+	// totals zero. It reads every asset with a bounded number of statements
+	// rather than one per asset.
+	GetAssetQuantitiesByPolicyAndName(
+		[]models.MintedAsset,
+		types.Txn,
+	) ([]uint64, error)
+
 	// GetAssetMintBurnInfo returns the hash of the earliest transaction that
 	// minted the asset (its initial mint) and the total number of recorded
 	// mint/burn events for the asset. Returns (nil, 0, nil) when the asset has
