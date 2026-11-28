@@ -1453,6 +1453,20 @@ func (d *Database) UtxoBalanceByAddressAtSlot(
 	)
 }
 
+// exactAddressIndexComplete reports whether every utxo row has its
+// utxo_address row: the store keeps that API-only index, and the startup
+// backfill of rows written before it existed has finished.
+func (d *Database) exactAddressIndexComplete(txn *Txn) (bool, error) {
+	if d.StorageMode() != types.StorageModeAPI {
+		return false, nil
+	}
+	complete, err := d.GetSyncState(utxoAddressBackfillSyncKey, txn)
+	if err != nil {
+		return false, err
+	}
+	return complete == "true", nil
+}
+
 func (d *Database) backfillUtxoAddresses(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err

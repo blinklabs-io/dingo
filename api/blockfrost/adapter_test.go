@@ -1613,7 +1613,13 @@ func TestAddressTransactionsApplyResolvedBoundsToCountAndPage(t *testing.T) {
 		}
 		insertAdapterTransaction(t, raw, tx)
 		storePointerOutputCbor(t, db, block.txHash, 0, addr, 1_000_000)
+		// An API-mode writer stores the rendered address with the output.
 		_, err := raw.Exec(`
+INSERT INTO utxo_address (utxo_id, address)
+SELECT id, ? FROM utxo WHERE tx_id = ? AND output_idx = 0`,
+			[]byte(addr.String()), tx.ID)
+		require.NoError(t, err)
+		_, err = raw.Exec(`
 INSERT INTO address_transaction (
     payment_key, payment_script, staking_key, credential_tag,
     transaction_id, slot, tx_index

@@ -89,6 +89,14 @@ func seedAddressOutput(
 	}
 	insertAdapterTransaction(t, raw, tx)
 	storePointerOutputCbor(t, db, txHash, 0, addr, amount)
+	// An API-mode writer stores the rendered address with the output.
+	_, err := raw.Exec(
+		`INSERT INTO utxo_address (utxo_id, address)
+SELECT id, ? FROM utxo WHERE tx_id = ? AND output_idx = 0`,
+		[]byte(addr.String()),
+		tx.ID,
+	)
+	require.NoError(t, err)
 	if spentBy != nil {
 		_, err := raw.Exec(
 			`UPDATE utxo SET spent_at_tx_id = (SELECT id FROM "transaction" WHERE hash = ?), deleted_slot = ? WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,

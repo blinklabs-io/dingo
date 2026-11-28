@@ -1727,6 +1727,31 @@ func (d *Database) CountTransactionsByAddress(
 	to *models.AddressTransactionPosition,
 	txn *Txn,
 ) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	indexed, err := d.exactAddressIndexComplete(txn)
+	if err != nil {
+		return 0, err
+	}
+	if indexed {
+		paymentKey, credentialTag, stakingKey, err := addressTransactionKeys(addr)
+		if err != nil {
+			return 0, err
+		}
+		return d.transactionStore().CountTransactionsByExactAddress(
+			[]byte(addr.String()),
+			paymentKey,
+			credentialTag,
+			stakingKey,
+			from,
+			to,
+			txn.Metadata(),
+		)
+	}
+	// Without a complete utxo_address index, match each candidate's decoded
+	// outputs instead. This reads every candidate's history.
 	txs, err := d.getTransactionsByExactAddress(
 		ctx,
 		addr,
