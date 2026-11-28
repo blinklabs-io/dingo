@@ -103,7 +103,7 @@ func leiosGateTestBlock(
 func swapInLeiosDatabase(t *testing.T, o *Ouroboros) *database.Database {
 	t.Helper()
 	withDB := newTestOuroborosWithLeiosDB(t)
-	o.ledgerState = withDB.ledgerState
+	installTestLedger(o, testLedgerState(t, withDB))
 	return o.leiosDatabase()
 }
 

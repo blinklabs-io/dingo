@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"net"
@@ -33,6 +32,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -386,6 +387,7 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 		EventBus:       eventBus,
 		NetworkMagic:   2, // preview
 		LedgerState:    ledgerState,
+		ChainLedger:    newSDKLedgerRole(ledgerState),
 		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
 		ChainsyncState: chainsync.NewState(eventBus, ledgerState),
 		ConnManager:    harnessConnManager,

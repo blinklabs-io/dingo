@@ -94,7 +94,8 @@ func newCatchUpBandFixture(t *testing.T) *catchUpBandFixture {
 		AppliedTip: func() (ochainsync.Tip, bool) {
 			return tipAt(f.applied.Load()), true
 		},
-	})
+	},
+	)
 	f.selector.SetLocalTip(tipAt(bandTestLocal))
 	// A reference inside (local, local+K].
 	require.True(t, f.selector.UpdatePeerTip(
@@ -111,6 +112,7 @@ func newCatchUpBandFixture(t *testing.T) *catchUpBandFixture {
 	f.o = newOuroboros(OuroborosConfig{
 		EventBus:       bus,
 		LedgerState:    ls,
+		ChainLedger:    newTestChainLedgerRole(t, ls),
 		ChainsyncState: f.state,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true

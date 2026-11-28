@@ -17,12 +17,13 @@ package dingo
 import (
 	"bytes"
 	"context"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"log/slog"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -81,7 +82,8 @@ func newLeiosNotifyTestConnPair(local, remote net.Addr) (net.Conn, net.Conn) {
 // inbound connection is replaced by a new connection with the same ID; the
 // delayed old owner callback must not remove the replacement's cursor. The
 // queued vote is then observed by the replacement peer through LeiosNotify.
-func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *testing.T) {
+func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *testing.T,
+) {
 	t.Parallel()
 	logWriter := new(leiosNotifyTestLogWriter)
 	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -119,6 +121,7 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 	t.Cleanup(func() { require.NoError(t, cm.Stop(context.Background())) })
 	o, err := ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
 		Logger: logger, EventBus: bus, LedgerState: ledgerState,
+		ChainLedger:             newSDKLedgerRole(ledgerState),
 		LeiosAnnouncementLedger: ledgerState,
 		Mempool:                 &mempool.FIFO{Mempool: harnessMempool},
 		ChainsyncState:          chainsync.NewState(bus, ledgerState), ConnManager: cm,
@@ -141,13 +144,15 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 			leiosnotify.WithNotificationFunc(func(_ leiosnotify.CallbackContext, msg protocol.Message) error {
 				received <- msg
 				return nil
-			}),
+			},
+			),
 			leiosnotify.WithRequestNextFunc(func(ctx leiosnotify.CallbackContext) (protocol.Message, error) {
 				// Keep the node's client request benignly parked while the
 				// peer's client exercises the node's server direction.
 				<-ctx.ConnectionDoneChan
 				return leiosnotify.NewMsgDone(), nil
-			}),
+			},
+			),
 		),
 	))
 
@@ -225,7 +230,8 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 	require.True(t, cm.AddConnection(oldConn, true, "127.0.0.1:3002"))
 	require.Same(t, oldConn, cm.GetConnectionById(oldConn.Id()))
 	o.HandleInboundConnEvent(event.NewEvent(connmanager.InboundConnectionEventType,
-		connmanager.InboundConnectionEvent{ConnectionId: oldConn.Id()}))
+		connmanager.InboundConnectionEvent{ConnectionId: oldConn.Id()}),
+	)
 	require.NotNil(t, oldConn.LeiosNotify())
 	_ = oldPeer
 
@@ -240,7 +246,8 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 	evicted := testutil.RequireReceive(t, ownerClosed, time.Second, "connection manager owner callback for evicted old connection")
 	require.Same(t, oldConn, evicted)
 	o.HandleInboundConnEvent(event.NewEvent(connmanager.InboundConnectionEventType,
-		connmanager.InboundConnectionEvent{ConnectionId: newConn.Id()}))
+		connmanager.InboundConnectionEvent{ConnectionId: newConn.Id()}),
+	)
 	_, versionData := newConn.ProtocolVersion()
 	require.NotNil(t, versionData)
 	require.Same(t, newConn, cm.GetConnectionById(newConn.Id()))

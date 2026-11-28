@@ -19,8 +19,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
-	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"io"
 	"log/slog"
 	"net"
@@ -30,6 +28,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -1584,6 +1585,7 @@ func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
 	o := newOuroboros(OuroborosConfig{
 		EventBus:       bus,
 		LedgerState:    ls,
+		ChainLedger:    newTestChainLedgerRole(t, ls),
 		ChainsyncState: state,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
@@ -1766,6 +1768,7 @@ func TestDeferredHeaderRecoveryResyncsWhenAppliedTipAdvancesDuringVerification(
 	o := newOuroboros(OuroborosConfig{
 		EventBus:       bus,
 		LedgerState:    ls,
+		ChainLedger:    newTestChainLedgerRole(t, ls),
 		ChainsyncState: state,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
@@ -1884,6 +1887,7 @@ func TestDeferredHeaderRecoveryKeepsPeerWhenDeferredHeaderIsApplied(
 	o := newOuroboros(OuroborosConfig{
 		EventBus:       bus,
 		LedgerState:    ls,
+		ChainLedger:    newTestChainLedgerRole(t, ls),
 		ChainsyncState: state,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
@@ -1960,6 +1964,7 @@ func newDeferredHeaderRecoveryFixture(
 	o := newOuroboros(OuroborosConfig{
 		EventBus:       bus,
 		LedgerState:    ls,
+		ChainLedger:    newTestChainLedgerRole(t, ls),
 		ChainsyncState: state,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
@@ -2223,7 +2228,8 @@ func TestChainsyncClientRollForwardDefersVerdictStaleBeforeObservation(
 		HeaderCryptoVerificationGenerationCurrent: func(generation uint64) bool {
 			return generation == current.Load()
 		},
-	})
+	},
+	)
 	o := newOuroboros(OuroborosConfig{
 		EventBus:       bus,
 		ChainsyncState: state,
@@ -2297,6 +2303,7 @@ func newDeferredHeaderFixture(
 	o := newOuroboros(OuroborosConfig{
 		EventBus:       bus,
 		LedgerState:    ls,
+		ChainLedger:    newTestChainLedgerRole(t, ls),
 		ChainsyncState: state,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
@@ -2905,8 +2912,7 @@ func TestBuildDefaultChainsyncIntersectPointsSurvivesAnchorStorageFaultWhenPoint
 
 	o, _, connId := newOutboundStartTestOuroboros(t, logger, bus)
 	ls, db := newTestLedgerStateWithChain(t, 5)
-	o.ledgerState = ls
-
+	installTestLedger(o, ls)
 	// A healthy node: the ledger tip is a block the chain holds, so the
 	// primary chain tip is not behind it and intersect points come from the
 	// in-memory chain.
@@ -3249,7 +3255,7 @@ func TestChainsyncNeverAsksPeerToReplayFromGenesisDuringRollback(t *testing.T) {
 	o := &Ouroboros{}
 	o.ledgerState, _ = newTestLedgerStateWithChain(t, 5)
 
-	chainTip := o.ledgerState.PrimaryChainTip()
+	chainTip := testLedgerState(t, o).PrimaryChainTip()
 	require.False(
 		t,
 		isOriginPoint(chainTip.Point),
@@ -3364,7 +3370,7 @@ func TestIntersectPointsChainAheadWithLedgerTipRowMissingStaysOriginOnly(
 	require.Error(t, err, "fixture requires the ledger tip row to be absent")
 	require.Greater(
 		t,
-		o.ledgerState.PrimaryChainTip().Point.Slot,
+		testLedgerState(t, o).PrimaryChainTip().Point.Slot,
 		ledgerTipPoint.Slot,
 		"fixture requires the primary chain to be ahead of the ledger tip",
 	)
@@ -3468,8 +3474,7 @@ func TestIntersectPointsChainAheadWithLedgerTipRowPresentAdvertisesChainPoints(
 func TestRollbackWindowIntersectAnchorPropagatesStorageError(t *testing.T) {
 	o := &Ouroboros{}
 	ls, db := newTestLedgerStateWithChain(t, 5)
-	o.ledgerState = ls
-
+	installTestLedger(o, ls)
 	setTestLedgerTip(t, o, ochainsync.Tip{
 		Point:       ocommon.NewPoint(2, ledgerTipHashAbsentFromChain),
 		BlockNumber: 2,
@@ -3506,8 +3511,7 @@ func TestBuildDefaultChainsyncIntersectPointsOffersRollbackPointInWindow(
 
 	o, _, connId := newOutboundStartTestOuroboros(t, logger, bus)
 	ls, _ := newTestLedgerStateWithChain(t, 5)
-	o.ledgerState = ls
-
+	installTestLedger(o, ls)
 	// The window: the chain has been rewound to slot 5 while the ledger tip
 	// still names a block at slot 9 whose row the rewind removed.
 	ls.SetTipForTesting(ochainsync.Tip{
@@ -3564,8 +3568,7 @@ func TestBuildDefaultChainsyncIntersectPointsStaysOriginOnlyOnAheadFork(
 
 	o, _, connId := newOutboundStartTestOuroboros(t, logger, bus)
 	ls, _ := newTestLedgerStateWithChain(t, 5)
-	o.ledgerState = ls
-
+	installTestLedger(o, ls)
 	ls.SetTipForTesting(ochainsync.Tip{
 		Point:       ocommon.NewPoint(2, ledgerTipHashAbsentFromChain),
 		BlockNumber: 2,
@@ -3700,8 +3703,8 @@ func TestOutboundChainsyncStartFailureClosesConnection(t *testing.T) {
 	// A ledger whose database is closed makes the rollback-anchor lookup
 	// return a storage error rather than "no anchor".
 	ls, db := newTestLedgerStateWithChain(t, 5)
-	o.ledgerState = ls
-	o.ledgerState.SetTipForTesting(ochainsync.Tip{
+	installTestLedger(o, ls)
+	testLedgerState(t, o).SetTipForTesting(ochainsync.Tip{
 		Point:       ocommon.NewPoint(2, ledgerTipHashAbsentFromChain),
 		BlockNumber: 2,
 	})
@@ -4224,7 +4227,7 @@ func newChainsyncServerFixtureServing(
 	cfg.EventBus = bus
 	cfg.Logger = logger
 	o = newOuroboros(cfg)
-	o.ledgerState = ledgerState
+	installTestLedger(o, ledgerState)
 	o.chainsyncState = dchainsync.NewState(bus, ledgerState)
 	for _, tweak := range tweaks {
 		tweak(o)
@@ -4333,7 +4336,7 @@ func (f *chainsyncServerFixture) setTip(
 	block *testBlock,
 	point ocommon.Point,
 ) {
-	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
+	builtInLedgerState(f.o.ledgerState).SetTipForTesting(ochainsync.Tip{
 		Point:       point,
 		BlockNumber: block.BlockNumber(),
 	})
@@ -4820,18 +4823,20 @@ func TestTrustedNtCChainSyncAwaitKeepsIdleDeadlineSuspended(t *testing.T) {
 		EventBus:     bus,
 		Logger:       logger,
 	})
-	o.ledgerState = ledgerState
+	installTestLedger(o, ledgerState)
 	o.chainsyncState = dchainsync.NewState(bus, ledgerState)
 	listeners := o.ConfigureListeners(t.Context(), []connmanager.ListenerConfig{{
 		Listener: listener,
 		UseNtC:   true,
-	}})
+	}},
+	)
 	manager := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
 		EventBus:              bus,
 		Listeners:             listeners,
 		Logger:                logger,
 		TrustedNtCIdleTimeout: 2 * time.Minute,
-	})
+	},
+	)
 	o.connManager = manager
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -5971,7 +5976,7 @@ func setTestLedgerTip(
 	tip ochainsync.Tip,
 ) {
 	t.Helper()
-	o.ledgerState.SetTipForTesting(tip)
+	testLedgerState(t, o).SetTipForTesting(tip)
 }
 
 func snapshotChainsyncNtNTimeouts() map[string]struct {
@@ -6706,7 +6711,8 @@ func TestChainsyncRejectedHeaderRemovesStagedPeerTip(t *testing.T) {
 		SecurityParam:         20,
 		MinCorroboratingPeers: 1,
 		StaleTipThreshold:     time.Hour,
-	})
+	},
+	)
 	witnessConn := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -6727,8 +6733,7 @@ func TestChainsyncRejectedHeaderRemovesStagedPeerTip(t *testing.T) {
 	})
 	o.eventBus = bus
 	o.chainsyncState = state
-	o.ledgerState = newTestLedgerState(t)
-
+	installTestLedger(o, newTestLedgerState(t))
 	require.NoError(t, o.chainsyncClientRollForward(
 		ochainsync.CallbackContext{ConnectionId: conn},
 		0,
@@ -6754,7 +6759,8 @@ func TestChainsyncRejectedHeaderRemovesStagedPeerTip(t *testing.T) {
 	chainsyncEvent.PeerTipAdmission(false)
 	_, _, found = state.LookupObservedHeader(conn, header.Hash().Bytes())
 	require.True(t, found,
-		"delivery rejection alone must not invalidate another delivery of the point")
+		"delivery rejection alone must not invalidate another delivery of the point",
+	)
 	require.NotNil(t, chainsyncEvent.InvalidatePeerHeaderHistory)
 	chainsyncEvent.InvalidatePeerHeaderHistory()
 	_, _, found = state.LookupObservedHeader(conn, header.Hash().Bytes())
@@ -7551,7 +7557,7 @@ func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory
 	o := newOuroboros(OuroborosConfig{EventBus: bus})
 	o.chainsyncState = state
 	o.eventBus = bus
-	o.ledgerState = newTestLedgerState(t)
+	installTestLedger(o, newTestLedgerState(t))
 
 	_, recycleCh := bus.Subscribe(
 		connmanager.ConnectionRecycleRequestedEventType,
@@ -8161,7 +8167,7 @@ func newFindIntersectTestOuroboros(t *testing.T) *Ouroboros {
 		EventBus: bus,
 		Logger:   logger,
 	})
-	o.ledgerState = ledgerState
+	installTestLedger(o, ledgerState)
 	o.chainsyncState = dchainsync.NewState(bus, ledgerState)
 	return o
 }
@@ -8862,7 +8868,7 @@ func TestChainsyncRejectedHeaderOfReplacedCursorParksNoRecovery(t *testing.T) {
 	})
 	o.eventBus = bus
 	o.chainsyncState = state
-	o.ledgerState = newTestLedgerState(t)
+	installTestLedger(o, newTestLedgerState(t))
 
 	require.NoError(t, o.chainsyncClientRollForward(
 		ochainsync.CallbackContext{ConnectionId: conn},

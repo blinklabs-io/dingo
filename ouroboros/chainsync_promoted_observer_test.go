@@ -292,7 +292,7 @@ func TestBuildDefaultChainsyncIntersectPointsAtLedgerTipForCorroboration(
 
 	ls, _ := newTestLedgerStateWithChain(t, 5)
 	o, _, connId := newOutboundStartTestOuroboros(t, logger, bus)
-	o.ledgerState = ls
+	installTestLedger(o, ls)
 	ledgerTip := ocommon.NewPoint(2, bytes.Repeat([]byte{2}, 32))
 	ls.SetTipForTesting(ochainsync.Tip{Point: ledgerTip, BlockNumber: 2})
 	require.Equal(t, uint64(5), ls.PrimaryChainTip().Point.Slot)

@@ -80,7 +80,8 @@ func (cfg OuroborosConfig) validateDependencies() error {
 		isNil bool
 	}{
 		{"EventBus", cfg.EventBus == nil},
-		{"LedgerState", cfg.LedgerState == nil},
+		{"LedgerState", isNilInterface(cfg.LedgerState)},
+		{"ChainLedger", isNilInterface(cfg.ChainLedger)},
 		{"Mempool", isNilInterface(cfg.Mempool)},
 		{"ChainsyncState", cfg.ChainsyncState == nil},
 		{"ConnManager", cfg.ConnManager == nil},
@@ -100,7 +101,8 @@ func (cfg OuroborosConfig) validateDependencies() error {
 // built through newOuroboros, not against a startup ordering hazard.
 func (o *Ouroboros) hasDependencies() bool {
 	return o.eventBus != nil &&
-		o.ledgerState != nil &&
+		!isNilInterface(o.ledgerState) &&
+		!isNilInterface(o.chainLedger) &&
 		(!o.config.EnableLeios ||
 			!isNilInterface(o.leiosAnnouncementLedger)) &&
 		o.mempool != nil &&
@@ -133,8 +135,11 @@ func (o *Ouroboros) SetLeiosPipeline(h LeiosPipelineHandler) error {
 	return nil
 }
 
-// LedgerState returns the ledger state. NewOuroboros guarantees it is non-nil.
-func (o *Ouroboros) LedgerState() *ledger.LedgerState { return o.ledgerState }
+// LedgerState returns the built-in ledger state for API compatibility.
+func (o *Ouroboros) LedgerState() *ledger.LedgerState {
+	state, _ := o.ledgerState.(*ledger.LedgerState)
+	return state
+}
 
 // Mempool returns the mempool. NewOuroboros guarantees it is non-nil.
 func (o *Ouroboros) Mempool() mempool.Service { return o.mempool }

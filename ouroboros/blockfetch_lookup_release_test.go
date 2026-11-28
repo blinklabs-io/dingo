@@ -66,7 +66,7 @@ func TestBlockfetchServerRequestRange_ReleasesLookupSlots(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{
 		Logger: logger, EventBus: bus, ConnManager: manager,
 	})
-	o.ledgerState = ledgerState
+	installTestLedger(o, ledgerState)
 	peer := newRegisteredBlockfetchServerPeer(t, o)
 
 	readType := func() byte {

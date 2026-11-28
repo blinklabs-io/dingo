@@ -211,10 +211,11 @@ func TestChainsyncAdmissionExpiryRetainsFailureBoundaries(t *testing.T) {
 	}
 }
 
-func TestChainsyncAdmissionExpiryRefreshesDeferredRecoveryBaseline(t *testing.T) {
+func TestChainsyncAdmissionExpiryRefreshesDeferredRecoveryBaseline(t *testing.T,
+) {
 	t.Parallel()
 	f := newPatienceRollForwardFixture(t, true)
-	f.o.ledgerState = newTestLedgerState(t)
+	installTestLedger(f.o, newTestLedgerState(t))
 	baseline := ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("old")), BlockNumber: 1}
 	current := ochainsync.Tip{Point: ocommon.NewPoint(200, []byte("published")), BlockNumber: 2}
 	setTestLedgerTip(t, f.o, current)

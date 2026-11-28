@@ -104,6 +104,12 @@ ledger dependency. Forging receives validation, stake, clock and broadcast
 interfaces. API servers expose local service interfaces; composition supplies
 adapters for the ledger, indexer and mempool they need.
 
+Ouroboros handlers depend on the ledger role they need for protocol handling,
+not the built-in ledger state implementation. Node composition supplies that
+role when it constructs the network protocols. The exported `LedgerState`
+accessor retains its concrete return type for source compatibility; the import
+boundary permits that type only inside the accessor.
+
 `event` owns the communication primitive. Event semantics and payload types
 belong to the component that owns the underlying behavior. A consumer does
 not gain authority to mutate the producer's state merely by subscribing.
@@ -433,9 +439,10 @@ is not proof that the rest of the node has stopped.
 
 The SDK is a separate module for plugin and chain-role contracts. It cannot
 import the node module or its internal packages, and Cardano-specific types
-are isolated under `sdk/cardano`. The current role adapters describe seams;
-they do not yet replace the node's execution paths. Import-boundary checks
-cover both modules.
+are isolated under `sdk/cardano`. Ouroboros reads neutral chain state through
+the SDK ledger role; the remaining role adapters describe seams that have not
+yet replaced the node's execution paths. Import-boundary checks cover both
+modules.
 
 ## Concurrency and communication
 

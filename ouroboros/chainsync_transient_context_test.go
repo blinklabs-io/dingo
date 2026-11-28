@@ -36,7 +36,8 @@ func transientContextErr(t *testing.T) error {
 	return err
 }
 
-func TestChainsyncClientRollForwardRetriesTransientLocalExtension(t *testing.T) {
+func TestChainsyncClientRollForwardRetriesTransientLocalExtension(t *testing.T,
+) {
 	t.Parallel()
 
 	f := newForecastHorizonFixture(t, "10.0.0.46:3001")
@@ -102,11 +103,12 @@ func TestChainsyncClientRollForwardRetriesTransientLocalExtension(t *testing.T) 
 	testutil.RequireNoReceive(t, f.recycle, 100*time.Millisecond, "no peer fault")
 }
 
-func TestChainsyncClientRollForwardParksTransientLocalExtensionAtBound(t *testing.T) {
+func TestChainsyncClientRollForwardParksTransientLocalExtensionAtBound(t *testing.T,
+) {
 	t.Parallel()
 
 	f := newForecastHorizonFixture(t, "10.0.0.47:3001")
-	f.o.ledgerState = newTestLedgerState(t)
+	installTestLedger(f.o, newTestLedgerState(t))
 	transientErr := transientContextErr(t)
 	f.o.catchUpBandWaitTimeout = 25 * time.Millisecond
 	f.o.config.ChainsyncHeaderVerificationSettled = newSettleSignal().current
@@ -130,7 +132,8 @@ func TestChainsyncClientRollForwardParksTransientLocalExtensionAtBound(t *testin
 	testutil.RequireNoReceive(t, f.recycle, 100*time.Millisecond, "no peer fault")
 }
 
-func TestChainsyncClientRollForwardRejectsInvalidExtensionAfterContextRetry(t *testing.T) {
+func TestChainsyncClientRollForwardRejectsInvalidExtensionAfterContextRetry(t *testing.T,
+) {
 	t.Parallel()
 
 	f := newForecastHorizonFixture(t, "10.0.0.48:3001")

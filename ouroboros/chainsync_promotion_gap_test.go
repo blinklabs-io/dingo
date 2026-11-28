@@ -77,7 +77,8 @@ func newPromotionGapFixture(t *testing.T) *promotionGapFixture {
 			stale := f.staleTipSlot.Load()
 			return stale != 0 && tip.Point.Slot == stale
 		},
-	})
+	},
+	)
 	o.config.ChainsyncIngressEligible = func(ouroboros.ConnectionId) bool { return f.eligible.Load() }
 	o.config.ChainsyncObservePeerTip = func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition {
 		return chainselection.PeerTipUpdateAccepted
@@ -114,20 +115,26 @@ func newPromotionGapFixture(t *testing.T) *promotionGapFixture {
 func (f *promotionGapFixture) eligibility(eligible bool) {
 	f.eligible.Store(eligible)
 	f.o.HandlePeerEligibilityChangedEvent(event.NewEvent(peergov.PeerEligibilityChangedEventType,
-		peergov.PeerEligibilityChangedEvent{ConnectionId: f.conn, Eligible: eligible}))
+		peergov.PeerEligibilityChangedEvent{ConnectionId: f.conn, Eligible: eligible},
+	),
+	)
 }
 
-func (f *promotionGapFixture) header(slot uint64, block uint64, hash byte) error {
+func (f *promotionGapFixture) header(slot uint64, block uint64, hash byte,
+) error {
 	return f.o.chainsyncClientRollForwardAt(ochainsync.CallbackContext{ConnectionId: f.conn},
 		0, newTestBlockHeader(slot, block, hash), ochainsync.Tip{
 			Point: ocommon.NewPoint(slot+100, []byte("advertised")), BlockNumber: block + 1,
-		}, time.Now())
+		}, time.Now(),
+	)
 }
 
 func (f *promotionGapFixture) rollback(t *testing.T, point ocommon.Point) {
 	t.Helper()
 	require.NoError(t, f.o.chainsyncClientRollBackward(ochainsync.CallbackContext{ConnectionId: f.conn},
-		point, ochainsync.Tip{Point: ocommon.NewPoint(1000, []byte("advertised")), BlockNumber: 10}))
+		point, ochainsync.Tip{Point: ocommon.NewPoint(1000, []byte("advertised")), BlockNumber: 10},
+	),
+	)
 }
 
 func (f *promotionGapFixture) noTimer(t *testing.T) {
@@ -165,7 +172,8 @@ func TestCapacityObserverFreshPromotionSurvivesMultipleTurns(t *testing.T) {
 	require.EqualValues(t, 4, f.verified.Load(), "every current header must still pass producer authentication")
 }
 
-func TestCapacityObserverSkippedHeaderResyncsAndFreshReplayStaysOpen(t *testing.T) {
+func TestCapacityObserverSkippedHeaderResyncsAndFreshReplayStaysOpen(t *testing.T,
+) {
 	t.Parallel()
 	f := newPromotionGapFixture(t)
 	f.o.config.ChainsyncRecordDeliveredPeerTip = func(chainselection.PeerTipUpdateEvent) {}
@@ -184,7 +192,7 @@ func TestCapacityObserverSkippedHeaderResyncsAndFreshReplayStaysOpen(t *testing.
 	// the primary header queue is ahead. Its replay must not restart again.
 	ls, _ := newTestLedgerStateWithChain(t, 5)
 	r := newPromotionGapFixture(t)
-	r.o.ledgerState = ls
+	installTestLedger(r.o, ls)
 	applied := ocommon.NewPoint(2, bytes.Repeat([]byte{2}, 32))
 	ls.SetTipForTesting(ochainsync.Tip{Point: applied, BlockNumber: 2})
 	r.o.config.ChainsyncIntersectAtLedgerTip = func() bool { return true }
@@ -257,9 +265,9 @@ func TestObserverGapDemotionAndSafeRollbackReset(t *testing.T) {
 	t.Parallel()
 	ls := newTestLedgerState(t)
 	f := newPromotionGapFixture(t)
-	f.o.ledgerState = ls
+	installTestLedger(f.o, ls)
 	applied := ocommon.NewPoint(50, []byte("applied"))
-	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{Point: applied, BlockNumber: 2})
+	testLedgerState(t, f.o).SetTipForTesting(ochainsync.Tip{Point: applied, BlockNumber: 2})
 	require.NoError(t, f.header(100, 3, 0xaa))
 	f.o.chainsyncState.RemoveClientConnId(f.fillers[0])
 	f.eligibility(true)
@@ -313,7 +321,7 @@ func TestObserverGapPromotedByAppliedTipChildKeepsConnection(t *testing.T) {
 	t.Parallel()
 	ls := newTestLedgerState(t)
 	f := newPromotionGapFixture(t)
-	f.o.ledgerState = ls
+	installTestLedger(f.o, ls)
 	var appliedHash gledger.Blake2b256
 	appliedHash[0] = 0xaa
 	applied := ocommon.NewPoint(50, appliedHash.Bytes())
@@ -356,7 +364,7 @@ func TestObserverGapPromotedByNonChildStillResyncs(t *testing.T) {
 	t.Parallel()
 	ls := newTestLedgerState(t)
 	f := newPromotionGapFixture(t)
-	f.o.ledgerState = ls
+	installTestLedger(f.o, ls)
 	var appliedHash gledger.Blake2b256
 	appliedHash[0] = 0xaa
 	ls.SetTipForTesting(ochainsync.Tip{Point: ocommon.NewPoint(50, appliedHash.Bytes()), BlockNumber: 2})
@@ -387,7 +395,7 @@ func TestObserverGapAppliedTipChildSurvivesHeaderBackpressure(t *testing.T) {
 	t.Parallel()
 	ls := newTestLedgerState(t)
 	f := newPromotionGapFixture(t)
-	f.o.ledgerState = ls
+	installTestLedger(f.o, ls)
 	var appliedHash gledger.Blake2b256
 	appliedHash[0] = 0xaa
 	ls.SetTipForTesting(ochainsync.Tip{Point: ocommon.NewPoint(50, appliedHash.Bytes()), BlockNumber: 2})

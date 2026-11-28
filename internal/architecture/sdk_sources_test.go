@@ -49,11 +49,10 @@ func main() {}
 `
 
 // TestSDKCardanoSourcesMatchNode keeps the node's types satisfying the source
-// interfaces the Cardano roles in sdk/cardano wrap. The node module does not
-// import the sdk, which would put a replace directive in the node's go.mod and
-// break go install of the node, so no build compiles the two together and a
-// changed node signature would go unnoticed. This compiles them in a temporary
-// workspace that holds both modules.
+// interfaces the Cardano roles in sdk/cardano wrap. The node compiles its
+// ledger source against the released SDK module, while the other source seams
+// are not wired yet. This temporary workspace holds both local modules so all
+// of the source pairings remain checked together.
 func TestSDKCardanoSourcesMatchNode(t *testing.T) {
 	t.Parallel()
 

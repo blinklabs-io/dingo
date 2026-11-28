@@ -131,7 +131,7 @@ func TestChainsyncDeferredPublicationWaitPreservesPendingWork(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := newForecastHorizonFixture(t, "10.0.0.50:3001")
-			f.o.ledgerState = newTestLedgerState(t)
+			installTestLedger(f.o, newTestLedgerState(t))
 			applied := gledger.Blake2b256{0xa0}.Bytes()
 			pending := gledger.Blake2b256{0xb0}.Bytes()
 			setTestLedgerTip(t, f.o, ochainsync.Tip{
@@ -321,6 +321,7 @@ func TestChainsyncDeferredCompetingForkReachesSelection(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{
 		EventBus:    bus,
 		LedgerState: ls,
+		ChainLedger: newTestChainLedgerRole(t, ls),
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
@@ -542,7 +543,7 @@ func TestChainsyncClientRollForwardParksHeaderDeferredPastWaitBound(
 
 	f := newForecastHorizonFixture(t, "10.0.0.41:3001")
 	deferredErr := deferredVerificationErr(t)
-	f.o.ledgerState = newTestLedgerState(t)
+	installTestLedger(f.o, newTestLedgerState(t))
 	f.o.catchUpBandWaitTimeout = 50 * time.Millisecond
 	f.o.config.ChainsyncHeaderVerificationSettled = newSettleSignal().current
 	var attempts atomic.Int32
@@ -777,10 +778,12 @@ func TestChainsyncDeferredVerificationEndsOnRealTransportClose(t *testing.T) {
 	serverConfig := ochainsync.NewConfig(
 		ochainsync.WithFindIntersectFunc(func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error) {
 			return ocommon.NewPointOrigin(), tip, nil
-		}),
+		},
+		),
 		ochainsync.WithRequestNextFunc(func(cb ochainsync.CallbackContext) error {
 			return cb.Server.RollForward(gledger.BlockTypeBabbage, block.Cbor(), tip)
-		}),
+		},
+		),
 	)
 	type serverResult struct {
 		conn *ouroboros.Connection
@@ -795,7 +798,9 @@ func TestChainsyncDeferredVerificationEndsOnRealTransportClose(t *testing.T) {
 		err := f.o.chainsyncClientRollForward(cb, typ, v, tip)
 		returned <- err
 		return err
-	}))
+	},
+	),
+	)
 	client, err := ouroboros.New(ouroboros.WithConnection(clientPipe), ouroboros.WithNodeToNode(true), ouroboros.WithNetworkMagic(42), ouroboros.WithDelayProtocolStart(true), ouroboros.WithLogger(logger), ouroboros.WithChainSyncConfig(clientConfig))
 	require.NoError(t, err)
 	server := testutil.RequireReceive(t, serverReady, 5*time.Second, "server handshake")

@@ -100,7 +100,7 @@ func TestDeferredHeaderParkMetrics(t *testing.T) {
 	childPoint := ocommon.NewPoint(86420, forkChild.Bytes())
 	f.o.markDeferredHeaderRecovery(
 		f.conn,
-		f.o.ledgerState.Tip(),
+		f.o.ledgerTip(),
 		childPoint,
 		ochainsync.Tip{Point: childPoint, BlockNumber: 11},
 		true,

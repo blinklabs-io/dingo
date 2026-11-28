@@ -459,7 +459,7 @@ func (a *replayAdapter) observeDownstream(
 		return nil
 	}
 	f := newChainsyncServerFixture(a.t, csmock.ModeNtN)
-	ls := f.o.ledgerState
+	ls := testLedgerState(a.t, f.o)
 	intersect := ocommon.NewPointOrigin()
 	if m := selected[0]; m.MsgType == format.ChainSyncMsgRollBackward &&
 		len(m.Point.Hash) > 0 {

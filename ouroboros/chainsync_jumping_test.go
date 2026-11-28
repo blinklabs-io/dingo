@@ -148,7 +148,7 @@ func newCsjHarness(t *testing.T, enabled bool) *csjHarness {
 	t.Cleanup(bus.Close)
 	o, cm, _ := newOutboundStartTestOuroboros(t, logger, bus)
 	ls, _ := newTestLedgerStateWithChain(t, 5)
-	o.ledgerState = ls
+	installTestLedger(o, ls)
 	// Registered after the ledger and before any peer, so it runs after
 	// their connections close and before the ledger closes: it stops the
 	// refresh loop and waits for in-flight jump work, which reads the ledger.

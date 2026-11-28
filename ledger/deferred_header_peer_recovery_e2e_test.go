@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	dingoouroboros "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
+	sdkcardano "github.com/blinklabs-io/dingo/sdk/cardano"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
@@ -111,10 +112,13 @@ func TestDeferredHeaderFailureDeniesOnlySupplyingPeerAndKeepsHonestPeerEligible(
 		MempoolCapacity: 1024 * 1024,
 	})
 	require.NoError(t, err)
+	chainLedger, err := sdkcardano.NewLedgerRole(fixture.Ledger)
+	require.NoError(t, err)
 	o, err := dingoouroboros.NewOuroboros(dingoouroboros.OuroborosConfig{
 		Logger:         logger,
 		EventBus:       bus,
 		LedgerState:    fixture.Ledger,
+		ChainLedger:    chainLedger,
 		NetworkMagic:   ouroboros_mock.MockNetworkMagic,
 		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
 		ChainsyncState: chainsync.NewState(bus, fixture.Ledger),

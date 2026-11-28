@@ -153,12 +153,13 @@ func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
 	// HardForkCurrentEraQuery case, which needs an epoch record covering
 	// the acquired slot to resolve an era from --
 	// newTestLedgerStateWithChain seeds blocks only.
-	require.NoError(t, o.ledgerState.LedgerDB().SetEpoch(
+	require.NoError(t, testLedgerState(t, o).LedgerDB().SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
-	))
+	),
+	)
 	// GetAccountState needs a network_state row at or before the acquired
 	// slot; genesis sync writes this slot-0 baseline on a real node.
-	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, testLedgerState(t, o).LedgerDB().SetNetworkState(0, 0, 0, nil))
 
 	connID := ouroboros.ConnectionId{}
 	err := o.localstatequeryServerAcquire(
@@ -331,10 +332,11 @@ func TestLocalstatequeryProtocol_LiveSetHistoryTooOld(t *testing.T) {
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(3, tipHash),
 	}, nil))
-	require.NoError(t, o.ledgerState.LedgerDB().SetEpoch(
+	require.NoError(t, testLedgerState(t, o).LedgerDB().SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
-	))
-	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
+	),
+	)
+	require.NoError(t, testLedgerState(t, o).LedgerDB().SetNetworkState(0, 0, 0, nil))
 
 	client := newLocalStateQueryTestClient(t, o)
 	oldPoint := ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32))
@@ -513,12 +515,13 @@ func newPinTestOuroboros(t *testing.T) (*Ouroboros, ocommon.Point) {
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(2, tipHash),
 	}, nil))
-	require.NoError(t, o.ledgerState.LedgerDB().SetEpoch(
+	require.NoError(t, testLedgerState(t, o).LedgerDB().SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
-	))
+	),
+	)
 	// GetAccountState needs a network_state row at or before the acquired
 	// slot; genesis sync writes this slot-0 baseline on a real node.
-	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, testLedgerState(t, o).LedgerDB().SetNetworkState(0, 0, 0, nil))
 	o.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	return o, ocommon.NewPoint(2, tipHash)
 }
@@ -548,7 +551,7 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 		t.Parallel()
 		o, point := newPinTestOuroboros(t)
 		require.NoError(t, acquireSpecific(t, o, connID, point, false))
-		require.Equal(t, 1, o.ledgerState.AcquiredPointPinCountForTesting())
+		require.Equal(t, 1, testLedgerState(t, o).AcquiredPointPinCountForTesting())
 	})
 
 	t.Run("Release drops the pin", func(t *testing.T) {
@@ -558,7 +561,7 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 		require.NoError(t, o.localstatequeryServerRelease(
 			olocalstatequery.CallbackContext{ConnectionId: connID},
 		))
-		require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting())
+		require.Equal(t, 0, testLedgerState(t, o).AcquiredPointPinCountForTesting())
 	})
 
 	t.Run("connection close drops the pin", func(t *testing.T) {
@@ -566,7 +569,7 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 		o, point := newPinTestOuroboros(t)
 		require.NoError(t, acquireSpecific(t, o, connID, point, false))
 		o.ReleaseLocalStateQueryAcquiredPointOwner(connID, nil)
-		require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting())
+		require.Equal(t, 0, testLedgerState(t, o).AcquiredPointPinCountForTesting())
 	})
 
 	t.Run("acquiring the volatile tip drops the pin", func(t *testing.T) {
@@ -578,7 +581,7 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 			olocalstatequery.AcquireVolatileTip{},
 			true,
 		))
-		require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting())
+		require.Equal(t, 0, testLedgerState(t, o).AcquiredPointPinCountForTesting())
 	})
 
 	t.Run("re-acquire replaces rather than accumulates", func(t *testing.T) {
@@ -586,8 +589,9 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 		o, point := newPinTestOuroboros(t)
 		require.NoError(t, acquireSpecific(t, o, connID, point, false))
 		require.NoError(t, acquireSpecific(t, o, connID, point, true))
-		require.Equal(t, 1, o.ledgerState.AcquiredPointPinCountForTesting(),
-			"a re-acquire must release the previous pin, not stack a second")
+		require.Equal(t, 1, testLedgerState(t, o).AcquiredPointPinCountForTesting(),
+			"a re-acquire must release the previous pin, not stack a second",
+		)
 	})
 
 	t.Run("a rejected acquire leaves no pin", func(t *testing.T) {
@@ -595,8 +599,9 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 		o, _ := newPinTestOuroboros(t)
 		ahead := ocommon.NewPoint(99, bytes.Repeat([]byte{9}, 32))
 		require.Error(t, acquireSpecific(t, o, connID, ahead, false))
-		require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
-			"a point that failed verification must hold nothing")
+		require.Equal(t, 0, testLedgerState(t, o).AcquiredPointPinCountForTesting(),
+			"a point that failed verification must hold nothing",
+		)
 	})
 
 	t.Run("a rejected re-acquire releases the previous pin", func(t *testing.T) {
@@ -605,10 +610,12 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 		require.NoError(t, acquireSpecific(t, o, connID, point, false))
 		ahead := ocommon.NewPoint(99, bytes.Repeat([]byte{9}, 32))
 		require.Error(t, acquireSpecific(t, o, connID, ahead, true))
-		require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
-			"a re-acquire closes the previous session, and its pin with it")
+		require.Equal(t, 0, testLedgerState(t, o).AcquiredPointPinCountForTesting(),
+			"a re-acquire closes the previous session, and its pin with it",
+		)
 		require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(connID))
-	})
+	},
+	)
 }
 
 // TestLocalstatequeryAcquire_PinHeldWhileVerifying is the ordering half of the
@@ -622,7 +629,7 @@ func TestLocalstatequeryAcquire_PinHeldWhileVerifying(t *testing.T) {
 	o, point := newPinTestOuroboros(t)
 	pinsAtVerify := -1
 	o.localstatequeryVerifyHook = func() {
-		pinsAtVerify = o.ledgerState.AcquiredPointPinCountForTesting()
+		pinsAtVerify = testLedgerState(t, o).AcquiredPointPinCountForTesting()
 	}
 	require.NoError(t, acquireSpecific(
 		t, o, ouroboros.ConnectionId{}, point, false,
@@ -644,8 +651,9 @@ func TestLocalstatequeryAcquire_CloseAfterVerifyLeavesNoPin(t *testing.T) {
 	}
 	err := acquireSpecific(t, o, connID, point, false)
 	require.ErrorIs(t, err, errLocalStateQueryConnectionClosed)
-	require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
-		"a connection closed after verify must not leave a pin behind")
+	require.Equal(t, 0, testLedgerState(t, o).AcquiredPointPinCountForTesting(),
+		"a connection closed after verify must not leave a pin behind",
+	)
 	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(connID))
 }
 
@@ -661,8 +669,9 @@ func TestLocalstatequeryAcquire_CloseDuringVerifyLeavesNoPin(t *testing.T) {
 		o.ReleaseLocalStateQueryAcquiredPointOwner(connID, nil)
 	}
 	require.Error(t, acquireSpecific(t, o, connID, point, false))
-	require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
-		"a connection closed mid-verify must not leave a pin behind")
+	require.Equal(t, 0, testLedgerState(t, o).AcquiredPointPinCountForTesting(),
+		"a connection closed mid-verify must not leave a pin behind",
+	)
 	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(connID),
 		"nor a recorded point for the dead connection")
 }
@@ -765,10 +774,11 @@ func TestLocalstatequerySpecificPointReportsAcquiredPoint(t *testing.T) {
 
 	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
 	moveTestTip(t, db, 2)
-	require.NoError(t, o.ledgerState.LedgerDB().SetEpoch(
+	require.NoError(t, testLedgerState(t, o).LedgerDB().SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
-	))
-	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
+	),
+	)
+	require.NoError(t, testLedgerState(t, o).LedgerDB().SetNetworkState(0, 0, 0, nil))
 	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
 	point := ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32))
 	require.NoError(t, o.localstatequeryServerAcquire(
@@ -810,10 +820,11 @@ func TestLocalstatequeryImmutableTipReportsDepthKPoint(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(tip, nil))
 	ls.SetTipForTesting(tip)
-	require.NoError(t, o.ledgerState.LedgerDB().SetEpoch(
+	require.NoError(t, testLedgerState(t, o).LedgerDB().SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
-	))
-	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
+	),
+	)
+	require.NoError(t, testLedgerState(t, o).LedgerDB().SetNetworkState(0, 0, 0, nil))
 
 	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
 	require.NoError(t, o.localstatequeryServerAcquire(
@@ -928,11 +939,11 @@ func TestLocalstatequeryDisconnectClosesSnapshot(t *testing.T) {
 // reopened at that point runs again.
 func prepareReopenableChain(t *testing.T, o *Ouroboros) {
 	t.Helper()
-	ldb := o.ledgerState.LedgerDB()
+	ldb := testLedgerState(t, o).LedgerDB()
 	require.NoError(t, ldb.SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
-	require.NoError(t, o.ledgerState.LedgerDB().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, testLedgerState(t, o).LedgerDB().SetNetworkState(0, 0, 0, nil))
 }
 
 // TestLocalstatequerySnapshotExpires proves a snapshot held past the
@@ -964,7 +975,8 @@ func TestLocalstatequerySnapshotExpires(t *testing.T) {
 	got, err := queryChainPoint(t, o, ctx)
 	require.NoError(t, err, "a query after expiry must not end the connection")
 	require.Equal(t, acquiredTip, got,
-		"the reopened snapshot must answer for the block acquired, not the new tip")
+		"the reopened snapshot must answer for the block acquired, not the new tip",
+	)
 	require.Contains(t, logs.String(), "reopened an expired ledger snapshot")
 }
 
@@ -1007,7 +1019,8 @@ func TestLocalstatequeryTipReopenChainDepStateAnswersAtAcquiredTip(
 				Query: &olocalstatequery.ShelleyDebugChainDepStateQuery{},
 			},
 		},
-	})
+	},
+	)
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -1409,17 +1422,19 @@ func TestLocalstatequeryReopen_PinsReopenedView(t *testing.T) {
 			testutil.WaitForCondition(t, func() bool {
 				_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 				return errors.Is(err, ledger.ErrQueryViewClosed) &&
-					o.ledgerState.AcquiredPointPinCountForTesting() == 0
+					testLedgerState(t, o).AcquiredPointPinCountForTesting() == 0
 			}, testutil.AsyncWait, "expiry did not close the snapshot and release its pin")
 
 			_, err := queryChainPoint(t, o, ctx)
 			require.NoError(t, err)
-			require.Equal(t, 1, o.ledgerState.AcquiredPointPinCountForTesting(),
-				"the reopened view must be pinned")
+			require.Equal(t, 1, testLedgerState(t, o).AcquiredPointPinCountForTesting(),
+				"the reopened view must be pinned",
+			)
 
 			require.NoError(t, o.localstatequeryServerRelease(ctx))
-			require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
-				"Release must drop the reopened view's pin")
+			require.Equal(t, 0, testLedgerState(t, o).AcquiredPointPinCountForTesting(),
+				"Release must drop the reopened view's pin",
+			)
 		})
 	}
 }
@@ -1452,8 +1467,9 @@ func TestLocalstatequeryReopen_CloseAfterOpenReleasesPin(t *testing.T) {
 		errors.Is(err, errLocalStateQueryConnectionClosed) ||
 			errors.Is(err, context.Canceled),
 		"the disconnect must fail the reopen, got: %v", err)
-	require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
-		"a view opened for a dead connection must release its pin")
+	require.Equal(t, 0, testLedgerState(t, o).AcquiredPointPinCountForTesting(),
+		"a view opened for a dead connection must release its pin",
+	)
 	o.localstatequeryAcquireMutex.Lock()
 	_, hasSession := o.localstatequerySessions[ctx.ConnectionId]
 	o.localstatequeryAcquireMutex.Unlock()
@@ -1487,8 +1503,9 @@ func TestLocalstatequeryReopen_CloseDuringReopenLeavesNoView(t *testing.T) {
 		errors.Is(err, errLocalStateQueryConnectionClosed) ||
 			errors.Is(err, context.Canceled),
 		"the disconnect must cancel the reopen, got: %v", err)
-	require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
-		"a reopen cancelled by a disconnect must not leave a pin behind")
+	require.Equal(t, 0, testLedgerState(t, o).AcquiredPointPinCountForTesting(),
+		"a reopen cancelled by a disconnect must not leave a pin behind",
+	)
 	o.localstatequeryAcquireMutex.Lock()
 	_, hasSession := o.localstatequerySessions[ctx.ConnectionId]
 	_, hasAcquisition := o.localstatequeryAcquisitions[ctx.ConnectionId]
@@ -1530,7 +1547,7 @@ func TestLocalstatequeryTipAcquireDuringBoundaryJobDefersSnapshot(
 	t.Parallel()
 
 	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
-	release := o.ledgerState.HoldEpochBoundaryJobForTesting(163)
+	release := testLedgerState(t, o).HoldEpochBoundaryJobForTesting(163)
 	ctx := olocalstatequery.CallbackContext{
 		ConnectionId: ouroboros.ConnectionId{},
 	}
@@ -1572,7 +1589,7 @@ func TestLocalstatequeryReleaseDeferredSession(t *testing.T) {
 	t.Parallel()
 
 	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
-	t.Cleanup(o.ledgerState.HoldEpochBoundaryJobForTesting(163))
+	t.Cleanup(testLedgerState(t, o).HoldEpochBoundaryJobForTesting(163))
 	ctx := olocalstatequery.CallbackContext{
 		ConnectionId: ouroboros.ConnectionId{},
 	}
@@ -1590,7 +1607,7 @@ func TestLocalstatequeryProtocol_TipAcquireDuringBoundaryJob(t *testing.T) {
 	t.Parallel()
 
 	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
-	release := o.ledgerState.HoldEpochBoundaryJobForTesting(163)
+	release := testLedgerState(t, o).HoldEpochBoundaryJobForTesting(163)
 	client := newLocalStateQueryTestClient(t, o)
 
 	require.NoError(t, client.AcquireVolatileTip())

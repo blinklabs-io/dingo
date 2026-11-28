@@ -37,9 +37,11 @@ func TestChainsyncBlockZeroWaitsAtOrigin(t *testing.T) {
 		t.Run(fmt.Sprint(slot), func(t *testing.T) {
 			t.Parallel()
 			f := newForecastHorizonFixture(t, "10.0.0.31:3001")
-			f.o.ledgerState = newTestLedgerState(t)
-			t.Cleanup(func() { require.NoError(t, f.o.ledgerState.Close()) })
-			f.o.chainsyncLocalTipBlock = func() (uint64, uint64) { return f.o.ledgerState.Tip().BlockNumber, 400 }
+			installTestLedger(f.o, newTestLedgerState(t))
+			t.Cleanup(func() {
+				require.NoError(t, testLedgerState(t, f.o).Close())
+			})
+			f.o.chainsyncLocalTipBlock = func() (uint64, uint64) { return f.o.ledgerTip().BlockNumber, 400 }
 			f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) { return 1, nil }
 			var eligible atomic.Bool
 			f.o.config.ChainsyncApplyEligible = func(ouroboros.ConnectionId) bool { return eligible.Load() }

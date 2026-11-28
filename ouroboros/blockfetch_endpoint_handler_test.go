@@ -121,7 +121,7 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 			o := newOuroboros(OuroborosConfig{
 				Logger: logger, EventBus: bus, ConnManager: manager,
 			})
-			o.ledgerState = ledgerState
+			installTestLedger(o, ledgerState)
 			peer := newRegisteredBlockfetchServerPeer(t, o)
 
 			// Prove the asynchronous sender is reachable through this exact

@@ -504,7 +504,7 @@ func TestLeiosPersistPauseForLiveLifecycleOpRefusesWritesForGood(
 	replacement := newTestOuroborosWithLeiosDB(t)
 	newDB := replacement.leiosDatabase()
 	require.NotNil(t, newDB)
-	o.ledgerState = replacement.ledgerState
+	installTestLedger(o, testLedgerState(t, replacement))
 
 	point2, blockRaw2 := testLeiosEndorserBlockRawWithRefs(t, 21, 1)
 	require.ErrorIs(t, o.storeLeiosEndorserBlock(
@@ -739,9 +739,13 @@ func TestLeiosVerifiedEbSlotRestoredByNewOuroboros(t *testing.T) {
 	// A restart: a brand-new Ouroboros over the same database, with nothing
 	// carried over in process and nothing called on it but the constructor.
 	second := newOuroboros(OuroborosConfig{
-		EnableLeios:             true,
-		LedgerState:             first.ledgerState,
-		LeiosAnnouncementLedger: first.ledgerState,
+		EnableLeios: true,
+		LedgerState: first.ledgerState,
+		ChainLedger: newTestChainLedgerRole(
+			t,
+			testLedgerState(t, first),
+		),
+		LeiosAnnouncementLedger: testLedgerState(t, first),
 	})
 	t.Cleanup(func() { require.NoError(t, second.Close()) })
 
@@ -997,9 +1001,13 @@ func TestLeiosPersistenceConstructorStartsGC(t *testing.T) {
 	require.NoError(t, db.SetLeiosEB(latest.Slot, latest.Hash, latestRaw, nil))
 	second := newOuroboros(
 		OuroborosConfig{
-			EnableLeios:                    true,
-			LedgerState:                    first.ledgerState,
-			LeiosAnnouncementLedger:        first.ledgerState,
+			EnableLeios: true,
+			LedgerState: first.ledgerState,
+			ChainLedger: newTestChainLedgerRole(
+				t,
+				testLedgerState(t, first),
+			),
+			LeiosAnnouncementLedger:        testLedgerState(t, first),
 			LeiosPersistenceRetentionSlots: 10,
 		},
 	)

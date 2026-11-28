@@ -115,7 +115,7 @@ func TestDeferredHeaderRecoveryHeldTipKeepsNewerWithheldHeader(t *testing.T) {
 	heldPoint := ocommon.NewPoint(86400, heldHash.Bytes())
 	f.o.markDeferredHeaderRecovery(
 		f.conn,
-		f.o.ledgerState.Tip(),
+		f.o.ledgerTip(),
 		heldPoint,
 		ochainsync.Tip{Point: heldPoint, BlockNumber: 10},
 		true,
@@ -147,7 +147,7 @@ func TestDeferredHeaderRecoveryHeldTipKeepsSameSlotForkHeader(t *testing.T) {
 	f.o.deferredHeaderRecoveryMu.Lock()
 	f.o.deferredHeaderRecovery = map[ouroboros.ConnectionId]deferredHeaderRecoveryState{
 		f.conn: {
-			baseline:   f.o.ledgerState.Tip(),
+			baseline:   f.o.ledgerTip(),
 			point:      forkPoint,
 			tip:        ochainsync.Tip{Point: forkPoint, BlockNumber: 10},
 			resolvable: true,
@@ -158,7 +158,7 @@ func TestDeferredHeaderRecoveryHeldTipKeepsSameSlotForkHeader(t *testing.T) {
 	heldPoint := ocommon.NewPoint(86400, heldHash.Bytes())
 	f.o.markDeferredHeaderRecovery(
 		f.conn,
-		f.o.ledgerState.Tip(),
+		f.o.ledgerTip(),
 		heldPoint,
 		ochainsync.Tip{Point: heldPoint, BlockNumber: 10},
 		true,
@@ -187,7 +187,7 @@ func TestDeferredHeaderRecoveryHeldTipLateRejectionDoesNotAdmitAfterRollback(
 	f.o.deferredHeaderRecoveryMu.Lock()
 	f.o.deferredHeaderRecovery = map[ouroboros.ConnectionId]deferredHeaderRecoveryState{
 		f.conn: {
-			baseline:   f.o.ledgerState.Tip(),
+			baseline:   f.o.ledgerTip(),
 			point:      olderPoint,
 			tip:        ochainsync.Tip{Point: olderPoint, BlockNumber: 9},
 			resolvable: false,
@@ -201,7 +201,7 @@ func TestDeferredHeaderRecoveryHeldTipLateRejectionDoesNotAdmitAfterRollback(
 	heldPoint := ocommon.NewPoint(86400, heldHash.Bytes())
 	f.o.markDeferredHeaderRecovery(
 		f.conn,
-		f.o.ledgerState.Tip(),
+		f.o.ledgerTip(),
 		heldPoint,
 		ochainsync.Tip{Point: heldPoint, BlockNumber: 10},
 		true,

@@ -21,7 +21,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -36,6 +35,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 
 	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/api/blockfrost"
@@ -1542,6 +1543,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 		Logger:         logger,
 		EventBus:       bus,
 		LedgerState:    ledgerState,
+		ChainLedger:    newSDKLedgerRole(ledgerState),
 		NetworkMagic:   ouroboros_mock.MockNetworkMagic,
 		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
 		ChainsyncState: chainsync.NewState(bus, ledgerState),
@@ -1627,6 +1629,7 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint(
 		Logger:         logger,
 		EventBus:       bus,
 		LedgerState:    ledgerState,
+		ChainLedger:    newSDKLedgerRole(ledgerState),
 		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
 		ChainsyncState: chainsync.NewState(bus, ledgerState),
 		ConnManager:    connManager,

@@ -20,13 +20,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"slices"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/connmanager"
@@ -148,7 +149,7 @@ func newTestOuroborosWithLeiosDB(t *testing.T) *Ouroboros {
 		EnableLeios:             true,
 		LeiosAnnouncementLedger: ls,
 	})
-	o.ledgerState = ls
+	installTestLedger(o, ls)
 	return o
 }
 
@@ -745,11 +746,13 @@ func TestAcceptLeiosAnnouncementDeduplicatesBeforeValidation(t *testing.T) {
 	require.NoError(t, o.acceptLeiosAnnouncement(raw, "first-peer"))
 	require.NoError(t, o.acceptLeiosAnnouncement(raw, "second-peer"))
 	require.Equal(t, 1, announcementLedger.validated,
-		"an identical announced ranking block must not repeat ledger validation")
+		"an identical announced ranking block must not repeat ledger validation",
+	)
 	require.Empty(t, o.leiosAnnouncementInFlight)
 }
 
-func TestRepeatedInvalidLeiosAnnouncementsArePenalizedPerConnection(t *testing.T) {
+func TestRepeatedInvalidLeiosAnnouncementsArePenalizedPerConnection(t *testing.T,
+) {
 	t.Parallel()
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	invalid := errors.New("invalid ranking block")
@@ -904,7 +907,7 @@ func TestDeferredLeiosAnnouncementDoesNotPenalizePeer(t *testing.T) {
 	raw := testDijkstraAnnouncementHeaderRaw(t)
 	header, err := decodeLeiosAnnouncementHeader(raw)
 	require.NoError(t, err)
-	deferredErr := probe.ledgerState.ValidateChainSelectionHeaderCrypto(header)
+	deferredErr := testLedgerState(t, probe).ValidateChainSelectionHeaderCrypto(header)
 	require.Error(t, deferredErr)
 	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
 
@@ -957,7 +960,8 @@ func TestAheadOfCurrentSlotLeiosAnnouncementStillPenalizesPeer(t *testing.T) {
 	require.ErrorIs(t, o.handleInvalidLeiosAnnouncement("peer-a", err), err)
 }
 
-func TestEarlyWithinLeiosAnnouncementClockSkewDoesNotPenalizePeer(t *testing.T) {
+func TestEarlyWithinLeiosAnnouncementClockSkewDoesNotPenalizePeer(t *testing.T,
+) {
 	t.Parallel()
 	raw := testDijkstraAnnouncementHeaderRaw(t)
 	header, err := decodeLeiosAnnouncementHeader(raw)
@@ -2278,7 +2282,7 @@ func TestValidateLeiosEndorserBlockForHeaderAcceptsForgedGenesisParent(
 	validationLedger := &fakeLeiosAnnouncementLedger{}
 	o := newTestOuroborosWithLeiosDB(t)
 	o.leiosAnnouncementLedger = validationLedger
-	o.ledgerState = newTestLedgerState(t)
+	installTestLedger(o, newTestLedgerState(t))
 	defer func() { require.NoError(t, o.Close()) }()
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
@@ -2484,7 +2488,8 @@ func TestSelectedLeiosHeaderAuthoritySeparatesDistinctRawHeaders(t *testing.T) {
 	o.leiosMu.RUnlock()
 }
 
-func TestValidateLeiosEndorserBlockForHeaderMissingBodyFailsClosed(t *testing.T) {
+func TestValidateLeiosEndorserBlockForHeaderMissingBodyFailsClosed(t *testing.T,
+) {
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 73)
@@ -3362,7 +3367,7 @@ func TestResolveCertifiedEndorserTxsWithholdsUnverifiedSlot(t *testing.T) {
 	require.NoError(t, err)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	o.ledgerState = newTestLedgerState(t)
+	installTestLedger(o, newTestLedgerState(t))
 	require.NoError(
 		t,
 		o.ledgerState.Chain().AddBlock(context.Background(), parentBlock, nil),
@@ -3539,7 +3544,8 @@ func TestLeiosReloadDiscardsLegacyWrappedPersistedTxs(t *testing.T) {
 	require.Empty(t, data.txsRaw)
 }
 
-func (f *fakeLeiosAnnouncementLedger) MatchesLeiosAnnouncement(context.Context, lcommon.BlockHeader, []byte, [][]byte) bool {
+func (f *fakeLeiosAnnouncementLedger) MatchesLeiosAnnouncement(context.Context, lcommon.BlockHeader, []byte, [][]byte,
+) bool {
 	f.receiptCalls++
 	return f.receiptMatches
 }
@@ -3558,7 +3564,7 @@ func TestValidateLeiosEndorserBlockForHeaderReusesLocalReceipt(t *testing.T) {
 			validationLedger := &fakeLeiosAnnouncementLedger{receiptMatches: matches}
 			o := newTestOuroborosWithLeiosDB(t)
 			o.leiosAnnouncementLedger = validationLedger
-			o.ledgerState = newTestLedgerState(t)
+			installTestLedger(o, newTestLedgerState(t))
 			setTestLedgerTip(t, o, ochainsync.Tip{Point: ocommon.NewPoint(point.Slot-1, header.PrevHash().Bytes())})
 			defer func() { require.NoError(t, o.Close()) }()
 			require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, []cbor.RawMessage{txRaw}, leiosStoreAuthoritative))

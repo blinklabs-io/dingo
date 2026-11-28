@@ -15,11 +15,12 @@
 package ouroboros
 
 import (
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -131,7 +132,8 @@ func TestChainsyncRollForwardRejectsCheckpointMismatch(t *testing.T) {
 	)
 }
 
-func TestChainsyncRollForwardAcceptsCheckpointMatchAndOtherHeights(t *testing.T) {
+func TestChainsyncRollForwardAcceptsCheckpointMatchAndOtherHeights(t *testing.T,
+) {
 	t.Parallel()
 
 	matching := newTestBlockHeader(100, 7, 0xaa)
@@ -202,7 +204,9 @@ func TestNewOuroborosWiresHeaderCheckpointFromLedgerConfig(t *testing.T) {
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	o := newOuroboros(OuroborosConfig{LedgerState: ls})
+	o := newOuroboros(OuroborosConfig{LedgerState: ls,
+		ChainLedger: newTestChainLedgerRole(t, ls),
+	})
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
 	require.NotNil(t, o.chainsyncHeaderCheckpoint)
 

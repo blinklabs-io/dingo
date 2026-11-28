@@ -38,7 +38,7 @@ func newDeferringLeiosOuroboros(
 		testDijkstraAnnouncementHeaderRaw(t),
 	)
 	require.NoError(t, err)
-	deferredErr := probe.ledgerState.ValidateChainSelectionHeaderCrypto(header)
+	deferredErr := testLedgerState(t, probe).ValidateChainSelectionHeaderCrypto(header)
 	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
 
 	announcementLedger := &fakeLeiosAnnouncementLedger{

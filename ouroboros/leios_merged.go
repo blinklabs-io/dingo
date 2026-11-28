@@ -1171,7 +1171,7 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 // announcing block is the tip and before the block that may certify it
 // applies. A forger checking its own announcement before adoption passes
 // ledger.LeiosValidationParentHash (see
-// ledger.LedgerState.ValidateLeiosEndorserBlockTransactions). Endorser-block
+// the ledger role's ValidateLeiosEndorserBlockTransactions). Endorser-block
 // bodies arrive independently on asynchronous Leios fetch workers.
 // Expired missing closures return unavailable without waiting; complete cached
 // closures still undergo semantic validation.
@@ -1197,7 +1197,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		return errors.New("leios announcement ledger unavailable")
 	}
 	if o.ledgerState != nil && !slices.Equal(
-		o.ledgerState.Tip().Point.Hash,
+		o.ledgerTip().Point.Hash,
 		basis,
 	) {
 		return ledger.ErrLeiosValidationParentUnavailable

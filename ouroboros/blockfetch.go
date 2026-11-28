@@ -512,7 +512,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			return nil
 		}
 	}
-	appliedTip := o.ledgerState.Tip()
+	appliedTip := o.ledgerTip()
 	tipIter, tipErr := o.ledgerState.GetChainFromPoint(appliedTip.Point, true)
 	if tipErr == nil {
 		tipIter.Cancel()
@@ -547,7 +547,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		return nil
 	}
 	maxBlocks := maxBlockFetchBlocksForSecurityParam(
-		o.ledgerState.SecurityParam(),
+		o.ledgerSecurityParam(),
 	)
 	// maxBlockFetchBlocksForSecurityParam never returns negative.
 	maxBlocksU64 := uint64(maxBlocks) // #nosec G115
