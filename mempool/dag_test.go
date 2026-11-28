@@ -17,6 +17,7 @@ package mempool
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -601,6 +602,139 @@ func TestDAGRevalidationBoundsLedgerGenerationRetries(t *testing.T) {
 	require.ErrorIs(t, err, errValidationSnapshotChanged)
 	assert.Len(t, pool.Transactions(), 1)
 	assert.False(t, pool.journalActive)
+}
+
+// rejectingSessionValidator fails every session validation after arm() is
+// called, and marks the first discardSessions armed sessions stale, so their
+// candidates are discarded and retried from the live pool. Before arm() the
+// admission path (and its immediate reconcile) stays open.
+type rejectingSessionValidator struct {
+	failErr         string
+	armed           atomic.Bool
+	discardSessions atomic.Int32
+	sessions        atomic.Int32
+}
+
+func (v *rejectingSessionValidator) arm() {
+	v.armed.Store(true)
+}
+
+func (v *rejectingSessionValidator) ValidateTx(gledger.Transaction) error {
+	return nil
+}
+
+func (v *rejectingSessionValidator) ValidateTxWithOverlay(
+	gledger.Transaction,
+	map[utxoref.Key]struct{},
+	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
+) error {
+	return nil
+}
+
+func (v *rejectingSessionValidator) WithTxValidationSession(ctx context.Context,
+	fn func(
+		validate func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+	) error,
+) error {
+	stale := false
+	if v.armed.Load() {
+		session := v.sessions.Add(1)
+		stale = session <= v.discardSessions.Load()
+	}
+	stillCurrent := func() bool { return !stale }
+	return fn(
+		func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error {
+			if v.armed.Load() {
+				return errors.New(v.failErr)
+			}
+			return nil
+		},
+		stillCurrent,
+		testCommitIfCurrent(stillCurrent),
+	)
+}
+
+// TestRevalidationDroppedTransactionLogsOnceAfterCommit pins that the
+// "failed re-validation and was dropped" warning is logged exactly once,
+// when the candidate that drops the transaction commits — not when a
+// discarded attempt merely rejects it into its private overlay.
+func TestRevalidationDroppedTransactionLogsOnceAfterCommit(t *testing.T) {
+	t.Parallel()
+	txBytes := getTestTxBytes(t)
+	validator := &rejectingSessionValidator{failErr: "rejected for test"}
+	validator.discardSessions.Store(1)
+	var logs lockedBuffer
+	pool, err := NewDAG(MempoolConfig{
+		Validator:       validator,
+		Logger:          slog.New(slog.NewTextHandler(&logs, nil)),
+		MempoolCapacity: 1 << 20,
+		PromRegistry:    prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
+	require.NoError(
+		t,
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes),
+	)
+	validator.arm()
+
+	require.NoError(t, pool.rebuildOverlay(context.Background()))
+	assert.Empty(t, pool.Transactions())
+	dropped := strings.Count(
+		logs.String(),
+		"transaction failed re-validation and was dropped from the mempool",
+	)
+	assert.Equal(
+		t, 1, dropped,
+		"a real drop logs exactly once; a discarded attempt must not log it",
+	)
+}
+
+// TestRevalidationDiscardedCandidateLogsNoDrop pins that a rebuild attempt
+// discarded for a stale ledger snapshot logs no drop: the live pool still
+// holds the transaction, and every attempt rejected it into an overlay that
+// was thrown away.
+func TestRevalidationDiscardedCandidateLogsNoDrop(t *testing.T) {
+	t.Parallel()
+	txBytes := getTestTxBytes(t)
+	validator := &rejectingSessionValidator{failErr: "rejected for test"}
+	validator.discardSessions.Store(2)
+	var logs lockedBuffer
+	pool, err := NewDAG(MempoolConfig{
+		Validator:       validator,
+		Logger:          slog.New(slog.NewTextHandler(&logs, nil)),
+		MempoolCapacity: 1 << 20,
+		PromRegistry:    prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
+	require.NoError(
+		t,
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes),
+	)
+	validator.arm()
+
+	err = pool.rebuildOverlay(context.Background())
+	require.ErrorIs(t, err, errValidationSnapshotChanged)
+	assert.Len(t, pool.Transactions(), 1)
+	assert.NotContains(
+		t,
+		logs.String(),
+		"transaction failed re-validation and was dropped from the mempool",
+	)
 }
 
 func TestDAGRevalidationJournalOverflowLeavesLiveStateUntouched(t *testing.T) {

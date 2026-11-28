@@ -361,13 +361,15 @@ type revalidationCandidate struct {
 	txByHash     map[string]*MempoolTransaction
 	sizeBytes    int64
 	invalid      map[string]*MempoolTransaction
+	invalidErrs  map[string]error
 }
 
 func newRevalidationCandidate() *revalidationCandidate {
 	return &revalidationCandidate{
-		overlay:  newUtxoOverlay(),
-		txByHash: make(map[string]*MempoolTransaction),
-		invalid:  make(map[string]*MempoolTransaction),
+		overlay:     newUtxoOverlay(),
+		txByHash:    make(map[string]*MempoolTransaction),
+		invalid:     make(map[string]*MempoolTransaction),
+		invalidErrs: make(map[string]error),
 	}
 }
 
@@ -375,12 +377,20 @@ func newRevalidationCandidate() *revalidationCandidate {
 // the candidate overlay, but its descendants are still validated: a parent
 // fails because a block confirmed it as readily as because it became invalid,
 // and only the ledger can tell which, by holding the parent's outputs or not.
+// validationErr is kept for the drop report the committing attempt makes;
+// a rejected transaction is not dropped until its candidate commits.
 func (c *revalidationCandidate) reject(
 	at appliedTx,
 	tx *MempoolTransaction,
+	validationErr error,
 ) {
 	if tx != nil {
 		c.invalid[at.hash] = tx
+		if validationErr != nil {
+			c.invalidErrs[at.hash] = validationErr
+		} else {
+			delete(c.invalidErrs, at.hash)
+		}
 	}
 }
 
@@ -394,6 +404,7 @@ func (c *revalidationCandidate) remove(hashes map[string]struct{}) {
 		if _, remove := hashes[tx.Hash]; remove {
 			delete(c.txByHash, tx.Hash)
 			delete(c.invalid, tx.Hash)
+			delete(c.invalidErrs, tx.Hash)
 			c.sizeBytes -= tx.retainedBytes()
 			continue
 		}
@@ -402,6 +413,7 @@ func (c *revalidationCandidate) remove(hashes map[string]struct{}) {
 	c.transactions = remaining
 	for hash := range hashes {
 		delete(c.invalid, hash)
+		delete(c.invalidErrs, hash)
 	}
 }
 
@@ -415,6 +427,7 @@ func (c *revalidationCandidate) add(
 	c.txByHash[at.hash] = tx
 	c.sizeBytes += tx.retainedBytes()
 	delete(c.invalid, at.hash)
+	delete(c.invalidErrs, at.hash)
 }
 
 // appliedTx records a pending transaction and its UTxO effects for overlay
@@ -1788,6 +1801,22 @@ func (m *Mempool) rebuildOverlayAttempt(
 				m.mutationJournal = nil
 				m.journalOverflow = false
 				if len(invalidHashes) > 0 {
+					// The drop warning is only sound here, after the candidate
+					// committed: an attempt that loses stillCurrent or fails to
+					// commit is discarded and retried from the live pool, which
+					// still holds a transaction it rejected, so a reject-time
+					// warning would report a drop that never happened, once per
+					// discarded attempt and again on every retry.
+					for _, hash := range invalidHashes {
+						if verr := candidate.invalidErrs[hash]; verr != nil {
+							m.logger.Warn(
+								"transaction failed re-validation and was dropped from the mempool",
+								"component", "mempool",
+								"tx_hash", hash,
+								"error", verr,
+							)
+						}
+					}
 					removed := make(map[string]struct{}, len(invalidHashes))
 					for _, hash := range invalidHashes {
 						removed[hash] = struct{}{}
@@ -1905,7 +1934,7 @@ func (m *Mempool) revalidateAppliedTx(
 	if tx == nil {
 		// There is no transaction body to record in candidate.invalid, but its
 		// created outputs must still invalidate every dependent transaction.
-		candidate.reject(at, nil)
+		candidate.reject(at, nil, nil)
 		m.logger.Warn(
 			"overlay applied transaction is missing from transaction index during re-validation",
 			"component",
@@ -1919,7 +1948,7 @@ func (m *Mempool) revalidateAppliedTx(
 	}
 	tmpTx, err := safedecode.Transaction(at.txType, tx.Cbor)
 	if err != nil {
-		candidate.reject(at, tx)
+		candidate.reject(at, tx, nil)
 		m.logger.Error(
 			"transaction failed decode during re-validation",
 			"component", "mempool",
@@ -1934,13 +1963,11 @@ func (m *Mempool) revalidateAppliedTx(
 		candidate.overlay.created,
 		candidate.overlay.accounts,
 	); err != nil {
-		candidate.reject(at, tx)
-		m.logger.Warn(
-			"transaction failed re-validation and was dropped from the mempool",
-			"component", "mempool",
-			"tx_hash", at.hash,
-			"error", err,
-		)
+		// Not a drop yet: the candidate may be discarded for a stale ledger
+		// snapshot and retried from the live pool, which still holds this
+		// transaction. The committing attempt reports the drop, with this
+		// error, once the transaction actually leaves the pool.
+		candidate.reject(at, tx, err)
 		return
 	}
 	candidate.add(at, tx, tmpTx)
