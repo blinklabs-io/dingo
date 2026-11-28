@@ -625,11 +625,15 @@ func (p *PeerGovernor) enforcePeerLimits(
 	return events
 }
 
-// demoteExcessWarmPeersLocked makes outbound warm peers over limit cold,
-// lowest source priority and score first, and closes their connections. A
-// demoted peer stays known: removing it would let the next peer-sharing or
-// ledger round add and dial it again. Topology peers and inbound peers are
-// never demoted here.
+// demoteExcessWarmPeersLocked makes outbound warm peers cold, lowest source
+// priority and score first, while hot and warm outbound peers together exceed
+// limit, and closes their connections. That is the set the dial gate counts
+// (establishedOrDialingCountLocked), less dials in flight: a dial that has
+// not connected yet must not displace a connected peer. A demoted peer stays
+// known: removing it would let the next peer-sharing or ledger round add and
+// dial it again. Topology peers count toward limit but are never demoted, hot
+// peers are not demoted here, and inbound peers neither count nor are
+// demoted.
 // Returns events that should be published after releasing the lock; the
 // demoted connections are appended to closes for the caller to close after
 // releasing it. Must be called with p.mu held.
@@ -637,19 +641,19 @@ func (p *PeerGovernor) demoteExcessWarmPeersLocked(
 	limit int,
 	closes *[]deferredClose,
 ) []pendingEvent {
-	warm := make([]*Peer, 0, len(p.peers))
+	established := 0
 	candidates := make([]*Peer, 0, len(p.peers))
 	for _, peer := range p.peers {
-		if peer == nil || peer.State != PeerStateWarm ||
+		if peer == nil || peer.State == PeerStateCold ||
 			peer.Source == PeerSourceInboundConn {
 			continue
 		}
-		warm = append(warm, peer)
-		if !p.isTopologyPeer(peer.Source) {
+		established++
+		if peer.State == PeerStateWarm && !p.isTopologyPeer(peer.Source) {
 			candidates = append(candidates, peer)
 		}
 	}
-	demoteCount := min(len(warm)-limit, len(candidates))
+	demoteCount := min(established-limit, len(candidates))
 	if demoteCount <= 0 {
 		return nil
 	}

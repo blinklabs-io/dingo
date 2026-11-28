@@ -1080,7 +1080,7 @@
 # Target number of known (cold) peers
 # CLI: --target-known-peers
 # targetNumberOfKnownPeers: 0
-# Target number of established (warm) peers
+# Target number of established (warm and hot) outbound peers
 # CLI: --target-established-peers
 # targetNumberOfEstablishedPeers: 0
 # Target number of active (hot) peers

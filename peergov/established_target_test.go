@@ -198,8 +198,10 @@ func TestStartOutboundConnections_DialsOnlyBelowEstablishedTarget(
 // every cycle) must not dial it.
 func TestEnforcePeerLimits_DemotesExcessWarmAndKeepsPeerKnown(t *testing.T) {
 	t.Parallel()
+	// Four established peers (two warm gossip, one hot, one warm topology)
+	// over a target of three: one warm gossip peer is demoted.
 	pg := newBlockedDialGovernor(t, PeerGovernorConfig{
-		TargetNumberOfEstablishedPeers: 2,
+		TargetNumberOfEstablishedPeers: 3,
 		TargetNumberOfKnownPeers:       100,
 	})
 	keep := starvationPeer(0, PeerSourceP2PGossip, PeerStateWarm, true)
@@ -253,6 +255,64 @@ func TestEnforcePeerLimits_DemotesExcessWarmAndKeepsPeerKnown(t *testing.T) {
 	require.NoError(t, pg.AddPeer(drop.Address, PeerSourceP2PGossip))
 	requireDialStarted(t, pg, drop.NormalizedAddress, false,
 		"a peer demoted for the limit is not redialled by the next round")
+}
+
+// The established target counts hot and warm outbound peers, the set the
+// dial gate counts, so hot peers leave fewer warm slots. Only non-topology
+// warm peers are demoted, lowest score first; inbound peers do not count.
+func TestEnforcePeerLimits_EstablishedLimitCountsHotPeers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		target  int
+		warm    int
+		demoted int
+	}{
+		{name: "two hot and two warm over a target of three", target: 3,
+			warm: 2, demoted: 1},
+		{name: "two hot and one warm at a target of three", target: 3,
+			warm: 1, demoted: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pg := newStarvationGovernor(PeerGovernorConfig{
+				TargetNumberOfEstablishedPeers: tc.target,
+				TargetNumberOfKnownPeers:       100,
+			})
+			peers := []*Peer{
+				starvationPeer(0, PeerSourceP2PGossip, PeerStateHot, true),
+				starvationPeer(1, PeerSourceP2PLedger, PeerStateHot, true),
+				starvationPeer(2, PeerSourceInboundConn, PeerStateWarm, false),
+			}
+			warm := make([]*Peer, 0, tc.warm)
+			for i := range tc.warm {
+				w := starvationPeer(3+i, PeerSourceP2PGossip, PeerStateWarm,
+					true)
+				w.PerformanceScore = float64(i+1) / 10
+				warm = append(warm, w)
+			}
+			peers = append(peers, warm...)
+			pg.mu.Lock()
+			pg.peers = peers
+			removed := 0
+			pg.enforcePeerLimits(&removed, new([]deferredClose))
+			pg.mu.Unlock()
+
+			assert.Zero(t, removed)
+			assert.Equal(t, PeerStateHot, peers[0].State)
+			assert.Equal(t, PeerStateHot, peers[1].State)
+			assert.Equal(t, PeerStateWarm, peers[2].State,
+				"inbound peers are outside the outbound target")
+			for i, w := range warm {
+				want := PeerStateWarm
+				if i < tc.demoted {
+					want = PeerStateCold
+				}
+				assert.Equal(t, want, w.State, "warm peer %d", i)
+			}
+		})
+	}
 }
 
 // A peer held back by the gate must be dialled once established peers fall

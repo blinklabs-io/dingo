@@ -310,7 +310,7 @@ type PeerGovernorConfig struct {
 	// Peer targets (0 = use default, -1 = unlimited)
 	// These are goals the system works toward, not hard limits.
 	TargetNumberOfKnownPeers       int // Target count of known (cold) peers
-	TargetNumberOfEstablishedPeers int // Target count of established (warm) peers
+	TargetNumberOfEstablishedPeers int // Target count of established (warm and hot) outbound peers; topology peers count, inbound peers do not
 	TargetNumberOfActivePeers      int // Target count of active (hot) peers
 	TargetNumberOfRootPeers        int // Target count of root peers from topology
 
