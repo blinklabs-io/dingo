@@ -340,6 +340,9 @@ func NewElection(
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// A node forging for several pools runs one election per pool, so every
+	// record names its pool.
+	logger = logger.With("pool_id", hex.EncodeToString(poolId[:]))
 	return &Election{
 		poolId:            poolId,
 		vrfSeed:           vrfSeed,
@@ -522,7 +525,6 @@ func (e *Election) start(ctx context.Context, afterWait func()) error {
 	e.logger.Info(
 		"leader election started",
 		"component", "leader",
-		"pool_id", hex.EncodeToString(e.poolId[:]),
 	)
 
 	return nil
