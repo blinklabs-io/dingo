@@ -15,6 +15,7 @@
 package chain
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -73,6 +74,26 @@ type ChainManager struct {
 	// headerQueueFullObserver, when set, is called for every header the
 	// primary chain rejects with ErrHeaderQueueFull.
 	headerQueueFullObserver atomic.Pointer[func()]
+	// genesisHash is the network's genesis hash, the previous hash a first
+	// Byron header must carry. Nil until SetGenesisHash runs.
+	genesisHash atomic.Pointer[[]byte]
+}
+
+// SetGenesisHash configures the genesis hash that anchors the first header of
+// an empty chain. A Byron header at origin must name it as its previous hash;
+// a header of a later era at origin must carry the null previous hash that the
+// reference reads as GenesisHash. Until it is set only the first block number
+// is enforced at origin. The hash must be 32 bytes.
+func (cm *ChainManager) SetGenesisHash(hash []byte) error {
+	if len(hash) != 32 {
+		return fmt.Errorf(
+			"genesis hash must be 32 bytes, got %d",
+			len(hash),
+		)
+	}
+	cloned := bytes.Clone(hash)
+	cm.genesisHash.Store(&cloned)
+	return nil
 }
 
 // SetHeaderQueueFullObserver installs fn to be called once for every header

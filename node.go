@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1119,6 +1120,16 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
 	n.chainManager = cm
+	if nc := n.config.cardanoNodeConfig; nc != nil &&
+		nc.ByronGenesisHash != "" {
+		genesisHash, err := hex.DecodeString(nc.ByronGenesisHash)
+		if err != nil {
+			return fmt.Errorf("decode Byron genesis hash: %w", err)
+		}
+		if err := cm.SetGenesisHash(genesisHash); err != nil {
+			return fmt.Errorf("configure chain genesis hash: %w", err)
+		}
+	}
 	n.chainsyncIngressEligibilityCache = make(
 		map[ouroboros.ConnectionId]bool,
 	)
