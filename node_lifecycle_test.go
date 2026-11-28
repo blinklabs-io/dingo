@@ -693,6 +693,11 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	// closed ledger, mempool and connection manager.
 	require.NotSame(t, ouroBeforeRestore, n.ouroboros())
 	require.Same(t, n.ledgerState, n.ouroboros().LedgerState())
+	require.Equal(
+		t,
+		newSDKLedgerRole(n.ledgerState).Tip(),
+		n.ouroboros().ChainLedger().Tip(),
+	)
 	require.Same(t, n.mempool, n.ouroboros().Mempool())
 	require.Same(t, n.chainsyncState, n.ouroboros().ChainsyncState())
 	require.Same(t, n.connManager, n.ouroboros().ConnManager())
