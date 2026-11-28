@@ -137,7 +137,7 @@ func fetchEraSpans(
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 	lsq := conn.LocalStateQuery()
 	if lsq == nil || lsq.Client == nil {
 		return nil, errAcquireWithoutLocalStateQuery

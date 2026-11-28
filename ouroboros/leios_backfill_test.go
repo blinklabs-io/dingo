@@ -382,7 +382,7 @@ func newLeiosFetchConversationWithAddrs(
 		ouroboros.WithLeiosFetchConfig(leiosfetch.NewConfig()),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	return conn
 }
 
@@ -405,7 +405,7 @@ func newLeiosBackfillSelectorPeers(
 	peers := make([]*ouroboros.Connection, 0, len(names))
 	for _, name := range names {
 		conn, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
-		t.Cleanup(func() { _ = conn.Close() })
+		t.Cleanup(func() { _ = conn.Close(context.Background()) })
 		require.NotNil(t, conn.LeiosNotify())
 		require.NotNil(t, conn.LeiosNotify().Client)
 		require.True(t, cm.AddConnection(conn, false, name))
@@ -625,7 +625,7 @@ func TestBackfillFinalRelayGetsRemainingBudgetAfterPromotion(t *testing.T) {
 		fakeConnAddr("dropped-local"),
 		fakeConnAddr("dropped-remote"),
 	)
-	t.Cleanup(func() { _ = dropped.Close() })
+	t.Cleanup(func() { _ = dropped.Close(context.Background()) })
 	state := chainsync.NewState(nil, nil)
 	state.SetClientConnId(peers[0].Id())
 	o := newOuroboros(OuroborosConfig{ConnManager: cm, ChainsyncState: state})

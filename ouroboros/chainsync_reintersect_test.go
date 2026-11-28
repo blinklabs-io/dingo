@@ -229,7 +229,7 @@ func (f *reintersectFixture) dial(t *testing.T) *ouroboros.Connection {
 	require.NoError(t, testutil.RequireReceive(
 		t, serverReady, 5*time.Second, "server handshake",
 	))
-	t.Cleanup(func() { _ = client.Close(); _ = serverConn.Close() })
+	t.Cleanup(func() { _ = client.Close(context.Background()); _ = serverConn.Close(context.Background()) })
 	require.True(t, f.cm.AddConnection(client, false, "127.0.0.1:3001"))
 	serverConn.ChainSync().Server.Start()
 	return client
@@ -578,7 +578,7 @@ func TestChainsyncResyncReintersectIgnoresReplacedConnection(t *testing.T) {
 	)
 	old := f.cm.GetConnectionById(f.connId)
 	require.NotNil(t, old)
-	require.NoError(t, old.Close())
+	require.NoError(t, old.Close(context.Background()))
 	testutil.WaitForCondition(
 		t,
 		func() bool { return !f.connected() },
@@ -681,7 +681,7 @@ func TestChainsyncResyncReintersectOnTornDownConnectionIsNoOp(t *testing.T) {
 	)
 	conn := f.cm.GetConnectionById(f.connId)
 	require.NotNil(t, conn)
-	require.NoError(t, conn.Close())
+	require.NoError(t, conn.Close(context.Background()))
 	testutil.WaitForCondition(
 		t,
 		func() bool { return !f.connected() },

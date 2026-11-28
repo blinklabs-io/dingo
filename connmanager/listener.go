@@ -492,7 +492,7 @@ func (c *ConnectionManager) setupAcceptedConnection(
 			"error",
 			err,
 		)
-		closeConnAndLog(c.config.Logger, oConn, "listener: close failed")
+		closeConnAndLog(c.config.Logger, OuroborosCloser{Conn: oConn}, "listener: close failed")
 		if ipKey != "" {
 			c.releaseIPSlot(ipKey)
 		}
@@ -515,7 +515,7 @@ func (c *ConnectionManager) setupAcceptedConnection(
 				err,
 			)
 			c.unregisterTrustedNtCActivity(oConn.Id(), oConn)
-			closeConnAndLog(c.config.Logger, oConn, "listener: close failed")
+			closeConnAndLog(c.config.Logger, OuroborosCloser{Conn: oConn}, "listener: close failed")
 			c.forgetClosedTrustedNtCActivity(oConn.Id(), oConn)
 			if ipKey != "" {
 				c.releaseIPSlot(ipKey)

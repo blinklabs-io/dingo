@@ -888,8 +888,16 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 			break
 		}
 		if blocking && len(tmpTxs) == 0 {
-			// Wait until we see a TX
-			tmpTx := consumer.NextTx(true)
+			// Wait until we see a TX, or until the protocol stops: the
+			// connection's close waits for this callback, and the consumer
+			// is only cancelled after that close completes.
+			var stop <-chan struct{}
+			if ctx.Client != nil {
+				if proto := ctx.Client.ProtocolInstance(); proto != nil {
+					stop = proto.StopChan()
+				}
+			}
+			tmpTx := consumer.NextTxUntil(true, stop)
 			if tmpTx == nil {
 				// The wait ended without a transaction: the protocol, the
 				// connection's consumer or the mempool is stopping. A

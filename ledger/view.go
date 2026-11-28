@@ -42,6 +42,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	gleios "github.com/blinklabs-io/gouroboros/ledger/leios"
 )
 
 // ErrNilDecodedOutput is returned when a decoded UTxO output is nil.
@@ -3201,6 +3202,12 @@ func (lv *LedgerView) GetLeiosKeys(
 	return out, nil
 }
 
+// maxLeiosKeyAgeEpochs returns how many epochs a Leios voting key is
+// honoured after its registration, by gOuroboros's MaxKeyAgeEpochs from the
+// Shelley genesis KES parameters. The rule measures the epoch in which the
+// committee's snapshot was taken; every epoch in which a Leios key can be
+// registered or snapshotted is post-Byron, where the epoch length is the
+// Shelley genesis one, so the current era's length is that epoch's length.
 func (ls *LedgerState) maxLeiosKeyAgeEpochs() (uint64, error) {
 	if ls.config.CardanoNodeConfig == nil {
 		return 0, errors.New("cardano configuration unavailable")
@@ -3214,21 +3221,11 @@ func (ls *LedgerState) maxLeiosKeyAgeEpochs() (uint64, error) {
 	if slotsPerKESPeriod == 0 || slotsPerEpoch == 0 {
 		return 0, errors.New("invalid KES-period or epoch length")
 	}
-	maxSlots := new(big.Int).Mul(
-		big.NewInt(int64(genesis.MaxKESEvolutions)),
-		new(big.Int).SetUint64(slotsPerKESPeriod),
+	return gleios.MaxKeyAgeEpochs(
+		uint64(genesis.MaxKESEvolutions),
+		slotsPerKESPeriod,
+		slotsPerEpoch,
 	)
-	divisor := new(big.Int).SetUint64(slotsPerEpoch)
-	epochs, remainder := new(big.Int), new(big.Int)
-	epochs.QuoRem(maxSlots, divisor, remainder)
-	if remainder.Sign() > 0 {
-		epochs.Add(epochs, big.NewInt(1))
-	}
-	epochs.Add(epochs, big.NewInt(2))
-	if !epochs.IsUint64() {
-		return 0, errors.New("maximum Leios key age overflows uint64")
-	}
-	return epochs.Uint64(), nil
 }
 
 // GetPoolStake returns the stake for a specific pool from the snapshot.

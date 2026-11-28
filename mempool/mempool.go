@@ -126,6 +126,7 @@ func producedOutputBytes(produced []lcommon.Utxo) int64 {
 // TxSubmission.
 type Consumer interface {
 	NextTx(bool) *MempoolTransaction
+	NextTxUntil(bool, <-chan struct{}) *MempoolTransaction
 	GetTxFromCache(string) *MempoolTransaction
 	ClearCache()
 	RemoveTxFromCache(string)

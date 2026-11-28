@@ -83,7 +83,7 @@ func TestInboundArrivalAtPeerCapReleasesConnectionSlots(t *testing.T) {
 		ouroboros.WithFullDuplex(true),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
 
 	arrival := testutil.RequireReceive(
 		t, inboundCh, testutil.AsyncWait, "inbound connection event",

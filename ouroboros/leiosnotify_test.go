@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -68,8 +69,8 @@ func TestLeiosNotifyStartedUnregisteredConnectionCloses(t *testing.T) {
 		closeConnection()
 		// Release the old implementation after a failed assertion, too.
 		o.ReleaseLeiosServeWaiters(connID)
-		server.Stop()
-		m.Stop()
+		server.Stop(context.Background())
+		m.Stop(context.Background())
 		_ = local.Close()
 		_ = peer.Close()
 	})
@@ -94,7 +95,7 @@ func TestLeiosNotifyStartedUnregisteredConnectionCloses(t *testing.T) {
 	}, 5*time.Second, "started callback to wait before manager publication")
 	require.Nil(t, o.connManager.GetConnectionById(connID))
 	closeConnection()
-	server.Stop()
+	server.Stop(context.Background())
 	testutil.RequireReceive(
 		t,
 		finished,
@@ -217,10 +218,10 @@ func TestLeiosNotifyClientStartBindsRealServerOwner(t *testing.T) {
 	var client, server *gouroboros.Connection
 	t.Cleanup(func() {
 		if client != nil {
-			_ = client.Close()
+			_ = client.Close(context.Background())
 		}
 		if server != nil {
-			_ = server.Close()
+			_ = server.Close(context.Background())
 		}
 		_ = left.Close()
 		_ = right.Close()
@@ -299,10 +300,10 @@ func TestLeiosNotifyClientContinuesAfterFirstNotification(t *testing.T) {
 	var client, server *gouroboros.Connection
 	t.Cleanup(func() {
 		if client != nil {
-			_ = client.Close()
+			_ = client.Close(context.Background())
 		}
 		if server != nil {
-			_ = server.Close()
+			_ = server.Close(context.Background())
 		}
 		_ = left.Close()
 		_ = right.Close()
@@ -401,7 +402,7 @@ func TestLeiosNotifyIdleRequestReleasedByDisconnect(t *testing.T) {
 	// Exercise the production callback with a real managed connection. The
 	// standalone protocol's completion remains open throughout the disconnect.
 	server := leiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
-	t.Cleanup(server.Stop)
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
 	finished := make(chan struct{})
 	connectionDone := make(chan any)
 	go func() {
@@ -489,7 +490,7 @@ func TestLeiosNotifyOfferKeepsConnectionClosureObserver(t *testing.T) {
 
 	o := newOuroboros(OuroborosConfig{})
 	server := leiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
-	t.Cleanup(server.Stop)
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
 	connectionDone := make(chan any)
 	connID := gouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
@@ -540,7 +541,7 @@ func TestLeiosNotifyCompletedProtocolReturnsWithoutCursor(t *testing.T) {
 	t.Parallel()
 	o := newOuroboros(OuroborosConfig{})
 	server := leiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
-	server.Stop()
+	server.Stop(context.Background())
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
@@ -582,14 +583,14 @@ func TestLeiosNotifyUnregisteredConnectionWaitsForProtocolCompletion(
 		})
 		finished <- err
 	}()
-	t.Cleanup(server.Stop)
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
 	testutil.RequireNoReceive(
 		t,
 		finished,
 		50*time.Millisecond,
 		"an unregistered connection must not be treated as a live-protocol disconnect",
 	)
-	server.Stop()
+	server.Stop(context.Background())
 	err := testutil.RequireReceive(t, finished, time.Second,
 		"protocol completion must release the callback")
 	require.Error(t, err)
@@ -611,7 +612,7 @@ func TestLeiosNotifyRequestDuringInFlightSendServesNextEntry(t *testing.T) {
 	t.Parallel()
 	o := newOuroboros(OuroborosConfig{})
 	server := leiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
-	t.Cleanup(server.Stop)
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
 	connectionDone := make(chan any)
 	t.Cleanup(func() { close(connectionDone) })
 	ctx := leiosnotify.CallbackContext{

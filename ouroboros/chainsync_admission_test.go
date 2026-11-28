@@ -124,7 +124,7 @@ func TestChainsyncAdmissionContextCancelledByClientStopDuringCallback(
 	}
 
 	stopped := make(chan error, 1)
-	go func() { stopped <- client.Stop() }()
+	go func() { stopped <- client.Stop(context.Background()) }()
 
 	select {
 	case err := <-waitResult:

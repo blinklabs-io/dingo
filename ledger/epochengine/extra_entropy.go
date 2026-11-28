@@ -17,6 +17,7 @@ package epochengine
 import (
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -125,14 +126,9 @@ func AssembleEpochNonce(
 			return cloneNonce(candidateNonce), nil
 		}
 		// candidateNonce ⭒ NeutralNonce ⭒ extraEntropy collapses to
-		// candidateNonce ⭒ extraEntropy, which CalculateEpochNonce cannot
-		// express because it requires a 32-byte lab.
-		//
-		// CalculateRollingNonce is NOT the bare ⭒ operator and must not be
-		// substituted here: it coerces its right operand from a raw VRF
-		// output, so for an all-zero left operand it returns
-		// blake2b_256(right) where ⭒ requires right unchanged
-		// (cardano-ledger BaseTypes: NeutralNonce <> x = x).
+		// candidateNonce ⭒ extraEntropy. An all-zero candidate is Dingo's
+		// wire form of NeutralNonce, and NeutralNonce <> x = x
+		// (cardano-ledger BaseTypes), so it is the identity here.
 		if IsNeutralNonce(candidateNonce) {
 			return cloneNonce(extraEntropy), nil
 		}
@@ -143,15 +139,34 @@ func AssembleEpochNonce(
 		mixed := lcommon.Blake2b256Hash(buf)
 		return mixed.Bytes(), nil
 	}
-	result, err := lcommon.CalculateEpochNonce(
-		candidateNonce,
-		labForEta,
-		extraEntropy,
-	)
+	if len(labForEta) != lcommon.Blake2b256Size ||
+		len(extraEntropy) != 0 && len(extraEntropy) != lcommon.Blake2b256Size {
+		return nil, fmt.Errorf(
+			"invalid epoch nonce inputs: lab=%d, extraEntropy=%d, expected "+
+				"32 and 0 or 32",
+			len(labForEta),
+			len(extraEntropy),
+		)
+	}
+	candidate, err := eras.NonceFromBytes(candidateNonce)
 	if err != nil {
 		return nil, err
 	}
-	return result.Bytes(), nil
+	lab, err := eras.NonceFromBytes(labForEta)
+	if err != nil {
+		return nil, err
+	}
+	extra := lcommon.Nonce{Type: lcommon.NonceTypeNeutral}
+	if len(extraEntropy) != 0 {
+		if extra, err = eras.NonceFromBytes(extraEntropy); err != nil {
+			return nil, err
+		}
+	}
+	result, err := lcommon.EpochNonceFromNonces(candidate, lab, extra)
+	if err != nil {
+		return nil, err
+	}
+	return result.Value[:], nil
 }
 
 // IsNeutralNonce reports whether nonce is the NeutralNonce, the identity of

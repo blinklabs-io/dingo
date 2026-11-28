@@ -20,8 +20,8 @@ require (
 	github.com/blinklabs-io/bark v0.6.0
 	github.com/blinklabs-io/bursa v0.25.0
 	github.com/blinklabs-io/go-scls v0.2.0
-	github.com/blinklabs-io/gouroboros v0.220.4
-	github.com/blinklabs-io/ouroboros-mock v0.21.2
+	github.com/blinklabs-io/gouroboros v0.222.0
+	github.com/blinklabs-io/ouroboros-mock v0.21.4
 	github.com/blinklabs-io/plutigo v0.13.1
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
@@ -219,7 +219,7 @@ require (
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.1 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
+	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/term v0.48.0 // indirect
 	golang.org/x/text v0.44.0 // indirect

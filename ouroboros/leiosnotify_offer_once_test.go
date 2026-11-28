@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -176,8 +177,8 @@ func leiosNotifyPipe(
 	require.NoError(t, serverResult.err)
 	client, server = clientResult.conn, serverResult.conn
 	t.Cleanup(func() {
-		_ = client.Close()
-		_ = server.Close()
+		_ = client.Close(context.Background())
+		_ = server.Close(context.Background())
 		_ = left.Close()
 		_ = right.Close()
 	})

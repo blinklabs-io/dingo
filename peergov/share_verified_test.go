@@ -76,9 +76,12 @@ func newMockNtNConnection(
 		ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
 		ouroboros.WithNodeToNode(true),
 		ouroboros.WithKeepAlive(false),
+		// The handshake ends with this side's agreement of its own data
+		// with the peer's, so peer sharing must be offered here too.
+		ouroboros.WithPeerSharing(peerSharing),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = oConn.Close() })
+	t.Cleanup(func() { _ = oConn.Close(context.Background()) })
 	return oConn
 }
 

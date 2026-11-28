@@ -1292,11 +1292,11 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 		nonceVrf, leaderVrf lcommon.VrfResult
 	)
 	if limits.era.isTPraos() {
-		nonceInput, err := vrf.MkSeedTPraos(
-			int64(slot),
+		nonceInput, err := eras.VRFSeedTPraos(
+			slot,
 			epochNonce,
 			vrf.SeedEta(),
-		) // #nosec G115 -- validated above
+		)
 		if err != nil {
 			return nil, nil, fmt.Errorf(
 				"failed to create TPraos nonce VRF input: %w",
@@ -1310,11 +1310,11 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 				err,
 			)
 		}
-		leaderInput, err := vrf.MkSeedTPraos(
-			int64(slot),
+		leaderInput, err := eras.VRFSeedTPraos(
+			slot,
 			epochNonce,
 			vrf.SeedL(),
-		) // #nosec G115 -- validated above
+		)
 		if err != nil {
 			return nil, nil, fmt.Errorf(
 				"failed to create TPraos leader VRF input: %w",
@@ -1331,7 +1331,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 		nonceVrf = lcommon.VrfResult{Output: nonceOutput, Proof: nonceProof}
 		leaderVrf = lcommon.VrfResult{Output: leaderOutput, Proof: leaderProof}
 	} else {
-		alpha, err := vrf.MkInputVrf(int64(slot), epochNonce) // #nosec G115 -- validated above
+		alpha, err := eras.VRFInputPraos(slot, epochNonce)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create VRF input: %w", err)
 		}

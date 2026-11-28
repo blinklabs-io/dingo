@@ -60,8 +60,8 @@ const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 // defaultCatchUpBandWaitTimeout bounds a catch-up band wait and a Limit on
 // Eagerness wait. A parked roll-forward callback stops its protocol's receive
 // loop. The protocol state timers that can run meanwhile are the chainsync Idle timeout (3673s), the
-// CanAwait timeout (ChainsyncBlockTimeout, at least 269s), the MustReply
-// timeout (135-269s), and dingo's own stall timeout (2m by default, measured
+// CanAwait timeout (ChainsyncBlockTimeout, at least 911s), the MustReply
+// timeout (601-911s), and dingo's own stall timeout (2m by default, measured
 // from the last delivered header). The bound stays under all of them.
 const defaultCatchUpBandWaitTimeout = 60 * time.Second
 
@@ -80,7 +80,7 @@ func catchUpBandWaitTimeoutFor(stall time.Duration) time.Duration {
 // defaultCorroborationHoldTimeout bounds a Genesis corroboration hold. A held
 // roll-forward callback stops its protocol's receive loop, and gouroboros
 // fails a pipelined client that consumes no reply within its CanAwait timeout
-// (ChainsyncBlockTimeout, at least 269s) or MustReply timeout (135-269s), so
+// (ChainsyncBlockTimeout, at least 911s) or MustReply timeout (601-911s), so
 // the bound stays well under them.
 const defaultCorroborationHoldTimeout = 5 * time.Second
 
@@ -1754,6 +1754,7 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 // replacement, and closing that would tear down a good peer for a failure that
 // belonged to its predecessor.
 func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
+	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	startedConn *ouroboros.Connection,
 ) {
@@ -1772,7 +1773,10 @@ func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
 		)
 		return
 	}
-	if closeErr := startedConn.Close(); closeErr != nil {
+	if closeErr := connmanager.CloseOuroborosConn(
+		context.WithoutCancel(ctx),
+		startedConn,
+	); closeErr != nil {
 		o.config.Logger.Debug(
 			"failed to close outbound connection after chainsync start failure",
 			"component", "network",
@@ -1871,7 +1875,7 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 					"connection_id",
 					connId.String(),
 				)
-				conn.Close()
+				_ = connmanager.CloseOuroborosConn(context.Background(), conn)
 				return
 			} else {
 				o.config.Logger.Debug(

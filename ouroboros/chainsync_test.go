@@ -19,8 +19,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
-	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"io"
 	"log/slog"
 	"net"
@@ -30,6 +28,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -1302,7 +1303,7 @@ func TestFutureHeaderResyncSuppressesConnectionRemovedDuringArm(t *testing.T) {
 		)),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	require.True(t, manager.AddConnection(conn, false, "127.0.0.1:1234"))
 
 	o := newOuroboros(OuroborosConfig{EventBus: bus})
@@ -3770,7 +3771,11 @@ func TestCloseOutboundConnAfterChainsyncFailureClosesStartedConn(t *testing.T) {
 	startedConn := connManager.GetConnectionById(connId)
 	require.NotNil(t, startedConn)
 
-	o.closeOutboundConnAfterChainsyncFailure(connId, startedConn)
+	o.closeOutboundConnAfterChainsyncFailure(
+		context.Background(),
+		connId,
+		startedConn,
+	)
 
 	require.Eventually(
 		t,
@@ -3814,10 +3819,14 @@ func TestCloseOutboundConnAfterChainsyncFailureSparesReplacement(t *testing.T) {
 		ouroboros.WithNodeToNode(true),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = staleConn.Close() })
+	t.Cleanup(func() { _ = staleConn.Close(context.Background()) })
 	require.NotSame(t, replacement, staleConn)
 
-	o.closeOutboundConnAfterChainsyncFailure(connId, staleConn)
+	o.closeOutboundConnAfterChainsyncFailure(
+		context.Background(),
+		connId,
+		staleConn,
+	)
 
 	// The replacement must be left strictly alone. Removal from the manager
 	// is asynchronous, so assert the connection never disappears over a
@@ -4377,7 +4386,7 @@ func (f *chainsyncServerFixture) requireConnectionClosed(
 
 // requireClientUnparked asserts the server dropped the transport, which is the
 // only thing that releases a peer the server has parked in MustReply short of
-// gouroboros' randomized 135-269s MustReply timer. The harness surfaces the
+// gouroboros' randomized 601-911s MustReply timer. The harness surfaces the
 // drop by closing its observed-message stream, so Observe returns
 // csmock.ErrClosed; a server that abandons the wait silently instead leaves
 // Observe blocking until the deadline.
@@ -4874,7 +4883,7 @@ func TestTrustedNtCChainSyncAwaitKeepsIdleDeadlineSuspended(t *testing.T) {
 		ouroboros.WithChainSyncConfig(clientConfig),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
 
 	serverConn := testutil.RequireReceive(
 		t,
@@ -5017,7 +5026,7 @@ func TestChainsyncServerRequestNextAsyncRollForwardFailureClosesConnection(
 	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
 
 	// Stop the protocol so the async send fails, then wake the iterator.
-	f.h.Server().Stop()
+	f.h.Server().Stop(context.Background())
 	block, point := f.appendBlock(t, 1, 1, 0x01)
 	f.setTip(block, point)
 
@@ -5047,7 +5056,7 @@ func TestChainsyncServerRequestNextAsyncRollBackwardFailureClosesConnection(
 	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
 
 	// Stop the protocol so the async send fails, then roll back.
-	f.h.Server().Stop()
+	f.h.Server().Stop(context.Background())
 	require.NoError(
 		t,
 		f.o.ledgerState.Chain().
@@ -5494,7 +5503,7 @@ func TestChainsyncServerRequestNextErrorsNameTheFailedStep(t *testing.T) {
 
 		f := newChainsyncServerFixture(t, csmock.ModeNtC)
 		f.registerClientAtOrigin(t)
-		f.h.Server().Stop()
+		f.h.Server().Stop(context.Background())
 
 		err := f.o.chainsyncServerRequestNext(f.callbackContext(), false)
 
@@ -5528,7 +5537,7 @@ func TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply(
 // Once AwaitReply is on the wire the server holds agency in MustReply, so a
 // waiter that gives up without a reply must drop the transport. Every test
 // below asserts the client was released rather than left to gouroboros'
-// randomized 135-269s MustReply timeout, which is what produced the observed
+// randomized 601-911s MustReply timeout, which is what produced the observed
 // reconnect-and-park loop.
 // =============================================================================
 
@@ -5587,7 +5596,7 @@ func TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient(
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.parkInAwaitReply(t)
 
-	f.o.chainsyncServerServeAwaited(f.callbackContext(), f.conn, nil, nil)
+	f.o.chainsyncServerServeAwaited(f.callbackContext(), connmanager.OuroborosCloser{Conn: f.conn}, nil, nil)
 
 	f.requireClientUnparked(
 		t,
@@ -5683,7 +5692,7 @@ func TestChainsyncServerAwaitedWaiterClosesOnConnectionTeardown(
 	f, logBuf := newChainsyncServerFixtureLogging(t)
 	clientState := f.registerClientAtOrigin(t)
 
-	conn := newStubChainsyncServerConnection(f.conn.Close)
+	conn := newStubChainsyncServerConnection(func() error { return f.conn.Close(context.Background()) })
 	conn.closeErr = errors.New("peer reset")
 	done := make(chan struct{})
 	go func() {
@@ -5735,7 +5744,7 @@ func TestChainsyncServerServeAwaitedCancelledDoesNotCloseConnection(
 
 	f.o.chainsyncServerServeAwaited(
 		f.callbackContext(),
-		f.conn,
+		connmanager.OuroborosCloser{Conn: f.conn},
 		nil,
 		context.Canceled,
 	)
@@ -5766,11 +5775,8 @@ func TestEffectiveChainsyncBlockTimeoutUsesProtocolMaxAsFloor(t *testing.T) {
 		ochainsync.MustReplyTimeoutMax,
 		effectiveChainsyncBlockTimeout(time.Minute),
 	)
-	require.Equal(
-		t,
-		10*time.Minute,
-		effectiveChainsyncBlockTimeout(10*time.Minute),
-	)
+	above := ochainsync.MustReplyTimeoutMax + time.Minute
+	require.Equal(t, above, effectiveChainsyncBlockTimeout(above))
 }
 
 func TestDecodeChainsyncHeaderAcceptsFullByronEbb(t *testing.T) {
@@ -6067,7 +6073,7 @@ func TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget(
 			option,
 		)
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = conn.Close() })
+		t.Cleanup(func() { _ = conn.Close(context.Background()) })
 		select {
 		case err, ok := <-mockConn.(*ouroboros_mock.Connection).ErrorChan():
 			require.NoError(t, err)
@@ -6117,7 +6123,7 @@ func TestCloseChainsyncServerConnTearsDownTransport(t *testing.T) {
 		ouroboros.WithLogger(logger),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = clientConn.Close() })
+	t.Cleanup(func() { _ = clientConn.Close(context.Background()) })
 
 	var serverConn *ouroboros.Connection
 	select {
@@ -6127,11 +6133,11 @@ func TestCloseChainsyncServerConnTearsDownTransport(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for server connection setup")
 	}
-	t.Cleanup(func() { _ = serverConn.Close() })
+	t.Cleanup(func() { _ = serverConn.Close(context.Background()) })
 
 	o := newOuroboros(OuroborosConfig{Logger: logger})
 	o.closeChainsyncServerConn(
-		serverConn,
+		connmanager.OuroborosCloser{Conn: serverConn},
 		serverConn.Id().String(),
 		errLeiosClosureUnresolved,
 	)
@@ -8741,7 +8747,7 @@ func TestHandleConnClosedEventPreservesLocalRestartStability(t *testing.T) {
 			bus := event.NewEventBus(nil, logger)
 			defer bus.Close()
 			conn := newChainsyncResyncTestConnection(t, "127.0.0.2:3001")
-			defer conn.Close()
+			defer conn.Close(context.Background())
 			manager := connmanager.NewConnectionManager(
 				connmanager.ConnectionManagerConfig{Logger: logger},
 			)

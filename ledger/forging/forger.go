@@ -4477,11 +4477,8 @@ func (f *BlockForger) VRFProofForSlot(
 		return nil, nil, fmt.Errorf("slot %d exceeds int64 max", slot)
 	}
 
-	// Create VRF input: MkInputVrf(slot, epochNonce)
-	alpha, err := vrf.MkInputVrf(
-		int64(slot),
-		epochNonce,
-	) // #nosec G115 -- validated above
+	// Create VRF input from the slot and epoch nonce.
+	alpha, err := eras.VRFInputPraos(slot, epochNonce)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create VRF input: %w", err)
 	}

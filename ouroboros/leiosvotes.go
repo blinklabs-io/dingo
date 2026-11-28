@@ -151,9 +151,8 @@ func (o *Ouroboros) leiosvotesClientVote(
 		"received leios vote",
 		"protocol", "leios-votes",
 		"connection_id", connId,
-		"slot", vote.SlotNo,
+		"announcing_rb_hash", vote.AnnouncingRbHash.String(),
 		"voter_id", vote.VoterId,
-		"endorser_block_hash", vote.EndorserBlockHash.String(),
 	)
 	if o.leiosVotes == nil {
 		return nil

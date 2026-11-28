@@ -3,14 +3,14 @@ module github.com/blinklabs-io/dingo/sdk
 go 1.26.11
 
 require (
-	github.com/blinklabs-io/gouroboros v0.220.4
-	github.com/blinklabs-io/ouroboros-mock v0.21.2
+	github.com/blinklabs-io/gouroboros v0.222.0
+	github.com/blinklabs-io/ouroboros-mock v0.21.4
 )
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/bits-and-blooms/bitset v1.25.0 // indirect
-	github.com/blinklabs-io/plutigo v0.12.1 // indirect
+	github.com/blinklabs-io/plutigo v0.13.0 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.5.1 // indirect
 	github.com/btcsuite/btcd/btcutil v1.2.0 // indirect
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.2.0 // indirect

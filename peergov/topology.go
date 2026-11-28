@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/topology"
 )
 
@@ -323,7 +324,7 @@ func (p *PeerGovernor) LoadTopologyConfig(
 			); conn != nil {
 				closeConnAndLog(
 					p.config.Logger,
-					conn,
+					connmanager.OuroborosCloser{Conn: conn, Begin: true},
 					"error closing connection for peer removed by topology",
 					"address", orphanPeer.Address,
 				)

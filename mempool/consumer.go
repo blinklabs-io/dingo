@@ -106,6 +106,18 @@ func (m *MempoolConsumer) cancel() {
 }
 
 func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
+	return m.NextTxUntil(blocking, nil)
+}
+
+// NextTxUntil is NextTx whose blocking wait also ends, returning nil, when
+// stop is closed. A caller running inside a protocol callback passes the
+// protocol's stop channel: the connection's close waits for the callback, so
+// the wait must not depend on the connection's cleanup cancelling the
+// consumer. A nil stop never fires.
+func (m *MempoolConsumer) NextTxUntil(
+	blocking bool,
+	stop <-chan struct{},
+) *MempoolTransaction {
 	if m == nil {
 		return nil
 	}
@@ -224,6 +236,9 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 			// Loop back to check if transaction is available
 			// This naturally handles the case of multiple rapid additions
 		case <-m.done:
+			m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)
+			return nil
+		case <-stop:
 			m.mempool.eventBus.Unsubscribe(AddTransactionEventType, addTxSubId)
 			return nil
 		case <-m.mempool.done:

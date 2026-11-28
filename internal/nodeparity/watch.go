@@ -233,7 +233,7 @@ func watchSession(
 		rawConn.Close() //nolint:errcheck
 		return false, fmt.Errorf("ouroboros.New: %w", connErr)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 
 	// GetCurrentTip and Sync below are synchronous protocol calls with no
 	// per-call timeout of their own: each blocks until the peer replies or
@@ -244,7 +244,7 @@ func watchSession(
 	// flight immediately.
 	stopOnCancel := context.AfterFunc(
 		ctx,
-		func() { conn.Close() },
+		func() { conn.Close(context.WithoutCancel(ctx)) },
 	) //nolint:errcheck
 	defer stopOnCancel()
 

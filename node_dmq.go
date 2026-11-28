@@ -167,27 +167,6 @@ func (a *dmqStakeAuthority) CurrentKESPeriod() (uint64, error) {
 	return slot / slotsPerKESPeriod, nil
 }
 
-func (a *dmqStakeAuthority) CurrentSlot() (uint64, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.wallClockSlot()
-}
-
-func (a *dmqStakeAuthority) PoolOpCertIssueNumber(
-	pool ocommon.PoolKeyHash,
-) (uint64, bool, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.ledgerState == nil {
-		return 0, false, dmqUnavailable(errDMQLedgerDetached)
-	}
-	issue, found, err := a.ledgerState.LatestOpCertSequence(pool)
-	if err != nil {
-		return 0, false, dmqUnavailable(err)
-	}
-	return issue, found, nil
-}
-
 // startDMQ starts the DMQ stack when it is enabled. Its collectors register
 // against the retained registry because the stack is not rebuilt by a live
 // restore, which unregisters everything the rebuildable wrapper holds.
@@ -226,12 +205,17 @@ func (n *Node) startDMQ() error {
 	n.dmqStake.setLedgerState(n.ledgerState)
 	authenticator, err := ocommon.NewMessageAuthenticator(
 		ocommon.MessageAuthenticatorConfig{
-			StakeAuthority:        &n.dmqStake,
-			CurrentSlot:           n.dmqStake.CurrentSlot,
-			PoolOpCertIssueNumber: n.dmqStake.PoolOpCertIssueNumber,
-			SlotsPerKESPeriod:     n.ledgerState.SlotsPerKESPeriod(),
-			MaxKESEvolutions:      n.config.MaxKESEvolutions(),
-			Logger:                n.config.logger,
+			// Message verification no longer reads the node's slot or the
+			// chain's opcert counter: as dmq-node, it checks the KES
+			// signature at the message's claimed period and compares
+			// counters only with earlier messages from the pool.
+			StakeAuthority:   &n.dmqStake,
+			MaxKESEvolutions: n.config.MaxKESEvolutions(),
+			// dmq-node's one vcMinSigDelay both refuses a pool's messages
+			// that arrive too close together and is why this node spaces
+			// the ones it announces, so the two use one setting.
+			MinSigDelay: dmqMinPoolMessageInterval(cfg.MinPoolMessageInterval),
+			Logger:      n.config.logger,
 		},
 	)
 	if err != nil {

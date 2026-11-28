@@ -261,8 +261,8 @@ func TestBuildChainSelectorConfigWiresPeerIdentity(t *testing.T) {
 	require.NoError(t, local.err)
 	require.NoError(t, peer.err)
 	t.Cleanup(func() {
-		_ = local.conn.Close()
-		_ = peer.conn.Close()
+		_ = local.conn.Close(context.Background())
+		_ = peer.conn.Close(context.Background())
 	})
 
 	conn := local.conn.Id()

@@ -1577,7 +1577,7 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 					_ = conn.Close()
 					return
 				}
-				defer oconn.Close() //nolint:errcheck
+				defer oconn.Close(context.Background()) //nolint:errcheck
 				<-oconn.ErrorChan()
 			}()
 		}

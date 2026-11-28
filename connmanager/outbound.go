@@ -118,7 +118,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 			"connection rejected (shutdown or collision): %s",
 			address,
 		)
-		return nil, joinCloseErr(rejectErr, oConn)
+		return nil, joinCloseErr(rejectErr, OuroborosCloser{Conn: oConn})
 	}
 	return oConn, nil
 }
