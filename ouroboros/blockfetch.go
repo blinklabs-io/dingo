@@ -137,6 +137,23 @@ type blockfetchSendDrainWaiter interface {
 	WaitSendQueueDrained(time.Duration) bool
 }
 
+// blockfetchPacedServer gives the gOuroboros block-fetch server the send-queue
+// wait that blockfetchServerWaitForSendDrain looks for. Server does not
+// promote the wait of its protocol instance, so without this wrapper that
+// function's type assertion fails and the sender runs ahead of the peer.
+type blockfetchPacedServer struct {
+	*blockfetch.Server
+}
+
+var _ blockfetchSendDrainWaiter = blockfetchPacedServer{}
+
+// WaitSendQueueDrained waits on the server's current protocol instance.
+func (s blockfetchPacedServer) WaitSendQueueDrained(
+	timeout time.Duration,
+) bool {
+	return s.ProtocolInstance().WaitSendQueueDrained(timeout)
+}
+
 // managedConnection is what a protocol handler may do with a connection the
 // connection manager owns: wait for its teardown and drop the transport. It
 // deliberately has no ErrorChan: the manager is the only receiver of that
@@ -621,7 +638,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			start,
 			end,
 			chainIter,
-			ctx.Server,
+			blockfetchPacedServer{Server: ctx.Server},
 			conn,
 			maxBlocks,
 		)

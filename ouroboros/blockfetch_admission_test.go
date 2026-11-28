@@ -18,6 +18,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -238,16 +239,8 @@ func TestBlockfetchServerRequestRange_PeerDisconnectMidRangeReleases(
 ) {
 	t.Parallel()
 
-	// The protocol queues up to 80 outbound messages before a send blocks, so
-	// the range must hold more blocks than that for the sender to be stuck
-	// mid-range while the peer reads nothing more.
-	const blocks = 100
-	slots := make([]uint64, blocks)
-	for i := range slots {
-		slots[i] = uint64(i+1) * 10
-	}
-	f := newBlockfetchRangeFixtureWithSlots(t, slots)
-	f.requestRange(t, f.point(0), f.point(blocks-1))
+	f := newBlockfetchRangeFixture(t)
+	f.requestRange(t, f.point(0), f.point(2))
 	// StartBatch proves the sender goroutine owns the reservation. The rest
 	// of the batch is left unread, so the sender is blocked mid-range.
 	require.Equal(t,
@@ -261,6 +254,42 @@ func TestBlockfetchServerRequestRange_PeerDisconnectMidRangeReleases(
 		total, conn := f.o.blockfetchRangeAdmission.counts(f.connID)
 		return total == 0 && conn == 0
 	}, testutil.AsyncWait, "reservation held after peer disconnect mid-range")
+}
+
+// The sender paces itself to the wire: it queues the next message only once
+// the protocol has written the previous one. A peer that has read StartBatch
+// and nothing more therefore leaves the sender blocked mid-range, still
+// holding its reservation, however short the range is. Without pacing the
+// sender queues the whole range at once and releases while the peer has read
+// one message. Releasing is the case that must not happen, so the wait is
+// bounded: it only runs long when the sender wrongly finished.
+func TestBlockfetchServerRequestRange_HoldsReservationUntilPeerReads(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newBlockfetchRangeFixture(t)
+	f.requestRange(t, f.point(0), f.point(2))
+	require.Equal(t,
+		[]byte{blockfetch.MessageTypeStartBatch}, f.readMessageTypes(t, 1))
+
+	require.Never(t, func() bool {
+		total, conn := f.o.blockfetchRangeAdmission.counts(f.connID)
+		return total == 0 && conn == 0
+	}, time.Second, time.Millisecond,
+		"reservation released while the peer has read only StartBatch")
+
+	// Reading the rest lets the paced sender finish and release.
+	assert.Equal(t, []byte{
+		blockfetch.MessageTypeBlock,
+		blockfetch.MessageTypeBlock,
+		blockfetch.MessageTypeBlock,
+		blockfetch.MessageTypeBatchDone,
+	}, f.readMessageTypes(t, 4))
+	testutil.WaitForCondition(t, func() bool {
+		total, conn := f.o.blockfetchRangeAdmission.counts(f.connID)
+		return total == 0 && conn == 0
+	}, testutil.AsyncWait, "reservation held after the peer read the range")
 }
 
 // With the only slot held, a request is rejected; once released the same
