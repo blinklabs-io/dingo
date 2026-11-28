@@ -111,7 +111,7 @@ func TestBlockInfoSizeMatchesDbSync(t *testing.T) {
 			length := block.SlotNumber() + 1
 			set, ok := livesettest.LedgerDBOf(adapter.ledgerState.Database())
 			require.True(t, ok, "the fixture's ledger has a LedgerDB set")
-			_, err = raw.Exec(
+			_, err := raw.Exec(
 				`INSERT INTO epoch (epoch_id, start_slot, length_in_slots, slot_length, era_id) VALUES (0, 0, ?, 1000, 6)`,
 				length,
 			)
