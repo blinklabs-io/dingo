@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -127,14 +128,14 @@ func TestLocalstatequeryProtocol_RequestAboveIngressCapIsRefused(
 				ouroboros.WithNodeToNode(false),
 			)
 			require.NoError(t, err)
-			defer cliConn.Close() //nolint:errcheck
+			defer cliConn.Close(context.Background()) //nolint:errcheck
 			select {
 			case err = <-serverDone:
 			case <-time.After(10 * time.Second):
 				t.Fatal("server handshake never completed")
 			}
 			require.NoError(t, err)
-			defer srvConn.Close() //nolint:errcheck
+			defer srvConn.Close(context.Background()) //nolint:errcheck
 
 			client := cliConn.LocalStateQuery().Client
 			require.NoError(t, client.AcquireVolatileTip())

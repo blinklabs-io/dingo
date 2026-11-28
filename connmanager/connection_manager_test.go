@@ -100,7 +100,7 @@ func TestConnectionManagerConnError(t *testing.T) {
 			if connId != expectedConnId {
 				tmpConn := connManager.GetConnectionById(connId)
 				if tmpConn != nil {
-					tmpConn.Close()
+					_ = tmpConn.Close(context.Background())
 				}
 			}
 		}
@@ -158,7 +158,7 @@ func TestConnectionManagerConnClosed(t *testing.T) {
 	}
 	expectedConnId = oConn.Id()
 	connManager.AddConnection(oConn, false, "127.0.0.1:1234")
-	oConn.Close()
+	_ = oConn.Close(context.Background())
 	select {
 	case <-doneChan:
 		// Wait for clean shutdown using Stop instead of fixed sleep

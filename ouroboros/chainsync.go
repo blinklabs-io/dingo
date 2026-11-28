@@ -4281,7 +4281,11 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 						"connection_id",
 						connId.String(),
 					)
-					_ = o.connManager.CloseConnectionWithReason(conn, e.Reason)
+					_ = o.connManager.CloseConnectionWithReason(
+						context.WithoutCancel(ctx),
+						conn,
+						e.Reason,
+					)
 				}
 				return
 			}
@@ -4402,7 +4406,11 @@ func (o *Ouroboros) closeConnectionForChainsyncResync(
 		"connection_id", connId.String(),
 		"reason", reason,
 	)
-	_ = o.connManager.CloseConnectionWithReason(conn, reason)
+	_ = o.connManager.CloseConnectionWithReason(
+		context.Background(),
+		conn,
+		reason,
+	)
 }
 
 // chainsyncReintersectRun is one in-place re-intersect of a chainsync client.

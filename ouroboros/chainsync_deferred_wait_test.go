@@ -800,7 +800,12 @@ func TestChainsyncDeferredVerificationEndsOnRealTransportClose(t *testing.T) {
 	require.NoError(t, err)
 	server := testutil.RequireReceive(t, serverReady, 5*time.Second, "server handshake")
 	require.NoError(t, server.err)
-	t.Cleanup(func() { cleanupRelease.Store(true); settle.publish(); _ = client.Close(); _ = server.conn.Close() })
+	t.Cleanup(func() {
+		cleanupRelease.Store(true)
+		settle.publish()
+		_ = client.Close(context.Background())
+		_ = server.conn.Close(context.Background())
+	})
 	require.True(t, f.state.AddClientConnId(client.Id()))
 	f.state.SetClientConnId(client.Id())
 	server.conn.ChainSync().Server.Start()
@@ -815,7 +820,7 @@ func TestChainsyncDeferredVerificationEndsOnRealTransportClose(t *testing.T) {
 	}
 	testutil.RequireNoReceive(t, returned, 100*time.Millisecond, "callback must really be parked before disconnect")
 	closed := make(chan error, 1)
-	go func() { closed <- client.Close() }()
+	go func() { closed <- client.Close(context.Background()) }()
 	testutil.RequireReceive(t, returned, 5*time.Second, "connection shutdown must release verification before protocol completion")
 	require.NoError(t, testutil.RequireReceive(t, closed, 5*time.Second, "connection close must join the protocol callback"))
 	testutil.RequireNoReceive(t, ledgerCh, 100*time.Millisecond, "a disconnected unverified header must not reach the ledger")

@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -37,6 +38,11 @@ type handledVote struct {
 	vote    lcommon.LeiosVote
 }
 
+type handledLegacyVote struct {
+	connKey string
+	vote    lcommon.LeiosLegacyVote
+}
+
 type handledPrototypeVote struct {
 	connKey string
 	vote    lcommon.LeiosPrototypeVote
@@ -51,6 +57,7 @@ type handledEb struct {
 type fakeLeiosVoteHandler struct {
 	mu             sync.Mutex
 	votes          []handledVote
+	legacyVotes    []handledLegacyVote
 	prototypeVotes []handledPrototypeVote
 	nextVotes      []lcommon.LeiosVote
 	nextErr        error
@@ -69,6 +76,19 @@ func (f *fakeLeiosVoteHandler) HandleVote(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.votes = append(f.votes, handledVote{connKey: connKey, vote: vote})
+	return nil
+}
+
+func (f *fakeLeiosVoteHandler) HandleLegacyVote(
+	connKey string,
+	vote lcommon.LeiosLegacyVote,
+) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.legacyVotes = append(
+		f.legacyVotes,
+		handledLegacyVote{connKey: connKey, vote: vote},
+	)
 	return nil
 }
 
@@ -154,12 +174,11 @@ func (f *fakeLeiosVoteHandler) RemoveConnection(connKey string) {
 	f.removed = append(f.removed, connKey)
 }
 
-func testLeiosVote(voterId uint64) lcommon.LeiosVote {
+func testLeiosVote(voterId uint16) lcommon.LeiosVote {
 	return lcommon.LeiosVote{
-		SlotNo:            123,
-		EndorserBlockHash: lcommon.NewBlake2b256([]byte("eb")),
-		VoterId:           voterId,
-		VoteSignature:     make([]byte, lcommon.LeiosBlsSignatureSize),
+		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("rb")),
+		VoterId:          voterId,
+		VoteSignature:    make([]byte, lcommon.LeiosBlsSignatureSize),
 	}
 }
 
@@ -215,7 +234,7 @@ func TestLeiosVotesServerRequestNextCanceledByProtocolStop(t *testing.T) {
 		result <- err
 	}()
 	<-started
-	server.Stop()
+	_ = server.Stop(context.Background())
 
 	select {
 	case err := <-result:

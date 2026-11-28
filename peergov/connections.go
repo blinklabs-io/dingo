@@ -517,7 +517,7 @@ func (p *PeerGovernor) createOutboundConnection(
 				// Peer was removed while connecting, close connection
 				closeConnAndLog(
 					p.config.Logger,
-					conn,
+					connmanager.OuroborosCloser{Conn: conn},
 					"outbound: error closing connection for removed peer",
 					"address", peer.Address,
 				)
@@ -537,7 +537,7 @@ func (p *PeerGovernor) createOutboundConnection(
 				p.mu.Unlock()
 				closeConnAndLog(
 					p.config.Logger,
-					conn,
+					connmanager.OuroborosCloser{Conn: conn},
 					"outbound: error closing superseded connection",
 					"address", peer.Address,
 				)
@@ -551,7 +551,7 @@ func (p *PeerGovernor) createOutboundConnection(
 				p.mu.Unlock()
 				closeConnAndLog(
 					p.config.Logger,
-					conn,
+					connmanager.OuroborosCloser{Conn: conn},
 					"outbound: error closing connection for denied peer",
 					"address", peer.Address,
 				)
@@ -848,7 +848,7 @@ func (p *PeerGovernor) closeRejectedInbound(
 	)
 	closeConnAndLog(
 		p.config.Logger,
-		conn,
+		connmanager.OuroborosCloser{Conn: conn},
 		"error closing rejected inbound peer connection",
 		"address", address,
 		"connection_id", connId.String(),
@@ -1603,7 +1603,7 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 			// Connection succeeded, close it since this is just a test.
 			// Reachability is already established by the successful dial,
 			// so a close error here carries no diagnostic value.
-			_ = conn.Close()
+			_ = connmanager.CloseOuroborosConn(p.ctx, conn)
 		}
 	} else {
 		testErr = errors.New("no test function or connection manager configured")

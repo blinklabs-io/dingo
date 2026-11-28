@@ -531,7 +531,7 @@ func stopAndDrainBlockPipeline(
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			require.NoError(t, ls.blockPipeline.Stop())
+			require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 			testutil.RequireReceive(
 				t,
 				ls.blockPipelineErrorsDone,

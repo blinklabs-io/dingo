@@ -207,3 +207,25 @@ func TestHeaderRangeAfterBytesCutsByEstimatedBytes(t *testing.T) {
 		require.Equal(t, 5, n)
 	})
 }
+
+// A queued header's block number is found by its point; a point the queue
+// does not hold, including one off the queued chain, is not.
+func TestQueuedHeaderBlockNumber(t *testing.T) {
+	t.Parallel()
+
+	blocks, err := fixtures.GenerateConwayChainWithTransactions(4)
+	require.NoError(t, err)
+	c := queueBlockHeaders(t, blocks[:3])
+
+	for _, b := range blocks[:3] {
+		got, ok := c.QueuedHeaderBlockNumber(rangePointOf(b))
+		require.True(t, ok)
+		require.Equal(t, b.BlockNumber(), got)
+	}
+	_, ok := c.QueuedHeaderBlockNumber(rangePointOf(blocks[3]))
+	require.False(t, ok)
+	_, ok = c.QueuedHeaderBlockNumber(
+		ocommon.NewPoint(blocks[1].SlotNumber(), []byte("not-a-header")),
+	)
+	require.False(t, ok)
+}

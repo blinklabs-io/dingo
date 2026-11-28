@@ -1204,7 +1204,7 @@ func (s *wiringFakeLSQServer) config() localstatequery.Config {
 				if s.cancelOnQuery != nil {
 					s.cancelOnQuery()
 					if conn := s.activeConn.Load(); conn != nil {
-						_ = conn.Close()
+						_ = conn.Close(context.Background())
 					}
 					return nil, errors.New(
 						"wiringFakeLSQServer: context ended mid-query",
@@ -1236,7 +1236,7 @@ func (s *wiringFakeLSQServer) config() localstatequery.Config {
 					case *localstatequery.ShelleyPoolDistr2Query:
 						if s.killAllPoolDistr.Load() || s.killConnOnNextPoolDistr.CompareAndSwap(true, false) {
 							if conn := s.activeConn.Load(); conn != nil {
-								_ = conn.Close()
+								_ = conn.Close(context.Background())
 							}
 							return nil, errors.New(
 								"wiringFakeLSQServer: connection killed for test",
@@ -1288,7 +1288,7 @@ func (s *wiringFakeLSQServer) serve(t *testing.T, listener net.Listener, magic u
 					return
 				}
 				s.activeConn.Store(oconn)
-				defer oconn.Close() //nolint:errcheck
+				defer oconn.Close(context.Background()) //nolint:errcheck
 				<-oconn.ErrorChan()
 			}()
 		}
@@ -1305,7 +1305,7 @@ func dialWiringClient(
 	t.Helper()
 	conn, err := Dial(ctx, addr, magic)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 
 	lsq := conn.LocalStateQuery()
 	require.NotNil(t, lsq)

@@ -184,7 +184,7 @@ func newValidatedPipelineTestLedger(
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	t.Cleanup(func() {
 		if ls.blockPipeline != nil {
-			require.NoError(t, ls.blockPipeline.Stop())
+			require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 		}
 	})
 	return ls
@@ -264,7 +264,7 @@ func TestDecodeReadChainBatchAcceptsRealByronWithValidation(t *testing.T) {
 		pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
-	t.Cleanup(func() { require.NoError(t, ls.blockPipeline.Stop()) })
+	t.Cleanup(func() { require.NoError(t, ls.blockPipeline.Stop(context.Background())) })
 
 	decoded, ok := ls.decodeReadChainBatch(
 		t.Context(),
@@ -408,7 +408,7 @@ func TestDecodeReadChainBatchSkipsValidationWithoutCachedNonce(
 		},
 	}
 	ls.publishSnapshotsLocked()
-	require.NoError(t, ls.blockPipeline.Stop())
+	require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
 		pipeline.WithValidateWorkers(1),
@@ -470,7 +470,7 @@ func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
 			useWrongEpochNonce(t, ls, vb)
 			ls.publishSnapshotsLocked()
 
-			require.NoError(t, ls.blockPipeline.Stop())
+			require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 			ls.blockPipeline = newTestReplayPipeline(ls,
 				pipeline.WithDecodeWorkers(1),
 				pipeline.WithValidateWorkers(1),
@@ -563,7 +563,7 @@ func TestDecodeReadChainBatchRejectsFailedValidationWhenEnabled(t *testing.T) {
 	block, vb := buildValidatedTestModelsBlock(t, seed, 7, 100, 1)
 
 	ls := newValidatedPipelineTestLedger(t, vb)
-	require.NoError(t, ls.blockPipeline.Stop())
+	require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 	useWrongEpochNonce(t, ls, vb)
 	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(2),
@@ -620,7 +620,7 @@ func TestDecodeReadChainBatchDrainsRemainingResultsAfterEarlyFailure(
 	)
 
 	ls := newValidatedPipelineTestLedger(t, vb2)
-	require.NoError(t, ls.blockPipeline.Stop())
+	require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(2),
 		pipeline.WithValidateWorkers(2),
@@ -687,7 +687,7 @@ func TestDecodeReadChainBatchIgnoresValidationOutcomeWhenDisabled(
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	defer func() {
-		require.NoError(t, ls.blockPipeline.Stop())
+		require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 	}()
 
 	decoded, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
@@ -792,7 +792,7 @@ func newAdmissionSkipTestLedger(
 		ls.epochCache[0].Nonce = wrongNonce
 		ls.publishSnapshotsLocked()
 	}
-	require.NoError(t, ls.blockPipeline.Stop())
+	require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
 		pipeline.WithValidateWorkers(1),

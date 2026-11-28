@@ -59,6 +59,17 @@ func (s *drepLifecycleValidationState) IsPoolRegistered(
 	return s.pools[pool]
 }
 
+// PoolCurrentState agrees with IsPoolRegistered: gOuroboros decides pool
+// registration from the current registration and retirement alone.
+func (s *drepLifecycleValidationState) PoolCurrentState(
+	pool common.PoolKeyHash,
+) (*common.PoolRegistrationCertificate, *uint64, error) {
+	if !s.pools[pool] {
+		return nil, nil, nil
+	}
+	return &common.PoolRegistrationCertificate{Operator: pool}, nil, nil
+}
+
 type drepLifecycleValidationEra struct {
 	name     string
 	params   common.ProtocolParameters

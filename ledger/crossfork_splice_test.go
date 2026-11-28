@@ -160,6 +160,43 @@ func TestValidateRollbackRejectsAbandonedForkPoint(t *testing.T) {
 	)
 }
 
+// A stored primary-chain block, beyond any queued header, resolves to its block
+// number; a block a fork replaced, and origin, resolve to none.
+func TestPrimaryChainPointBlockNumberResolvesStoredBlocks(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ctx := context.Background()
+	abandonedPoint := fixture.currentTip.Point
+
+	got, ok := ls.PrimaryChainPointBlockNumber(ctx, abandonedPoint)
+	require.True(t, ok)
+	require.Equal(t, fixture.currentTip.BlockNumber, got)
+
+	require.NoError(t, ls.chain.Rollback(ctx, fixture.ancestorTip.Point))
+	forkPoint := ocommon.NewPoint(21, testHashBytes("number-fork-block"))
+	require.NoError(t, ls.chain.AddRawBlocks(ctx, []chain.RawBlock{{
+		Slot:        forkPoint.Slot,
+		Hash:        forkPoint.Hash,
+		BlockNumber: fixture.ancestorTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.ancestorTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}}))
+
+	_, ok = ls.PrimaryChainPointBlockNumber(ctx, abandonedPoint)
+	assert.False(t, ok, "an abandoned fork block has no primary-chain number")
+	got, ok = ls.PrimaryChainPointBlockNumber(ctx, forkPoint)
+	assert.True(t, ok)
+	assert.Equal(t, fixture.ancestorTip.BlockNumber+1, got)
+	got, ok = ls.PrimaryChainPointBlockNumber(ctx, fixture.ancestorTip.Point)
+	assert.True(t, ok)
+	assert.Equal(t, fixture.ancestorTip.BlockNumber, got)
+	_, ok = ls.PrimaryChainPointBlockNumber(ctx, ocommon.Point{})
+	assert.False(t, ok, "origin has no block number")
+}
+
 // spliceAuditBlock is a minimal ledger.Block carrying a fixed transaction set.
 // Only the fields the continuation audit reads are meaningful; the transactions
 // themselves come from the shared ouroboros-mock builders.

@@ -98,32 +98,24 @@ func (a *NodeAdapter) listAssets(
 	if err != nil {
 		return nil, 0, fmt.Errorf("list assets: %w", err)
 	}
-	ret := make([]AssetListItemInfo, 0, len(assets))
 	for _, asset := range assets {
-		if err := ctx.Err(); err != nil {
-			return nil, 0, err
-		}
-		policy, err := lcommon.NewBlake2b224Checked(asset.PolicyId)
-		if err != nil {
+		if _, err := lcommon.NewBlake2b224Checked(asset.PolicyId); err != nil {
 			return nil, 0, fmt.Errorf("stored asset policy ID: %w", err)
 		}
-		quantity, err := meta.GetAssetQuantityByPolicyAndName(
-			policy,
-			asset.Name,
-			txn.Metadata(),
-		)
-		if err != nil {
-			return nil, 0, fmt.Errorf(
-				"get quantity of asset %x%x: %w",
-				asset.PolicyId,
-				asset.Name,
-				err,
-			)
-		}
+	}
+	quantities, err := meta.GetAssetQuantitiesByPolicyAndName(
+		assets,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("get asset quantities: %w", err)
+	}
+	ret := make([]AssetListItemInfo, 0, len(assets))
+	for i, asset := range assets {
 		ret = append(ret, AssetListItemInfo{
 			Asset: hex.EncodeToString(asset.PolicyId) +
 				hex.EncodeToString(asset.Name),
-			Quantity: strconv.FormatUint(quantity, 10),
+			Quantity: strconv.FormatUint(quantities[i], 10),
 		})
 	}
 	return ret, total, nil

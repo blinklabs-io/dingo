@@ -168,7 +168,7 @@ func Dial(
 	// watch loop, calling Check every cycle against cmd.Context(), which
 	// lives for the whole process) does not accumulate one of these per
 	// past cycle for the life of the process.
-	stop := context.AfterFunc(ctx, func() { conn.Close() }) //nolint:errcheck
+	stop := context.AfterFunc(ctx, func() { conn.Close(context.WithoutCancel(ctx)) }) //nolint:errcheck
 	go func() {
 		// The error received here (if any -- ErrorChan is also closed on a
 		// clean shutdown with no value) is the actual reason this connection

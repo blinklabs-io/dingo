@@ -126,7 +126,7 @@ func connectNtCAdmissionClient(
 		ouroboros.WithNodeToNode(false),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
 	require.NoError(t, conn.SetDeadline(time.Time{}))
 	return client
 }
@@ -209,7 +209,7 @@ func TestTrustedLocalNtCIdleAfterProtocolActivityReleasesAdmissionSlot(
 
 	client := connectNtCAdmissionClient(t, listener)
 	requireTrustedNtCAdmissionCount(t, manager, 1)
-	require.NoError(t, client.LocalTxSubmission().Client.Stop())
+	require.NoError(t, client.LocalTxSubmission().Client.Stop(t.Context()))
 	requireTrustedNtCAdmissionCount(t, manager, 0)
 
 	connectNtCAdmissionClient(t, listener)
@@ -367,7 +367,7 @@ func TestNtCAdmissionPendingAndEstablished(t *testing.T) {
 			require.True(t, manager.acquireIPSlot("127.0.0.1"))
 			t.Cleanup(func() { manager.releaseIPSlot("127.0.0.1") })
 
-			require.NoError(t, first.Close())
+			require.NoError(t, first.Close(t.Context()))
 			requireNtCAdmissionCount(t, manager, 1)
 			connectNtCAdmissionClient(t, secondListener)
 			requireNtCAdmissionCount(t, manager, 2)
@@ -417,7 +417,7 @@ func TestNtCAdmissionUnix(t *testing.T) {
 	sources := len(manager.ntcIPConns)
 	manager.ntcAdmissionMutex.Unlock()
 	require.Zero(t, sources, "Unix sockets must not consume IP slots")
-	require.NoError(t, first.Close())
+	require.NoError(t, first.Close(t.Context()))
 	requireNtCAdmissionCount(t, manager, 1)
 	connectNtCAdmissionClient(t, listener)
 	requireNtCAdmissionCount(t, manager, 2)

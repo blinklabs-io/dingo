@@ -15,6 +15,7 @@
 package connmanager
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
@@ -898,10 +899,10 @@ func TestLocalCloseReasonIsBoundToConnectionOwner(t *testing.T) {
 	old := newUnstartedConnection(t)
 	live := newUnstartedConnection(t)
 	require.True(t, cm.AddConnection(old, false, "1.2.3.4:3001"))
-	require.NoError(t, cm.CloseConnectionWithReason(old, "first reason"))
+	require.NoError(t, cm.CloseConnectionWithReason(context.Background(), old, "first reason"))
 	require.True(t, cm.AddConnection(live, false, "1.2.3.4:3001"))
 	// A stale owner's close must not mark its replacement.
-	require.NoError(t, cm.CloseConnectionWithReason(old, "stale reason"))
+	require.NoError(t, cm.CloseConnectionWithReason(context.Background(), old, "stale reason"))
 	old.ErrorChan() <- nil
 	live.ErrorChan() <- nil
 	select {
@@ -923,7 +924,7 @@ func TestLocalCloseReasonPublishedWithTransportError(t *testing.T) {
 	cm := NewConnectionManager(ConnectionManagerConfig{EventBus: bus})
 	conn := newUnstartedConnection(t)
 	require.True(t, cm.AddConnection(conn, false, "1.2.3.4:3001"))
-	require.NoError(t, cm.CloseConnectionWithReason(conn, "local recovery"))
+	require.NoError(t, cm.CloseConnectionWithReason(context.Background(), conn, "local recovery"))
 	failure := errors.New("protocol failure")
 	conn.ErrorChan() <- failure
 	select {

@@ -1887,10 +1887,15 @@ func (m *mockLedgerState) TimeToSlot(
 	return 0, nil
 }
 
+// PoolCurrentState agrees with IsPoolRegistered: gOuroboros decides pool
+// registration from the current registration and retirement alone.
 func (m *mockLedgerState) PoolCurrentState(
-	_ lcommon.PoolKeyHash,
+	pool lcommon.PoolKeyHash,
 ) (*lcommon.PoolRegistrationCertificate, *uint64, error) {
-	return nil, nil, nil
+	if !m.poolsRegistered {
+		return nil, nil, nil
+	}
+	return &lcommon.PoolRegistrationCertificate{Operator: pool}, nil, nil
 }
 
 func (m *mockLedgerState) IsPoolRegistered(

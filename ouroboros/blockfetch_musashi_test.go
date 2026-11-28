@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -181,8 +182,8 @@ func newBlockfetchPeerWithOpts(
 	client.Start()
 	m.Start()
 	t.Cleanup(func() {
-		_ = client.Stop()
-		m.Stop()
+		_ = client.Stop(context.Background())
+		m.Stop(context.Background())
 		_ = clientConn.Close()
 		_ = peerConn.Close()
 	})

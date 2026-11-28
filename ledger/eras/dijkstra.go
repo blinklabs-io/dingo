@@ -382,14 +382,14 @@ func CalculateEtaVDijkstra(
 		return nil, errors.New("unexpected block type")
 	}
 	vrfNonce := praosVRFNonceValue(h.Body.VrfResult.Output)
-	tmpNonce, err := lcommon.CalculateRollingNonce(
+	tmpNonce, err := CombineNonceBytes(
 		prevBlockNonce,
 		vrfNonce,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return tmpNonce.Bytes(), nil
+	return tmpNonce, nil
 }
 
 func CertDepositDijkstra(

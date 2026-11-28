@@ -415,7 +415,7 @@ func (s *fakeLSQState) serveLSQOnly(
 					_ = conn.Close()
 					return
 				}
-				defer oconn.Close() //nolint:errcheck
+				defer oconn.Close(context.Background()) //nolint:errcheck
 				<-oconn.ErrorChan()
 			}()
 		}
@@ -585,7 +585,7 @@ func (s *fakeCardanoServer) serve(
 					_ = conn.Close()
 					return
 				}
-				defer oconn.Close() //nolint:errcheck
+				defer oconn.Close(context.Background()) //nolint:errcheck
 				<-oconn.ErrorChan()
 			}()
 		}

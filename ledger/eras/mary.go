@@ -119,14 +119,14 @@ func CalculateEtaVMary(
 	// raw VRF certificate output. Folding the raw certificate bytes
 	// directly produces nonces that disagree with peers.
 	contribution := lcommon.Blake2b256Hash(h.Body.NonceVrf.Output).Bytes()
-	tmpNonce, err := lcommon.CalculateRollingNonce(
+	tmpNonce, err := CombineNonceBytes(
 		prevBlockNonce,
 		contribution,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return tmpNonce.Bytes(), nil
+	return tmpNonce, nil
 }
 
 func CertDepositMary(

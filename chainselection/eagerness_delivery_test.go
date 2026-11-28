@@ -385,7 +385,7 @@ func TestEagernessAuthenticatedDeliveryRollbacksAndRemoval(t *testing.T) {
 					case "tracked":
 						require.True(
 							t,
-							f.selector.applyRollbackToTrackedPeer(rollback),
+							f.selector.applyRollbackToTrackedPeer(rollback, 0),
 						)
 					case "event":
 						f.selector.HandlePeerRollbackEvent(

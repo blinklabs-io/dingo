@@ -18,6 +18,7 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -59,9 +60,11 @@ func (p *PeerGovernor) connCloserLocked(id ouroboros.ConnectionId) io.Closer {
 		return nil
 	}
 	// A nil *ouroboros.Connection stored in an io.Closer is not a nil
-	// interface, so check before converting.
+	// interface, so check before converting. closeDeferred runs after p.mu
+	// is released and outside any callback of conn, so the close may wait
+	// for conn's callbacks.
 	if conn := p.config.ConnManager.GetConnectionById(id); conn != nil {
-		return conn
+		return connmanager.OuroborosCloser{Conn: conn}
 	}
 	return nil
 }

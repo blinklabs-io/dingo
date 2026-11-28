@@ -261,14 +261,17 @@ func TestBuildChainSelectorConfigWiresPeerIdentity(t *testing.T) {
 	require.NoError(t, local.err)
 	require.NoError(t, peer.err)
 	t.Cleanup(func() {
-		_ = local.conn.Close()
-		_ = peer.conn.Close()
+		_ = local.conn.Close(context.Background())
+		_ = peer.conn.Close(context.Background())
 	})
 
 	conn := local.conn.Id()
 	require.Equal(t, localAddr.String(), conn.LocalAddr.String())
 	require.Equal(t, remoteAddr.String(), conn.RemoteAddr.String())
-	require.True(t, connManager.AddConnection(local.conn, true, remoteAddr.String()))
+	require.True(
+		t,
+		connManager.AddConnection(local.conn, true, remoteAddr.String()),
+	)
 
 	n, _ := newMetricsTestNode(t)
 	n.eventBus = bus
@@ -301,10 +304,12 @@ func TestBuildChainSelectorConfigWiresPeerIdentity(t *testing.T) {
 			event.NewEvent(
 				connmanager.InboundConnectionEventType,
 				connmanager.InboundConnectionEvent{
-					ConnectionId:         conn,
-					LocalAddr:            conn.LocalAddr,
-					RemoteAddr:           conn.RemoteAddr,
-					NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteAddr.String()),
+					ConnectionId: conn,
+					LocalAddr:    conn.LocalAddr,
+					RemoteAddr:   conn.RemoteAddr,
+					NormalizedRemoteAddr: connmanager.NormalizePeerAddr(
+						remoteAddr.String(),
+					),
 				},
 			),
 		)
@@ -403,6 +408,8 @@ func TestBuildChainSelectorConfigWiresGenesisDensityDisconnect(t *testing.T) {
 	n.peerGov = peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
 	conn := newNodeTestConnId(3303)
 
+	startPeerDisconnectWorkerForTest(t, n)
+
 	cfg := n.buildChainSelectorConfig(2160, true, 0)
 	require.NotNil(t, cfg.OnGenesisDensityDisconnect)
 	require.False(t, n.peerGov.IsDenied(conn.RemoteAddr.String()))
@@ -410,6 +417,7 @@ func TestBuildChainSelectorConfigWiresGenesisDensityDisconnect(t *testing.T) {
 	cfg.OnGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
 		ConnectionId: conn,
 	})
+	drainPeerDisconnects(t, n)
 
 	assert.Equal(
 		t,
@@ -441,22 +449,15 @@ func TestGenesisDensityDisconnectDuringNetworkingCoreReplacement(t *testing.T) {
 		ConnectionId: newNodeTestConnId(3306),
 	}
 
+	startPeerDisconnectWorkerForTest(t, n)
+
+	// The report returns at once; the deny waits for the replacement.
 	n.networkingCoreMu.Lock()
-	done := make(chan struct{})
-	go func() {
-		n.onGenesisDensityDisconnect(disconnect)
-		close(done)
-	}()
-	testutil.RequireNoReceive(
-		t,
-		done,
-		50*time.Millisecond,
-		"density action crossed a live networking replacement",
-	)
+	n.onGenesisDensityDisconnect(disconnect)
 	n.setPeerGovernor(currentGov)
 	n.connManager = currentManager
 	n.networkingCoreMu.Unlock()
-	testutil.RequireReceive(t, done, time.Second, "density action completion")
+	drainPeerDisconnects(t, n)
 
 	address := disconnect.ConnectionId.RemoteAddr.String()
 	assert.False(t, outgoingGov.IsDenied(address))
@@ -473,11 +474,13 @@ func TestGenesisDensityDisconnectLogReportsDenial(t *testing.T) {
 	n, _ := newMetricsTestNode(t)
 	n.config.logger = slog.New(slog.NewTextHandler(&logs, nil))
 	n.peerGov = peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+	startPeerDisconnectWorkerForTest(t, n)
 
 	withAddr := newNodeTestConnId(3304)
 	n.onGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
 		ConnectionId: withAddr,
 	})
+	drainPeerDisconnects(t, n)
 	require.Contains(t, logs.String(), "denied=true")
 	require.True(t, n.peerGov.IsDenied(withAddr.RemoteAddr.String()))
 
@@ -487,6 +490,7 @@ func TestGenesisDensityDisconnectLogReportsDenial(t *testing.T) {
 	n.onGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
 		ConnectionId: noAddr,
 	})
+	drainPeerDisconnects(t, n)
 	require.Contains(t, logs.String(), "denied=false")
 }
 
@@ -499,12 +503,14 @@ func TestGenesisDensityDisconnectStandoffDoesNotDenyPeer(t *testing.T) {
 	n, registry := newMetricsTestNode(t)
 	n.config.logger = slog.New(slog.NewTextHandler(&logs, nil))
 	n.peerGov = peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+	startPeerDisconnectWorkerForTest(t, n)
 
 	conn := newNodeTestConnId(3307)
 	n.onGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
 		ConnectionId:      conn,
 		EagernessStandoff: true,
 	})
+	drainPeerDisconnects(t, n)
 	assert.False(t, n.peerGov.IsDenied(conn.RemoteAddr.String()))
 	assert.Contains(t, logs.String(), "denied=false")
 	assert.Equal(
@@ -549,10 +555,14 @@ func TestGenesisDensityDisconnectRecordsStandoffCloseReason(t *testing.T) {
 				n.connManager.AddConnection(conn, false, "1.2.3.4:3001"),
 			)
 
-			n.onGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
-				ConnectionId:      conn.Id(),
-				EagernessStandoff: tc.standoff,
-			})
+			startPeerDisconnectWorkerForTest(t, n)
+			n.onGenesisDensityDisconnect(
+				chainselection.GenesisDensityDisconnect{
+					ConnectionId:      conn.Id(),
+					EagernessStandoff: tc.standoff,
+				},
+			)
+			drainPeerDisconnects(t, n)
 			conn.ErrorChan() <- nil
 
 			evt := testutil.RequireReceive(

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -195,7 +196,11 @@ func (o *Ouroboros) startOutboundChainsync(
 		// A transient fault such as a storage error during the intersect
 		// lookup would silently cost the peer for the lifetime of the
 		// connection.
-		o.closeOutboundConnAfterChainsyncFailure(connId, conn)
+		o.closeOutboundConnAfterChainsyncFailure(
+			context.Background(),
+			connId,
+			conn,
+		)
 		return false
 	}
 	o.csjStarted(connId, role)
@@ -271,7 +276,7 @@ func (o *Ouroboros) stopOutboundChainsync(
 			if hook := o.chainsyncClientStoppedHook; hook != nil {
 				hook(connId)
 			}
-			_ = conn.Close()
+			_ = connmanager.CloseOuroborosConn(ctx, conn)
 			return
 		}
 	}

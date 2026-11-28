@@ -17,11 +17,12 @@ package ouroboros
 import (
 	"bytes"
 	"context"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -308,10 +309,10 @@ func newHoldResyncFixture(t *testing.T) *holdResyncFixture {
 	// itself down once its keepalive conversation runs out, so the test's
 	// window must start here.
 	conn := newChainsyncResyncTestConnection(t, "10.0.0.51:3001")
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	require.True(t, cm.AddConnection(conn, false, "10.0.0.51:3001"))
 	observer := newChainsyncResyncTestConnection(t, "10.0.0.53:3001")
-	t.Cleanup(func() { _ = observer.Close() })
+	t.Cleanup(func() { _ = observer.Close(context.Background()) })
 	require.True(t, cm.AddConnection(observer, true, "10.0.0.53:3001"))
 	state := dchainsync.NewState(bus, nil)
 	require.True(t, state.AddClientConnId(conn.Id()))
@@ -505,7 +506,7 @@ func newHeldChainsyncPeer(
 	client := ochainsync.NewClient(opts, &cfg)
 	client.Start()
 	peer.muxer.Start()
-	t.Cleanup(func() { _ = client.Stop() })
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
 	return &heldChainsyncPeer{peer: peer, client: client}
 }
 

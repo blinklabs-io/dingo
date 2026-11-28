@@ -18,6 +18,8 @@ package dmqinterop
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -53,7 +55,6 @@ func submitMessage(
 	magic uint32,
 	msg ocommon.DmqMessage,
 ) (string, error) {
-	verdict := make(chan string, 1)
 	conn, err := ouroboros.NewConnection(
 		ouroboros.WithDMQ(true),
 		ouroboros.WithNetworkMagic(magic),
@@ -65,19 +66,6 @@ func submitMessage(
 				localmessagesubmission.WithTTLValidator(
 					ocommon.NewNoOpTTLValidator(nil),
 				),
-				localmessagesubmission.WithAcceptMessageFunc(
-					func(localmessagesubmission.CallbackContext) {
-						verdict <- "ACCEPTED"
-					},
-				),
-				localmessagesubmission.WithRejectMessageFunc(
-					func(
-						_ localmessagesubmission.CallbackContext,
-						reason ocommon.RejectReason,
-					) {
-						verdict <- fmt.Sprintf("REJECTED: %#v", reason)
-					},
-				),
 			),
 		),
 	)
@@ -87,14 +75,21 @@ func submitMessage(
 	if err := conn.Dial("unix", socket); err != nil {
 		return "", err
 	}
-	defer conn.Close()
-	err = conn.LocalMessageSubmission().Client.SubmitMessage(&msg)
-	if err != nil {
-		return "", err
-	}
+	defer func() { _ = conn.Close(context.Background()) }()
+	// SubmitMessage waits for the node's answer to this message.
+	done := make(chan error, 1)
+	go func() { done <- conn.LocalMessageSubmission().Client.SubmitMessage(&msg) }()
 	select {
-	case v := <-verdict:
-		return v, nil
+	case err := <-done:
+		var rejected localmessagesubmission.MessageRejectedError
+		switch {
+		case err == nil:
+			return "ACCEPTED", nil
+		case errors.As(err, &rejected):
+			return fmt.Sprintf("REJECTED: %#v", rejected.Reason), nil
+		default:
+			return "", err
+		}
 	case <-time.After(verdictTimeout):
 		return "TIMEOUT: no verdict", nil
 	}

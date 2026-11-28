@@ -2255,6 +2255,21 @@ func (c *Chain) HoldsQueuedHeader(point ocommon.Point) bool {
 	return err == nil && index >= 0
 }
 
+// QueuedHeaderBlockNumber returns the block number of point when it is a
+// header queued on this chain ahead of its blocks.
+func (c *Chain) QueuedHeaderBlockNumber(point ocommon.Point) (uint64, bool) {
+	if c == nil {
+		return 0, false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	index, err := c.findQueuedHeader(point)
+	if err != nil || index < 0 {
+		return 0, false
+	}
+	return c.headers[index].blockNumber, true
+}
+
 // HoldsQueuedHeaderHash reports whether hash is queued on this chain ahead of
 // its blocks.
 func (c *Chain) HoldsQueuedHeaderHash(hash []byte) bool {
