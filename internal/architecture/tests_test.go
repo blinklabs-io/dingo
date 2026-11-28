@@ -294,19 +294,42 @@ func requiresBuildTag(expr constraint.Expr, tag string) bool {
 const modulePath = "github.com/blinklabs-io/dingo"
 
 type importBoundaryRule struct {
-	from      string
-	forbidden []string
-	reason    string
-	// testImportExemptions maps a repository-relative _test.go file to the
-	// forbidden packages it may import. Keep each entry to a test that must
-	// compose both sides of the boundary, and name the reason beside it.
-	testImportExemptions map[string][]string
+	from           string
+	forbidden      []string
+	forbiddenExact []string
+	reason         string
+	// fileImportExemptions maps one repository-relative Go file to the
+	// forbidden packages it may import. Keep each exemption exact and name
+	// the compatibility or composition reason beside it.
+	fileImportExemptions map[string][]string
 }
 
 // importBoundaryRules encode reviewed package directions for critical domains.
 // Update this list when a dependency direction changes and keep its reason
 // explicit. Update ARCHITECTURE.md when that changes an ownership boundary.
 var importBoundaryRules = []importBoundaryRule{
+	{
+		from: "chain",
+		forbidden: []string{
+			"ledger",
+			"chainselection",
+		},
+		forbiddenExact: []string{"consensus"},
+		reason: "chain consumes ledger and consensus through sdk/chain roles " +
+			"and neutral points and tips",
+	},
+	{
+		from:           "chainselection",
+		forbidden:      []string{"chain", "ledger"},
+		forbiddenExact: []string{"consensus"},
+		reason: "chain selection consumes consensus through the sdk/chain role " +
+			"and neutral points and tips",
+		fileImportExemptions: map[string][]string{
+			// Preserves the exported ChainSelectorConfig.Consensus field's
+			// exact pre-SDK type while production composition uses ConsensusRole.
+			"chainselection/consensus_compat.go": {"consensus"},
+		},
+	},
 	{
 		from: "ledger",
 		forbidden: []string{
@@ -316,7 +339,7 @@ var importBoundaryRules = []importBoundaryRule{
 		},
 		reason: "ledger owns validation and state, while node wiring translates " +
 			"neutral events/callbacks into networking or mempool actions",
-		testImportExemptions: map[string][]string{
+		fileImportExemptions: map[string][]string{
 			// Drives a Dijkstra collateral-return transaction through both
 			// mempool admission and ledger block application.
 			"ledger/dijkstra_collateral_return_production_test.go": {
@@ -467,6 +490,83 @@ func TestImportBoundaries(t *testing.T) {
 	}
 }
 
+func TestImportBoundaryCompatibilityExemptionIsFileScoped(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	rule := importBoundaryRule{
+		from:           "chainselection",
+		forbidden:      []string{"ledger"},
+		forbiddenExact: []string{"consensus"},
+		reason:         "test boundary",
+		fileImportExemptions: map[string][]string{
+			"chainselection/consensus_compat.go": {"consensus"},
+		},
+	}
+	tests := []struct {
+		name          string
+		relPath       string
+		importPath    string
+		wantViolation bool
+	}{
+		{
+			name:       "exact compatibility file",
+			relPath:    "chainselection/consensus_compat.go",
+			importPath: modulePath + "/consensus",
+		},
+		{
+			name:          "sibling file",
+			relPath:       "chainselection/selector.go",
+			importPath:    modulePath + "/consensus",
+			wantViolation: true,
+		},
+		{
+			name:          "nested file with matching basename",
+			relPath:       "chainselection/internal/consensus_compat.go",
+			importPath:    modulePath + "/consensus",
+			wantViolation: true,
+		},
+		{
+			name:          "different forbidden package",
+			relPath:       "chainselection/consensus_compat.go",
+			importPath:    modulePath + "/ledger",
+			wantViolation: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file := filepath.Join(
+				repoRoot,
+				filepath.FromSlash(test.relPath),
+			)
+			if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+				t.Fatalf("create fixture directory: %v", err)
+			}
+			source := fmt.Sprintf(
+				"package fixture\nimport _ %q\n",
+				test.importPath,
+			)
+			if err := os.WriteFile(file, []byte(source), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			violations, err := importBoundaryViolationsForFile(
+				repoRoot,
+				rule,
+				file,
+			)
+			if err != nil {
+				t.Fatalf("check fixture: %v", err)
+			}
+			if test.wantViolation && len(violations) == 0 {
+				t.Fatal("expected forbidden import violation")
+			}
+			if !test.wantViolation && len(violations) != 0 {
+				t.Fatalf("unexpected violations: %v", violations)
+			}
+		})
+	}
+}
+
 // importBoundaryViolations checks one boundary rule, parsing files in parallel
 // while bounding concurrent parser work to the configured Go CPU parallelism.
 func importBoundaryViolations(
@@ -535,15 +635,27 @@ func importBoundaryViolationsForFile(
 	if err != nil {
 		return nil, err
 	}
-	var exempt []string
-	if strings.HasSuffix(relFile, "_test.go") {
-		exempt = rule.testImportExemptions[relFile]
-	}
+	exempt := rule.fileImportExemptions[relFile]
 
 	var violations []string
 	for _, importPath := range imports {
 		for _, forbidden := range rule.forbidden {
 			if !isLocalPackageImport(importPath, forbidden) ||
+				slices.Contains(exempt, forbidden) {
+				continue
+			}
+			violations = append(
+				violations,
+				fmt.Sprintf(
+					"%s imports %s: %s",
+					relFile,
+					importPath,
+					rule.reason,
+				),
+			)
+		}
+		for _, forbidden := range rule.forbiddenExact {
+			if importPath != modulePath+"/"+forbidden ||
 				slices.Contains(exempt, forbidden) {
 				continue
 			}

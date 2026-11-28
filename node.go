@@ -74,6 +74,7 @@ import (
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/muxer"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -1190,7 +1191,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	})
 	// n.ouroboros is constructed once every dependency exists; see the
 	// NewOuroboros call below.
-	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
+	if err := n.configureChainLedgerRole(); err != nil {
 		return fmt.Errorf(
 			"failed to configure chain security parameter: %w",
 			err,
@@ -1525,7 +1526,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Without this initial observation, the plausibility guard treats the
 	// local tip as block zero until the recycler's first tick, leaving a
 	// startup window in which stale peer references cannot enter catch-up mode.
-	n.chainSelector.SetLocalTip(n.ledgerState.Tip())
+	if tip, ok := n.chainManager.LedgerTip(); ok {
+		n.chainSelector.SetLocalChainTip(tip)
+	} else {
+		n.chainSelector.SetLocalTip(n.ledgerState.Tip())
+	}
 	// Published after the seed, so a scrape never reads a limit measured from
 	// block zero.
 	n.chainSelectorForGauges.Store(n.chainSelector)
@@ -2501,7 +2506,7 @@ func (n *Node) buildChainSelectorConfig(
 	genesisWindowSlots uint64,
 ) chainselection.ChainSelectorConfig {
 	config := chainselection.ChainSelectorConfig{
-		Consensus:             n.selectedConsensusProvider(),
+		ConsensusRole:         nodeChainConsensusRole{node: n},
 		Logger:                n.config.logger,
 		EventBus:              n.eventBus,
 		SecurityParam:         securityParam,
@@ -2554,14 +2559,13 @@ func (n *Node) buildChainSelectorConfig(
 			slot, err := ls.CurrentSlot()
 			return slot, err == nil
 		},
-		AppliedTip: func() (ochainsync.Tip, bool) {
-			ls := n.wallClockLedger.Load()
-			if ls == nil {
-				return ochainsync.Tip{}, false
+		AppliedChainTip: func() (sdkchain.Tip, bool) {
+			if n.wallClockLedger.Load() == nil || n.chainManager == nil {
+				return sdkchain.Tip{}, false
 			}
-			return ls.Tip(), true
+			return n.chainManager.LedgerTip()
 		},
-		PointOnLocalChain: func(point ocommon.Point) bool {
+		ChainPointOnLocalChain: func(point sdkchain.Point) bool {
 			ls := n.wallClockLedger.Load()
 			if ls == nil {
 				return false
@@ -2571,12 +2575,15 @@ func (n *Node) buildChainSelectorConfig(
 				ledger.QueryPoint{Slot: point.Slot, Hash: point.Hash},
 			) == nil
 		},
-		LocalPointBlockNumber: func(point ocommon.Point) (uint64, bool) {
+		LocalChainPointBlockNumber: func(point sdkchain.Point) (uint64, bool) {
 			ls := n.wallClockLedger.Load()
 			if ls == nil {
 				return 0, false
 			}
-			return ls.PrimaryChainPointBlockNumber(context.Background(), point)
+			return ls.PrimaryChainPointBlockNumber(
+				context.Background(),
+				ocommon.Point{Slot: point.Slot, Hash: point.Hash},
+			)
 		},
 	}
 	// The running node publishes its started ledger before constructing the

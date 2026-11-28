@@ -29,9 +29,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/tracing"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -154,7 +154,11 @@ const (
 
 // ChainSelectorConfig holds configuration for the ChainSelector.
 type ChainSelectorConfig struct {
-	Consensus          nodeconsensus.Provider
+	// ConsensusRole is the chain-neutral consensus boundary used by the node.
+	// Consensus remains as a compatibility path for callers that have not yet
+	// adapted a legacy provider.
+	ConsensusRole      sdkchain.Consensus
+	Consensus          LegacyConsensus
 	Logger             *slog.Logger
 	EventBus           *event.EventBus
 	EvaluationInterval time.Duration
@@ -177,6 +181,9 @@ type ChainSelectorConfig struct {
 	// the last SetLocalTip value. It must not block or take locks shared with
 	// the selector.
 	AppliedTip func() (ochainsync.Tip, bool)
+	// AppliedChainTip is the chain-neutral form of AppliedTip. It takes
+	// precedence when both are configured.
+	AppliedChainTip func() (sdkchain.Tip, bool)
 	// LocalPointBlockNumber returns the block number of a point on the node's
 	// own chain, including a header queued ahead of the applied tip. A
 	// chainsync rollback carries only a point, and a re-intersect lands on
@@ -185,9 +192,15 @@ type ChainSelectorConfig struct {
 	// called without the selector mutex held. Nil, or false, leaves such a
 	// point with an unknown (zero) block number.
 	LocalPointBlockNumber func(ocommon.Point) (uint64, bool)
+	// LocalChainPointBlockNumber is the chain-neutral form of
+	// LocalPointBlockNumber and takes precedence when configured.
+	LocalChainPointBlockNumber func(sdkchain.Point) (uint64, bool)
 	// PointOnLocalChain confirms a point against the current applied chain.
 	// The Genesis ingress gate calls it without holding the selector mutex.
 	PointOnLocalChain func(ocommon.Point) bool
+	// ChainPointOnLocalChain is the chain-neutral form of PointOnLocalChain
+	// and takes precedence when configured.
+	ChainPointOnLocalChain func(sdkchain.Point) bool
 	// HeaderCryptoVerificationGenerationCurrent reports whether a nonzero
 	// producer-authorization generation still matches the live ledger state.
 	// It is optional for callers that do not stage cryptographically verified
@@ -715,8 +728,8 @@ func (cs *ChainSelector) refreshGenesisSelectionSnapshotLocked() {
 
 // NewChainSelector creates a new ChainSelector with the given configuration.
 func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
-	if cfg.Consensus == nil {
-		cfg.Consensus = nodeconsensus.NewPraosProvider()
+	if cfg.ConsensusRole == nil && cfg.Consensus == nil {
+		cfg.Consensus = defaultLegacyConsensus()
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -3327,15 +3340,21 @@ func (cs *ChainSelector) removePeer(
 // reset the clock because the comparison is against the previous applied tip,
 // not an all-time high-water mark.
 func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
+	cs.SetLocalChainTip(toChainTip(tip))
+}
+
+// SetLocalChainTip updates the local chain tip through the neutral SDK type.
+func (cs *ChainSelector) SetLocalChainTip(tip sdkchain.Tip) {
+	cardanoTip := toCardanoTip(tip)
 	shouldEvaluate := false
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
-		if tip.BlockNumber > cs.localTipProgressBlock {
+		if cardanoTip.BlockNumber > cs.localTipProgressBlock {
 			cs.localTipProgressAt = cs.now()
 		}
-		cs.localTipProgressBlock = tip.BlockNumber
-		cs.localTip = tip
+		cs.localTipProgressBlock = cardanoTip.BlockNumber
+		cs.localTip = cardanoTip
 		cs.localTipKnown = true
 		if len(cs.pendingFarTipClaims) > 0 || len(cs.pendingPeerTips) > 0 {
 			cs.rebuildPendingAdmissionStateLocked()
@@ -3352,16 +3371,25 @@ func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 // number changed. It leaves the progress clock that SetLocalTip maintains to
 // SetLocalTip. Must be called with cs.mutex held for writing.
 func (cs *ChainSelector) refreshAppliedLocalTipLocked() bool {
-	if cs.config.AppliedTip == nil {
-		return false
-	}
-	if tip, ok := cs.config.AppliedTip(); ok {
-		changed := !cs.localTipKnown || tip.BlockNumber != cs.localTip.BlockNumber
+	if tip, ok := cs.configuredAppliedTip(); ok {
+		changed := !cs.localTipKnown ||
+			tip.BlockNumber != cs.localTip.BlockNumber
 		cs.localTip = tip
 		cs.localTipKnown = true
 		return changed
 	}
 	return false
+}
+
+func (cs *ChainSelector) configuredAppliedTip() (ochainsync.Tip, bool) {
+	if cs.config.AppliedChainTip != nil {
+		tip, ok := cs.config.AppliedChainTip()
+		return toCardanoTip(tip), ok
+	}
+	if cs.config.AppliedTip != nil {
+		return cs.config.AppliedTip()
+	}
+	return ochainsync.Tip{}, false
 }
 
 // peerTipBeyondCatchUpCeilingLocked reports whether staged header admission
@@ -4043,12 +4071,7 @@ func (cs *ChainSelector) comparePeerTipsPraos(
 ) ChainComparisonResult {
 	tipA := peerTipA.SelectionTip()
 	tipB := peerTipB.SelectionTip()
-	comparison := cs.config.Consensus.CompareTips(
-		tipA,
-		tipB,
-		peerTipA.PraosView,
-		peerTipB.PraosView,
-	)
+	comparison := cs.compareConsensusTips(peerTipA, peerTipB)
 	switch comparison {
 	case ChainABetter, ChainBBetter, ChainComparisonUnknown:
 		return comparison
@@ -4061,6 +4084,60 @@ func (cs *ChainSelector) comparePeerTipsPraos(
 		return cs.compareTransportLocked(connIdA, connIdB, false)
 	default:
 		return ChainComparisonUnknown
+	}
+}
+
+func (cs *ChainSelector) compareConsensusTips(
+	a, b *PeerChainTip,
+) ChainComparisonResult {
+	if cs.config.ConsensusRole != nil {
+		if observed, ok := cs.config.ConsensusRole.(interface {
+			CompareObservedTips(
+				sdkchain.Tip,
+				sdkchain.Tip,
+				PraosTiebreakerView,
+				PraosTiebreakerView,
+			) sdkchain.Comparison
+		}); ok {
+			return ChainComparisonResult(observed.CompareObservedTips(
+				toChainTip(a.SelectionTip()),
+				toChainTip(b.SelectionTip()),
+				a.PraosView,
+				b.PraosView,
+			))
+		}
+		return ChainComparisonResult(cs.config.ConsensusRole.Compare(
+			toChainTip(a.SelectionTip()),
+			toChainTip(b.SelectionTip()),
+		))
+	}
+	return cs.config.Consensus.CompareTips(
+		a.SelectionTip(),
+		b.SelectionTip(),
+		a.PraosView,
+		b.PraosView,
+	)
+}
+
+func toChainPoint(point ocommon.Point) sdkchain.Point {
+	return sdkchain.Point{Slot: point.Slot, Hash: bytes.Clone(point.Hash)}
+}
+
+func toCardanoPoint(point sdkchain.Point) ocommon.Point {
+	return ocommon.Point{Slot: point.Slot, Hash: bytes.Clone(point.Hash)}
+}
+
+func toChainTip(tip ochainsync.Tip) sdkchain.Tip {
+	return sdkchain.Tip{
+		Point:       toChainPoint(tip.Point),
+		BlockNumber: tip.BlockNumber,
+	}
+}
+
+func toCardanoTip(tip sdkchain.Tip) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       toCardanoPoint(tip.Point),
+		BlockNumber: tip.BlockNumber,
 	}
 }
 
@@ -4348,14 +4425,12 @@ func (cs *ChainSelector) catchingUpLocked(bestKnownBlock *uint64) bool {
 // cs.mutex held for writing.
 func (cs *ChainSelector) observeLocalProgressLocked() {
 	applied := cs.localTip.BlockNumber
-	if cs.config.AppliedTip != nil {
-		if tip, ok := cs.config.AppliedTip(); ok {
-			applied = tip.BlockNumber
-			if applied > cs.localTipProgressBlock {
-				cs.localTipProgressAt = cs.now()
-			}
-			cs.localTipProgressBlock = applied
+	if tip, ok := cs.configuredAppliedTip(); ok {
+		applied = tip.BlockNumber
+		if applied > cs.localTipProgressBlock {
+			cs.localTipProgressAt = cs.now()
 		}
+		cs.localTipProgressBlock = applied
 	}
 	// A clock that never started stays unstarted, as localTipStalledLocked
 	// documents for a freshly started node.
@@ -4651,12 +4726,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 			if !ok {
 				return false, nil, nil, corroborationEvent
 			}
-			if cs.config.Consensus.CompareTips(
-				newPeerTip.SelectionTip(),
-				previousPeerTip.SelectionTip(),
-				newPeerTip.PraosView,
-				previousPeerTip.PraosView,
-			) == ChainEqual {
+			if cs.compareConsensusTips(newPeerTip, previousPeerTip) == ChainEqual {
 				// When two peers have delivered the same observed frontier,
 				// or the reference implementation's equal-length Praos
 				// tiebreaker is not armed, keep following the incumbent.
@@ -5013,11 +5083,18 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 // through LocalPointBlockNumber, returning 0 when it is unknown. Must be called
 // without cs.mutex held.
 func (cs *ChainSelector) localPointBlockNumber(point ocommon.Point) uint64 {
-	if cs.config.LocalPointBlockNumber == nil ||
-		(point.Slot == 0 && len(point.Hash) == 0) {
+	if point.Slot == 0 && len(point.Hash) == 0 {
 		return 0
 	}
-	blockNumber, ok := cs.config.LocalPointBlockNumber(point)
+	var blockNumber uint64
+	var ok bool
+	if cs.config.LocalChainPointBlockNumber != nil {
+		blockNumber, ok = cs.config.LocalChainPointBlockNumber(
+			toChainPoint(point),
+		)
+	} else if cs.config.LocalPointBlockNumber != nil {
+		blockNumber, ok = cs.config.LocalPointBlockNumber(point)
+	}
 	if !ok {
 		return 0
 	}

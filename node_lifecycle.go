@@ -755,7 +755,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	n.dmqStake.setLedgerState(state)
 	// n.ouroboros is rewired in one place, once every rebuilt dependency
 	// exists; see the NewOuroboros call in reinitializeNetworkingCore.
-	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
+	if err := n.configureChainLedgerRole(); err != nil {
 		return fmt.Errorf(
 			"failed to reconfigure chain security parameter: %w",
 			err,

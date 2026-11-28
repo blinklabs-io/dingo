@@ -154,10 +154,8 @@ func (cs *ChainSelector) maxCaughtUpAge() time.Duration {
 // appliedLocalTipLocked returns the live applied tip when it is available and
 // the last tip given to SetLocalTip otherwise.
 func (cs *ChainSelector) appliedLocalTipLocked() (ochainsync.Tip, bool) {
-	if cs.config.AppliedTip != nil {
-		if tip, ok := cs.config.AppliedTip(); ok {
-			return tip, true
-		}
+	if tip, ok := cs.configuredAppliedTip(); ok {
+		return tip, true
 	}
 	return cs.localTip, cs.localTipKnown
 }
@@ -301,10 +299,14 @@ func (cs *ChainSelector) historicDisconnects(
 
 // onChain reports whether a point is on the applied chain.
 func (cs *ChainSelector) onChain(point ocommon.Point) bool {
-	if cs.config.PointOnLocalChain == nil || len(point.Hash) == 0 {
+	if len(point.Hash) == 0 {
 		return false
 	}
-	return cs.config.PointOnLocalChain(point)
+	if cs.config.ChainPointOnLocalChain != nil {
+		return cs.config.ChainPointOnLocalChain(toChainPoint(point))
+	}
+	return cs.config.PointOnLocalChain != nil &&
+		cs.config.PointOnLocalChain(point)
 }
 
 // intersectsLocalChain reports whether a peer's delivered frontier shares a

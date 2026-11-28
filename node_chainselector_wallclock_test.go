@@ -36,6 +36,21 @@ func TestBuildChainSelectorConfigWallClockSlot(t *testing.T) {
 	assert.Zero(t, slot)
 }
 
+func TestBuildChainSelectorConfigAppliedTipFollowsPublishedLedger(
+	t *testing.T,
+) {
+	t.Parallel()
+	n, _ := newLiveLifecycleTestNode(t, 4)
+	cfg := n.buildChainSelectorConfig(2160, true, 0)
+	require.NotNil(t, cfg.AppliedChainTip)
+	_, ok := cfg.AppliedChainTip()
+	require.True(t, ok)
+
+	n.wallClockLedger.Store(nil)
+	_, ok = cfg.AppliedChainTip()
+	require.False(t, ok)
+}
+
 func TestBuildChainSelectorConfigWiresHeaderVerificationGeneration(
 	t *testing.T,
 ) {

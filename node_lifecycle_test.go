@@ -364,6 +364,7 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	ledgerState, err := ledger.NewLedgerState(n.ledgerStateConfig())
 	require.NoError(t, err)
 	n.setLedgerState(ledgerState)
+	require.NoError(t, n.configureChainLedgerRole())
 	if storageMode == StorageModeCore && !seed.legacy {
 		require.NoError(t, n.reconcileUtxoSet(t.Context()))
 	}

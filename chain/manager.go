@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -42,6 +43,7 @@ type ChainManager struct {
 	db            *database.Database
 	eventBus      *event.EventBus
 	securityParam int
+	ledgerRole    sdkchain.Ledger
 	chains        map[ChainId]*Chain
 	// primary is immutable after loadPrimaryChain. Keeping the pointer
 	// separately lets callers establish the chain -> primary -> manager lock
@@ -163,7 +165,32 @@ func (cm *ChainManager) recordRollbackPointNotOnChain() {
 func (cm *ChainManager) SetLedger(
 	ledgerState interface{ SecurityParam() int },
 ) error {
-	k := ledgerState.SecurityParam()
+	return cm.setSecurityParam(ledgerState.SecurityParam())
+}
+
+// SetLedgerRole configures the manager from the chain-neutral ledger role.
+// SetLedger remains available for callers that only provide the legacy
+// security-parameter source.
+func (cm *ChainManager) SetLedgerRole(role sdkchain.Ledger) error {
+	if role == nil {
+		return errors.New("ledger role is nil")
+	}
+	k := role.SecurityParam()
+	if k <= 0 {
+		return fmt.Errorf(
+			"%w: got %d",
+			ErrInvalidSecurityParam,
+			k,
+		)
+	}
+	cm.mutex.Lock()
+	cm.securityParam = k
+	cm.ledgerRole = role
+	cm.mutex.Unlock()
+	return nil
+}
+
+func (cm *ChainManager) setSecurityParam(k int) error {
 	if k <= 0 {
 		return fmt.Errorf(
 			"%w: got %d",
@@ -174,7 +201,22 @@ func (cm *ChainManager) SetLedger(
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 	cm.securityParam = k
+	cm.ledgerRole = nil
 	return nil
+}
+
+// LedgerTip returns the neutral tip reported by the configured ledger role.
+func (cm *ChainManager) LedgerTip() (sdkchain.Tip, bool) {
+	if cm == nil {
+		return sdkchain.Tip{}, false
+	}
+	cm.mutex.RLock()
+	role := cm.ledgerRole
+	cm.mutex.RUnlock()
+	if role == nil {
+		return sdkchain.Tip{}, false
+	}
+	return role.Tip(), true
 }
 
 // SecurityParam returns the configured Ouroboros security parameter K, or zero

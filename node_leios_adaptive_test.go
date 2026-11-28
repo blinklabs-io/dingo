@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leios"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -192,7 +193,7 @@ func TestLeiosAdaptiveCaughtUpFollowsSyncInPraosMode(t *testing.T) {
 		return start.Add(time.Duration(slot) * time.Second), nil
 	}
 	cfg.ConnectionLive = func(ouroboros.ConnectionId) bool { return true }
-	cfg.PointOnLocalChain = func(p ocommon.Point) bool {
+	cfg.ChainPointOnLocalChain = func(p sdkchain.Point) bool {
 		mu.Lock()
 		defer mu.Unlock()
 		_, ok := onChain[p.Slot]
