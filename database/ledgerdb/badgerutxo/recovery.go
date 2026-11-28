@@ -240,6 +240,9 @@ func (s *Store) JournalPoints() ([]ocommon.Point, error) {
 			if err != nil {
 				return err
 			}
+			if rec.continues() {
+				continue
+			}
 			if !rec.hadTip || rec.prevTip.Slot >= rec.point.Slot ||
 				rec.prevTip.Slot+1 < floor {
 				break

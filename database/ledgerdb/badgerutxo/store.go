@@ -485,13 +485,16 @@ func (s *Store) Apply(
 	)
 }
 
-// ApplyBatch applies changes in order in one transaction, so a reader or a
-// crash sees all of them or none, and records tip when it is not nil. The
-// transaction also writes a journal record per point the changes belong to,
-// holding every touched output's state before that point's changes, which
-// Rollback restores. A tip past the last change's point gets a record of its
-// own. It reports, but still applies past, removed outputs that are not live
-// and added outputs that already are.
+// ApplyBatch applies changes in order and records tip when it is not nil. A
+// reader sees all of them or none, and so, through the failure mark and the
+// startup rewind, does a crash: changes more than one Badger transaction
+// takes, even one block's, are written in several (see ApplyLedgerBatch).
+// The writes include a journal record per point the changes belong to, or
+// per part of a point written in parts, holding every touched output's state
+// before those changes, which Rollback restores. A tip past the last
+// change's point gets a record of its own. It reports, but still applies
+// past, removed outputs that are not live and added outputs that already
+// are.
 func (s *Store) ApplyBatch(
 	tip *ocommon.Point,
 	changes []Change,
@@ -546,9 +549,15 @@ type LedgerBatch struct {
 }
 
 // ApplyLedgerBatch is ApplyBatch for a whole ledger commit: the nonces and
-// the nonce prune are written in the same transaction as the UTxO changes.
-// A rollback deletes the nonces above the point it restores, so nonces need
-// no journal.
+// the nonce prune are written with the UTxO changes. A rollback deletes the
+// nonces above the point it restores, so nonces need no journal.
+//
+// A batch too big for one Badger transaction is written in several. The
+// first sets a failure mark and the last writes the tip and clears the mark,
+// so the tip moves only once every change is in; a stop in between leaves the
+// mark, whose startup rewind undoes the journal records past the tip. A
+// block whose changes alone are too big is written in parts, each with its
+// own record; Rollback undoes such a block under its pending mark.
 func (s *Store) ApplyLedgerBatch(
 	tip *ocommon.Point,
 	batch LedgerBatch,
