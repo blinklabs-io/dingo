@@ -48,7 +48,7 @@ func TestChainsyncClientHeldHeaderIsNotAcceptedTip(t *testing.T) {
 		uint64,
 		func() ochainsync.Tip,
 	) error {
-		release = f.o.ledgerState.HoldNetworkIngest()
+		release = testLedgerState(t, f.o).HoldNetworkIngest()
 		return nil
 	}
 	err := f.o.chainsyncClientRollForward(

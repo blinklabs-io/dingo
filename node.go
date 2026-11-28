@@ -74,6 +74,8 @@ import (
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
+	sdkcardano "github.com/blinklabs-io/dingo/sdk/cardano"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/muxer"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -725,6 +727,7 @@ func (n *Node) newOuroborosConfig(
 		EventBus:                       n.eventBus,
 		ConnManager:                    n.connManager,
 		LedgerState:                    n.ledgerState,
+		ChainLedger:                    newSDKLedgerRole(n.ledgerState),
 		LeiosAnnouncementLedger:        n.ledgerState,
 		Mempool:                        n.mempool,
 		ChainsyncState:                 n.chainsyncState,
@@ -789,6 +792,17 @@ func (n *Node) newOuroborosConfig(
 		// leaves the limiter off at zero, so the node must set it.
 		MaxTxSubmissionsPerSecond: defaultMaxTxSubmissionsPerSecond,
 	}
+}
+
+func newSDKLedgerRole(state *ledger.LedgerState) sdkchain.Ledger {
+	if state == nil {
+		return nil
+	}
+	role, err := sdkcardano.NewLedgerRole(state)
+	if err != nil {
+		return nil
+	}
+	return role
 }
 
 // chainsyncJumpingConfig connects ChainSync Jumping to the chain selector.

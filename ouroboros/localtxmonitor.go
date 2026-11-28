@@ -66,7 +66,7 @@ func (o *Ouroboros) localtxmonitorServerGetMempool(
 	if o.ledgerState == nil || o.mempool == nil {
 		return 0, 0, nil, errLocalTxMonitorUnavailable
 	}
-	tip := o.ledgerState.Tip()
+	tip := o.ledgerTip()
 	capacity := o.mempool.CapacityBytes()
 	if capacity < 0 || capacity > math.MaxUint32 {
 		return 0, 0, nil, fmt.Errorf(

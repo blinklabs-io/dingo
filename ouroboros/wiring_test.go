@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
+	sdkcardano "github.com/blinklabs-io/dingo/sdk/cardano"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -112,6 +113,7 @@ func newWiringTestDeps(t *testing.T) OuroborosConfig {
 		Logger:                  logger,
 		EventBus:                bus,
 		LedgerState:             ls,
+		ChainLedger:             newTestChainLedgerRole(t, ls),
 		LeiosAnnouncementLedger: ls,
 		Mempool:                 &mempool.FIFO{Mempool: m},
 		ChainsyncState:          chainsync.NewState(bus, ls),
@@ -161,6 +163,7 @@ func TestNewOuroborosRejectsMissingRequiredDependency(t *testing.T) {
 	}{
 		{"EventBus", func(c *OuroborosConfig) { c.EventBus = nil }},
 		{"LedgerState", func(c *OuroborosConfig) { c.LedgerState = nil }},
+		{"ChainLedger", func(c *OuroborosConfig) { c.ChainLedger = nil }},
 		{"Mempool", func(c *OuroborosConfig) { c.Mempool = nil }},
 		{"ChainsyncState", func(c *OuroborosConfig) { c.ChainsyncState = nil }},
 		{"ConnManager", func(c *OuroborosConfig) { c.ConnManager = nil }},
@@ -196,7 +199,7 @@ func TestNewOuroborosRejectsChainsyncCapacityOverflow(t *testing.T) {
 	cfg := newWiringTestDeps(t)
 	cfg.ChainsyncState = chainsync.NewStateWithConfig(
 		cfg.EventBus,
-		cfg.LedgerState,
+		concreteLedgerState(t, cfg.LedgerState),
 		chainsync.Config{MaxClients: 8000},
 	)
 
@@ -247,6 +250,15 @@ func TestRejectsTypedNilDependencies(t *testing.T) {
 	t.Parallel()
 
 	base := newWiringTestDeps(t)
+	t.Run("LedgerState", func(t *testing.T) {
+		cfg := base
+		var typedNil *ledger.LedgerState
+		cfg.LedgerState = typedNil
+		o, err := NewOuroboros(cfg)
+		require.Nil(t, o)
+		require.ErrorIs(t, err, ErrMissingDependency)
+		require.Contains(t, err.Error(), "LedgerState")
+	})
 	t.Run("Mempool", func(t *testing.T) {
 		cfg := base
 		var typedNil *mempool.FIFO
@@ -255,6 +267,15 @@ func TestRejectsTypedNilDependencies(t *testing.T) {
 		require.Nil(t, o)
 		require.ErrorIs(t, err, ErrMissingDependency)
 		require.Contains(t, err.Error(), "Mempool")
+	})
+	t.Run("ChainLedger", func(t *testing.T) {
+		cfg := base
+		var typedNil *sdkcardano.LedgerRole
+		cfg.ChainLedger = typedNil
+		o, err := NewOuroboros(cfg)
+		require.Nil(t, o)
+		require.ErrorIs(t, err, ErrMissingDependency)
+		require.Contains(t, err.Error(), "ChainLedger")
 	})
 	t.Run("LeiosAnnouncementLedger", func(t *testing.T) {
 		cfg := base
@@ -295,7 +316,9 @@ func TestNewOuroborosWiresPeerRelativeHeaderVerification(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	o := newOuroboros(OuroborosConfig{LedgerState: ls})
+	o := newOuroboros(OuroborosConfig{LedgerState: ls,
+		ChainLedger: newTestChainLedgerRole(t, ls),
+	})
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
 	blocks, err := testfixtures.GenerateConwayChain(2)
 	require.NoError(t, err)

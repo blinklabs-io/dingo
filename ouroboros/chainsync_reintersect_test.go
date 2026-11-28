@@ -100,7 +100,7 @@ func newReintersectFixture(
 	f.o = newOuroboros(OuroborosConfig{EventBus: bus, Logger: logger})
 	f.o.eventBus = bus
 	f.o.connManager = cm
-	f.o.ledgerState = ls
+	installTestLedger(f.o, ls)
 	f.o.chainsyncReintersectTimeout = timeout
 	bus.SubscribeFunc(ledger.ChainsyncEventType, func(evt event.Event) {
 		e, ok := evt.Data.(ledger.ChainsyncEvent)
@@ -132,7 +132,7 @@ func newReintersectFixture(
 // dial replaces the first connection under its ID.
 func (f *reintersectFixture) dial(t *testing.T) *ouroboros.Connection {
 	t.Helper()
-	tip := f.o.ledgerState.PrimaryChainTip()
+	tip := testLedgerState(t, f.o).PrimaryChainTip()
 	serverPipe, clientPipe := net.Pipe()
 	t.Cleanup(func() { _ = serverPipe.Close(); _ = clientPipe.Close() })
 	serverConfig := ochainsync.NewConfig(
@@ -166,7 +166,8 @@ func (f *reintersectFixture) dial(t *testing.T) *ouroboros.Connection {
 				return cb.Server.RollBackward(f.intersect, tip)
 			}
 			return cb.Server.RollForward(1, []byte{0x80}, tip)
-		}),
+		},
+		),
 	)
 	serverReady := make(chan error, 1)
 	var serverConn *ouroboros.Connection
@@ -702,7 +703,8 @@ func TestChainsyncResyncReintersectOnTornDownConnectionIsNoOp(t *testing.T) {
 
 	_, _, ok := f.state.LookupObservedHeader(f.connId, below.Hash().Bytes())
 	require.True(t, ok,
-		"a re-intersect on a torn-down connection must not run the close fallback")
+		"a re-intersect on a torn-down connection must not run the close fallback",
+	)
 }
 
 // Closing a connection used to end everything recorded against its cursor:
@@ -996,7 +998,8 @@ func TestLocalRollbackPreservesCursorAlreadyStreamingFromPoint(t *testing.T) {
 		"the existing cursor must keep streaming",
 	)
 	require.Equal(t, findsBefore, f.findIntersects.Load(),
-		"a cursor already continuing from the rollback point must not re-intersect")
+		"a cursor already continuing from the rollback point must not re-intersect",
+	)
 	require.True(t, f.connected())
 }
 
@@ -1032,7 +1035,7 @@ func (f *reintersectFixture) answerParked(t *testing.T) {
 	f.parked = nil
 	f.mu.Unlock()
 	require.NotEmpty(t, parked, "the peer parked no request")
-	tip := f.o.ledgerState.PrimaryChainTip()
+	tip := testLedgerState(t, f.o).PrimaryChainTip()
 	for _, server := range parked {
 		require.NoError(t, server.RollForward(1, []byte{0x80}, tip))
 	}

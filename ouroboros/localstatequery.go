@@ -166,7 +166,7 @@ type localstatequerySession struct {
 	lastQuery  time.Time
 	expiry     *time.Timer
 	// releasePin drops the ledger pin that keeps pruning off the view's
-	// point (ledger.LedgerState.PinAcquiredPoint); nil for a tip acquire
+	// point (ProtocolLedger.PinAcquiredPoint); nil for a tip acquire
 	// until its view is reopened. It is idempotent, and runs wherever the
 	// view is closed.
 	releasePin func()

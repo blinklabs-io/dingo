@@ -39,7 +39,7 @@ func TestLocaltxmonitorServerGetMempoolReportsConfiguredCapacity(t *testing.T) {
 			cfg.MempoolCapacity = capacity
 		},
 	)
-	o.ledgerState = newTestLedgerState(t)
+	installTestLedger(o, newTestLedgerState(t))
 
 	_, got, _, err := o.localtxmonitorServerGetMempool(
 		olocaltxmonitor.CallbackContext{},
@@ -57,7 +57,7 @@ func TestLocaltxmonitorServerGetMempoolRejectsUnrepresentableCapacity(
 	o, _ := newTxSubmissionTestOuroboros(t, func(cfg *mempool.MempoolConfig) {
 		cfg.MempoolCapacity = int64(math.MaxUint32) + 1
 	})
-	o.ledgerState = newTestLedgerState(t)
+	installTestLedger(o, newTestLedgerState(t))
 
 	_, _, _, err := o.localtxmonitorServerGetMempool(
 		olocaltxmonitor.CallbackContext{},
@@ -85,8 +85,8 @@ func TestLocaltxmonitorServerGetMempoolListsTransactions(t *testing.T) {
 	t.Parallel()
 
 	o, _ := newTxSubmissionTestOuroboros(t)
-	o.ledgerState = newTestLedgerState(t)
-	o.ledgerState.SetTipForTesting(ochainsync.Tip{
+	installTestLedger(o, newTestLedgerState(t))
+	testLedgerState(t, o).SetTipForTesting(ochainsync.Tip{
 		Point: ocommon.NewPoint(77, bytes.Repeat([]byte{7}, 32)),
 	})
 
@@ -117,7 +117,7 @@ func TestLocaltxmonitorServerGetMempoolRequiresDependencies(t *testing.T) {
 
 	withMempool, _ := newTxSubmissionTestOuroboros(t)
 	withLedger := newOuroboros(OuroborosConfig{})
-	withLedger.ledgerState = newTestLedgerState(t)
+	installTestLedger(withLedger, newTestLedgerState(t))
 
 	for name, o := range map[string]*Ouroboros{
 		"no ledger state": withMempool,
@@ -142,7 +142,7 @@ func TestLocaltxmonitorProtocol_SnapshotHasTxNextTx(t *testing.T) {
 	t.Parallel()
 
 	o, _ := newTxSubmissionTestOuroboros(t)
-	o.ledgerState = newTestLedgerState(t)
+	installTestLedger(o, newTestLedgerState(t))
 	fixtures := txsubmissionTestFixtures(t)
 	addTxSubmissionTestFixtures(t, o.mempool, fixtures[0])
 	conn := newNtCTestClientConn(

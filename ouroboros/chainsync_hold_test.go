@@ -117,7 +117,7 @@ func (f *holdFixture) rollForwardHeld(t *testing.T, tip ochainsync.Tip) {
 func TestHoldNetworkIngestDropsHeaders(t *testing.T) {
 	t.Parallel()
 	f := newHoldFixture(t)
-	ls := f.o.ledgerState
+	ls := testLedgerState(t, f.o)
 	chainTip := ls.PrimaryChainTip()
 	peerTip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(9000, []byte{0xee}),
@@ -213,7 +213,7 @@ func TestHoldNetworkIngestRollBackwardTrimsObserverHistory(t *testing.T) {
 
 	point := ocommon.NewPoint(50, []byte("rb"))
 	tip := ochainsync.Tip{Point: point, BlockNumber: 5}
-	release := f.o.ledgerState.HoldNetworkIngest()
+	release := testLedgerState(t, f.o).HoldNetworkIngest()
 	defer release()
 
 	require.ErrorIs(t, f.o.chainsyncClientRollBackward(
@@ -230,7 +230,7 @@ func TestHoldNetworkIngestRollBackwardTrimsObserverHistory(t *testing.T) {
 func TestHoldServesPeers(t *testing.T) {
 	t.Parallel()
 	f := newBlockfetchRangeFixture(t)
-	release := f.o.ledgerState.HoldNetworkIngest()
+	release := testLedgerState(t, f.o).HoldNetworkIngest()
 	defer release()
 
 	f.requestRange(t, f.point(0), f.point(2))
@@ -333,7 +333,7 @@ func newHoldResyncFixture(t *testing.T) *holdResyncFixture {
 	})
 	o.eventBus = bus
 	o.chainsyncState = state
-	o.ledgerState = ls
+	installTestLedger(o, ls)
 	o.SubscribeChainsyncResync(t.Context())
 	return &holdResyncFixture{
 		o:        o,
@@ -364,7 +364,7 @@ func TestHoldResyncReleaseClosesTrackedClients(t *testing.T) {
 	t.Parallel()
 	f := newHoldResyncFixture(t)
 
-	release := f.o.ledgerState.HoldNetworkIngest()
+	release := testLedgerState(t, f.o).HoldNetworkIngest()
 	f.publishResync(event.ChainsyncResyncReasonBehindLocalTip)
 	require.Never(
 		t,
@@ -404,7 +404,7 @@ func TestHoldReleaseKeepsDroppingHeldConnections(t *testing.T) {
 		BlockNumber: 900,
 	}
 	f.o.chainsyncState.SetNetworkIngestHeld(true)
-	release := f.o.ledgerState.HoldNetworkIngest()
+	release := testLedgerState(t, f.o).HoldNetworkIngest()
 	release()
 	f.o.chainsyncState.SetNetworkIngestHeld(false)
 
@@ -465,7 +465,7 @@ func TestHoldTakenDuringWaitDropsHeader(t *testing.T) {
 			f := newHoldFixture(t)
 			var release func()
 			test.wire(f, func() {
-				release = f.o.ledgerState.HoldNetworkIngest()
+				release = testLedgerState(t, f.o).HoldNetworkIngest()
 			})
 			f.rollForwardHeld(t, peerTip)
 			require.NotNil(t, release)
@@ -552,7 +552,7 @@ func TestHoldStopsRequestingHeaders(t *testing.T) {
 	f.o.heldTips.clientFor = func(ouroboros.ConnectionId) heldTipClient {
 		return p.client
 	}
-	release := f.o.ledgerState.HoldNetworkIngest()
+	release := testLedgerState(t, f.o).HoldNetworkIngest()
 	defer release()
 
 	go func() { _ = p.client.Sync([]ocommon.Point{ocommon.NewPointOrigin()}) }()

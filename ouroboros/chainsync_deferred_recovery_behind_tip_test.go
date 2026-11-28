@@ -144,7 +144,7 @@ func TestDeferredHeaderRecoveryKeepsParkedRecoveryOnStaleRejection(
 	older := ocommon.NewPoint(190, []byte("older"))
 	f.o.markDeferredHeaderRecovery(
 		f.conn,
-		f.o.ledgerState.Tip(),
+		f.o.ledgerTip(),
 		older,
 		ochainsync.Tip{Point: older, BlockNumber: 1},
 		true,

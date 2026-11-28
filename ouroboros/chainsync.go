@@ -400,7 +400,7 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 		}
 	}
 	o.deferredHeaderRecoveryMu.Unlock()
-	current := o.ledgerState.Tip().Point
+	current := o.ledgerTip().Point
 	if current.Slot != baseline.Point.Slot ||
 		!bytes.Equal(current.Hash, baseline.Point.Hash) {
 		// The ledger may have advanced during ancestry lookup, before this
@@ -462,7 +462,7 @@ func (o *Ouroboros) recoverWithheldHeaderAncestry(
 	case o.chainsyncLocalChainTips != nil:
 		tipHash, _ = o.chainsyncLocalChainTips()
 	case o.ledgerState != nil:
-		tipHash = o.ledgerState.Tip().Point.Hash
+		tipHash = o.ledgerTip().Point.Hash
 	}
 	if len(tipHash) == 0 {
 		return
@@ -1320,7 +1320,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		"connection_id", cbCtx.ConnectionId.String(),
 		"num_points", len(points),
 	)
-	tip := o.ledgerState.Tip()
+	tip := o.ledgerTip()
 	o.config.Logger.Debug(
 		"chainsync server: got tip",
 		"component", "ouroboros",
@@ -1404,7 +1404,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 // ledger processes them, so the tip can be stale. A tip slot behind the
 // block slot is a protocol violation that causes peers to disconnect.
 func (o *Ouroboros) refreshTip(next *chain.ChainIteratorResult) ochainsync.Tip {
-	tip := o.ledgerState.Tip()
+	tip := o.ledgerTip()
 	if !next.Rollback && next.Point.Slot > tip.Point.Slot {
 		tip = ochainsync.Tip{
 			Point:       next.Point,
@@ -1423,7 +1423,7 @@ func (o *Ouroboros) chainsyncServerAheadOfLedger(
 	if next == nil || next.Rollback {
 		return false
 	}
-	appliedTip := o.ledgerState.Tip().Point
+	appliedTip := o.ledgerTip().Point
 	if next.Point.Slot != appliedTip.Slot {
 		if next.Point.Slot > appliedTip.Slot {
 			return true
@@ -1509,7 +1509,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	}()
 	o.recordServedActivity(ctx.ConnectionId)
 	// Create/retrieve chainsync state for connection
-	tip := o.ledgerState.Tip()
+	tip := o.ledgerTip()
 	clientState, err := o.chainsyncState.AddClient(
 		ctx.ConnectionId,
 		tip.Point,
@@ -1697,7 +1697,7 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 					o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
 					return
 				}
-				appliedTip := o.ledgerState.Tip().Point
+				appliedTip := o.ledgerTip().Point
 				if appliedTip.Slot > next.Point.Slot &&
 					o.chainsyncServerAppliedTipRolledBack(appliedTip) {
 					continue
@@ -2081,7 +2081,7 @@ func (o *Ouroboros) clearObserverHeaderGapAtRollback(
 	}
 	safe := point.Slot == 0 && len(point.Hash) == 0
 	if !safe && o.ledgerState != nil {
-		applied := o.ledgerState.Tip().Point
+		applied := o.ledgerTip().Point
 		safe = point.Slot == applied.Slot &&
 			bytes.Equal(point.Hash, applied.Hash)
 	}
@@ -2114,7 +2114,7 @@ func (o *Ouroboros) clearObserverHeaderGapAtAppliedExtension(
 		!o.chainsyncState.ClientObserverHeaderGap(connId) {
 		return false
 	}
-	applied := o.ledgerState.Tip()
+	applied := o.ledgerTip()
 	if len(applied.Point.Hash) == 0 ||
 		header.BlockNumber() != applied.BlockNumber+1 ||
 		header.SlotNumber() <= applied.Point.Slot {
@@ -2179,7 +2179,7 @@ func (o *Ouroboros) headerAtOrBelowLocalTip(header gledger.BlockHeader) bool {
 	// Origin and the first applied block both have block number zero. Only
 	// a nonempty applied point can make the first header historical.
 	if tipBlock == 0 && (o.ledgerState == nil ||
-		len(o.ledgerState.Tip().Point.Hash) == 0) {
+		len(o.ledgerTip().Point.Hash) == 0) {
 		return false
 	}
 	if _, boundary := header.(*byron.ByronEpochBoundaryBlockHeader); boundary {
@@ -2991,7 +2991,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		if selectionEligible && ingressEligible && o.config.ChainsyncAwaitEagerness != nil {
 			var appliedTip func() ochainsync.Tip
 			if o.ledgerState != nil {
-				appliedTip = o.ledgerState.Tip
+				appliedTip = o.ledgerTip
 			}
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 			waitCtx, cancelWait := context.WithTimeout(
@@ -3294,7 +3294,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					o.chainsyncCursorEpoch(ctx.ConnectionId) == cursorEpoch {
 					o.markDeferredHeaderRecovery(
 						ctx.ConnectionId,
-						o.ledgerState.Tip(),
+						o.ledgerTip(),
 						point,
 						tip,
 						true,
@@ -3400,7 +3400,7 @@ func (o *Ouroboros) verifyHeaderAwaitingLedger(
 			settled = o.config.ChainsyncHeaderVerificationSettled()
 		}
 		if o.ledgerState != nil {
-			*baseline = o.ledgerState.Tip()
+			*baseline = o.ledgerTip()
 		}
 		generation, err := o.chainSelectionVerifyHeaderCrypto(
 			ctx.ConnectionId,
@@ -3946,7 +3946,7 @@ func (o *Ouroboros) updateChainsyncMetrics(
 
 	// Calculate tip delta (our tip slot - peer's tip slot)
 	// Positive means peer is behind us, negative means peer is ahead
-	ourTip := o.ledgerState.Tip()
+	ourTip := o.ledgerTip()
 	// Use signed subtraction to handle the delta correctly
 	// Slots are uint64, but the difference fits in int64 for reasonable cases
 	// Cap at math.MaxInt64 to avoid overflow

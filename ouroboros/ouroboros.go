@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	oprotocol "github.com/blinklabs-io/gouroboros/protocol"
@@ -134,7 +135,8 @@ type Ouroboros struct {
 	chainsyncState *chainsync.State
 	eventBus       *event.EventBus
 	mempool        mempool.Service
-	ledgerState    *ledger.LedgerState
+	ledgerState    ProtocolLedger
+	chainLedger    sdkchain.Ledger
 	// lastOriginOnlyIntersectWarn throttles warnOriginOnlyIntersectRescued.
 	// Unix nanoseconds; 0 means "never warned".
 	lastOriginOnlyIntersectWarn atomic.Int64
@@ -877,7 +879,11 @@ type OuroborosConfig struct {
 	// Ouroboros, connmanager takes ConfigureListeners and OutboundConnOpts,
 	// and peergov takes RequestPeersFromPeer. Ouroboros must therefore be
 	// built before any of them exists.
-	LedgerState *ledger.LedgerState
+	LedgerState ProtocolLedger
+	// ChainLedger is the neutral SDK role over LedgerState. Node composition
+	// supplies the Cardano adapter so protocol code reads shared chain state
+	// through the plugin boundary.
+	ChainLedger sdkchain.Ledger
 	// LeiosAnnouncementLedger is the narrow ledger read/validation boundary
 	// required when EnableLeios is true. Node composition supplies the same
 	// LedgerState instance through this restricted surface.
@@ -1094,15 +1100,16 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	o.chainsyncHasBestPeer = cfg.ChainsyncHasBestPeer
 	o.initChainsyncJumping()
 	o.blockfetchRangeBytes = func(ocommon.Point, ocommon.Point) uint64 { return 0 }
-	if o.ledgerState != nil {
+	if !isNilInterface(o.ledgerState) {
+		o.chainLedger = cfg.ChainLedger
 		o.blockfetchRangeBytes = o.ledgerState.BlockfetchRangeExpectedBytes
 		o.chainsyncHeaderBackpressure = o.ledgerState.AwaitChainsyncHeaderCapacity
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncObserverHorizonWait = o.ledgerState.AwaitObserverHeaderHorizon
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
 		o.chainsyncLocalTipBlock = func() (uint64, uint64) {
-			k := max(o.ledgerState.SecurityParam(), 0)
-			return o.ledgerState.Tip().BlockNumber, uint64(k)
+			k := max(o.ledgerSecurityParam(), 0)
+			return o.ledgerTip().BlockNumber, uint64(k)
 		}
 		o.leiosImmutableSlot = func(
 			ctx context.Context,
@@ -1112,7 +1119,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		}
 		o.leiosPinAdvance = o.ledgerState.AdvanceLeiosPins
 		o.chainsyncHeaderCheckpoint = o.ledgerState.ValidateHeaderCheckpoint
-		if k := o.ledgerState.SecurityParam(); k > 0 {
+		if k := o.ledgerSecurityParam(); k > 0 {
 			o.chainsyncHeaderHistoryLimit = k + 1
 		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto

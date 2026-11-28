@@ -1014,6 +1014,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	}
 	ouroborosCfg := n.ouroborosConfig
 	ouroborosCfg.LedgerState = n.ledgerState
+	ouroborosCfg.ChainLedger = newSDKLedgerRole(n.ledgerState)
 	ouroborosCfg.LeiosAnnouncementLedger = n.ledgerState
 	ouroborosCfg.Mempool = n.mempool
 	ouroborosCfg.ChainsyncState = n.chainsyncState

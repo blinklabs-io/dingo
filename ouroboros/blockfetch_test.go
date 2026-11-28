@@ -294,7 +294,8 @@ func TestDecodeBlockAuxiliaryDataRules(t *testing.T) {
 					}
 					require.NoError(t, err)
 					require.Len(t, block.Transactions(), tc.txCount)
-				})
+				},
+				)
 			}
 		}
 	}
@@ -477,6 +478,7 @@ func TestBlockfetchClientRequestRangeUsesLedgerEstimateByDefault(
 	o := newOuroboros(OuroborosConfig{
 		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		LedgerState: ls,
+		ChainLedger: newTestChainLedgerRole(t, ls),
 	})
 	o.blockfetchConnClient = func(
 		ouroboros.ConnectionId,
@@ -636,8 +638,8 @@ func newBlockfetchRangeFixtureWithTypes(
 // newBlockfetchRangeFixtureWithSlotsAndConfig is
 // newBlockfetchRangeFixtureWithSlots generalized to an optional
 // *cardano.CardanoNodeConfig, so a test can control what
-// o.ledgerState.SecurityParam() (LedgerState.SecurityParam, distinct from
-// the ChainManager-level testSecurityParamLedger below) returns. A nil
+// the SDK ledger role's SecurityParam (distinct from the ChainManager-level
+// testSecurityParamLedger below) returns. A nil
 // config leaves LedgerState without a CardanoNodeConfig, so SecurityParam()
 // falls back to blockfetchBatchSlotThresholdDefault.
 func newBlockfetchRangeFixtureWithSlotsAndConfig(
@@ -749,8 +751,7 @@ func newBlockfetchRangeFixtureWithSlotsConfigAndTypes(
 		EventBus:    bus,
 		ConnManager: connManager,
 	})
-	o.ledgerState = ls
-
+	installTestLedger(o, ls)
 	opts, peer := newMuxerServerPeer(t)
 	// Report the registered connection's ID, the way a real muxer on that
 	// connection would, so the callback resolves its peer through ConnManager.
@@ -773,7 +774,7 @@ func TestBlockfetchServerRequestRange_RejectsUnappliedEndPoint(t *testing.T) {
 
 	f := newBlockfetchRangeFixture(t)
 	applied := f.blocks[0]
-	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
+	testLedgerState(t, f.o).SetTipForTesting(ochainsync.Tip{
 		Point:       ocommon.NewPoint(applied.Slot, applied.Hash),
 		BlockNumber: applied.BlockNumber,
 	})
@@ -793,7 +794,7 @@ func TestBlockfetchServerRequestRange_RepeatedUnappliedEndPointClosesPeer(
 ) {
 	f := newBlockfetchRangeFixture(t)
 	applied := f.blocks[0]
-	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
+	testLedgerState(t, f.o).SetTipForTesting(ochainsync.Tip{
 		Point:       ocommon.NewPoint(applied.Slot, applied.Hash),
 		BlockNumber: applied.BlockNumber,
 	})
@@ -899,7 +900,7 @@ func TestBlockfetchServerRequestRange_RejectsInvertedSameSlotRange(
 		[]uint{1, 0, 1},
 	)
 	boundary := f.blocks[1]
-	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
+	testLedgerState(t, f.o).SetTipForTesting(ochainsync.Tip{
 		Point:       ocommon.NewPoint(boundary.Slot, boundary.Hash),
 		BlockNumber: boundary.BlockNumber,
 	})
@@ -1056,8 +1057,8 @@ func TestBlockfetchServerRequestRange_SparseNetworkRangeServedOverWire(
 
 // smallSecurityParamCardanoConfig loads the complete mainnet configuration and
 // overrides its Byron and Shelley security parameter K with k, so
-// LedgerState.SecurityParam() -- and so maxBlockFetchBlocksForSecurityParam
-// -- is small and test-controlled instead of falling back to
+// the SDK ledger role's SecurityParam -- and so
+// maxBlockFetchBlocksForSecurityParam -- is small and test-controlled instead of falling back to
 // blockfetchBatchSlotThresholdDefault (50000, far too large to build a
 // real-chain test around).
 func smallSecurityParamCardanoConfig(

@@ -296,7 +296,15 @@ const modulePath = "github.com/blinklabs-io/dingo"
 type importBoundaryRule struct {
 	from      string
 	forbidden []string
-	reason    string
+	// forbiddenTypes rejects concrete types from otherwise permitted imports.
+	// Tests may still compose the concrete implementation with the interface;
+	// this constraint applies to production files only.
+	forbiddenTypes map[string][]string
+	// forbiddenTypeFunctionExemptions permits a forbidden concrete type only
+	// inside the named function. It exists for exported compatibility APIs;
+	// execution paths remain subject to forbiddenTypes.
+	forbiddenTypeFunctionExemptions map[string]map[string][]string
+	reason                          string
 	// testImportExemptions maps a repository-relative _test.go file to the
 	// forbidden packages it may import. Keep each entry to a test that must
 	// compose both sides of the boundary, and name the reason beside it.
@@ -307,6 +315,19 @@ type importBoundaryRule struct {
 // Update this list when a dependency direction changes and keep its reason
 // explicit. Update ARCHITECTURE.md when that changes an ownership boundary.
 var importBoundaryRules = []importBoundaryRule{
+	{
+		from: "ouroboros",
+		forbiddenTypes: map[string][]string{
+			"ledger": {"LedgerState"},
+		},
+		forbiddenTypeFunctionExemptions: map[string]map[string][]string{
+			"ouroboros/wiring.go": {
+				"LedgerState": {"ledger.LedgerState"},
+			},
+		},
+		reason: "network protocols depend on the ledger role instead of the " +
+			"built-in ledger implementation",
+	},
 	{
 		from: "ledger",
 		forbidden: []string{
@@ -467,6 +488,43 @@ func TestImportBoundaries(t *testing.T) {
 	}
 }
 
+func TestForbiddenTypeFunctionExemptionIsScopedToNamedFunction(t *testing.T) {
+	repoRoot := t.TempDir()
+	packageDir := filepath.Join(repoRoot, "ouroboros")
+	if err := os.MkdirAll(packageDir, 0o755); err != nil {
+		t.Fatalf("create fixture package: %v", err)
+	}
+	file := filepath.Join(packageDir, "wiring.go")
+	source := `package ouroboros
+import "github.com/blinklabs-io/dingo/ledger"
+type Ouroboros struct{}
+func (*Ouroboros) LedgerState() *ledger.LedgerState { return nil }
+func (*Ouroboros) OtherLedgerState() *ledger.LedgerState { return nil }
+`
+	if err := os.WriteFile(file, []byte(source), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	rule := importBoundaryRule{
+		from: "ouroboros",
+		forbiddenTypes: map[string][]string{
+			"ledger": {"LedgerState"},
+		},
+		forbiddenTypeFunctionExemptions: map[string]map[string][]string{
+			"ouroboros/wiring.go": {
+				"LedgerState": {"ledger.LedgerState"},
+			},
+		},
+		reason: "test boundary",
+	}
+	violations, err := importBoundaryViolationsForFile(repoRoot, rule, file)
+	if err != nil {
+		t.Fatalf("check fixture boundary: %v", err)
+	}
+	if len(violations) != 1 || !strings.Contains(violations[0], "uses ledger.LedgerState") {
+		t.Fatalf("violations = %v, want only OtherLedgerState's result", violations)
+	}
+}
+
 // importBoundaryViolations checks one boundary rule, parsing files in parallel
 // while bounding concurrent parser work to the configured Go CPU parallelism.
 func importBoundaryViolations(
@@ -558,6 +616,118 @@ func importBoundaryViolationsForFile(
 			)
 		}
 	}
+	if !strings.HasSuffix(relFile, "_test.go") {
+		typeViolations, err := forbiddenTypeViolationsForFile(
+			file,
+			relFile,
+			rule,
+		)
+		if err != nil {
+			return nil, err
+		}
+		violations = append(violations, typeViolations...)
+	}
+	return violations, nil
+}
+
+func forbiddenTypeViolationsForFile(
+	file string,
+	relFile string,
+	rule importBoundaryRule,
+) ([]string, error) {
+	if len(rule.forbiddenTypes) == 0 {
+		return nil, nil
+	}
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, file, nil, 0)
+	if err != nil {
+		return nil, fmt.Errorf("parse types for %s: %w", file, err)
+	}
+
+	aliases := make(map[string]map[string]struct{})
+	var violations []string
+	for _, importSpec := range parsed.Imports {
+		importPath := strings.Trim(importSpec.Path.Value, `"`)
+		for packagePath, typeNames := range rule.forbiddenTypes {
+			if importPath != modulePath+"/"+packagePath {
+				continue
+			}
+			alias := filepath.Base(importPath)
+			if importSpec.Name != nil {
+				alias = importSpec.Name.Name
+			}
+			if alias == "_" {
+				continue
+			}
+			if alias == "." {
+				violations = append(violations, fmt.Sprintf(
+					"%s dot-imports %s: %s",
+					relFile,
+					importPath,
+					rule.reason,
+				))
+				continue
+			}
+			if aliases[alias] == nil {
+				aliases[alias] = make(map[string]struct{})
+			}
+			for _, typeName := range typeNames {
+				aliases[alias][typeName] = struct{}{}
+			}
+		}
+	}
+	functionExemptions := make(map[token.Pos]struct{})
+	fileExemptions := rule.forbiddenTypeFunctionExemptions[relFile]
+	for _, declaration := range parsed.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		allowedResults := fileExemptions[function.Name.Name]
+		if len(allowedResults) == 0 {
+			continue
+		}
+		ast.Inspect(function, func(node ast.Node) bool {
+			selector, ok := node.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := selector.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if slices.Contains(allowedResults, ident.Name+"."+selector.Sel.Name) {
+				functionExemptions[selector.Pos()] = struct{}{}
+			}
+			return true
+		})
+	}
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		typeNames := aliases[ident.Name]
+		if _, forbidden := typeNames[selector.Sel.Name]; !forbidden {
+			return true
+		}
+		if _, exempt := functionExemptions[selector.Pos()]; exempt {
+			return true
+		}
+		violations = append(violations, fmt.Sprintf(
+			"%s:%d uses %s.%s: %s",
+			relFile,
+			fset.Position(selector.Pos()).Line,
+			ident.Name,
+			selector.Sel.Name,
+			rule.reason,
+		))
+		return true
+	})
 	return violations, nil
 }
 

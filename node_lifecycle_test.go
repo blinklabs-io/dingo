@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"net"
@@ -33,6 +32,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -386,6 +387,7 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 		EventBus:       eventBus,
 		NetworkMagic:   2, // preview
 		LedgerState:    ledgerState,
+		ChainLedger:    newSDKLedgerRole(ledgerState),
 		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
 		ChainsyncState: chainsync.NewState(eventBus, ledgerState),
 		ConnManager:    harnessConnManager,
@@ -691,6 +693,11 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	// closed ledger, mempool and connection manager.
 	require.NotSame(t, ouroBeforeRestore, n.ouroboros())
 	require.Same(t, n.ledgerState, n.ouroboros().LedgerState())
+	require.Equal(
+		t,
+		newSDKLedgerRole(n.ledgerState).Tip(),
+		n.ouroboros().ChainLedger().Tip(),
+	)
 	require.Same(t, n.mempool, n.ouroboros().Mempool())
 	require.Same(t, n.chainsyncState, n.ouroboros().ChainsyncState())
 	require.Same(t, n.connManager, n.ouroboros().ConnManager())
