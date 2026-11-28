@@ -62,6 +62,7 @@ import (
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -4388,6 +4389,23 @@ func TestNewOuroborosConfigDoesNotInitiateLegacyLeiosVotes(t *testing.T) {
 
 	assert.False(t, cfg.EnableLeiosVotes,
 		"prototype nodes must diffuse votes over leios-notify")
+}
+
+type configTestMempoolRole struct{}
+
+func (*configTestMempoolRole) AddTx(context.Context, sdkchain.Tx) error {
+	return nil
+}
+
+func (*configTestMempoolRole) RemoveTx(string) {}
+
+func TestNewOuroborosConfigCarriesMempoolRole(t *testing.T) {
+	t.Parallel()
+
+	role := &configTestMempoolRole{}
+	n := &Node{config: NewConfig(), chainMempool: role}
+
+	assert.Same(t, role, n.newOuroborosConfig(false, 0, 0).ChainMempool)
 }
 
 func TestNewOuroborosConfigCarriesLeiosMinOfferLead(t *testing.T) {

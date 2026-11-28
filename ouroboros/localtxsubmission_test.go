@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/mempool"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/connection"
@@ -657,6 +658,35 @@ func localTxSubmissionTestMsg(raw []byte) olocaltxsubmission.MsgSubmitTxTransact
 	}
 }
 
+type recordingChainMempool struct {
+	added chan sdkchain.Tx
+}
+
+func (m *recordingChainMempool) AddTx(_ context.Context, tx sdkchain.Tx) error {
+	m.added <- tx
+	return nil
+}
+
+func (*recordingChainMempool) RemoveTx(string) {}
+
+func TestLocalTxSubmissionUsesChainMempoolRole(t *testing.T) {
+	t.Parallel()
+
+	role := &recordingChainMempool{added: make(chan sdkchain.Tx, 1)}
+	o := newOuroboros(OuroborosConfig{ChainMempool: role})
+	raw := []byte{0x80}
+
+	require.NoError(t, o.localtxsubmissionServerSubmitTx(
+		localTxSubmissionTestCtx(),
+		localTxSubmissionTestMsg(raw),
+	))
+	tx := testutil.RequireReceive(t, role.added, time.Second, "transaction admission")
+	assert.Equal(t, uint(gledger.EraIdConway), tx.View().Type)
+	encoded, err := tx.Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, raw, encoded)
+}
+
 // TestLocalTxSubmissionServerSubmitTx_AcceptsValidTransaction proves a valid
 // transaction is accepted and lands in the mempool.
 func TestLocalTxSubmissionServerSubmitTx_AcceptsValidTransaction(t *testing.T) {
@@ -782,7 +812,7 @@ func TestLocalTxSubmissionServerSubmitTx_CancelsOnConnectionClose(
 
 	o := newOuroboros(OuroborosConfig{})
 	pool := newBlockingLocalTxMempool()
-	o.mempool = pool
+	setTestMempool(t, o, pool)
 	connDone := make(chan struct{})
 	o.localTxSubmissionConnDoneFunc = func(
 		connection.ConnectionId,
@@ -835,7 +865,7 @@ func TestLocalTxSubmissionProtocol_UnregisteredConnCloseCancels(
 	})
 	o := newOuroboros(OuroborosConfig{ConnManager: cm})
 	pool := newBlockingLocalTxMempool()
-	o.mempool = pool
+	setTestMempool(t, o, pool)
 	t.Cleanup(func() { close(pool.release) })
 	conn := newNtCTestClientConn(
 		t,

@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	oprotocol "github.com/blinklabs-io/gouroboros/protocol"
@@ -134,6 +135,7 @@ type Ouroboros struct {
 	chainsyncState *chainsync.State
 	eventBus       *event.EventBus
 	mempool        mempool.Service
+	chainMempool   sdkchain.Mempool
 	ledgerState    *ledger.LedgerState
 	// lastOriginOnlyIntersectWarn throttles warnOriginOnlyIntersectRescued.
 	// Unix nanoseconds; 0 means "never warned".
@@ -883,8 +885,11 @@ type OuroborosConfig struct {
 	// LedgerState instance through this restricted surface.
 	LeiosAnnouncementLedger LeiosAnnouncementLedger
 	Mempool                 mempool.Service
-	ChainsyncState          *chainsync.State
-	PeerGov                 *peergov.PeerGovernor
+	// ChainMempool is the optional chain role used for transaction admission.
+	// Node composition adapts the selected built-in Cardano mempool provider.
+	ChainMempool   sdkchain.Mempool
+	ChainsyncState *chainsync.State
+	PeerGov        *peergov.PeerGovernor
 }
 
 type blockfetchMetrics struct {
@@ -1007,6 +1012,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosValidationCancel:   leiosValidationCancel,
 		leiosValidationSlots:    make(chan struct{}, 2),
 		mempool:                 cfg.Mempool,
+		chainMempool:            cfg.ChainMempool,
 		chainsyncState:          cfg.ChainsyncState,
 		peerGov:                 cfg.PeerGov,
 		blockFetchStarts:        make(map[blockFetchKey]time.Time),

@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 )
 
 // ErrMissingDependency reports that a required dependency was absent at
@@ -138,6 +139,9 @@ func (o *Ouroboros) LedgerState() *ledger.LedgerState { return o.ledgerState }
 
 // Mempool returns the mempool. NewOuroboros guarantees it is non-nil.
 func (o *Ouroboros) Mempool() mempool.Service { return o.mempool }
+
+// ChainMempool returns the optional chain mempool role.
+func (o *Ouroboros) ChainMempool() sdkchain.Mempool { return o.chainMempool }
 
 // ChainsyncState returns the chainsync state. NewOuroboros guarantees it is non-nil.
 func (o *Ouroboros) ChainsyncState() *chainsync.State { return o.chainsyncState }

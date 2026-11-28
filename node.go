@@ -74,6 +74,8 @@ import (
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
+	sdkcardano "github.com/blinklabs-io/dingo/sdk/cardano"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/muxer"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -115,6 +117,7 @@ type Node struct {
 	consensusProvider      nodeconsensus.Provider
 	destinationRegistry    *lifecycle.DestinationRegistry
 	mempool                mempool.Service
+	chainMempool           sdkchain.Mempool
 	chainManager           *chain.ChainManager
 	db                     *database.Database
 	indexerDB              *database.Database
@@ -727,6 +730,7 @@ func (n *Node) newOuroborosConfig(
 		LedgerState:                    n.ledgerState,
 		LeiosAnnouncementLedger:        n.ledgerState,
 		Mempool:                        n.mempool,
+		ChainMempool:                   n.chainMempool,
 		ChainsyncState:                 n.chainsyncState,
 		PeerGov:                        n.peerGov,
 		NetworkMagic:                   n.config.networkMagic,
@@ -789,6 +793,13 @@ func (n *Node) newOuroborosConfig(
 		// leaves the limiter off at zero, so the node must set it.
 		MaxTxSubmissionsPerSecond: defaultMaxTxSubmissionsPerSecond,
 	}
+}
+
+func newCardanoMempoolRole(source mempool.Service) (sdkchain.Mempool, error) {
+	if source == nil {
+		return nil, nil
+	}
+	return sdkcardano.NewMempoolRole(source)
 }
 
 // chainsyncJumpingConfig connects ChainSync Jumping to the chain selector.
@@ -1462,6 +1473,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	)
 	if err != nil {
 		return fmt.Errorf("resolve mempool: %w", err)
+	}
+	n.chainMempool, err = newCardanoMempoolRole(n.mempool)
+	if err != nil {
+		return fmt.Errorf("adapt mempool chain role: %w", err)
 	}
 	started = append(
 		started,
