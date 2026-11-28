@@ -637,13 +637,13 @@ func (p *PeerGovernor) addResolvedLedgerPeerContext(
 	// and outbound connections are enabled before spawning.
 	//
 	// Spawning must happen inside this same critical section: see
-	// AddPeer's identical comment in peers.go for why calling
-	// spawnOutboundConnection after unlocking races Stop's
+	// AddPeer's identical comment in peers.go for why spawning
+	// the dial after unlocking races Stop's
 	// stopCh-clearing + p.wg.Wait() and can let Stop return before this
 	// dial is ever registered with that WaitGroup.
 	shouldConnect := p.stopCh != nil && !p.config.DisableOutbound
 	if shouldConnect {
-		p.spawnOutboundConnectionLocked(newPeer)
+		p.spawnBelowEstablishedTargetLocked(newPeer)
 	}
 	evt = &pendingEvent{
 		PeerAddedEventType,

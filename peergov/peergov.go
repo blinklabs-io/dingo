@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/topology"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -184,6 +185,9 @@ type PeerGovernor struct {
 	// afterFunc, when set, replaces time.AfterFunc for scheduled peer
 	// state changes and returns the timer's Stop. Tests set it.
 	afterFunc func(d time.Duration, f func()) func() bool
+	// connCloser, when set, replaces the connection manager lookup in
+	// connCloserLocked. Tests set it.
+	connCloser func(id ouroboros.ConnectionId) io.Closer
 	// demotionReleases holds each peer's pending demotion release.
 	demotionReleases        map[*Peer]*demotionRelease
 	metrics                 *peerGovernorMetrics
@@ -306,7 +310,7 @@ type PeerGovernorConfig struct {
 	// Peer targets (0 = use default, -1 = unlimited)
 	// These are goals the system works toward, not hard limits.
 	TargetNumberOfKnownPeers       int // Target count of known (cold) peers
-	TargetNumberOfEstablishedPeers int // Target count of established (warm) peers
+	TargetNumberOfEstablishedPeers int // Target count of established (warm and hot) outbound peers; topology peers count, inbound peers do not
 	TargetNumberOfActivePeers      int // Target count of active (hot) peers
 	TargetNumberOfRootPeers        int // Target count of root peers from topology
 
@@ -535,12 +539,20 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 
 	// Setup connmanager event listeners
 	if p.config.EventBus != nil {
-		inboundConnSubId := p.config.EventBus.SubscribeFunc(
+		// Both streams are one-shot transitions with no replay: a
+		// detached subscriber would never learn of a later close, and its
+		// peer would stay hot on a dead connection. They block instead of
+		// detaching when a governor pass holds p.mu through a burst.
+		inboundConnSubId := p.config.EventBus.SubscribeFuncWithBufferPolicy(
 			connmanager.InboundConnectionEventType,
+			event.DefaultSubscriberBuffer,
+			event.SubscriberBackpressureBlock,
 			p.handleInboundConnectionEvent,
 		)
-		connClosedSubId := p.config.EventBus.SubscribeFunc(
+		connClosedSubId := p.config.EventBus.SubscribeFuncWithBufferPolicy(
 			connmanager.ConnectionClosedEventType,
+			event.DefaultSubscriberBuffer,
+			event.SubscriberBackpressureBlock,
 			p.handleConnectionClosedEvent,
 		)
 		p.mu.Lock()

@@ -33,6 +33,12 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/handshake"
 )
 
+// errOutboundClosedBeforeAttach is the dial failure recorded for a connection
+// that closed before the worker could record it on its peer.
+var errOutboundClosedBeforeAttach = errors.New(
+	"outbound connection closed before it was recorded",
+)
+
 var networkMagicFieldPattern = regexp.MustCompile(
 	`\bunNetworkMagic\s*=\s*([0-9]+)\b`,
 )
@@ -213,16 +219,46 @@ func (p *PeerGovernor) startOutboundConnections() {
 
 	for _, tmpPeer := range peers {
 		if tmpPeer != nil {
-			p.spawnOutboundConnection(tmpPeer)
+			p.mu.Lock()
+			p.spawnBelowEstablishedTargetLocked(tmpPeer)
+			p.mu.Unlock()
 		}
 	}
 }
 
-// spawnOutboundConnection serializes work registration with Stop. Callers
-// already holding p.mu use spawnOutboundConnectionLocked instead.
-func (p *PeerGovernor) spawnOutboundConnection(peer *Peer) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// establishedOrDialingCountLocked returns the number of outbound peers that
+// are connected or have a dial in flight. Inbound peers have their own
+// bounds and do not count. Callers must hold p.mu.
+func (p *PeerGovernor) establishedOrDialingCountLocked() int {
+	n := 0
+	for _, peer := range p.peers {
+		if peer == nil || peer.Source == PeerSourceInboundConn {
+			continue
+		}
+		if peer.State != PeerStateCold ||
+			(peer.Reconnecting && peer.Connection == nil) {
+			n++
+		}
+	}
+	return n
+}
+
+// spawnBelowEstablishedTargetLocked dials a peer found by discovery or held
+// at start. A topology peer is always dialled. Any other peer is dialled
+// only while established peers and dials in flight are below
+// TargetNumberOfEstablishedPeers (0 means unlimited); otherwise it stays
+// known and cold until reconcile finds the established count below the
+// target (fillEstablishedDeficitLocked).
+// Must be called with p.mu held.
+func (p *PeerGovernor) spawnBelowEstablishedTargetLocked(peer *Peer) {
+	if peer == nil {
+		return
+	}
+	target := p.config.TargetNumberOfEstablishedPeers
+	if !p.isTopologyPeer(peer.Source) && target > 0 &&
+		p.establishedOrDialingCountLocked() >= target {
+		return
+	}
 	p.spawnOutboundConnectionLocked(peer)
 }
 
@@ -314,11 +350,14 @@ func (p *PeerGovernor) createOutboundConnection(
 	currentPeer.Reconnecting = true
 	reconnectPeer := currentPeer
 	p.mu.Unlock()
+	// released records, under p.mu, that this worker already gave up its
+	// reservation; a successor may hold Reconnecting by the time it exits.
+	released := false
 	// Ensure Reconnecting is cleared when this goroutine exits
 	defer func() {
 		p.mu.Lock()
 		idx := p.peerIndexByAddress(reconnectPeer.NormalizedAddress)
-		if idx != -1 && p.peers[idx] == reconnectPeer {
+		if !released && idx != -1 && p.peers[idx] == reconnectPeer {
 			p.peers[idx].Reconnecting = false
 		}
 		p.mu.Unlock()
@@ -361,6 +400,17 @@ func (p *PeerGovernor) createOutboundConnection(
 			return
 		}
 		currentPeer = p.peers[peerIdx]
+		// The entry was removed and the address added again. This worker
+		// belongs to the removed entry; the new one is dialled by its own
+		// worker or by reconcile, and two workers would dial it at once.
+		if currentPeer != reconnectPeer {
+			p.mu.Unlock()
+			p.config.Logger.Debug(
+				"outbound: peer entry replaced, stopping connection attempts",
+				"address", peer.Address,
+			)
+			return
+		}
 		if p.isPeerDeniedLocked(currentPeer) {
 			p.mu.Unlock()
 			p.config.Logger.Debug(
@@ -480,8 +530,34 @@ func (p *PeerGovernor) createOutboundConnection(
 				)
 				return
 			}
-			// Use the peer from the slice in case the pointer changed
 			currentPeer := p.peers[peerIdx]
+			// Recording conn over a replacement entry's connection, or
+			// over one an inbound duplex arrival recorded during the dial,
+			// would leave the overwritten connection open with no peer
+			// holding it.
+			if currentPeer != reconnectPeer ||
+				currentPeer.hasClientConnection() {
+				// Release the reservation with the decision: the close
+				// below can wait, and a close of the connection holding
+				// the entry handled meanwhile starts no worker while
+				// Reconnecting is set.
+				if currentPeer == reconnectPeer {
+					currentPeer.Reconnecting = false
+					released = true
+				}
+				p.mu.Unlock()
+				closeConnAndLog(
+					p.config.Logger,
+					connmanager.OuroborosCloser{Conn: conn},
+					"outbound: error closing superseded connection",
+					"address", peer.Address,
+				)
+				p.config.Logger.Debug(
+					"outbound: peer entry replaced or already connected during connection, closing",
+					"address", peer.Address,
+				)
+				return
+			}
 			if p.isPeerDeniedLocked(currentPeer) {
 				p.mu.Unlock()
 				closeConnAndLog(
@@ -496,25 +572,40 @@ func (p *PeerGovernor) createOutboundConnection(
 				)
 				return
 			}
-			oldSource := currentPeer.Source
-			oldConn := clonePeerConnection(currentPeer.Connection)
-			p.attachOutboundConnLocked(currentPeer, conn, time.Now())
-			selectionEvents := p.appendChainSelectionEventsLocked(
-				nil,
-				p.bootstrapExited,
-				oldSource,
-				oldConn,
-				currentPeer,
-			)
-			p.updatePeerMetrics()
+			// The connection manager removes a closed connection before
+			// it publishes the close, so a connection still registered here
+			// has its close event handled after this attach. One already
+			// removed had its close event handled while no peer held it;
+			// recording it would leave the peer on a dead connection that
+			// nothing clears.
+			if p.config.ConnManager.GetConnectionById(connId) == conn {
+				oldSource := currentPeer.Source
+				oldConn := clonePeerConnection(currentPeer.Connection)
+				p.attachOutboundConnLocked(currentPeer, conn, time.Now())
+				// The close of conn may be handled before this worker
+				// exits; it must find no reservation, or it starts no
+				// worker.
+				currentPeer.Reconnecting = false
+				released = true
+				selectionEvents := p.appendChainSelectionEventsLocked(
+					nil,
+					p.bootstrapExited,
+					oldSource,
+					oldConn,
+					currentPeer,
+				)
+				p.updatePeerMetrics()
+				p.mu.Unlock()
+				p.publishPendingEvents(selectionEvents)
+				// Generate event
+				p.publishEvent(
+					OutboundConnectionEventType,
+					OutboundConnectionEvent{ConnectionId: connId},
+				)
+				return
+			}
 			p.mu.Unlock()
-			p.publishPendingEvents(selectionEvents)
-			// Generate event
-			p.publishEvent(
-				OutboundConnectionEventType,
-				OutboundConnectionEvent{ConnectionId: connId},
-			)
-			return
+			err = errOutboundClosedBeforeAttach
 		}
 		if isConnectionCancellationError(err) {
 			select {
@@ -536,7 +627,7 @@ func (p *PeerGovernor) createOutboundConnection(
 			}
 			p.mu.Lock()
 			peerIdx = p.peerIndexByAddress(peer.NormalizedAddress)
-			if peerIdx == -1 {
+			if peerIdx == -1 || p.peers[peerIdx] != reconnectPeer {
 				p.mu.Unlock()
 				p.config.Logger.Debug(
 					"outbound: peer removed during canceled connection attempt",
@@ -608,7 +699,10 @@ func (p *PeerGovernor) createOutboundConnection(
 		p.mu.Lock()
 		// Re-lookup peer to avoid stale pointer if slice was rebuilt
 		peerIdx = p.peerIndexByAddress(peer.NormalizedAddress)
-		if peerIdx == -1 {
+		// A replacement entry is not charged for this worker's failure:
+		// it would back off, or deny and remove, an address whose own
+		// worker may already be connected.
+		if peerIdx == -1 || p.peers[peerIdx] != reconnectPeer {
 			p.mu.Unlock()
 			p.config.Logger.Debug(
 				"outbound: peer removed during connection attempt, stopping",

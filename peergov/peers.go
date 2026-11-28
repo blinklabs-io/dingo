@@ -421,8 +421,8 @@ func (p *PeerGovernor) AddPeer(
 	// The spawn itself must happen inside this same critical section,
 	// not after unlocking: Stop() closes and nils p.stopCh while
 	// holding p.mu, then unlocks and calls p.wg.Wait() with the lock
-	// released. Reading p.stopCh here and only calling
-	// spawnOutboundConnection (which does p.wg.Go, registering this
+	// released. Reading p.stopCh here and only
+	// spawning the dial (which does p.wg.Go, registering this
 	// dial with that same WaitGroup) after unlocking would leave a
 	// window where Stop's Wait() observes the WaitGroup counter back
 	// at zero and returns before this goroutine is ever registered --
@@ -433,7 +433,7 @@ func (p *PeerGovernor) AddPeer(
 	shouldConnect := p.stopCh != nil && !p.config.DisableOutbound &&
 		source != PeerSourceInboundConn
 	if shouldConnect {
-		p.spawnOutboundConnectionLocked(newPeer)
+		p.spawnBelowEstablishedTargetLocked(newPeer)
 	}
 	evt = &pendingEvent{
 		PeerAddedEventType,

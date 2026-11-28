@@ -48,6 +48,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Collect events to publish after releasing the lock (avoid deadlock)
 	var events []pendingEvent
+	var closes []deferredClose
 
 	// Cleanup expired deny list entries
 	p.cleanupDenyList()
@@ -118,20 +119,12 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				if p.isBootstrapPeer(peer) && !p.canPromoteBootstrapPeer() {
 					// Bootstrap peer with connection but bootstrap exited
 					// Close the connection and keep peer cold
-					if p.config.ConnManager != nil {
-						conn := p.config.ConnManager.GetConnectionById(
-							peer.Connection.Id,
-						)
-						if conn != nil {
-							closeConnAndLog(
-								p.config.Logger,
-								connmanager.OuroborosCloser{Conn: conn, Begin: true},
-								"error closing connection for bootstrap peer after exit",
-								"address",
-								peer.Address,
-							)
-						}
-					}
+					closes = p.deferCloseLocked(
+						closes,
+						peer.Connection.Id,
+						"error closing connection for bootstrap peer after exit",
+						peer.Address,
+					)
 					peer.Connection = nil
 					p.config.Logger.Debug(
 						"prevented bootstrap peer promotion after exit",
@@ -468,7 +461,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Enforce overall peer targets by removing excess peers
 	// Priority order (highest to lowest): Topology > Gossip > Ledger > Inbound > Unknown
-	events = append(events, p.enforcePeerLimits(&knownRemoved)...)
+	events = append(events, p.enforcePeerLimits(&knownRemoved, &closes)...)
 
 	// Collect QuotaStatusEvent with current hot peer distribution.
 	// This runs after enforcePeerLimits so InboundPruned and held counts
@@ -556,6 +549,8 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	// Peer Discovery (outside lock)
 	p.mu.Unlock()
 
+	p.closeDeferred(closes)
+
 	// Publish all collected events after releasing the lock (avoid deadlock)
 	p.publishPendingEvents(events)
 
@@ -576,8 +571,12 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 // enforcePeerLimits removes excess peers when targets are exceeded.
 // It prioritizes keeping topology peers and removes lower-priority peers first.
 // Returns events that should be published after releasing the lock.
-// Must be called with p.mu held.
-func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
+// Connections of removed peers are appended to closes; the caller closes
+// them after releasing p.mu. Must be called with p.mu held.
+func (p *PeerGovernor) enforcePeerLimits(
+	removedCount *int,
+	closes *[]deferredClose,
+) []pendingEvent {
 	var events []pendingEvent
 
 	// Enforce active (hot) peer target
@@ -587,16 +586,15 @@ func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
 			p.config.TargetNumberOfActivePeers,
 			false,
 			removedCount,
+			closes,
 		)...)
 	}
 
-	// Enforce established (warm) peer target
+	// Enforce the established (warm and hot) outbound peer target
 	if p.config.TargetNumberOfEstablishedPeers > 0 {
-		events = append(events, p.enforceStateLimit(
-			PeerStateWarm,
+		events = append(events, p.demoteExcessWarmPeersLocked(
 			p.config.TargetNumberOfEstablishedPeers,
-			false,
-			removedCount,
+			closes,
 		)...)
 	}
 
@@ -609,6 +607,7 @@ func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
 			p.config.InboundWarmTarget,
 			true,
 			removedCount,
+			closes,
 		)...)
 	}
 
@@ -619,22 +618,105 @@ func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
 			p.config.TargetNumberOfKnownPeers,
 			false,
 			removedCount,
+			closes,
 		)...)
 	}
 
 	return events
 }
 
+// demoteExcessWarmPeersLocked makes outbound warm peers cold, lowest source
+// priority and score first, while hot and warm outbound peers together exceed
+// limit, and closes their connections. That is the set the dial gate counts
+// (establishedOrDialingCountLocked), less dials in flight: a dial that has
+// not connected yet must not displace a connected peer. A demoted peer stays
+// known: removing it would let the next peer-sharing or ledger round add and
+// dial it again. Topology peers count toward limit but are never demoted, hot
+// peers are not demoted here, and inbound peers neither count nor are
+// demoted.
+// Returns events that should be published after releasing the lock; the
+// demoted connections are appended to closes for the caller to close after
+// releasing it. Must be called with p.mu held.
+func (p *PeerGovernor) demoteExcessWarmPeersLocked(
+	limit int,
+	closes *[]deferredClose,
+) []pendingEvent {
+	established := 0
+	candidates := make([]*Peer, 0, len(p.peers))
+	for _, peer := range p.peers {
+		if peer == nil || peer.State == PeerStateCold ||
+			peer.Source == PeerSourceInboundConn {
+			continue
+		}
+		established++
+		if peer.State == PeerStateWarm && !p.isTopologyPeer(peer.Source) {
+			candidates = append(candidates, peer)
+		}
+	}
+	demoteCount := min(established-limit, len(candidates))
+	if demoteCount <= 0 {
+		return nil
+	}
+	slices.SortFunc(candidates, func(a, b *Peer) int {
+		if c := cmp.Compare(
+			p.peerSourcePriority(a.Source),
+			p.peerSourcePriority(b.Source),
+		); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.PerformanceScore, b.PerformanceScore)
+	})
+	var events []pendingEvent
+	for _, peer := range candidates[:demoteCount] {
+		oldSource := peer.Source
+		oldConn := clonePeerConnection(peer.Connection)
+		p.config.Logger.Debug(
+			"demoting peer due to established limit exceeded",
+			"address", peer.Address,
+			"source", peer.Source,
+			"limit", limit,
+		)
+		if peer.Connection != nil {
+			*closes = p.deferCloseLocked(
+				*closes,
+				peer.Connection.Id,
+				"error closing connection for peer demoted due to limit exceeded",
+				peer.Address,
+			)
+		}
+		peer.Connection = nil
+		p.recordPeerStateChange(peer.State, PeerStateCold)
+		peer.State = PeerStateCold
+		events = p.appendChainSelectionEventsLocked(
+			events,
+			p.bootstrapExited,
+			oldSource,
+			oldConn,
+			peer,
+		)
+		events = append(events, pendingEvent{
+			PeerDemotedEventType,
+			PeerStateChangeEvent{
+				Address: peer.Address,
+				Reason:  "limit exceeded",
+			},
+		})
+	}
+	return events
+}
+
 // enforceStateLimit removes excess peers in a given state. With inbound set it
 // counts and removes only inbound peers in that state, least recently served
 // first; otherwise inbound peers in a non-cold state are left out entirely.
-// Returns events that should be published after releasing the lock.
-// Must be called with p.mu held.
+// Returns events that should be published after releasing the lock, and
+// appends the removed peers' connections to closes for the caller to close
+// after releasing it. Must be called with p.mu held.
 func (p *PeerGovernor) enforceStateLimit(
 	state PeerState,
 	limit int,
 	inbound bool,
 	removedCount *int,
+	closes *[]deferredClose,
 ) []pendingEvent {
 	var events []pendingEvent
 
@@ -721,17 +803,13 @@ func (p *PeerGovernor) enforceStateLimit(
 			"source", peer.Source,
 			"limit", limit,
 		)
-		if peer.Connection != nil && p.config.ConnManager != nil {
-			conn := p.config.ConnManager.GetConnectionById(peer.Connection.Id)
-			if conn != nil {
-				closeConnAndLog(
-					p.config.Logger,
-					connmanager.OuroborosCloser{Conn: conn, Begin: true},
-					"error closing connection for peer removed due to limit exceeded",
-					"address",
-					peer.Address,
-				)
-			}
+		if peer.Connection != nil {
+			*closes = p.deferCloseLocked(
+				*closes,
+				peer.Connection.Id,
+				"error closing connection for peer removed due to limit exceeded",
+				peer.Address,
+			)
 		}
 		events = append(events, pendingEvent{
 			PeerRemovedEventType,

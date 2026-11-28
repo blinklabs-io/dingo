@@ -18,14 +18,13 @@ import (
 	"cmp"
 	"slices"
 	"time"
-
-	"github.com/blinklabs-io/dingo/connmanager"
 )
 
 // gossipChurn performs aggressive churn on gossip and ledger peers.
 // It demotes the lowest-scoring hot peers to cold and promotes warm peers.
 func (p *PeerGovernor) gossipChurn() {
 	var events []pendingEvent
+	var closes []deferredClose
 
 	p.mu.Lock()
 
@@ -124,20 +123,12 @@ func (p *PeerGovernor) gossipChurn() {
 
 		// Close connection when demoting to cold
 		if targetState == PeerStateCold && peer.Connection != nil {
-			if p.config.ConnManager != nil {
-				conn := p.config.ConnManager.GetConnectionById(
-					peer.Connection.Id,
-				)
-				if conn != nil {
-					closeConnAndLog(
-						p.config.Logger,
-						connmanager.OuroborosCloser{Conn: conn, Begin: true},
-						"gossip churn: error closing connection for demoted peer",
-						"address",
-						peer.Address,
-					)
-				}
-			}
+			closes = p.deferCloseLocked(
+				closes,
+				peer.Connection.Id,
+				"gossip churn: error closing connection for demoted peer",
+				peer.Address,
+			)
 			peer.Connection = nil
 			p.config.Logger.Debug(
 				"gossip churn: cleared connection for demoted peer",
@@ -225,6 +216,7 @@ func (p *PeerGovernor) gossipChurn() {
 	p.updatePeerMetrics()
 	p.mu.Unlock()
 
+	p.closeDeferred(closes)
 	// Publish all events outside of lock to avoid deadlock
 	p.publishPendingEvents(events)
 }
