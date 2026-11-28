@@ -16,9 +16,9 @@
 // runs. A fresh SQLite metadata database has no sqlite_stat1, so the planner
 // picks indexes by shape alone and can scan most of a large table for a query
 // that should seek; this package runs the backend's incremental statistics
-// maintenance during startup, after each epoch rollover, and on a fixed
-// interval in between, because block application can grow tables well past the
-// cardinality the last run recorded long before the next rollover.
+// maintenance during startup and after each epoch rollover. There is no timer
+// between rollovers: a pass re-analyzes every table and holds the only write
+// connection, so it runs only when an event says the data has moved on.
 package plannerstats
 
 import (
@@ -26,27 +26,11 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 )
-
-// DefaultRefreshInterval is how often the worker re-runs the incremental
-// maintenance between epoch rollovers. SQLite selects tables whose
-// statistics are absent or stale and samples their indexes with a temporary
-// analysis limit, so a table filled since startup need not wait until the
-// next epoch to have useful planner statistics.
-const DefaultRefreshInterval = time.Minute
-
-// periodicBackoff scales how long periodic runs wait after a pass: none
-// starts until periodicBackoff times the last pass's duration has passed. A
-// pass holds the write connection, and on a large store it can outlast
-// DefaultRefreshInterval many times over; without the wait the ticker's
-// buffered tick starts the next pass the moment one ends, pausing writes
-// for good. Epoch runs do not wait.
-const periodicBackoff = 9
 
 // shelleyProtocolMajor is the first protocol major version with an epoch
 // nonce; Byron used 0 and 1.
@@ -66,22 +50,6 @@ type Manager struct {
 	// follow-up is remembered, because a run reads current state and so
 	// covers every transition that arrived before it started.
 	pending chan struct{}
-
-	// newTick returns the periodic trigger channel and its stop function.
-	// Tests replace it to fire the trigger without waiting on a clock.
-	newTick func() (<-chan time.Time, func())
-
-	// now is the clock periodic backoff reads; tests replace it.
-	now func() time.Time
-	// periodicAfter is when the next periodic run may start. Only the worker
-	// reads or writes it.
-	periodicAfter time.Time
-
-	// deferMu guards deferrals, the outstanding Defer calls, and skipped,
-	// whether a trigger arrived while any was outstanding.
-	deferMu   sync.Mutex
-	deferrals int
-	skipped   bool
 
 	mu             sync.Mutex
 	cancel         context.CancelFunc
@@ -103,11 +71,6 @@ func NewManager(
 		eventBus: eventBus,
 		logger:   logger,
 		pending:  make(chan struct{}, 1),
-		newTick: func() (<-chan time.Time, func()) {
-			ticker := time.NewTicker(DefaultRefreshInterval)
-			return ticker.C, ticker.Stop
-		},
-		now: time.Now,
 	}
 }
 
@@ -127,7 +90,7 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 // StartWithStartup starts the worker with a startup pass before it handles
-// epoch or periodic triggers. The pass runs on the worker, so this method does
+// epoch triggers. The pass runs on the worker, so this method does
 // not wait for planner maintenance to finish.
 func (m *Manager) StartWithStartup(ctx context.Context) error {
 	return m.start(ctx, true)
@@ -166,9 +129,7 @@ func (m *Manager) start(ctx context.Context, runStartup bool) error {
 		if runStartup {
 			_, _ = m.run(childCtx, types.PlannerStatsTriggerStartup)
 		}
-		tick, stopTick := m.newTick()
-		defer stopTick()
-		m.worker(childCtx, tick)
+		m.worker(childCtx)
 	})
 	return nil
 }
@@ -199,47 +160,6 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
-// Defer holds back the epoch and periodic runs until resume is called, for a
-// write burst such as a Mithril stream catch-up: a run holds SQLite's only
-// write connection, and on a database growing that fast its statistics are
-// stale again within the next epoch. Every trigger that arrives while deferred collapses into one
-// run queued when the last resume is called; none is queued if nothing
-// arrived. A run already in flight when Defer is called finishes. Nested
-// calls are counted, and calling one resume more than once has no further
-// effect. Defer on a nil Manager returns a no-op.
-func (m *Manager) Defer() (resume func()) {
-	if m == nil {
-		return func() {}
-	}
-	m.deferMu.Lock()
-	m.deferrals++
-	m.deferMu.Unlock()
-	return sync.OnceFunc(func() {
-		m.deferMu.Lock()
-		m.deferrals--
-		queue := m.deferrals == 0 && m.skipped
-		if queue {
-			m.skipped = false
-		}
-		m.deferMu.Unlock()
-		if queue {
-			m.signal()
-		}
-	})
-}
-
-// deferred reports whether runs are deferred, recording the skipped trigger
-// when they are.
-func (m *Manager) deferred() bool {
-	m.deferMu.Lock()
-	defer m.deferMu.Unlock()
-	if m.deferrals == 0 {
-		return false
-	}
-	m.skipped = true
-	return true
-}
-
 func (m *Manager) signal() {
 	select {
 	case m.pending <- struct{}{}:
@@ -267,33 +187,14 @@ func (m *Manager) handleEpochTransition(evt event.Event) {
 	m.signal()
 }
 
-func (m *Manager) worker(ctx context.Context, tick <-chan time.Time) {
+func (m *Manager) worker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick:
-			// deferred first: it records the tick for Defer's resume even
-			// when backoff then holds the run.
-			if m.deferred() || m.now().Before(m.periodicAfter) {
-				continue
-			}
-			result, _ := m.run(ctx, types.PlannerStatsTriggerPeriodic)
-			m.backOff(result)
 		case <-m.pending:
-			if !m.deferred() {
-				result, _ := m.run(ctx, types.PlannerStatsTriggerEpoch)
-				m.backOff(result)
-			}
+			_, _ = m.run(ctx, types.PlannerStatsTriggerEpoch)
 		}
-	}
-}
-
-// backOff holds periodic runs back for periodicBackoff times the duration
-// of the pass that just ran.
-func (m *Manager) backOff(result types.PlannerStatsResult) {
-	if result.Duration > 0 {
-		m.periodicAfter = m.now().Add(periodicBackoff * result.Duration)
 	}
 }
 

@@ -97,9 +97,9 @@ func TestEpochTransitionCreatesStat1OnGenesisStyleDatabase(t *testing.T) {
 }
 
 // Block application grows tables after the startup run recorded them. With
-// the real store and no epoch transition, a periodic tick must re-analyze a
-// table that has since grown far past its recorded cardinality.
-func TestPeriodicTickReanalyzesGrownTables(t *testing.T) {
+// the real store, the next epoch transition must re-analyze a table that has
+// since grown far past its recorded cardinality.
+func TestEpochTransitionReanalyzesGrownTables(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	seedMigratedMetadata(t, dataDir)
@@ -138,14 +138,25 @@ func TestPeriodicTickReanalyzesGrownTables(t *testing.T) {
 		return stat, err
 	}
 
+	// A file many times the size of utxo, so that filling utxo cannot be
+	// mistaken for growth of the file.
+	_, err = probe.Exec(
+		"CREATE TABLE planner_filler (id INTEGER PRIMARY KEY, payload BLOB)",
+	)
+	require.NoError(t, err)
+	_, err = probe.Exec(
+		"WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c " +
+			"WHERE i < 5000) INSERT INTO planner_filler (payload) " +
+			"SELECT randomblob(4000) FROM c",
+	)
+	require.NoError(t, err)
 	insertUtxos(1, 10)
-	tick := make(chan time.Time)
+	bus := event.NewEventBus(nil, nil)
 	manager := plannerstats.NewManager(
 		store,
-		event.NewEventBus(nil, nil),
+		bus,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
-	plannerstats.SetTickSource(manager, tick)
 	_, err = manager.RunStartup(context.Background())
 	require.NoError(t, err)
 	recorded, err := utxoStat()
@@ -159,11 +170,13 @@ func TestPeriodicTickReanalyzesGrownTables(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, recorded, stale, "statistics must still be stale")
 
-	select {
-	case tick <- time.Time{}:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out handing the periodic tick to the worker")
-	}
+	bus.Publish(
+		event.EpochTransitionEventType,
+		event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{NewEpoch: 2, EpochNonce: []byte{1}},
+		),
+	)
 	// A failed read is not a changed statistic; only a readable, different
 	// row proves the re-analysis.
 	require.Eventually(t, func() bool {
@@ -171,7 +184,7 @@ func TestPeriodicTickReanalyzesGrownTables(t *testing.T) {
 		return err == nil && stat != recorded
 	},
 		30*time.Second, 20*time.Millisecond,
-		"the periodic run must re-analyze the grown utxo table")
+		"the epoch run must re-analyze the grown utxo table")
 }
 
 // seedMigratedMetadata gives dataDir a schema-migrated metadata file so the

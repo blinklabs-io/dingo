@@ -144,11 +144,21 @@ plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead of
 a seek on `idx_utxo_tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs a
 bounded `ANALYZE` (`analysis_limit` of 1000 rows per index, the connection's own
 limit restored afterwards) on the write connection, outside any transaction, at startup,
-after each epoch rollover commits, and once a minute in between, though a
-periodic pass starts no sooner than nine times the last pass's duration after
-it ended, so a pass that outlasts the minute is not followed by another at
-once. A pass excludes bulk-mode transitions but not WAL checkpoints, which keep
-the WAL bounded while it runs. `PRAGMA
+and after each epoch rollover commits. There is no timer between rollovers. An
+epoch pass is skipped until some table's highest rowid (`MAX(rowid)`, one
+b-tree descent per table) has grown by 25%, and by at least 1000 rows, since the
+last completed pass, because a pass re-analyzes every table and holds the only
+write connection while most tables barely change between epochs. A table whose
+highest rowid falls, after a rollback or a vacuum that renumbers rowids, is
+measured from the lower value: one recorded at 10000 and seen at 5000 passes
+again at 6250, though that is still below the last completed pass. The
+measure is per table and not the file size: a large database whose
+`transaction` and `certs` tables were recorded at almost no rows still passes as
+they fill, and a vacuum that shrinks the file does not suppress later passes.
+Startup and anchor passes always run. The table sizes of the last pass
+are held in memory, since a restart runs a startup pass. A pass excludes
+bulk-mode transitions but not WAL checkpoints, which keep the WAL bounded while
+it runs. `PRAGMA
 optimize` is not used because it re-analyzes a table only after a large change
 in its row count, leaving a steadily growing table with stale statistics. The
 pass holds one write connection throughout, because `analysis_limit` is per
@@ -160,9 +170,9 @@ maintenance does not delay API availability:
 statistics recorded at startup can understate tables that block application then
 fills (a node bootstrapped from Mithril records `transaction` and `certs` at
 almost no rows), and every query that reaches `transaction` through `certs` then
-plans a full scan per lookup until the next run. Every pass re-analyzes every
-table, however little it changed since the last one, and sampling bounds the
-index work of each. The write pool has one connection, so writers still wait
+plans a full scan per lookup until the next run. Every pass that runs
+re-analyzes every table, and sampling bounds the index work of each. The write
+pool has one connection, so writers still wait
 for the run. Sampled analysis updates
 `sqlite_stat1` and does not compute full `sqlite_stat4` histograms; explicit
 full `ANALYZE` remains available for completed backfills. The run is skipped
@@ -391,7 +401,7 @@ the partial index for a spent-row range.
 `dingo_database_sql_planner_stats_runs_total{trigger,result}`,
 `dingo_database_sql_planner_stats_duration_seconds{trigger}` and
 `dingo_database_sql_planner_stats_errors_total` report runs (`trigger` is
-`startup`, `epoch` or `periodic`; `result` is `changed`, `unchanged`, `skipped`
+`startup`, `epoch` or `anchor`; `result` is `changed`, `unchanged`, `skipped`
 or `error`). `plannerStatsRefreshEnabled` (environment
 `DINGO_PLANNER_STATS_REFRESH_ENABLED`, default true) disables the whole
 mechanism and exists only as an escape hatch.

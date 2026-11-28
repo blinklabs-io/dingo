@@ -64,7 +64,7 @@ INSERT INTO planner_analysis_probe SELECT id, id % 127 FROM seq;`)
 			for range 2 {
 				result, err := store.OptimizePlannerStatsContext(
 					ctx,
-					PlannerStatsTriggerPeriodic,
+					PlannerStatsTriggerStartup,
 				)
 				require.NoError(t, err)
 				require.True(t, result.Supported)
@@ -82,7 +82,7 @@ INSERT INTO planner_analysis_probe SELECT id, id % 127 FROM seq;`)
 				require.Zero(
 					t,
 					plannerProbeStat4Rows(t, store.writeDB),
-					"periodic maintenance must use sampled analysis",
+					"bounded maintenance must use sampled analysis",
 				)
 				var restored int
 				require.NoError(
@@ -115,7 +115,7 @@ INSERT INTO planner_analysis_probe SELECT id, id % 127 FROM seq;`)
 	}
 }
 
-// A table that keeps growing between periodic passes must have its statistics
+// A table that keeps growing between passes must have its statistics
 // retaken each pass, however small the growth since the last one.
 func TestOptimizePlannerStatsRefreshesStatsOfAGrowingTable(t *testing.T) {
 	t.Parallel()
@@ -145,12 +145,12 @@ INSERT INTO planner_growth_probe SELECT id, id % 7 FROM seq`, from, to)
 	}
 
 	grow(1, 100)
-	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerPeriodic)
+	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerStartup)
 	require.NoError(t, err)
 	require.Equal(t, 100, statRows())
 
 	grow(101, 400)
-	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerPeriodic)
+	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerStartup)
 	require.NoError(t, err)
 	require.Equal(
 		t, 400, statRows(),
@@ -191,7 +191,7 @@ func TestOptimizePlannerStatsRestoresLimitOnAPooledWriteConnection(
 	}
 	for range 50 {
 		_, err := store.OptimizePlannerStatsContext(
-			ctx, PlannerStatsTriggerPeriodic,
+			ctx, PlannerStatsTriggerStartup,
 		)
 		require.NoError(t, err)
 	}

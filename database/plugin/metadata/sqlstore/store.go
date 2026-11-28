@@ -314,6 +314,10 @@ type Store struct {
 	// long would keep every WAL checkpoint waiting, letting the WAL grow
 	// without bound.
 	plannerStatsMu sync.Mutex
+	// plannerStatsSizes is each table's highest rowid when the last
+	// planner-statistics pass completed, nil before any has. Protected by
+	// plannerStatsMu.
+	plannerStatsSizes map[string]int64
 
 	closeOnce sync.Once
 	closeDone chan struct{}

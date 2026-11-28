@@ -1137,7 +1137,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"PlannerStatsRefreshEnabled",
 		"planner-stats-refresh-enabled",
-		"keep SQLite planner statistics current with a bounded ANALYZE at startup, after each epoch rollover and once a minute",
+		"keep SQLite planner statistics current with a bounded ANALYZE at startup and after epoch rollovers",
 	),
 
 	boolFlag(

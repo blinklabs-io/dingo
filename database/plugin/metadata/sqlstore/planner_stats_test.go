@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -91,7 +92,7 @@ func stat1Rows(tb testing.TB, db *sql.DB) (int, bool) {
 }
 
 // Uniform liveness lets the cache-refresh probe depend on stat1 alone.
-// Periodic analysis samples indexes and does not collect stat4 histograms.
+// Bounded analysis samples indexes and does not collect stat4 histograms.
 // The production spend-plan tests keep their mixed live/spent distributions.
 func seedPlannerStatsProbeUtxos(t *testing.T, store *Store) {
 	t.Helper()
@@ -177,7 +178,7 @@ func TestOptimizePlannerStatsCreatesStat1OnGenesisStyleDatabase(t *testing.T) {
 	require.Equal(t, rows, result.Stat1Rows)
 
 	again, err := store.OptimizePlannerStatsContext(
-		context.Background(), PlannerStatsTriggerEpoch,
+		context.Background(), PlannerStatsTriggerStartup,
 	)
 	require.NoError(t, err)
 	require.True(t, again.Supported)
@@ -336,7 +337,7 @@ func TestOptimizePlannerStatsRepreparesHotStatements(t *testing.T) {
 	)
 
 	unchanged, err := store.OptimizePlannerStatsContext(
-		context.Background(), PlannerStatsTriggerEpoch,
+		context.Background(), PlannerStatsTriggerStartup,
 	)
 	require.NoError(t, err)
 	require.False(t, unchanged.Changed)
@@ -417,7 +418,7 @@ func TestOptimizePlannerStatsMetrics(t *testing.T) {
 	seedStakeRefLookupUtxos(t, store, 300, 16)
 	for _, trigger := range []string{
 		PlannerStatsTriggerStartup, PlannerStatsTriggerEpoch,
-		PlannerStatsTriggerPeriodic,
+		types.PlannerStatsTriggerAnchor,
 	} {
 		_, err := store.OptimizePlannerStatsContext(
 			context.Background(),
@@ -441,18 +442,18 @@ func TestOptimizePlannerStatsMetrics(t *testing.T) {
 		}
 	}
 	require.Equal(t, map[string]float64{
-		"result=changed,trigger=startup,":    1,
-		"result=unchanged,trigger=startup,":  0,
-		"result=skipped,trigger=startup,":    0,
-		"result=error,trigger=startup,":      0,
-		"result=changed,trigger=epoch,":      0,
-		"result=unchanged,trigger=epoch,":    1,
-		"result=skipped,trigger=epoch,":      0,
-		"result=error,trigger=epoch,":        0,
-		"result=changed,trigger=periodic,":   0,
-		"result=unchanged,trigger=periodic,": 1,
-		"result=skipped,trigger=periodic,":   0,
-		"result=error,trigger=periodic,":     0,
+		"result=changed,trigger=startup,":   1,
+		"result=unchanged,trigger=startup,": 0,
+		"result=skipped,trigger=startup,":   0,
+		"result=error,trigger=startup,":     0,
+		"result=changed,trigger=epoch,":     0,
+		"result=unchanged,trigger=epoch,":   0,
+		"result=skipped,trigger=epoch,":     1,
+		"result=error,trigger=epoch,":       0,
+		"result=changed,trigger=anchor,":    0,
+		"result=unchanged,trigger=anchor,":  1,
+		"result=skipped,trigger=anchor,":    0,
+		"result=error,trigger=anchor,":      0,
 	}, got)
 }
 
@@ -687,6 +688,179 @@ SELECT tx_id, output_idx + ?, staking_key, credential_tag,
 	full := poolPlans(t, store.writeDB, 1)[0]
 	require.Contains(t, full, "idx_utxo_tx_id_output_idx")
 	require.Equal(t, full, resumed)
+}
+
+// countingOptimizeDialect returns the SQLite dialect with its planner
+// statistics pass wrapped to count the ANALYZE passes that actually run.
+func countingOptimizeDialect(passes *atomic.Int64) Dialect {
+	d := SQLiteDialect().(dialect)
+	inner := d.optimize
+	d.optimize = func(ctx context.Context, exec Execer) error {
+		passes.Add(1)
+		return inner(ctx, exec)
+	}
+	return d
+}
+
+// insertGrowthRows appends n rows to the table, creating it first.
+func insertGrowthRows(tb testing.TB, db *sql.DB, table string, n int) {
+	tb.Helper()
+	_, err := db.Exec(
+		"CREATE TABLE IF NOT EXISTS " + table +
+			" (id INTEGER PRIMARY KEY, v INTEGER, payload BLOB)",
+	)
+	require.NoError(tb, err)
+	_, err = db.Exec(
+		"WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s "+
+			"WHERE i < ?) INSERT INTO "+table+" (v, payload) "+
+			"SELECT i, randomblob(8) FROM s",
+		n,
+	)
+	require.NoError(tb, err)
+}
+
+// An epoch pass re-analyzes every table, so it runs only once some table
+// has grown by a quarter (and by at least the minimum row count) since the
+// last pass; startup and anchor passes always run.
+func TestOptimizePlannerStatsEpochPassWaitsForGrowth(t *testing.T) {
+	t.Parallel()
+	store := newFilePlannerStatsStore(t, nil)
+	var passes atomic.Int64
+	store.dialect = countingOptimizeDialect(&passes)
+	ctx := t.Context()
+	optimize := func(trigger string) types.PlannerStatsResult {
+		result, err := store.OptimizePlannerStatsContext(ctx, trigger)
+		require.NoError(t, err)
+		return result
+	}
+	insertGrowthRows(t, store.writeDB, "planner_growth_big", 8000)
+	insertGrowthRows(t, store.writeDB, "planner_growth_small", 10)
+
+	first := optimize(PlannerStatsTriggerEpoch)
+	require.False(t, first.Skipped, "a database with no previous pass must run")
+	require.Equal(t, int64(1), passes.Load())
+
+	skipped := optimize(PlannerStatsTriggerEpoch)
+	require.True(t, skipped.Skipped, "no growth must skip the epoch pass")
+	require.True(t, skipped.Supported)
+	require.Equal(t, int64(1), passes.Load(), "a skipped pass issued ANALYZE")
+
+	// 8000 rows need 2000 more; a small table needs only the minimum.
+	insertGrowthRows(t, store.writeDB, "planner_growth_big", 1999)
+	insertGrowthRows(t, store.writeDB, "planner_growth_small", 999)
+	require.True(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"growth under every table's threshold must skip the epoch pass")
+	require.Equal(t, int64(1), passes.Load())
+
+	insertGrowthRows(t, store.writeDB, "planner_growth_small", 1)
+	require.False(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"a small table past the minimum growth must run the epoch pass")
+	require.Equal(t, int64(2), passes.Load())
+
+	require.True(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"the threshold is measured from the latest pass")
+	require.Equal(t, int64(2), passes.Load())
+
+	// The big table stood at 9999 rows at the last pass.
+	insertGrowthRows(t, store.writeDB, "planner_growth_big", 2499)
+	require.True(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"a table just under a quarter of its size must wait")
+	insertGrowthRows(t, store.writeDB, "planner_growth_big", 1)
+	require.False(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"a table past a quarter of its size must run the epoch pass")
+	require.Equal(t, int64(3), passes.Load())
+
+	require.False(t, optimize(types.PlannerStatsTriggerAnchor).Skipped,
+		"the anchor pass must run without growth")
+	require.False(t, optimize(PlannerStatsTriggerStartup).Skipped,
+		"the startup pass must run without growth")
+	require.Equal(t, int64(5), passes.Load())
+}
+
+// A large file whose tables are small must still be re-analyzed once a table
+// that the last pass recorded at almost no rows fills, as happens when block
+// application fills tables a Mithril bootstrap left empty. Growth of the
+// file is not the measure, and neither a shrinking file nor a vacuum may
+// change the answer.
+func TestOptimizePlannerStatsEpochPassRunsForSmallTableInLargeDatabase(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newFilePlannerStatsStore(t, nil)
+	var passes atomic.Int64
+	store.dialect = countingOptimizeDialect(&passes)
+	ctx := t.Context()
+	optimize := func(trigger string) types.PlannerStatsResult {
+		result, err := store.OptimizePlannerStatsContext(ctx, trigger)
+		require.NoError(t, err)
+		return result
+	}
+	_, err := store.writeDB.Exec(
+		"CREATE TABLE planner_growth_filler " +
+			"(id INTEGER PRIMARY KEY, payload BLOB)",
+	)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec(
+		"WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s " +
+			"WHERE i < 4000) INSERT INTO planner_growth_filler (payload) " +
+			"SELECT randomblob(4000) FROM s",
+	)
+	require.NoError(t, err)
+	insertGrowthRows(t, store.writeDB, "planner_growth_small", 10)
+	require.False(t, optimize(PlannerStatsTriggerStartup).Skipped)
+	require.Equal(t, int64(1), passes.Load())
+
+	insertGrowthRows(t, store.writeDB, "planner_growth_small", 2000)
+	require.False(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"a table that grew past its threshold must be re-analyzed "+
+			"however large the file is")
+	require.Equal(t, int64(2), passes.Load())
+
+	_, err = store.writeDB.Exec("DELETE FROM planner_growth_filler")
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec("VACUUM")
+	require.NoError(t, err)
+	require.True(t, optimize(PlannerStatsTriggerEpoch).Skipped)
+	insertGrowthRows(t, store.writeDB, "planner_growth_small", 2000)
+	require.False(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"shrinking the file must not suppress a later pass")
+	require.Equal(t, int64(3), passes.Load())
+}
+
+// A table whose highest rowid falls, as after a rollback deletes its newest
+// rows, is measured from the lower value. Measured from the last pass
+// instead, it would wait until it outgrew a size it no longer has.
+func TestOptimizePlannerStatsEpochPassCountsGrowthFromAShrunkTable(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newFilePlannerStatsStore(t, nil)
+	var passes atomic.Int64
+	store.dialect = countingOptimizeDialect(&passes)
+	ctx := t.Context()
+	optimize := func(trigger string) types.PlannerStatsResult {
+		result, err := store.OptimizePlannerStatsContext(ctx, trigger)
+		require.NoError(t, err)
+		return result
+	}
+	insertGrowthRows(t, store.writeDB, "planner_growth_big", 10000)
+	require.False(t, optimize(PlannerStatsTriggerStartup).Skipped)
+	require.Equal(t, int64(1), passes.Load())
+
+	_, err := store.writeDB.Exec(
+		"DELETE FROM planner_growth_big WHERE id > 5000",
+	)
+	require.NoError(t, err)
+	require.True(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"a table that shrank has not grown")
+
+	insertGrowthRows(t, store.writeDB, "planner_growth_big", 1249)
+	require.True(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"growth under a quarter of the lowered size must wait")
+	insertGrowthRows(t, store.writeDB, "planner_growth_big", 1)
+	require.False(t, optimize(PlannerStatsTriggerEpoch).Skipped,
+		"growth of a quarter from the lowered size must run the epoch pass")
+	require.Equal(t, int64(2), passes.Load())
 }
 
 // TestCheckpointRunsDuringPlannerStatsPass holds a planner-statistics pass
