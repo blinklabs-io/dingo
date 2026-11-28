@@ -36,54 +36,12 @@
   "id": null,
   "links": [
     {
-      "title": "Node Overview",
-      "url": "/d/dingo-overview",
-      "type": "link",
-      "icon": "external link",
-      "keepTime": true,
-      "targetBlank": false,
-      "includeVars": true
-    },
-    {
-      "title": "Block Production",
-      "url": "/d/dingo-bp",
-      "type": "link",
-      "icon": "external link",
-      "keepTime": true,
-      "targetBlank": false,
-      "includeVars": true
-    },
-    {
-      "title": "Peer Health",
-      "url": "/d/dingo-peers",
-      "type": "link",
-      "icon": "external link",
-      "keepTime": true,
-      "targetBlank": false,
-      "includeVars": true
-    },
-    {
-      "title": "Mempool",
-      "url": "/d/dingo-mempool",
-      "type": "link",
-      "icon": "external link",
-      "keepTime": true,
-      "targetBlank": false,
-      "includeVars": true
-    },
-    {
-      "title": "Resources",
-      "url": "/d/dingo-resources",
-      "type": "link",
-      "icon": "external link",
-      "keepTime": true,
-      "targetBlank": false,
-      "includeVars": true
-    },
-    {
-      "title": "Leios",
-      "url": "/d/dingo-leios",
-      "type": "link",
+      "title": "Dingo",
+      "type": "dashboards",
+      "tags": [
+        "dingo"
+      ],
+      "asDropdown": true,
       "icon": "external link",
       "keepTime": true,
       "targetBlank": false,

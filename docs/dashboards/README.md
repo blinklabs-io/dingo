@@ -184,8 +184,12 @@ target (typically `localhost:9100` or the host IP).
 
 ## Navigation
 
-Dashboard-level links at the top of each dashboard connect all 6 dashboards.
-Links preserve the selected time range and template variables.
+Each dashboard except Traces and Logs has a **Dingo** menu in the top bar. It
+lists every loaded dashboard tagged `dingo`, including Traces and Logs and,
+when they are installed, the dingo-operator and Bursa KES agent dashboards.
+The menu keeps the selected time range and template variables; a variable
+carries over only to a dashboard that defines one with the same name, such as
+`$datasource`.
 
 ## Dormant metrics
 
