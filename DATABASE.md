@@ -7317,11 +7317,28 @@ does not wait for SQLite locks. The current code first runs PASSIVE, which
 does not wait for readers, and attempts TRUNCATE only after PASSIVE reports
 the WAL fully drained. If a reader at the WAL tip still prevents truncation,
 SQLite returns `busy=1` immediately; the result is logged at `Warn`, and the
-next tick retries. The dedicated connection never occupies `writeDB`, so a
-checkpoint blocked by a reader cannot stall a concurrent write behind the
-write pool's sole connection. SQLite tracks WAL locks at the shared-memory
-and file level rather than per `database/sql` connection, so the dedicated
-connection still observes a snapshot held open through `readDB`.
+next tick retries. The checkpoint statements never run on `writeDB`, and the
+truncate attempt returns at once, so a checkpoint blocked by a reader cannot
+stall a concurrent write behind the write pool's sole connection. SQLite
+tracks WAL locks at the shared-memory and file level rather than per
+`database/sql` connection, so the dedicated connection still observes a
+snapshot held open through `readDB`.
+
+TRUNCATE also needs an instant with no write transaction open. The IndexerDB
+catch-up writer runs one write transaction after another, and a
+planner-statistics ANALYZE keeps `writeDB`'s connection for minutes, so a
+truncate that only tried found the writer lock held at every tick: PASSIVE
+copied every frame (`checkpointed_frames` equal to `wal_frames`), the truncate
+reported busy, and the WAL grew for the whole catch-up. The truncate attempt
+therefore takes `writeDB`'s connection (`holdWriteConnection`) before it runs
+and gives it back as soon as the attempt returns. While it holds the
+connection no transaction is open on it, and the writer's next transaction
+begins after the attempt. The pool hands a released connection to a randomly
+chosen waiter, so the attempt is granted after a few transactions, or when
+ANALYZE ends, rather than waiting for a gap. PASSIVE still runs before the
+hold, so the hold covers only the frames committed since. A reader that uses
+the WAL at that instant still makes the attempt busy, and a busy attempt is
+retried at the next truncate tick.
 TRUNCATE, not the safer-sounding RESTART, is deliberate: as shown above,
 RESTART does not shrink the file, so it cannot make the gauge move.
 

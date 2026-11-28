@@ -387,13 +387,19 @@ const checkpointBusyTimeout = 0 * time.Millisecond
 // count rather than an error -- logged at Warn so a persistently blocked
 // checkpoint (rather than a single slow tick) is visible to an operator, and
 // left for the next tick to retry rather than retried in a loop here.
+//
+// The TRUNCATE attempt holds writeDB's only connection (see
+// holdWriteConnection) while it runs, so no write transaction of the write
+// pool is open when it asks SQLite for the writer lock. It issues no statement
+// on that connection.
 func checkpointWAL(
 	databaseURI string,
+	writeDB *sql.DB,
 	logger *slog.Logger,
 ) func(context.Context) error {
 	return checkpointWALEvery(
 		checkpointTruncateEvery,
-		checkpointWALRunner(databaseURI, logger),
+		checkpointWALRunnerHoldingWriter(databaseURI, writeDB, logger),
 	)
 }
 
@@ -411,9 +417,25 @@ func passiveCheckpointWAL(
 }
 
 // checkpointWALRunner returns a checkpointTick run against a dedicated
-// connection opened for the call.
+// connection opened for the call, with no claim on the write connection.
 func checkpointWALRunner(
 	databaseURI string,
+	logger *slog.Logger,
+) func(context.Context, bool) error {
+	return checkpointWALRunnerHoldingWriter(databaseURI, nil, logger)
+}
+
+// checkpointWALRunnerHoldingWriter is checkpointWALRunner whose TRUNCATE
+// attempt holds writeDB's connection when writeDB is not nil.
+//
+// TRUNCATE needs an instant with no write transaction open, and the catch-up
+// writer runs one write transaction after another while a planner-statistics
+// ANALYZE holds the connection for minutes, so an attempt that merely tries
+// finds the writer lock held at every tick and the WAL is never reset. Holding
+// the connection queues the attempt ahead of the writer's next transaction.
+func checkpointWALRunnerHoldingWriter(
+	databaseURI string,
+	writeDB *sql.DB,
 	logger *slog.Logger,
 ) func(context.Context, bool) error {
 	return func(ctx context.Context, truncate bool) error {
@@ -430,6 +452,13 @@ func checkpointWALRunner(
 			logger,
 			truncate,
 			func(ctx context.Context, mode string) (int, int, int, error) {
+				if mode == "TRUNCATE" && writeDB != nil {
+					release, err := holdWriteConnection(ctx, writeDB)
+					if err != nil {
+						return 0, 0, 0, err
+					}
+					defer release()
+				}
 				var busy, walLog, checkpointed int
 				row := db.QueryRowContext(
 					ctx,
@@ -442,6 +471,22 @@ func checkpointWALRunner(
 			},
 		)
 	}
+}
+
+// holdWriteConnection takes writeDB's only connection and returns the
+// function that gives it back. Once the holder is queued, every release hands
+// the connection to a randomly chosen waiter, so the holder is granted after a
+// few transactions rather than never, and no transaction is open on the
+// connection while it holds it.
+func holdWriteConnection(
+	ctx context.Context,
+	writeDB *sql.DB,
+) (func(), error) {
+	conn, err := writeDB.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("hold write connection: %w", err)
+	}
+	return func() { _ = conn.Close() }, nil
 }
 
 // checkpointWALEvery returns a callback that calls run on every invocation,
@@ -832,7 +877,7 @@ func openSQLStoreWithDialect(
 		if checkpointLogger == nil {
 			checkpointLogger = slog.Default()
 		}
-		checkpoint = checkpointWAL(databaseURI, checkpointLogger)
+		checkpoint = checkpointWAL(databaseURI, writeDB, checkpointLogger)
 		bulkCheckpoint = passiveCheckpointWAL(databaseURI, checkpointLogger)
 		syncCommits = syncCommitsWAL(databaseURI)
 		backupTo = func(ctx context.Context, dstPath string) error {
