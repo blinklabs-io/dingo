@@ -2067,3 +2067,114 @@ func TestComputeScheduleRejectsMissingVRFSeedProvider(t *testing.T) {
 	_, err := election.computeSchedule(context.Background(), sigmaAuditEpoch)
 	require.ErrorContains(t, err, "pool VRF seed is unavailable")
 }
+
+// lockedBuffer lets a test read log output while election goroutines write it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) snapshot() *bytes.Buffer {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.NewBuffer(bytes.Clone(b.buf.Bytes()))
+}
+
+// requirePoolIDOnEveryRecord checks that each record carries pool_id exactly
+// once, so a node forging for several pools can attribute every schedule.
+func requirePoolIDOnEveryRecord(
+	t *testing.T,
+	buf *bytes.Buffer,
+	poolId lcommon.PoolKeyHash,
+) {
+	t.Helper()
+	want := hex.EncodeToString(poolId[:])
+	scanner := bufio.NewScanner(bytes.NewReader(buf.Bytes()))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	records := 0
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var record map[string]any
+		require.NoError(t, json.Unmarshal(line, &record))
+		require.Equal(t, want, record["pool_id"], "record %q", record["msg"])
+		require.Equal(
+			t, 1, bytes.Count(line, []byte(`"pool_id":`)),
+			"record %q", record["msg"],
+		)
+		records++
+	}
+	require.NoError(t, scanner.Err())
+	require.Positive(t, records)
+}
+
+func TestElectionLogsPoolIDOnScheduleRecords(t *testing.T) {
+	t.Parallel()
+	poolId := lcommon.PoolKeyHash{}
+	copy(poolId[:], []byte("testpool1234567890123"))
+
+	t.Run("calculated and persisted", func(t *testing.T) {
+		t.Parallel()
+		var out lockedBuffer
+		stakeProvider := newMockStakeProvider()
+		stakeProvider.totalStake = 10000
+		stakeProvider.poolStakes[string(poolId[:])] = 1000
+		eventBus := event.NewEventBus(nil, nil)
+		defer eventBus.Stop()
+		election := NewElection(
+			poolId,
+			vrfSeedSource(electionTestVRFSeed),
+			stakeProvider,
+			newMockEpochProvider(),
+			eventBus,
+			slog.New(slog.NewJSONHandler(&out, nil)),
+		)
+		election.SetScheduleStore(newMockScheduleStore())
+		require.NoError(t, election.Start(context.Background()))
+		defer func() { _ = election.Stop() }()
+		waitForSchedule(t, election, 30*time.Second)
+		require.Eventually(t, func() bool {
+			buf := out.snapshot()
+			return bytes.Contains(buf.Bytes(), []byte(`"persisted leader schedule"`))
+		}, testutil.AsyncWait, 50*time.Millisecond)
+
+		buf := out.snapshot()
+		findLogRecord(t, buf, "leader schedule calculated")
+		requirePoolIDOnEveryRecord(t, buf, poolId)
+	})
+
+	t.Run("loaded persisted", func(t *testing.T) {
+		t.Parallel()
+		var out lockedBuffer
+		store := newMockScheduleStore()
+		persisted := NewSchedule(10, poolId, 1000, 10000, electionTestNonce)
+		persisted.AddLeaderSlot(101)
+		require.NoError(t, store.SaveSchedule(persisted))
+		stakeProvider := newMockStakeProvider()
+		stakeProvider.totalStake = 10000
+		stakeProvider.poolStakes[string(poolId[:])] = 1000
+		eventBus := event.NewEventBus(nil, nil)
+		defer eventBus.Stop()
+		election := NewElection(
+			poolId,
+			vrfSeedSource(electionTestVRFSeed),
+			stakeProvider,
+			newMockEpochProvider(),
+			eventBus,
+			slog.New(slog.NewJSONHandler(&out, nil)),
+		)
+		election.SetScheduleStore(store)
+		require.NoError(t, election.Start(context.Background()))
+		defer func() { _ = election.Stop() }()
+		waitForSchedule(t, election, 5*time.Second)
+
+		buf := out.snapshot()
+		findLogRecord(t, buf, "loaded persisted leader schedule")
+		requirePoolIDOnEveryRecord(t, buf, poolId)
+	})
+}
