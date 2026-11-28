@@ -433,9 +433,16 @@ is not proof that the rest of the node has stopped.
 
 The SDK is a separate module for plugin and chain-role contracts. It cannot
 import the node module or its internal packages, and Cardano-specific types
-are isolated under `sdk/cardano`. The current role adapters describe seams;
-they do not yet replace the node's execution paths. Import-boundary checks
-cover both modules.
+are isolated under `sdk/cardano`. Chain management reads the ledger through
+the SDK ledger role, and chain selection compares neutral SDK points and tips
+through the SDK consensus role. The root composition layer adapts Cardano's
+ledger and observed Praos select views without exposing those concrete
+dependencies to the execution path in either package. A compatibility-only
+alias preserves the original exported `ChainSelectorConfig.Consensus` provider
+type; the import-boundary check exempts that one file and rejects the concrete
+dependency everywhere else. Import-boundary checks cover both modules and
+prevent the execution packages from restoring the concrete dependency
+direction.
 
 ## Concurrency and communication
 

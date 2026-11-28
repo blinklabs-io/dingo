@@ -98,11 +98,7 @@ func (cs *ChainSelector) catchUpBandHold(
 	observedTip ochainsync.Tip,
 	entered bool,
 ) bool {
-	var applied ochainsync.Tip
-	haveApplied := false
-	if cs.config.AppliedTip != nil {
-		applied, haveApplied = cs.config.AppliedTip()
-	}
+	applied, haveApplied := cs.configuredAppliedTip()
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	localTip := cs.localTip

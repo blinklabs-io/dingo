@@ -353,11 +353,7 @@ func (cs *ChainSelector) ingressDecision(
 	connId ouroboros.ConnectionId,
 ) ingressVerdict {
 	// Read outside the lock: the applied tip is the ledger's to guard.
-	var applied ochainsync.Tip
-	haveApplied := false
-	if cs.config.AppliedTip != nil {
-		applied, haveApplied = cs.config.AppliedTip()
-	}
+	applied, haveApplied := cs.configuredAppliedTip()
 	releaseGeneration, generationCurrent := cs.pinCurrentHeaderCryptoGeneration()
 	if !generationCurrent {
 		if genesis, _ := cs.GenesisSelectionState(); genesis {
@@ -485,18 +481,16 @@ func (cs *ChainSelector) pointOnAppliedChain(
 	blockNumber uint64,
 	localTip ochainsync.Tip,
 ) bool {
-	if cs.config.PointOnLocalChain == nil || len(point.Hash) == 0 {
+	if len(point.Hash) == 0 {
 		return false
 	}
-	if cs.config.AppliedTip != nil {
-		if currentTip, ok := cs.config.AppliedTip(); ok {
-			localTip = currentTip
-		}
+	if currentTip, ok := cs.configuredAppliedTip(); ok {
+		localTip = currentTip
 	}
 	if blockNumber > localTip.BlockNumber || point.Slot > localTip.Point.Slot {
 		return false
 	}
-	return cs.config.PointOnLocalChain(point)
+	return cs.onChain(point)
 }
 
 // AwaitIngressCorroboration holds a header from connId that ShouldApplyIngress

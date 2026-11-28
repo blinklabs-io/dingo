@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	sdkchain "github.com/blinklabs-io/dingo/sdk/chain"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -272,6 +273,18 @@ func (c *Chain) Tip() ochainsync.Tip {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.currentTip
+}
+
+// ChainTip returns the current tip without exposing the wire protocol type.
+func (c *Chain) ChainTip() sdkchain.Tip {
+	tip := c.Tip()
+	return sdkchain.Tip{
+		Point: sdkchain.Point{
+			Slot: tip.Point.Slot,
+			Hash: bytes.Clone(tip.Point.Hash),
+		},
+		BlockNumber: tip.BlockNumber,
+	}
 }
 
 // TipRelation returns the current tip, the number of blocks between point and
