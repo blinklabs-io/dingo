@@ -590,7 +590,7 @@ func (p *PeerGovernor) enforcePeerLimits(
 		)...)
 	}
 
-	// Enforce established (warm) peer target
+	// Enforce the established (warm and hot) outbound peer target
 	if p.config.TargetNumberOfEstablishedPeers > 0 {
 		events = append(events, p.demoteExcessWarmPeersLocked(
 			p.config.TargetNumberOfEstablishedPeers,
