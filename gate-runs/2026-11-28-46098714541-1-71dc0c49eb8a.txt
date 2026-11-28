@@ -1,0 +1,220 @@
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkRealBlockProcessing-4                   	   33194	     38080 ns/op	   21713 B/op	     151 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     210	   5876252 ns/op	       100.0 blocks_processed	 2436436 B/op	   21050 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   29494	     40592 ns/op	     24636 blocks/sec	   15078 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   51531	     22548 ns/op	     44351 blocks/sec	    5029 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   57328	     20666 ns/op	     48389 blocks/sec	    5029 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkReadParamsRequest-4   	    8841	    137649 ns/op	   17416 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkRealBlockProcessing-4                   	   36235	     35359 ns/op	   22665 B/op	     152 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     194	   6085263 ns/op	       100.0 blocks_processed	 2457777 B/op	   21029 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   29016	     41567 ns/op	     24057 blocks/sec	   15079 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   49102	     23218 ns/op	     43070 blocks/sec	    5031 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   50688	     22902 ns/op	     43665 blocks/sec	    5030 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkReadParamsRequest-4   	    6480	    183466 ns/op	   17865 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkRealBlockProcessing-4                   	   32288	     38927 ns/op	   21777 B/op	     151 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     204	   6009019 ns/op	       100.0 blocks_processed	 2444450 B/op	   21044 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   29242	     40676 ns/op	     24585 blocks/sec	   15078 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   51092	     22650 ns/op	     44150 blocks/sec	    5030 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   50688	     22630 ns/op	     44189 blocks/sec	    5030 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkReadParamsRequest-4   	    6628	    179241 ns/op	   18424 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkRealBlockProcessing-4                   	   32569	     38936 ns/op	   21758 B/op	     151 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     205	   5943563 ns/op	       100.0 blocks_processed	 2443351 B/op	   21045 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   29575	     41060 ns/op	     24355 blocks/sec	   15079 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   50133	     22944 ns/op	     43584 blocks/sec	    5031 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   49977	     23120 ns/op	     43253 blocks/sec	    5031 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkReadParamsRequest-4   	    6507	    184005 ns/op	   18207 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkRealBlockProcessing-4                   	   30993	     39512 ns/op	   21889 B/op	     151 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     202	   6002462 ns/op	       100.0 blocks_processed	 2446594 B/op	   21040 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   29092	     40876 ns/op	     24464 blocks/sec	   15078 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   49326	     23132 ns/op	     43230 blocks/sec	    5031 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   48736	     22998 ns/op	     43482 blocks/sec	    5031 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkReadParamsRequest-4   	    6627	    179569 ns/op	   18674 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkRealBlockProcessing-4                   	   32347	     38292 ns/op	   21776 B/op	     151 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     205	   5915705 ns/op	       100.0 blocks_processed	 2442569 B/op	   21043 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   29601	     40658 ns/op	     24595 blocks/sec	   15078 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   51260	     22381 ns/op	     44681 blocks/sec	    5029 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   50536	     23082 ns/op	     43325 blocks/sec	    5030 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkReadParamsRequest-4   	    6633	    180587 ns/op	   17497 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkRealBlockProcessing-4                   	   31706	     38631 ns/op	   21825 B/op	     151 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     204	   6015112 ns/op	       100.0 blocks_processed	 2443843 B/op	   21042 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   29472	     40855 ns/op	     24477 blocks/sec	   15078 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   51756	     22931 ns/op	     43609 blocks/sec	    5029 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   50820	     22653 ns/op	     44145 blocks/sec	    5030 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkReadParamsRequest-4   	    6777	    176385 ns/op	   17901 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkRealBlockProcessing-4                   	   31813	     39234 ns/op	   21817 B/op	     151 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     202	   5935988 ns/op	       100.0 blocks_processed	 2446370 B/op	   21038 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   30013	     39931 ns/op	     25043 blocks/sec	   15078 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   50805	     22551 ns/op	     44344 blocks/sec	    5030 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   49332	     23164 ns/op	     43170 blocks/sec	    5031 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkReadParamsRequest-4   	    6760	    177267 ns/op	   18266 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkRealBlockProcessing-4                   	   32368	     38479 ns/op	   21771 B/op	     151 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     198	   6096438 ns/op	       100.0 blocks_processed	 2451896 B/op	   21034 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   29037	     41415 ns/op	     24146 blocks/sec	   15079 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   50266	     22943 ns/op	     43586 blocks/sec	    5030 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   49810	     22856 ns/op	     43753 blocks/sec	    5031 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkReadParamsRequest-4   	    6658	    179521 ns/op	   18684 B/op	     169 allocs/op
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/ledger
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkRealBlockProcessing-4                   	   32198	     38099 ns/op	   21784 B/op	     151 allocs/op
+BenchmarkChainSyncFromGenesis-4                  	     207	   5918151 ns/op	       100.0 blocks_processed	 2440687 B/op	   21047 allocs/op
+BenchmarkBlockProcessingThroughput-4             	   29122	     40903 ns/op	     24448 blocks/sec	   15080 B/op	     175 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughput-4
+    benchmark_test.go:2368: Loaded 4096 blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4         	   49963	     22794 ns/op	     43872 blocks/sec	    5030 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=off-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4   	   52058	     22496 ns/op	     44453 blocks/sec	    5029 B/op	     117 allocs/op
+--- BENCH: BenchmarkBlockProcessingThroughputPredecoded/tracing=unsampled-4
+    benchmark_test.go:2867: Loaded 4096 predecoded blocks for throughput testing
+PASS
+goos: linux
+goarch: amd64
+pkg: github.com/blinklabs-io/dingo/api/utxorpc
+cpu: INTEL(R) XEON(R) PLATINUM 8573C
+BenchmarkReadParamsRequest-4   	    6637	    179328 ns/op	   17656 B/op	     169 allocs/op
+PASS
