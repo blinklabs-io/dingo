@@ -9330,6 +9330,15 @@ sum `DECIMAL(20, 0)` and the store rejects a total past 64 bits). The holdings
 are all read, with no holding cap. The scan runs under the caller's
 transaction context and stops when that context ends.
 
+On SQLite these reads, and the `GetAssetHolders` statements, write the
+liveness test as `+u.deleted_slot = 0`. `deleted_slot = 0` matches nearly every
+row, yet with no planner statistics, or with the bounded statistics the store
+gathers, SQLite ranks `idx_utxo_deleted_payment_script (deleted_slot=?)` above
+the asset's holdings and probes `asset_holding` once per live output, so one
+asset's lookup costs the whole live UTxO set. The unary plus keeps that index
+out of the plan: the asset's identity row and its holdings drive, and `utxo` is
+reached by primary key. Other backends keep the plain predicate.
+
 `GetAssetMintBurnInfo` (Blockfrost `/assets/{asset}` `initial_mint_tx_hash` and
 `mint_or_burn_count`) reads the mint/burn history rather than live holdings:
 

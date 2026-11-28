@@ -61,7 +61,7 @@ func TestKeepNtCConnAliveSendsUntilCancelled(t *testing.T) {
 					_ = conn.Close()
 					return
 				}
-				defer oconn.Close() //nolint:errcheck
+				defer oconn.Close(context.Background()) //nolint:errcheck
 				<-oconn.ErrorChan()
 			}()
 		}
@@ -75,7 +75,7 @@ func TestKeepNtCConnAliveSendsUntilCancelled(t *testing.T) {
 		ouroboros.WithNodeToNode(false),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

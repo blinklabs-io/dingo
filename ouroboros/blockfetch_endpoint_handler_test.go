@@ -230,7 +230,7 @@ func newRegisteredBlockfetchServerPeer(
 	select {
 	case r := <-ready:
 		require.NoError(t, r.err)
-		t.Cleanup(func() { _ = r.conn.Close() })
+		t.Cleanup(func() { _ = r.conn.Close(context.Background()) })
 		require.True(t, o.connManager.AddConnection(
 			r.conn, true, r.conn.Id().RemoteAddr.String()))
 	case <-time.After(5 * time.Second):

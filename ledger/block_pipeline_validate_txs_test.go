@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -44,7 +45,7 @@ func TestDecodeReadChainBatchValidatesBlockWithTransactions(t *testing.T) {
 	}
 
 	ls := newValidatedPipelineTestLedger(t, vb)
-	require.NoError(t, ls.blockPipeline.Stop())
+	require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
 		pipeline.WithValidateWorkers(1),

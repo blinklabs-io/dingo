@@ -285,7 +285,7 @@ func TestLeiosNotifyVoteOfferHasIndependentWorkLimit(t *testing.T) {
 
 	valid := &oleiosnotify.MsgVotesOffer{
 		FullVotes: make(
-			[]lcommon.LeiosVote,
+			[]lcommon.LeiosLegacyVote,
 			leiosNotifyMaxVoteVerificationsPerOffer,
 		),
 	}

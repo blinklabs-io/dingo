@@ -75,7 +75,10 @@ func PrototypeVoteMessageBytes(announcingRbHash lcommon.Blake2b256) []byte {
 	return append(msg, announcingRbHash.Bytes()...)
 }
 
-// VoteMessageBytes retains the legacy standalone leios-votes message shape.
+// VoteMessageBytes returns the signed message of a vote in the earlier
+// CIP-0164 draft shape, [slot, eb_hash, voter_id, signature], which
+// LeiosNotify offers may still carry: the big-endian slot followed by the
+// endorser block hash.
 func VoteMessageBytes(slotNo uint64, ebHash lcommon.Blake2b256) []byte {
 	msg := make([]byte, 8, 8+len(ebHash))
 	binary.BigEndian.PutUint64(msg, slotNo)

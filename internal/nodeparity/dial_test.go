@@ -158,5 +158,5 @@ func TestDial_SucceedsAgainstARealServer(t *testing.T) {
 
 	conn, err := Dial(context.Background(), listener.Addr().String(), 42)
 	require.NoError(t, err)
-	require.NoError(t, conn.Close())
+	require.NoError(t, conn.Close(context.Background()))
 }

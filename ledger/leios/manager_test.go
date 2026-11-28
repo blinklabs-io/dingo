@@ -1246,7 +1246,7 @@ func TestVoteManagerRolledBackHeaderAnnouncementDoesNotVote(t *testing.T) {
 
 	// A peer vote above the rollback point gives the test an observable
 	// signal for the rollback having been processed.
-	require.NoError(t, fixture.mgr.HandleVote(
+	require.NoError(t, fixture.mgr.HandleLegacyVote(
 		"conn-a",
 		fixture.makeVote(t, 1, headerArmingRbSlot, ebHash),
 	))
@@ -1260,7 +1260,7 @@ func TestVoteManagerRolledBackHeaderAnnouncementDoesNotVote(t *testing.T) {
 		),
 	)
 	testutil.WaitForCondition(t, func() bool {
-		return len(fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		return len(fixture.retainedVotes([]lcommon.LeiosVoteId{{
 			SlotNo: headerArmingRbSlot, VoterId: 1,
 		}})) == 0
 	}, testutil.AsyncWait, "rollback pruned state above the rollback point")
@@ -1276,7 +1276,7 @@ func TestVoteManagerRolledBackHeaderAnnouncementDoesNotVote(t *testing.T) {
 	)
 	assert.Empty(
 		t,
-		fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		fixture.retainedVotes([]lcommon.LeiosVoteId{{
 			SlotNo:  headerArmingRbSlot,
 			VoterId: headerArmingSeatedVoterId,
 		}}),
@@ -2169,7 +2169,10 @@ func TestVoteManagerSameSlotLocalForgeStillVotes(t *testing.T) {
 	var stored lcommon.LeiosVote
 	_, err := cbor.Decode(raws[0], &stored)
 	require.NoError(t, err)
-	assert.Equal(t, localEb, stored.EndorserBlockHash)
+	assert.Equal(t, localRb, stored.AnnouncingRbHash)
+	retained := fixture.retainedVotes([]lcommon.LeiosVoteId{voteId})
+	require.Len(t, retained, 1)
+	assert.Equal(t, localEb, retained[0].ebHash)
 
 	fixture.mgr.mu.Lock()
 	defer fixture.mgr.mu.Unlock()
@@ -2699,17 +2702,39 @@ func (f *managerFixture) makeVote(
 	voterId uint64,
 	slot uint64,
 	ebHash lcommon.Blake2b256,
-) lcommon.LeiosVote {
+) lcommon.LeiosLegacyVote {
 	t.Helper()
 	key, ok := f.keys[voterId]
 	require.True(t, ok, "no key for voter %d", voterId)
 	sig, err := SignVote(key, VoteMessageBytes(slot, ebHash))
 	require.NoError(t, err)
-	return lcommon.LeiosVote{
+	return lcommon.LeiosLegacyVote{
 		SlotNo:            slot,
 		EndorserBlockHash: ebHash,
 		VoterId:           voterId,
 		VoteSignature:     sig,
+	}
+}
+
+// makeAnnouncedVote announces ebHash at slot from a ranking block derived
+// from both, and returns voterId's CIP-0164 vote for that announcement.
+func (f *managerFixture) makeAnnouncedVote(
+	t *testing.T,
+	voterId uint64,
+	slot uint64,
+	ebHash lcommon.Blake2b256,
+) lcommon.LeiosVote {
+	t.Helper()
+	rbHash := lcommon.NewBlake2b256(
+		fmt.Appendf(nil, "announcing-rb-%d-%x", slot, ebHash.Bytes()),
+	)
+	f.mgr.ObserveAnnouncement(slot, rbHash, ebHash)
+	vote := f.makePrototypeVote(t, voterId, rbHash)
+	require.LessOrEqual(t, voterId, uint64(math.MaxUint16))
+	return lcommon.LeiosVote{
+		AnnouncingRbHash: vote.AnnouncingRbHash,
+		VoterId:          uint16(voterId),
+		VoteSignature:    vote.VoteSignature,
 	}
 }
 
@@ -2935,7 +2960,7 @@ func TestVoteManagerHandleVoteAndServe(t *testing.T) {
 
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
-	vote := fixture.makeVote(t, 0, 577, ebHash)
+	vote := fixture.makeAnnouncedVote(t, 0, 577, ebHash)
 	require.NoError(t, fixture.mgr.HandleVote("conn-a", vote))
 
 	done := make(chan struct{})
@@ -2948,13 +2973,14 @@ func TestVoteManagerHandleVoteAndServe(t *testing.T) {
 	)
 	require.NoError(t, result.err)
 	require.Len(t, result.votes, 1)
-	assert.Equal(t, vote.SlotNo, result.votes[0].SlotNo)
+	assert.Equal(t, vote.AnnouncingRbHash, result.votes[0].AnnouncingRbHash)
 	assert.Equal(t, vote.VoterId, result.votes[0].VoterId)
-	assert.Equal(
-		t,
-		vote.EndorserBlockHash,
-		result.votes[0].EndorserBlockHash,
+	assert.Equal(t, vote.VoteSignature, result.votes[0].VoteSignature)
+	retained := fixture.retainedVotes(
+		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
 	)
+	require.Len(t, retained, 1, "the vote counts in its announcing block's slot")
+	assert.Equal(t, ebHash, retained[0].ebHash)
 }
 
 func TestVoteManagerSkipsRepeatedVoteSignatureVerification(t *testing.T) {
@@ -2977,8 +3003,8 @@ func TestVoteManagerSkipsRepeatedVoteSignatureVerification(t *testing.T) {
 		return VerifyVoteSignature(publicKey, message, signature)
 	}
 
-	require.NoError(t, fixture.mgr.HandleVote("conn-a", vote))
-	require.NoError(t, fixture.mgr.HandleVote("conn-b", vote))
+	require.NoError(t, fixture.mgr.HandleLegacyVote("conn-a", vote))
+	require.NoError(t, fixture.mgr.HandleLegacyVote("conn-b", vote))
 	assert.EqualValues(t, 1, verifyCalls.Load())
 }
 
@@ -3006,9 +3032,9 @@ func TestVoteManagerCoalescesConcurrentVoteVerification(t *testing.T) {
 		return VerifyVoteSignature(publicKey, message, signature)
 	}
 	done := make(chan error, 1)
-	go func() { done <- fixture.mgr.HandleVote("conn-a", vote) }()
+	go func() { done <- fixture.mgr.HandleLegacyVote("conn-a", vote) }()
 	<-entered
-	require.NoError(t, fixture.mgr.HandleVote("conn-b", vote))
+	require.NoError(t, fixture.mgr.HandleLegacyVote("conn-b", vote))
 	assert.EqualValues(t, 1, verifyCalls.Load())
 	close(release)
 	require.NoError(t, <-done)
@@ -3037,8 +3063,8 @@ func TestVoteManagerInvalidSignatureDoesNotReserveVoteIdentity(t *testing.T) {
 		return VerifyVoteSignature(publicKey, message, signature)
 	}
 
-	require.NoError(t, fixture.mgr.HandleVote("conn-a", invalid))
-	require.NoError(t, fixture.mgr.HandleVote("conn-b", valid))
+	require.NoError(t, fixture.mgr.HandleLegacyVote("conn-a", invalid))
+	require.NoError(t, fixture.mgr.HandleLegacyVote("conn-b", valid))
 	assert.EqualValues(t, 2, verifyCalls.Load())
 }
 
@@ -3047,9 +3073,9 @@ func TestVoteManagerBoundsSignatureVerificationPerPeer(t *testing.T) {
 
 	fixture := newManagerFixture(t)
 	for idx := range voteVerificationMaxPerPeer {
-		vote := lcommon.LeiosVote{
-			SlotNo: uint64(idx), VoterId: uint64(idx),
-			EndorserBlockHash: lcommon.NewBlake2b256(fmt.Appendf(nil, "vote-%d", idx)),
+		vote := resolvedVote{
+			slotNo: uint64(idx), voterId: uint64(idx),
+			ebHash: lcommon.NewBlake2b256(fmt.Appendf(nil, "vote-%d", idx)),
 		}
 		reserved, err := fixture.mgr.reserveIncomingVoteVerification("conn-a", vote)
 		require.NoError(t, err)
@@ -3058,13 +3084,13 @@ func TestVoteManagerBoundsSignatureVerificationPerPeer(t *testing.T) {
 	}
 	reserved, err := fixture.mgr.reserveIncomingVoteVerification(
 		"conn-a",
-		lcommon.LeiosVote{SlotNo: 1000, VoterId: 1000},
+		resolvedVote{slotNo: 1000, voterId: 1000},
 	)
 	require.ErrorContains(t, err, "peer vote verification budget exhausted")
 	require.False(t, reserved)
 	reserved, err = fixture.mgr.reserveIncomingVoteVerification(
 		"conn-b",
-		lcommon.LeiosVote{SlotNo: 1001, VoterId: 1001},
+		resolvedVote{slotNo: 1001, voterId: 1001},
 	)
 	require.NoError(t, err)
 	require.True(t, reserved, "one peer's budget does not consume another peer's quota")
@@ -3075,9 +3101,9 @@ func TestVoteManagerDoesNotPenalizePeerForSharedVerificationBudget(t *testing.T)
 	fixture := newManagerFixture(t)
 	for idx := range voteVerificationMaxProcess {
 		peer := fmt.Sprintf("conn-%d", idx/voteVerificationMaxPerPeer)
-		vote := lcommon.LeiosVote{
-			SlotNo: uint64(idx + 1), VoterId: uint64(idx + 1),
-			EndorserBlockHash: lcommon.NewBlake2b256(
+		vote := resolvedVote{
+			slotNo: uint64(idx + 1), voterId: uint64(idx + 1),
+			ebHash: lcommon.NewBlake2b256(
 				fmt.Appendf(nil, "process-budget-%d", idx),
 			),
 		}
@@ -3087,7 +3113,7 @@ func TestVoteManagerDoesNotPenalizePeerForSharedVerificationBudget(t *testing.T)
 		fixture.mgr.releaseIncomingVoteVerification(vote)
 	}
 
-	blockedVote := lcommon.LeiosVote{SlotNo: voteVerificationMaxProcess + 1}
+	blockedVote := resolvedVote{slotNo: voteVerificationMaxProcess + 1}
 	reserved, err := fixture.mgr.reserveIncomingVoteVerification(
 		"honest-peer",
 		blockedVote,
@@ -3104,11 +3130,11 @@ func TestVoteManagerDoesNotPenalizePeerForSharedVerificationBudget(t *testing.T)
 	invalid := errors.New("invalid vote")
 	for range voteInvalidPeerLimit - 1 {
 		require.NoError(t, fixture.mgr.rejectIncomingVote(
-			"honest-peer", "structural", lcommon.LeiosVote{}, invalid,
+			"honest-peer", "structural", resolvedVote{}, invalid,
 		))
 	}
 	require.ErrorIs(t, fixture.mgr.rejectIncomingVote(
-		"honest-peer", "structural", lcommon.LeiosVote{}, invalid,
+		"honest-peer", "structural", resolvedVote{}, invalid,
 	), ErrPeerMisbehavior)
 }
 
@@ -3167,13 +3193,13 @@ func TestVoteManagerBoundsPrototypeSignatureVerificationPerPeer(t *testing.T) {
 func TestVoteManagerDisconnectsPeerAfterRepeatedInvalidVotes(t *testing.T) {
 	t.Parallel()
 	fixture := newManagerFixture(t)
-	invalid := lcommon.LeiosVote{}
+	invalid := lcommon.LeiosLegacyVote{}
 	for range voteInvalidPeerLimit - 1 {
-		require.NoError(t, fixture.mgr.HandleVote("conn-a", invalid))
+		require.NoError(t, fixture.mgr.HandleLegacyVote("conn-a", invalid))
 	}
-	err := fixture.mgr.HandleVote("conn-a", invalid)
+	err := fixture.mgr.HandleLegacyVote("conn-a", invalid)
 	require.ErrorIs(t, err, ErrPeerMisbehavior)
-	require.NoError(t, fixture.mgr.HandleVote("conn-b", invalid),
+	require.NoError(t, fixture.mgr.HandleLegacyVote("conn-b", invalid),
 		"one connection's invalid-message count must not penalize another")
 }
 
@@ -3186,7 +3212,7 @@ func TestVoteManagerDoesNotEchoToOrigin(t *testing.T) {
 		t,
 		fixture.mgr.HandleVote(
 			"conn-a",
-			fixture.makeVote(t, 0, 577, ebHash),
+			fixture.makeAnnouncedVote(t, 0, 577, ebHash),
 		),
 	)
 
@@ -3217,7 +3243,7 @@ func TestVoteManagerNextVotesCursorAdvances(t *testing.T) {
 		t,
 		fixture.mgr.HandleVote(
 			"conn-a",
-			fixture.makeVote(t, 0, 577, ebHash),
+			fixture.makeAnnouncedVote(t, 0, 577, ebHash),
 		),
 	)
 
@@ -3258,7 +3284,7 @@ func TestVoteManagerRemoveConnectionResetsCursor(t *testing.T) {
 		t,
 		fixture.mgr.HandleVote(
 			"conn-a",
-			fixture.makeVote(t, 0, 577, ebHash),
+			fixture.makeAnnouncedVote(t, 0, 577, ebHash),
 		),
 	)
 
@@ -3331,7 +3357,7 @@ func TestVoteManagerNextVotesAccumulatesAcrossInserts(t *testing.T) {
 		t,
 		fixture.mgr.HandleVote(
 			"conn-a",
-			fixture.makeVote(t, 0, 577, ebHash),
+			fixture.makeAnnouncedVote(t, 0, 577, ebHash),
 		),
 	)
 	testutil.RequireNoReceive(
@@ -3344,7 +3370,7 @@ func TestVoteManagerNextVotesAccumulatesAcrossInserts(t *testing.T) {
 		t,
 		fixture.mgr.HandleVote(
 			"conn-a",
-			fixture.makeVote(t, 1, 577, ebHash),
+			fixture.makeAnnouncedVote(t, 1, 577, ebHash),
 		),
 	)
 	result := testutil.RequireReceive(
@@ -3355,8 +3381,8 @@ func TestVoteManagerNextVotesAccumulatesAcrossInserts(t *testing.T) {
 	)
 	require.NoError(t, result.err)
 	require.Len(t, result.votes, 2)
-	assert.Equal(t, uint64(0), result.votes[0].VoterId)
-	assert.Equal(t, uint64(1), result.votes[1].VoterId)
+	assert.Equal(t, uint16(0), result.votes[0].VoterId)
+	assert.Equal(t, uint16(1), result.votes[1].VoterId)
 }
 
 func TestVoteManagerStopUnblocksNextVotes(t *testing.T) {
@@ -3387,7 +3413,7 @@ func TestVoteManagerDedupIgnoresResubmission(t *testing.T) {
 
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
-	vote := fixture.makeVote(t, 0, 577, ebHash)
+	vote := fixture.makeAnnouncedVote(t, 0, 577, ebHash)
 	require.NoError(t, fixture.mgr.HandleVote("conn-a", vote))
 	require.NoError(t, fixture.mgr.HandleVote("conn-c", vote))
 
@@ -3420,28 +3446,25 @@ func TestVoteManagerEquivocationFirstWins(t *testing.T) {
 	ebHashB := lcommon.NewBlake2b256([]byte("eb-b"))
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 577, ebHashA),
 		),
 	)
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 577, ebHashB),
 		),
 	)
 
-	raws := fixture.mgr.VotesByIds(
+	raws := fixture.retainedVotes(
 		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
 	)
 	require.Len(t, raws, 1)
-	var stored lcommon.LeiosVote
-	_, err := cbor.Decode(raws[0], &stored)
-	require.NoError(t, err)
 	assert.Equal(
-		t, ebHashA, stored.EndorserBlockHash,
+		t, ebHashA, raws[0].ebHash,
 		"first vote wins on equivocation",
 	)
 }
@@ -3454,8 +3477,8 @@ func TestVoteManagerEquivocationDoesNotPenalizeRelayingPeer(t *testing.T) {
 	for slot := uint64(600); slot < 600+voteInvalidPeerLimit; slot++ {
 		first := fixture.makeVote(t, 0, slot, hashA)
 		conflict := fixture.makeVote(t, 0, slot, hashB)
-		require.NoError(t, fixture.mgr.HandleVote("first-peer", first))
-		require.NoError(t, fixture.mgr.HandleVote("relaying-peer", conflict))
+		require.NoError(t, fixture.mgr.HandleLegacyVote("first-peer", first))
+		require.NoError(t, fixture.mgr.HandleLegacyVote("relaying-peer", conflict))
 	}
 }
 
@@ -3468,19 +3491,19 @@ func TestVoteManagerRejectsInvalidVotes(t *testing.T) {
 	// Voter id out of committee range
 	outOfRange := fixture.makeVote(t, 0, 577, ebHash)
 	outOfRange.VoterId = 10
-	require.NoError(t, fixture.mgr.HandleVote("conn-a", outOfRange))
+	require.NoError(t, fixture.mgr.HandleLegacyVote("conn-a", outOfRange))
 
 	// Structurally invalid signature size
 	badSize := fixture.makeVote(t, 1, 577, ebHash)
 	badSize.VoteSignature = []byte{1, 2, 3}
-	require.NoError(t, fixture.mgr.HandleVote("conn-a", badSize))
+	require.NoError(t, fixture.mgr.HandleLegacyVote("conn-a", badSize))
 
 	// Signature by the wrong key (registry knows the right one)
 	wrongKey := fixture.makeVote(t, 2, 577, ebHash)
 	wrongKey.VoterId = 3
-	require.NoError(t, fixture.mgr.HandleVote("conn-a", wrongKey))
+	require.NoError(t, fixture.mgr.HandleLegacyVote("conn-a", wrongKey))
 
-	raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+	raws := fixture.retainedVotes([]lcommon.LeiosVoteId{
 		{SlotNo: 577, VoterId: 10},
 		{SlotNo: 577, VoterId: 1},
 		{SlotNo: 577, VoterId: 3},
@@ -3508,13 +3531,13 @@ func TestVoteManagerRejectsKeylessSeatVote(t *testing.T) {
 	for voterId := range uint64(10) {
 		require.NoError(
 			t,
-			fixture.mgr.HandleVote(
+			fixture.mgr.HandleLegacyVote(
 				"conn-a",
 				fixture.makeVote(t, voterId, 577, ebHash),
 			),
 		)
 	}
-	raws := fixture.mgr.VotesByIds(
+	raws := fixture.retainedVotes(
 		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 9}},
 	)
 	assert.Empty(t, raws, "keyless seat votes must not be stored")
@@ -3538,7 +3561,7 @@ func TestVoteManagerQuorumBuildsCertificate(t *testing.T) {
 	for voterId := range uint64(5) {
 		require.NoError(
 			t,
-			fixture.mgr.HandleVote(
+			fixture.mgr.HandleLegacyVote(
 				"conn-a",
 				fixture.makeVote(t, voterId, 577, ebHash),
 			),
@@ -3574,7 +3597,7 @@ func TestVoteManagerQuorumBuildsCertificate(t *testing.T) {
 	// More votes after certification must not publish again
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 5, 577, ebHash),
 		),
@@ -3617,7 +3640,7 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 	for voterId := range uint64(5) {
 		require.NoError(
 			t,
-			fixture.mgr.HandleVote(
+			fixture.mgr.HandleLegacyVote(
 				"conn-a",
 				fixture.makeVote(t, voterId, 577, ebHash),
 			),
@@ -3633,14 +3656,14 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 	// Verified 300+50+40 = 390 >= 385: certificate now builds
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 5, 577, ebHash),
 		),
 	)
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 6, 577, ebHash),
 		),
@@ -3703,8 +3726,8 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	var vote lcommon.LeiosVote
 	_, err := cbor.Decode(raws[0], &vote)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(3), vote.VoterId)
-	assert.Equal(t, ebHash, vote.EndorserBlockHash)
+	assert.Equal(t, uint16(3), vote.VoterId)
+	assert.Equal(t, rbHash, vote.AnnouncingRbHash)
 	require.NoError(
 		t,
 		VerifyVoteSignature(
@@ -3722,55 +3745,62 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	)
 	assert.Len(t, raws, 1)
 
-	// Prototype votes are diffused over leios-notify and must not be served
-	// through protocol 20, whose signature domain is slot plus EB hash.
+	// leios-votes carries the CIP-0164 shape, which a local vote has.
 	done := make(chan struct{})
-	resultCh := startNextVotes(fixture, done, "conn-b", 1)
-	testutil.RequireNoReceive(
-		t,
-		resultCh,
-		300*time.Millisecond,
-		"local prototype vote must stay off the legacy protocol",
-	)
-	close(done)
+	defer close(done)
 	result := testutil.RequireReceive(
-		t, resultCh, testutil.AsyncWait, "aborted NextVotes returns",
+		t,
+		startNextVotes(fixture, done, "conn-b", 1),
+		testutil.AsyncWait,
+		"local vote served over leios-votes",
 	)
-	assert.Error(t, result.err)
+	require.NoError(t, result.err)
+	require.Len(t, result.votes, 1)
+	assert.Equal(t, rbHash, result.votes[0].AnnouncingRbHash)
+	assert.Equal(t, uint16(3), result.votes[0].VoterId)
 }
 
-func TestVoteManagerNextVotesExcludesReceivedPrototypeVotes(t *testing.T) {
+func TestVoteManagerNextVotesExcludesLegacyVotes(t *testing.T) {
 	t.Parallel()
 
 	fixture := newManagerFixture(t)
-	rbHash := lcommon.NewBlake2b256([]byte("prototype-rb"))
-	ebHash := lcommon.NewBlake2b256([]byte("prototype-eb"))
-	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
-	received := fixture.makePrototypeVote(t, 3, rbHash)
-	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", received))
-
-	done := make(chan struct{})
-	resultCh := startNextVotes(fixture, done, "conn-b", 1)
-	testutil.RequireNoReceive(
-		t,
-		resultCh,
-		300*time.Millisecond,
-		"received prototype vote must stay off the legacy protocol",
-	)
-
 	legacy := fixture.makeVote(
 		t,
 		4,
 		578,
 		lcommon.NewBlake2b256([]byte("legacy-eb")),
 	)
-	require.NoError(t, fixture.mgr.HandleVote("conn-a", legacy))
+	require.NoError(t, fixture.mgr.HandleLegacyVote("conn-a", legacy))
+	require.Len(t, fixture.retainedVotes(
+		[]lcommon.LeiosVoteId{{SlotNo: 578, VoterId: 4}},
+	), 1)
+	assert.Empty(t, fixture.mgr.VotesByIds(
+		[]lcommon.LeiosVoteId{{SlotNo: 578, VoterId: 4}},
+	), "a legacy vote has no CIP-0164 form to serve over leios-fetch")
+
+	done := make(chan struct{})
+	resultCh := startNextVotes(fixture, done, "conn-b", 1)
+	testutil.RequireNoReceive(
+		t,
+		resultCh,
+		300*time.Millisecond,
+		"legacy vote must stay off leios-votes",
+	)
+
+	rbHash := lcommon.NewBlake2b256([]byte("prototype-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("prototype-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	received := fixture.makePrototypeVote(t, 3, rbHash)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", received))
 	result := testutil.RequireReceive(
-		t, resultCh, testutil.AsyncWait, "legacy vote served after prototype",
+		t, resultCh, testutil.AsyncWait, "announced vote served after legacy",
 	)
 	close(done)
 	require.NoError(t, result.err)
-	require.Equal(t, []lcommon.LeiosVote{legacy}, result.votes)
+	require.Len(t, result.votes, 1)
+	assert.Equal(t, rbHash, result.votes[0].AnnouncingRbHash)
+	assert.Equal(t, uint16(3), result.votes[0].VoterId)
+	assert.Equal(t, received.VoteSignature, result.votes[0].VoteSignature)
 }
 
 func TestVoteManagerDoesNotEmitVoteAfterVotingReconfiguredDuringSigning(
@@ -3916,12 +3946,18 @@ func TestVoteManagerQueuesPrototypeVoteUntilAnnouncement(t *testing.T) {
 		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
 	)
 	require.Len(t, raws, 1)
-	var resolved lcommon.LeiosVote
-	_, err := cbor.Decode(raws[0], &resolved)
+	var served lcommon.LeiosVote
+	_, err := cbor.Decode(raws[0], &served)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(577), resolved.SlotNo)
-	assert.Equal(t, ebHash, resolved.EndorserBlockHash)
-	assert.Equal(t, vote.VoteSignature, resolved.VoteSignature)
+	assert.Equal(t, rbHash, served.AnnouncingRbHash)
+	assert.Equal(t, uint16(3), served.VoterId)
+	assert.Equal(t, vote.VoteSignature, served.VoteSignature)
+	resolved := fixture.retainedVotes(
+		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
+	)
+	require.Len(t, resolved, 1)
+	assert.Equal(t, uint64(577), resolved[0].slotNo)
+	assert.Equal(t, ebHash, resolved[0].ebHash)
 }
 
 // TestVoteManagerPeerPrototypeVoteRequeuedForRelay guards relay re-diffusion: a
@@ -4370,7 +4406,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	sig, err := SignVote(key, VoteMessageBytes(577, ebHash))
 	require.NoError(t, err)
-	require.NoError(t, fixture.mgr.HandleVote("peer", lcommon.LeiosVote{
+	require.NoError(t, fixture.mgr.HandleLegacyVote("peer", lcommon.LeiosLegacyVote{
 		SlotNo:            577,
 		EndorserBlockHash: ebHash,
 		VoterId:           member.VoterId,
@@ -4573,7 +4609,7 @@ func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	sig, err := SignVote(key, VoteMessageBytes(577, ebHash))
 	require.NoError(t, err)
-	require.NoError(t, fixture.mgr.HandleVote("peer", lcommon.LeiosVote{
+	require.NoError(t, fixture.mgr.HandleLegacyVote("peer", lcommon.LeiosLegacyVote{
 		SlotNo:            577,
 		EndorserBlockHash: ebHash,
 		VoterId:           member.VoterId,
@@ -5932,27 +5968,24 @@ func TestVoteManagerVotesByIdsSubset(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 577, ebHash),
 		),
 	)
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 1, 577, ebHash),
 		),
 	)
-	raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+	raws := fixture.retainedVotes([]lcommon.LeiosVoteId{
 		{SlotNo: 577, VoterId: 0},
 		{SlotNo: 577, VoterId: 9}, // unknown: omitted
 	})
 	require.Len(t, raws, 1)
-	var vote lcommon.LeiosVote
-	_, err := cbor.Decode(raws[0], &vote)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(0), vote.VoterId)
+	assert.Equal(t, uint64(0), raws[0].voterId)
 }
 
 func TestVoteManagerRollbackPrunesVotes(t *testing.T) {
@@ -5962,14 +5995,14 @@ func TestVoteManagerRollbackPrunesVotes(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 510, ebHash),
 		),
 	)
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 1, 590, ebHash),
 		),
@@ -5987,13 +6020,13 @@ func TestVoteManagerRollbackPrunesVotes(t *testing.T) {
 	)
 
 	testutil.WaitForCondition(t, func() bool {
-		return len(fixture.mgr.VotesByIds(
+		return len(fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 590, VoterId: 1}},
 		)) == 0
 	}, testutil.AsyncWait, "votes after the rollback point are pruned")
 	assert.Len(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 510, VoterId: 0}},
 		),
 		1,
@@ -6014,14 +6047,14 @@ func TestVoteManagerEpochTransitionPrunes(t *testing.T) {
 	// Epoch 3 vote (slot 350) and epoch 5 vote (slot 577)
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 350, ebHash),
 		),
 	)
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 1, 577, ebHash),
 		),
@@ -6039,13 +6072,13 @@ func TestVoteManagerEpochTransitionPrunes(t *testing.T) {
 	)
 
 	testutil.WaitForCondition(t, func() bool {
-		return len(fixture.mgr.VotesByIds(
+		return len(fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 350, VoterId: 0}},
 		)) == 0
 	}, testutil.AsyncWait, "votes older than the previous epoch are pruned")
 	assert.Len(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 1}},
 		),
 		1,
@@ -6114,7 +6147,7 @@ func TestVoteManagerTTLPrune(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 577, ebHash),
 		),
@@ -6125,21 +6158,21 @@ func TestVoteManagerTTLPrune(t *testing.T) {
 	// Inserting another vote triggers pruning of the expired one
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 1, 578, ebHash),
 		),
 	)
 	assert.Empty(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
 		),
 		"expired votes are pruned",
 	)
 	assert.Len(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 578, VoterId: 1}},
 		),
 		1,
@@ -6155,7 +6188,7 @@ func TestVoteManagerSizePrune(t *testing.T) {
 	for voterId := range uint64(3) {
 		require.NoError(
 			t,
-			fixture.mgr.HandleVote(
+			fixture.mgr.HandleLegacyVote(
 				"conn-a",
 				fixture.makeVote(t, voterId, 577, ebHash),
 			),
@@ -6163,14 +6196,14 @@ func TestVoteManagerSizePrune(t *testing.T) {
 	}
 	assert.Empty(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
 		),
 		"oldest vote evicted at size bound",
 	)
 	assert.Len(
 		t,
-		fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+		fixture.retainedVotes([]lcommon.LeiosVoteId{
 			{SlotNo: 577, VoterId: 1},
 			{SlotNo: 577, VoterId: 2},
 		}),
@@ -6213,14 +6246,14 @@ func TestVoteManagerParamsValidationFailureSurfaces(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 577, ebHash),
 		),
 	)
 	assert.Empty(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
 		),
 	)
@@ -6237,7 +6270,7 @@ func TestVoteManagerParamsValidationFailureSurfaces(t *testing.T) {
 	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 	assert.Empty(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
 		),
 	)
@@ -6260,7 +6293,7 @@ func TestVoteManagerExpiredVoteIdCanBeReplaced(t *testing.T) {
 	ebHashB := lcommon.NewBlake2b256([]byte("eb-b"))
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 577, ebHashA),
 		),
@@ -6272,19 +6305,16 @@ func TestVoteManagerExpiredVoteIdCanBeReplaced(t *testing.T) {
 	// replace it rather than being dropped by the stale dedup entry.
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 577, ebHashB),
 		),
 	)
-	raws := fixture.mgr.VotesByIds(
+	raws := fixture.retainedVotes(
 		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
 	)
 	require.Len(t, raws, 1)
-	var stored lcommon.LeiosVote
-	_, err := cbor.Decode(raws[0], &stored)
-	require.NoError(t, err)
-	assert.Equal(t, ebHashB, stored.EndorserBlockHash)
+	assert.Equal(t, ebHashB, raws[0].ebHash)
 }
 
 func TestVoteManagerNextVotesAbortDoesNotSkipVotes(t *testing.T) {
@@ -6296,7 +6326,7 @@ func TestVoteManagerNextVotesAbortDoesNotSkipVotes(t *testing.T) {
 		t,
 		fixture.mgr.HandleVote(
 			"conn-a",
-			fixture.makeVote(t, 0, 577, ebHash),
+			fixture.makeAnnouncedVote(t, 0, 577, ebHash),
 		),
 	)
 
@@ -6329,7 +6359,7 @@ func TestVoteManagerNextVotesAbortDoesNotSkipVotes(t *testing.T) {
 	)
 	require.NoError(t, result.err)
 	require.Len(t, result.votes, 1)
-	assert.Equal(t, uint64(0), result.votes[0].VoterId)
+	assert.Equal(t, uint16(0), result.votes[0].VoterId)
 }
 
 func TestVoteManagerEvictedVoteDoesNotRecount(t *testing.T) {
@@ -6346,7 +6376,7 @@ func TestVoteManagerEvictedVoteDoesNotRecount(t *testing.T) {
 	for voterId := range uint64(4) {
 		require.NoError(
 			t,
-			fixture.mgr.HandleVote(
+			fixture.mgr.HandleLegacyVote(
 				"conn-a",
 				fixture.makeVote(t, voterId, 577, ebHash),
 			),
@@ -6354,7 +6384,7 @@ func TestVoteManagerEvictedVoteDoesNotRecount(t *testing.T) {
 	}
 	require.Empty(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
 		),
 		"voter 0's serving entry is evicted",
@@ -6366,7 +6396,7 @@ func TestVoteManagerEvictedVoteDoesNotRecount(t *testing.T) {
 	// wedges certificate building for this EB permanently.
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-b",
 			fixture.makeVote(t, 0, 577, ebHash),
 		),
@@ -6381,7 +6411,7 @@ func TestVoteManagerEvictedVoteDoesNotRecount(t *testing.T) {
 	// Genuine quorum: voter 4 brings verified stake to 400 >= 385
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 4, 577, ebHash),
 		),
@@ -6421,7 +6451,7 @@ func TestVoteManagerEvictedVoteEquivocationStillDetected(t *testing.T) {
 	ebHashB := lcommon.NewBlake2b256([]byte("eb-b"))
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 577, ebHashA),
 		),
@@ -6429,14 +6459,14 @@ func TestVoteManagerEvictedVoteEquivocationStillDetected(t *testing.T) {
 	// Voter 1's insert evicts voter 0's serving entry
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 1, 577, ebHashA),
 		),
 	)
 	require.Empty(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
 		),
 	)
@@ -6445,7 +6475,7 @@ func TestVoteManagerEvictedVoteEquivocationStillDetected(t *testing.T) {
 	// the first vote so the conflicting one is dropped.
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-b",
 			fixture.makeVote(t, 0, 577, ebHashB),
 		),
@@ -6457,7 +6487,7 @@ func TestVoteManagerEvictedVoteEquivocationStillDetected(t *testing.T) {
 	for voterId := uint64(2); voterId <= 6; voterId++ {
 		require.NoError(
 			t,
-			fixture.mgr.HandleVote(
+			fixture.mgr.HandleLegacyVote(
 				"conn-a",
 				fixture.makeVote(t, voterId, 577, ebHashB),
 			),
@@ -6494,7 +6524,7 @@ func TestVoteManagerRecordsRetainedWhileTallyLive(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 577, ebHash),
 		),
@@ -6503,7 +6533,7 @@ func TestVoteManagerRecordsRetainedWhileTallyLive(t *testing.T) {
 	setOffset(9 * time.Minute)
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 1, 577, ebHash),
 		),
@@ -6514,7 +6544,7 @@ func TestVoteManagerRecordsRetainedWhileTallyLive(t *testing.T) {
 	setOffset(voteStoreTTL + time.Minute)
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-b",
 			fixture.makeVote(t, 0, 577, ebHash),
 		),
@@ -6526,7 +6556,7 @@ func TestVoteManagerRecordsRetainedWhileTallyLive(t *testing.T) {
 	for voterId := uint64(2); voterId <= 4; voterId++ {
 		require.NoError(
 			t,
-			fixture.mgr.HandleVote(
+			fixture.mgr.HandleLegacyVote(
 				"conn-a",
 				fixture.makeVote(t, voterId, 577, ebHash),
 			),
@@ -6547,14 +6577,14 @@ func TestVoteManagerRecordsRetainedWhileTallyLive(t *testing.T) {
 	setOffset(2*voteStoreTTL + 5*time.Minute)
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-b",
 			fixture.makeVote(t, 0, 577, ebHash),
 		),
 	)
 	assert.Len(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
 		),
 		1,
@@ -6571,7 +6601,7 @@ func TestVoteManagerLocalVoteBypassesRecordCapacity(t *testing.T) {
 	// A peer vote fills the record ledger
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 0, 577, ebHash),
 		),
@@ -6589,7 +6619,7 @@ func TestVoteManagerLocalVoteBypassesRecordCapacity(t *testing.T) {
 	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 	assert.Len(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
 		),
 		1,
@@ -6624,13 +6654,13 @@ func TestVoteManagerSlotWindowRejects(t *testing.T) {
 	} {
 		require.NoError(
 			t,
-			fixture.mgr.HandleVote(
+			fixture.mgr.HandleLegacyVote(
 				"conn-a",
 				fixture.makeVote(t, tc.voterId, tc.slot, ebHash),
 			),
 			tc.name,
 		)
-		raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+		raws := fixture.retainedVotes([]lcommon.LeiosVoteId{
 			{SlotNo: tc.slot, VoterId: tc.voterId},
 		})
 		if tc.accepted {
@@ -6653,7 +6683,7 @@ func TestVoteManagerSlotWindowRejects(t *testing.T) {
 	fixture.mgr.ObserveAnnouncement(oldSlot, rbHash, ebHash)
 	assert.Empty(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: oldSlot, VoterId: 3}},
 		),
 		"no local vote for an out-of-window endorser block",
@@ -6712,7 +6742,7 @@ func TestVoteManagerRollbackAllowsReVoteForNewChain(t *testing.T) {
 	ebHashB := lcommon.NewBlake2b256([]byte("eb-b"))
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 1, 590, ebHashA),
 		),
@@ -6728,7 +6758,7 @@ func TestVoteManagerRollbackAllowsReVoteForNewChain(t *testing.T) {
 		),
 	)
 	testutil.WaitForCondition(t, func() bool {
-		return len(fixture.mgr.VotesByIds(
+		return len(fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 590, VoterId: 1}},
 		)) == 0
 	}, testutil.AsyncWait, "rolled-back vote is pruned")
@@ -6738,19 +6768,16 @@ func TestVoteManagerRollbackAllowsReVoteForNewChain(t *testing.T) {
 	// mistaken for equivocation.
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 1, 590, ebHashB),
 		),
 	)
-	raws := fixture.mgr.VotesByIds(
+	raws := fixture.retainedVotes(
 		[]lcommon.LeiosVoteId{{SlotNo: 590, VoterId: 1}},
 	)
 	require.Len(t, raws, 1)
-	var stored lcommon.LeiosVote
-	_, err := cbor.Decode(raws[0], &stored)
-	require.NoError(t, err)
-	assert.Equal(t, ebHashB, stored.EndorserBlockHash)
+	assert.Equal(t, ebHashB, raws[0].ebHash)
 }
 
 func TestVoteManagerRollbackRejectsInFlightLocalPrototypeVote(t *testing.T) {
@@ -6872,14 +6899,14 @@ func TestVoteManagerLateVotesAreNotPeerMisbehavior(t *testing.T) {
 		slot := uint64(1000 - voteWindow - i)
 		require.NoError(
 			t,
-			fixture.mgr.HandleVote(
+			fixture.mgr.HandleLegacyVote(
 				"relay",
 				fixture.makeVote(t, uint64(i%4), slot, ebHash),
 			),
 			"late vote %d must not be peer misbehavior",
 			i,
 		)
-		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+		assert.Empty(t, fixture.retainedVotes([]lcommon.LeiosVoteId{
 			{SlotNo: slot, VoterId: uint64(i % 4)},
 		}), "late vote %d must not be stored", i)
 	}
@@ -6892,19 +6919,19 @@ func TestVoteManagerLateVotesAreNotPeerMisbehavior(t *testing.T) {
 
 	// Late votes must not consume the budget for genuinely invalid ones
 	// from the same connection: the limit still trips at exactly the limit.
-	invalid := lcommon.LeiosVote{}
+	invalid := lcommon.LeiosLegacyVote{}
 	for range voteInvalidPeerLimit - 1 {
-		require.NoError(t, fixture.mgr.HandleVote("relay", invalid))
+		require.NoError(t, fixture.mgr.HandleLegacyVote("relay", invalid))
 	}
 	require.ErrorIs(
 		t,
-		fixture.mgr.HandleVote("relay", invalid),
+		fixture.mgr.HandleLegacyVote("relay", invalid),
 		ErrPeerMisbehavior,
 	)
 
 	// Votes too far in the future are not exempt.
 	for i := range voteInvalidPeerLimit - 1 {
-		require.NoError(t, fixture.mgr.HandleVote(
+		require.NoError(t, fixture.mgr.HandleLegacyVote(
 			"skewed",
 			fixture.makeVote(
 				t,
@@ -6916,7 +6943,7 @@ func TestVoteManagerLateVotesAreNotPeerMisbehavior(t *testing.T) {
 	}
 	require.ErrorIs(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"skewed",
 			fixture.makeVote(t, 0, 1000+slotWindowFutureTolerance+100, ebHash),
 		),
@@ -6975,19 +7002,19 @@ func TestVoteManagerLatePrototypeVotesAreNotPeerMisbehavior(t *testing.T) {
 		"slot_window rejection metric must count every late vote",
 	)
 	for voterId := range uint64(4) {
-		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+		assert.Empty(t, fixture.retainedVotes([]lcommon.LeiosVoteId{
 			{SlotNo: lateSlot, VoterId: voterId},
 		}))
 	}
 
 	// The connection's invalid-vote budget is untouched by the late votes.
-	invalid := lcommon.LeiosVote{}
+	invalid := lcommon.LeiosLegacyVote{}
 	for range voteInvalidPeerLimit - 1 {
-		require.NoError(t, fixture.mgr.HandleVote("relay", invalid))
+		require.NoError(t, fixture.mgr.HandleLegacyVote("relay", invalid))
 	}
 	require.ErrorIs(
 		t,
-		fixture.mgr.HandleVote("relay", invalid),
+		fixture.mgr.HandleLegacyVote("relay", invalid),
 		ErrPeerMisbehavior,
 	)
 }
@@ -7018,18 +7045,18 @@ func TestVoteManagerRepeatedKeylessVotesDoNotExhaustVerificationBudget(
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	keyless := fixture.makeVote(t, 0, 577, ebHash)
 	for range 2 * voteVerificationMaxPerPeer {
-		require.NoError(t, fixture.mgr.HandleVote("conn-a", keyless))
+		require.NoError(t, fixture.mgr.HandleLegacyVote("conn-a", keyless))
 	}
 	require.NoError(
 		t,
-		fixture.mgr.HandleVote(
+		fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, 1, 577, ebHash),
 		),
 	)
 	assert.Len(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 1}},
 		),
 		1,
@@ -7037,7 +7064,7 @@ func TestVoteManagerRepeatedKeylessVotesDoNotExhaustVerificationBudget(
 	)
 	assert.Empty(
 		t,
-		fixture.mgr.VotesByIds(
+		fixture.retainedVotes(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
 		),
 	)
@@ -7088,4 +7115,21 @@ func TestCommitteeFollowsElectionSnapshotAcrossEmptyEpoch(t *testing.T) {
 
 	plain := &VoteManager{epochProvider: &fakeEpochProvider{}}
 	require.Equal(t, CommitteeSnapshotEpoch(9), plain.committeeSnapshotEpoch(9))
+}
+
+// retainedVotes returns the retained votes among ids, servable or not. It
+// probes retention where VotesByIds cannot: a legacy vote is retained and
+// tallied but has no CIP-0164 form to serve.
+func (f *managerFixture) retainedVotes(
+	ids []lcommon.LeiosVoteId,
+) []resolvedVote {
+	f.mgr.mu.Lock()
+	defer f.mgr.mu.Unlock()
+	ret := make([]resolvedVote, 0, len(ids))
+	for _, id := range ids {
+		if sv, ok := f.mgr.votesById[id]; ok {
+			ret = append(ret, sv.vote)
+		}
+	}
+	return ret
 }

@@ -582,6 +582,7 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 		// Withdraw the ledger from the selector's wall-clock hook before
 		// Close tears down the slot clock it reads.
 		n.wallClockLedger.Store(nil)
+		//nolint:contextcheck // Close has no caller context; it bounds its own waits.
 		if closeErr := n.ledgerState.Close(); closeErr != nil {
 			// Fail closed: do not nil n.ledgerState, close n.db, or stop
 			// the storage plugins below -- a goroutine this Close call

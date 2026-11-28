@@ -47,6 +47,12 @@ func (tx ppupWindowTestTx) Witnesses() lcommon.TransactionWitnessSet {
 	return tx.witness
 }
 
+// IsValid reports a phase-2-valid transaction: Alonzo and Babbage run PPUP
+// only on that branch.
+func (tx ppupWindowTestTx) IsValid() bool {
+	return true
+}
+
 type ppupWindowTestWitnessSet struct {
 	lcommon.TransactionWitnessSet
 	vkeys []lcommon.VkeyWitness
@@ -54,6 +60,12 @@ type ppupWindowTestWitnessSet struct {
 
 func (w ppupWindowTestWitnessSet) Vkey() []lcommon.VkeyWitness {
 	return w.vkeys
+}
+
+// Bootstrap reports no bootstrap witnesses: the genesis-delegate quorum
+// counts their roots as well as the vkey witnesses.
+func (w ppupWindowTestWitnessSet) Bootstrap() []lcommon.BootstrapWitness {
+	return nil
 }
 
 // ppupWindowRuleState takes the voting window from the real LedgerView and

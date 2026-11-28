@@ -27,9 +27,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testBody pads s to the smallest body CIP-0137 allows, which gOuroboros
+// refuses to decode below, so a test message survives the wire.
+func testBody(s string) []byte {
+	body := []byte(s)
+	for len(body) < ocommon.MinMessageBodySize {
+		body = append(body, '.')
+	}
+	return body
+}
+
 // newTestMessage builds a well-formed DmqMessage with no message ID set, so
-// Add computes one from the payload, matching real submissions.
+// Add computes one from the payload, matching real submissions. A body
+// shorter than CIP-0137 allows is padded as testBody does.
 func newTestMessage(body []byte, expiresAt uint32) ocommon.DmqMessage {
+	return newSizedTestMessage(testBody(string(body)), expiresAt)
+}
+
+// newSizedTestMessage is newTestMessage with body exactly as given.
+func newSizedTestMessage(body []byte, expiresAt uint32) ocommon.DmqMessage {
 	return ocommon.DmqMessage{
 		Payload: ocommon.DmqMessagePayload{
 			MessageBody: body,
@@ -108,7 +124,7 @@ func TestMessageMempool_AddClonesStoredMessage(t *testing.T) {
 
 	got, ok := mp.Get(wantID)
 	require.True(t, ok)
-	require.Equal(t, []byte("original"), got.Payload.MessageBody)
+	require.Equal(t, testBody("original"), got.Payload.MessageBody)
 }
 
 func TestMessageMempool_GetReturnsIndependentCopy(t *testing.T) {
@@ -131,7 +147,7 @@ func TestMessageMempool_GetReturnsIndependentCopy(t *testing.T) {
 	// must return a copy the caller cannot use to corrupt retained data.
 	got2, ok := mp.Get(wantID)
 	require.True(t, ok)
-	require.Equal(t, []byte("original"), got2.Payload.MessageBody)
+	require.Equal(t, testBody("original"), got2.Payload.MessageBody)
 }
 
 func TestMessageMempool_AddDedup(t *testing.T) {

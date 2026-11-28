@@ -533,7 +533,7 @@ func TestLocalTxSubmissionConnection_EncodeErrorClosesPeer(t *testing.T) {
 		gouroboros.WithLogger(logger),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = clientConn.Close() })
+	t.Cleanup(func() { _ = clientConn.Close(context.Background()) })
 
 	var serverConn *gouroboros.Connection
 	select {
@@ -543,7 +543,7 @@ func TestLocalTxSubmissionConnection_EncodeErrorClosesPeer(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for server connection setup")
 	}
-	t.Cleanup(func() { _ = serverConn.Close() })
+	t.Cleanup(func() { _ = serverConn.Close(context.Background()) })
 
 	// The server's rejection cannot be encoded for Babbage. A real connection
 	// must close as a consequence of that protocol error, allowing the client's
@@ -885,7 +885,7 @@ func TestLocalTxSubmissionProtocol_UnregisteredConnCloseCancels(
 	)
 	require.NoError(t, valCtx.Err())
 
-	require.NoError(t, conn.Close())
+	require.NoError(t, conn.Close(context.Background()))
 
 	select {
 	case <-valCtx.Done():

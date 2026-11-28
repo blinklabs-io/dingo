@@ -3667,7 +3667,9 @@ func (ls *LedgerState) Close() (retErr error) {
 	if ls.blockPipeline != nil {
 		blockPipelineStopDone = make(chan error, 1)
 		go func() {
-			stopErr := ls.blockPipeline.Stop()
+			stopErr := ls.blockPipeline.Stop(
+				context.WithoutCancel(ls.lifecycleContext()),
+			)
 			// Stop closes errorsChan as one of its final steps, once every
 			// stage has fully drained -- see BlockPipeline.Stop. Waiting for
 			// drainBlockPipelineErrors here (it exits via range-over-channel

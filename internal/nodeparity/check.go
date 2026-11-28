@@ -87,7 +87,7 @@ func Check(
 	if err != nil {
 		return nil, fmt.Errorf("dial dingo %s: %w", dingoAddr, err)
 	}
-	defer dingoConn.Close() //nolint:errcheck
+	defer dingoConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 
 	var targetTip Tip
 	if at != nil {
@@ -108,12 +108,12 @@ func Check(
 		}
 		dingoTip, err := ReadTip(dingoConn)
 		if err != nil {
-			cardanoTipConn.Close() //nolint:errcheck
+			cardanoTipConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 			return nil, fmt.Errorf("dingo tip: %w", err)
 		}
 		cardanoTip, err := ReadTip(cardanoTipConn)
 		if err != nil {
-			cardanoTipConn.Close() //nolint:errcheck
+			cardanoTipConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 			return nil, fmt.Errorf("cardano-node tip: %w", err)
 		}
 		// Closed now, unconditionally, rather than held open into
@@ -125,7 +125,7 @@ func Check(
 		// instead. A close failure here does not invalidate the tip read
 		// that already succeeded above, so it is logged rather than
 		// failing the whole check.
-		if closeErr := cardanoTipConn.Close(); closeErr != nil {
+		if closeErr := cardanoTipConn.Close(context.WithoutCancel(ctx)); closeErr != nil {
 			slog.Warn(
 				"close cardano-node tip connection",
 				"addr", cardanoAddr,
@@ -160,7 +160,7 @@ func Check(
 	if err != nil {
 		return nil, fmt.Errorf("re-dial cardano-node %s: %w", cardanoAddr, err)
 	}
-	defer cardanoConn.Close() //nolint:errcheck
+	defer cardanoConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 
 	cardanoSnap, err := QueryReferenceUTxOSnapshot(
 		cardanoConn,

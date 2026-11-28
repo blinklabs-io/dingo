@@ -1311,7 +1311,7 @@ func (o *Ouroboros) csjStartStreaming(
 				err,
 			)
 			o.chainsyncState.RemoveClientConnId(connId)
-			o.closeOutboundConnAfterChainsyncFailure(connId, conn)
+			o.closeOutboundConnAfterChainsyncFailure(ctx, connId, conn)
 			return
 		}
 		o.config.Logger.Debug(

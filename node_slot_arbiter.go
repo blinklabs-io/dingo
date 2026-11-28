@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/vrf"
@@ -396,16 +397,9 @@ func (a *poolSlotArbiter) leaderVRFInputLocked(slot uint64) ([]byte, string) {
 	}
 	var input []byte
 	if era < babbage.EraIdBabbage {
-		input, err = vrf.MkSeedTPraos(
-			int64(slot), // #nosec G115 -- bounded above
-			nonce,
-			vrf.SeedL(),
-		)
+		input, err = eras.VRFSeedTPraos(slot, nonce, vrf.SeedL())
 	} else {
-		input, err = vrf.MkInputVrf(
-			int64(slot), // #nosec G115 -- bounded above
-			nonce,
-		)
+		input, err = eras.VRFInputPraos(slot, nonce)
 	}
 	if err != nil {
 		return nil, "VRF input: " + err.Error()
