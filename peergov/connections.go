@@ -350,11 +350,14 @@ func (p *PeerGovernor) createOutboundConnection(
 	currentPeer.Reconnecting = true
 	reconnectPeer := currentPeer
 	p.mu.Unlock()
+	// released records, under p.mu, that this worker already gave up its
+	// reservation; a successor may hold Reconnecting by the time it exits.
+	released := false
 	// Ensure Reconnecting is cleared when this goroutine exits
 	defer func() {
 		p.mu.Lock()
 		idx := p.peerIndexByAddress(reconnectPeer.NormalizedAddress)
-		if idx != -1 && p.peers[idx] == reconnectPeer {
+		if !released && idx != -1 && p.peers[idx] == reconnectPeer {
 			p.peers[idx].Reconnecting = false
 		}
 		p.mu.Unlock()
@@ -534,6 +537,14 @@ func (p *PeerGovernor) createOutboundConnection(
 			// holding it.
 			if currentPeer != reconnectPeer ||
 				currentPeer.hasClientConnection() {
+				// Release the reservation with the decision: the close
+				// below can wait, and a close of the connection holding
+				// the entry handled meanwhile starts no worker while
+				// Reconnecting is set.
+				if currentPeer == reconnectPeer {
+					currentPeer.Reconnecting = false
+					released = true
+				}
 				p.mu.Unlock()
 				closeConnAndLog(
 					p.config.Logger,
@@ -571,6 +582,11 @@ func (p *PeerGovernor) createOutboundConnection(
 				oldSource := currentPeer.Source
 				oldConn := clonePeerConnection(currentPeer.Connection)
 				p.attachOutboundConnLocked(currentPeer, conn, time.Now())
+				// The close of conn may be handled before this worker
+				// exits; it must find no reservation, or it starts no
+				// worker.
+				currentPeer.Reconnecting = false
+				released = true
 				selectionEvents := p.appendChainSelectionEventsLocked(
 					nil,
 					p.bootstrapExited,

@@ -448,3 +448,190 @@ func TestCreateOutboundConnection_KeepsClientConnectionRecordedDuringDial(
 		waitDone(t, done, "the dialled connection to close")
 	}
 }
+
+// logHook calls fn, once, from inside the logging call whose message is msg,
+// on the goroutine that logs it.
+type logHook struct {
+	msg  string
+	once *sync.Once
+	fn   func()
+}
+
+func (h logHook) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h logHook) Handle(_ context.Context, r slog.Record) error {
+	if r.Message == h.msg {
+		h.once.Do(h.fn)
+	}
+	return nil
+}
+
+func (h logHook) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h logHook) WithGroup(string) slog.Handler      { return h }
+
+// A dial worker that discards its connection because a client connection
+// took the entry during the dial releases its reconnect reservation before
+// it lets go of p.mu. When that client connection closes while the worker is
+// still tearing its own down, the close handler must start a new worker;
+// with the reservation still held it starts none and the peer stays
+// unconnected until the next reconcile.
+func TestCreateOutboundConnection_DiscardedDialReleasesReservation(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	dialing := make(chan struct{})
+	release := make(chan struct{})
+	var dials atomic.Int32
+	connMgr := newAttachTestConnManager(
+		t,
+		func(context.Context, string) (net.Conn, error) {
+			if dials.Add(1) > 1 {
+				return nil, io.ErrUnexpectedEOF
+			}
+			close(dialing)
+			<-release
+			return newAddrConn(), nil
+		},
+		nil,
+	)
+	inboundId := closeLaneConnId(1)
+	var pg *PeerGovernor
+	// The worker logs this after it has released p.mu and closed its own
+	// connection, and before its deferred cleanup runs: the window in which
+	// the competing connection's close is handled.
+	hook := logHook{
+		msg: "outbound: peer entry replaced or already connected " +
+			"during connection, closing",
+		once: &sync.Once{},
+		fn: func() {
+			pg.handleConnectionClosedEvent(event.NewEvent(
+				connmanager.ConnectionClosedEventType,
+				connmanager.ConnectionClosedEvent{ConnectionId: inboundId},
+			))
+		},
+	}
+	pg = NewPeerGovernor(PeerGovernorConfig{
+		Logger:      slog.New(hook),
+		ConnManager: connMgr,
+	})
+	target := &Peer{
+		Address:           "44.0.0.1:3001",
+		NormalizedAddress: "44.0.0.1:3001",
+		Source:            PeerSourceP2PGossip,
+		State:             PeerStateCold,
+	}
+	stopCh := make(chan struct{})
+	pg.mu.Lock()
+	pg.ctx = t.Context()
+	pg.stopCh = stopCh
+	pg.peers = []*Peer{target}
+	pg.spawnOutboundConnectionLocked(target)
+	pg.mu.Unlock()
+	waitDone(t, dialing, "the dial")
+	pg.mu.Lock()
+	target.Connection = &PeerConnection{Id: inboundId, IsClient: true}
+	target.State = PeerStateWarm
+	pg.mu.Unlock()
+	close(release)
+
+	require.Eventually(t, func() bool { return dials.Load() >= 2 },
+		5*time.Second, time.Millisecond,
+		"closing the competing connection must start a new dial")
+	pg.mu.Lock()
+	close(stopCh)
+	pg.stopCh = nil
+	pg.mu.Unlock()
+	workersDone := make(chan struct{})
+	go func() {
+		pg.wg.Wait()
+		close(workersDone)
+	}()
+	waitDone(t, workersDone, "the dial workers")
+}
+
+// A dial worker that records its connection releases its reconnect
+// reservation before it lets go of p.mu. When that connection closes before
+// the worker has exited, the close handler must start a new worker; with the
+// reservation still held it starts none and the peer stays unconnected until
+// the next reconcile.
+func TestCreateOutboundConnection_AttachReleasesReservation(t *testing.T) {
+	t.Parallel()
+
+	dialed := make(chan *addrConn, 1)
+	var dials atomic.Int32
+	connMgr := newAttachTestConnManager(
+		t,
+		func(context.Context, string) (net.Conn, error) {
+			if dials.Add(1) > 1 {
+				return nil, io.ErrUnexpectedEOF
+			}
+			c := newAddrConn()
+			dialed <- c
+			return c, nil
+		},
+		nil,
+	)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	// A blocking subscriber with a full buffer holds the worker in its
+	// OutboundConnectionEvent publish, after the attach and before its
+	// deferred cleanup, until the test drains it.
+	_, outboundCh := bus.SubscribeWithBufferPolicy(
+		OutboundConnectionEventType,
+		1,
+		event.SubscriberBackpressureBlock,
+	)
+	bus.Publish(
+		OutboundConnectionEventType,
+		event.NewEvent(OutboundConnectionEventType, nil),
+	)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		ConnManager: connMgr,
+		EventBus:    bus,
+	})
+	target := &Peer{
+		Address:           "44.0.0.1:3001",
+		NormalizedAddress: "44.0.0.1:3001",
+		Source:            PeerSourceP2PGossip,
+		State:             PeerStateCold,
+	}
+	stopCh := make(chan struct{})
+	pg.mu.Lock()
+	pg.ctx = t.Context()
+	pg.stopCh = stopCh
+	pg.peers = []*Peer{target}
+	pg.spawnOutboundConnectionLocked(target)
+	pg.mu.Unlock()
+	c := <-dialed
+	require.Eventually(t, func() bool {
+		pg.mu.Lock()
+		defer pg.mu.Unlock()
+		return target.Connection != nil
+	}, 10*time.Second, time.Millisecond)
+	// A long session, so the close applies no reconnect backoff.
+	pg.mu.Lock()
+	target.ConnectedAt = time.Now().Add(-time.Hour)
+	pg.mu.Unlock()
+	pg.handleConnectionClosedEvent(event.NewEvent(
+		connmanager.ConnectionClosedEventType,
+		connmanager.ConnectionClosedEvent{ConnectionId: c.id()},
+	))
+	<-outboundCh
+	<-outboundCh
+
+	require.Eventually(t, func() bool { return dials.Load() >= 2 },
+		5*time.Second, time.Millisecond,
+		"closing the recorded connection must start a new dial")
+	pg.mu.Lock()
+	close(stopCh)
+	pg.stopCh = nil
+	pg.mu.Unlock()
+	workersDone := make(chan struct{})
+	go func() {
+		pg.wg.Wait()
+		close(workersDone)
+	}()
+	waitDone(t, workersDone, "the dial workers")
+}
