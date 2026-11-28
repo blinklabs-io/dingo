@@ -580,6 +580,98 @@ FROM address_transaction WHERE `+predicate),
 	return int(count), nil
 }
 
+// exactAddressTouchedTransactions lists the transactions whose loaded
+// outputs, collateral return, inputs, collateral or reference inputs (the sets
+// hydrateTransactionSlice reads) include an output stored at the bound
+// rendered address. It binds that address five times.
+const exactAddressTouchedTransactions = `
+SELECT utxo.tx_id FROM utxo_address
+JOIN utxo ON utxo.id = utxo_address.utxo_id
+WHERE utxo_address.address = ? AND utxo.tx_id IS NOT NULL
+UNION
+SELECT utxo.spent_at_tx_id FROM utxo_address
+JOIN utxo ON utxo.id = utxo_address.utxo_id
+WHERE utxo_address.address = ? AND utxo.spent_at_tx_id IS NOT NULL
+UNION
+SELECT utxo.collateral_return_for_tx_id FROM utxo_address
+JOIN utxo ON utxo.id = utxo_address.utxo_id
+WHERE utxo_address.address = ? AND utxo.collateral_return_for_tx_id IS NOT NULL
+UNION
+SELECT edge.tx_id FROM utxo_address
+JOIN utxo_collateral_edge AS edge ON edge.utxo_id = utxo_address.utxo_id
+WHERE utxo_address.address = ?
+UNION
+SELECT edge.tx_id FROM utxo_address
+JOIN utxo_reference_edge AS edge ON edge.utxo_id = utxo_address.utxo_id
+WHERE utxo_address.address = ?`
+
+// exactAddressTransactionCountQuery counts the address_transaction
+// candidates for the credential predicate that are applied and that touch an
+// output stored at address.
+func exactAddressTransactionCountQuery(
+	predicate string,
+	keyArgs []any,
+	address []byte,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
+) (string, []any) {
+	query := `SELECT COUNT(DISTINCT transaction_id) FROM address_transaction
+WHERE ` + predicate
+	args := append([]any{}, keyArgs...)
+	if from != nil {
+		query += " AND (slot, tx_index) >= (?, ?)"
+		args = append(args, from.Slot, from.TxIndex)
+	}
+	if to != nil {
+		query += " AND (slot, tx_index) <= (?, ?)"
+		args = append(args, to.Slot, to.TxIndex)
+	}
+	query += `
+  AND EXISTS (
+    SELECT 1 FROM applied_transaction AS a
+    WHERE a.tx_id = address_transaction.transaction_id
+  )
+  AND transaction_id IN (` + exactAddressTouchedTransactions + `
+)`
+	for range 5 {
+		args = append(args, address)
+	}
+	return query, args
+}
+
+func (s *Store) CountTransactionsByExactAddress(
+	address []byte,
+	paymentKey []byte,
+	credentialTag uint8,
+	stakingKey []byte,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
+	txn types.Txn,
+) (int, error) {
+	predicate, keyArgs := addressTransactionPredicate(
+		paymentKey,
+		credentialTag,
+		stakingKey,
+	)
+	if predicate == "" || len(address) == 0 {
+		return 0, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	query, args := exactAddressTransactionCountQuery(
+		predicate, keyArgs, address, from, to,
+	)
+	var count int64
+	if err := db.QueryRowContext(
+		ctx, s.dialect.Rebind(query), args...,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count txs by exact address: %w", err)
+	}
+	return int(count), nil
+}
+
 func (s *Store) GetTransactionsByAddress(
 	paymentKey []byte,
 	credentialTag uint8,

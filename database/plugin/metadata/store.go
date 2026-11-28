@@ -1260,6 +1260,23 @@ type TransactionStore interface {
 		types.Txn,
 	) (int, error)
 
+	// CountTransactionsByExactAddress returns the number of applied
+	// transactions with an address_transaction row for the credential pair,
+	// optionally within an inclusive (slot, block index) range, that produce,
+	// spend, return as collateral, consume as collateral or reference an
+	// output whose utxo_address row holds the rendered address. It reads only
+	// utxo_address, so it is complete only in API storage mode once the
+	// UTxO address backfill has finished.
+	CountTransactionsByExactAddress(
+		[]byte, // rendered address (Address.String())
+		[]byte, // paymentKey
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		*models.AddressTransactionPosition, // from (inclusive, nil = unbounded)
+		*models.AddressTransactionPosition, // to (inclusive, nil = unbounded)
+		types.Txn,
+	) (int, error)
+
 	// CountTransactionsByPaymentCred returns the total number of
 	// transactions involving the provided payment credential across every
 	// address that carries it, regardless of staking part. paymentScript

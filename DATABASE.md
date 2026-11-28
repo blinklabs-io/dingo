@@ -9056,6 +9056,48 @@ WHERE atx.payment_key = decode($1, 'hex')
   AND (atx.staking_key IS NULL OR length(atx.staking_key) = 0)
 ```
 
+### `CountTransactionsByExactAddress`
+
+The key pair does not identify an address: an enterprise address and its
+pointer siblings share one, and a key pair's candidates include every
+transaction of each. `Database.CountTransactionsByAddress`, which the
+Blockfrost address transactions and `/total` routes call, counts the
+candidates that touch the exact address. In API storage mode, once the UTxO
+address backfill has set `dingo:utxo-addresses:backfilled`, it calls
+`CountTransactionsByExactAddress`, which reads only metadata. A candidate
+counts when it is applied and produces, spends, returns as collateral,
+consumes as collateral or references an output whose `utxo_address` row holds
+the rendered address (`Address.String()`). Those are the `utxo.tx_id`,
+`utxo.spent_at_tx_id`, `utxo.collateral_return_for_tx_id`,
+`utxo_collateral_edge` and `utxo_reference_edge` links, the same sets a
+loaded transaction's outputs, collateral return, inputs, collateral and
+reference inputs come from. The address's outputs are found through
+`idx_utxo_address_order` and the candidates through the key pair's
+`address_transaction` index, so the count reads no output CBOR.
+
+```sql
+SELECT COUNT(DISTINCT transaction_id) FROM address_transaction
+WHERE <key pair condition> [AND (slot, tx_index) range]
+  AND EXISTS (SELECT 1 FROM applied_transaction a
+              WHERE a.tx_id = address_transaction.transaction_id)
+  AND transaction_id IN (
+    SELECT u.tx_id FROM utxo_address ua JOIN utxo u ON u.id = ua.utxo_id
+    WHERE ua.address = $address AND u.tx_id IS NOT NULL
+    UNION SELECT u.spent_at_tx_id ...           -- spends
+    UNION SELECT u.collateral_return_for_tx_id ... -- collateral returns
+    UNION SELECT e.tx_id FROM utxo_address ua
+          JOIN utxo_collateral_edge e ON e.utxo_id = ua.utxo_id
+          WHERE ua.address = $address
+    UNION SELECT e.tx_id FROM utxo_address ua
+          JOIN utxo_reference_edge e ON e.utxo_id = ua.utxo_id
+          WHERE ua.address = $address);
+```
+
+In core mode, or before the backfill finishes, `utxo_address` may be missing
+rows, so the count instead loads each candidate and decodes its outputs and
+inputs until one has the exact address bytes, which reads the CBOR of the key
+pair's whole history. The transaction page itself still uses that match.
+
 ### `CountTransactionsByPaymentCred`
 
 Counts transactions for a payment credential across every address carrying
