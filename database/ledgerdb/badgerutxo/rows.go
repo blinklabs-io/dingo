@@ -129,15 +129,11 @@ func journalRow(txn *badger.Txn, slot uint64, pk []byte) error {
 func putRows(txn *badger.Txn, puts []RowPut) error {
 	for _, p := range puts {
 		if p.WipeRewardEpoch {
-			if len(p.Key) != 8 {
-				return errors.New(
-					"badgerutxo: a reward epoch wipe needs an 8-byte epoch",
-				)
-			}
-			if err := wipeRewardEpoch(txn, binary.BigEndian.Uint64(p.Key)); err != nil {
-				return err
-			}
-			continue
+			// The wipe is as large as the epoch, so applyChunked runs it in
+			// bounded transactions of its own and never hands it here.
+			return errors.New(
+				"badgerutxo: a reward epoch wipe is applied in its own transactions",
+			)
 		}
 		if p.TombstonePrefix || p.WipePrefix {
 			if len(p.Key) == 0 || p.Key[0] == AccountTag ||

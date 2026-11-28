@@ -545,14 +545,30 @@ type LedgerBatch struct {
 	RewardBlocks []RewardBlockOp
 }
 
-// ApplyLedgerBatch is ApplyBatch for a whole ledger commit: the nonces and
-// the nonce prune are written in the same transaction as the UTxO changes.
-// A rollback deletes the nonces above the point it restores, so nonces need
-// no journal.
+// ApplyLedgerBatch is ApplyBatch for a whole ledger commit: the nonces are
+// written with the UTxO changes. The nonce prune is not: after any
+// RowPut.WipePrefix delete, the non-checkpoint nonces before
+// PruneNoncesBefore are deleted in transactions of their own, ahead of the
+// UTxO changes and the tip. An error before the first UTxO transaction
+// leaves the prune committed and the tip and UTxOs unchanged; the next prune
+// deletes any nonces it left. An error after a UTxO transaction has
+// committed leaves the tip unchanged and, for a batch with a tip, changes or
+// slotted rows, a failure mark from which startup rewinds the partial
+// changes. A rollback deletes the nonces above the point
+// it restores, so nonces need no journal.
 func (s *Store) ApplyLedgerBatch(
 	tip *ocommon.Point,
 	batch LedgerBatch,
 ) (ApplyResult, error) {
+	// A wipe runs after the batch's first transaction has committed, so its
+	// key is checked before anything is written.
+	for _, r := range batch.Rows {
+		if r.WipeRewardEpoch && len(r.Key) != 8 {
+			return ApplyResult{}, errors.New(
+				"badgerutxo: a reward epoch wipe needs an 8-byte epoch",
+			)
+		}
+	}
 	changes := batch.Changes
 	var res ApplyResult
 	var pending bool
@@ -588,6 +604,17 @@ func (s *Store) ApplyLedgerBatch(
 		if err := s.deletePrefixRows(r.Key); err != nil {
 			return ApplyResult{}, fmt.Errorf(
 				"badgerutxo: wipe prefix %x: %w", r.Key, err,
+			)
+		}
+	}
+	// A prune can find more nonces than one transaction deletes, so they go
+	// in transactions of their own first; the batch's own prune then finds
+	// only the nonces the batch wrote.
+	if batch.PruneNoncesBefore > 0 {
+		if err := s.pruneNoncesBulk(batch.PruneNoncesBefore); err != nil {
+			return ApplyResult{}, fmt.Errorf(
+				"badgerutxo: prune nonces before slot %d: %w",
+				batch.PruneNoncesBefore, err,
 			)
 		}
 	}

@@ -196,6 +196,10 @@ func (s *Store) applyChunked(
 	}
 	rowsTotal = rowsTotal.add(accountsCost(batch.Accounts)).
 		add(recordsCost(batch.RewardRecords))
+	// A reward epoch wipe deletes as many rows as the epoch holds, which the
+	// row's own cost does not say, so a batch with one always runs its rows
+	// in transactions of their own, where the wipe is bounded by its rows.
+	rowsFit := !hasRewardWipe(batch.Rows) && rowsTotal.fits(entries, bytes)
 	opsTotal, err := s.opsCost(batch.SnapshotOps, batch.RewardBlocks)
 	if err != nil {
 		return err
@@ -208,13 +212,13 @@ func (s *Store) applyChunked(
 	extractOps := len(batch.SnapshotOps)+len(batch.RewardBlocks) > 0
 	if extractOps {
 		stripped := stripOps(batch)
-		if !rowsTotal.fits(entries, bytes) {
+		if !rowsFit {
 			stripped.Rows, stripped.Accounts, stripped.RewardRecords =
 				nil, nil, nil
 		}
 		extractOps = !opsTotal.add(familyCost(stripped)).fits(entries, bytes)
 	}
-	if extractOps || !rowsTotal.fits(entries, bytes) {
+	if extractOps || !rowsFit {
 		rows, leadRollback = batch.Rows, batch.DeleteNoncesAfter
 		accounts, records = batch.Accounts, batch.RewardRecords
 		batch.Rows, batch.DeleteNoncesAfter = nil, nil
@@ -267,6 +271,9 @@ func (s *Store) applyChunked(
 			bulk      func(txn *badger.Txn, limit int64) (bool, error)
 			bulkLimit int64
 			bulkMore  bool
+			// bulkRow is whether the delete is the row at the front of
+			// rows, not an op.
+			bulkRow bool
 		)
 		switch {
 		case len(accounts) > 0:
@@ -276,7 +283,20 @@ func (s *Store) applyChunked(
 			)]
 		case len(rows) > 0:
 			n = 0
-			rowChunk = rows[:takeRows(rows, entries, bytes)]
+			if !isRewardWipe(rows[0]) {
+				rowChunk = rows[:takeRows(rows, entries, bytes)]
+			} else if chunks == 0 {
+				// The batch's rollback goes first, alone: it restores
+				// rows the wipe then removes.
+				rowChunk = rows[:0]
+			} else {
+				epoch := binary.BigEndian.Uint64(rows[0].Key)
+				bulkRow = true
+				bulkLimit = max(entries/rewardWipeEntries, 1)
+				bulk = func(txn *badger.Txn, limit int64) (bool, error) {
+					return wipeRewardEpochLimited(txn, epoch, limit)
+				}
+			}
 		case len(records) > 0:
 			n = 0
 			recordChunk = records[:takeCount(
@@ -432,7 +452,9 @@ func (s *Store) applyChunked(
 		snaps = snaps[len(snapChunk):]
 		blocks = blocks[len(blockChunk):]
 		if bulk != nil && !bulkMore {
-			if len(snaps) > 0 && len(snapChunk) == 0 {
+			if bulkRow {
+				rows = rows[1:]
+			} else if len(snaps) > 0 && len(snapChunk) == 0 {
 				snaps = snaps[1:]
 			} else {
 				blocks = blocks[1:]
@@ -499,7 +521,9 @@ func takeRows(rows []RowPut, entries, bytes int64) int {
 	var c cost
 	n := 0
 	for _, r := range rows {
-		if n > 0 && !c.add(rowCost(r)).fits(entries, bytes) {
+		// A wipe is applied alone, in bounded transactions.
+		if n > 0 && (isRewardWipe(r) ||
+			!c.add(rowCost(r)).fits(entries, bytes)) {
 			break
 		}
 		c = c.add(rowCost(r))

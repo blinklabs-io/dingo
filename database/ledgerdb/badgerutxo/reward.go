@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -223,32 +224,48 @@ func DecodePostSnapshotCreditRowKey(
 	return slot, tag, key, kind, append([]byte(nil), r.b...), nil
 }
 
-// wipeRewardEpoch deletes every output row of epoch and its index rows,
-// without a journal entry: the metadata store's delete of an epoch's outputs
-// is never undone by a rollback.
-func wipeRewardEpoch(txn *badger.Txn, epoch uint64) error {
-	var keys [][]byte
-	opts := badger.DefaultIteratorOptions
-	opts.Prefix = RewardEpochPrefix(epoch)
-	opts.PrefetchValues = false
-	it := txn.NewIterator(opts)
-	for it.Rewind(); it.Valid(); it.Next() {
-		keys = append(keys, it.Item().KeyCopy(nil))
-	}
-	it.Close()
-	for _, idx := range keys {
-		k, err := DecodeRewardEpochRowKey(idx)
-		if err != nil {
-			return err
-		}
-		if err := txn.Delete(RewardOutputRowKey(k)); err != nil {
-			return err
-		}
-		if err := txn.Delete(idx); err != nil {
-			return err
-		}
-	}
-	return nil
+// rewardWipeEntries is the entries one output costs a wipe: its primary row
+// and its index row.
+const rewardWipeEntries = 2
+
+func isRewardWipe(r RowPut) bool { return r.WipeRewardEpoch }
+
+func hasRewardWipe(rows []RowPut) bool {
+	return slices.ContainsFunc(rows, isRewardWipe)
+}
+
+// wipeRewardEpochLimited deletes the output rows of epoch and their index
+// rows for at most limit outputs, without a journal entry: the metadata
+// store's delete of an epoch's outputs is never undone by a rollback. It
+// reports whether outputs are left. A row and its index row go in one
+// transaction, so a stop between transactions leaves whole outputs, and the
+// wipe run again deletes the rest.
+func wipeRewardEpochLimited(
+	txn *badger.Txn,
+	epoch uint64,
+	limit int64,
+) (bool, error) {
+	return deleteKeysLimited(
+		txn,
+		RewardEpochPrefix(epoch),
+		func([]byte) bool { return true },
+		limit,
+		func(txn *badger.Txn, keys [][]byte) error {
+			for _, idx := range keys {
+				k, err := DecodeRewardEpochRowKey(idx)
+				if err != nil {
+					return err
+				}
+				if err := txn.Delete(RewardOutputRowKey(k)); err != nil {
+					return err
+				}
+				if err := txn.Delete(idx); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
 }
 
 // RewardEpochs returns the epochs that have an output row, oldest first.
