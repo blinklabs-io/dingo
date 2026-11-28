@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -55,7 +56,7 @@ func requireReadChainBatchShapeOutcome(
 		)
 		require.NoError(t, ls.blockPipeline.Start(ctx))
 		defer func() {
-			require.NoError(t, ls.blockPipeline.Stop())
+			require.NoError(t, ls.blockPipeline.Stop(context.Background()))
 		}()
 	}
 	decoded, err := ls.decodeReadChainBatchWithError(

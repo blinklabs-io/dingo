@@ -425,6 +425,9 @@ func TestAssetIdentityHoldingsExpandReplays(t *testing.T) {
 	want := assetHoldings(t, db)
 
 	_, err := db.Exec(`
+DELETE FROM schema_migrations WHERE version > ?`, assetSplitVersion)
+	require.NoError(t, err)
+	_, err = db.Exec(`
 UPDATE schema_migrations
 SET phase = 'expand', dirty = 1, completed_at = NULL WHERE version = ?`,
 		assetSplitVersion)

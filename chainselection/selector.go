@@ -177,6 +177,14 @@ type ChainSelectorConfig struct {
 	// the last SetLocalTip value. It must not block or take locks shared with
 	// the selector.
 	AppliedTip func() (ochainsync.Tip, bool)
+	// LocalPointBlockNumber returns the block number of a point on the node's
+	// own chain, including a header queued ahead of the applied tip. A
+	// chainsync rollback carries only a point, and a re-intersect lands on
+	// the node's chain, possibly beyond any header the peer delivered on this
+	// connection; its block number then bounds the peer's next header. It is
+	// called without the selector mutex held. Nil, or false, leaves such a
+	// point with an unknown (zero) block number.
+	LocalPointBlockNumber func(ocommon.Point) (uint64, bool)
 	// PointOnLocalChain confirms a point against the current applied chain.
 	// The Genesis ingress gate calls it without holding the selector mutex.
 	PointOnLocalChain func(ocommon.Point) bool
@@ -4327,6 +4335,54 @@ func (cs *ChainSelector) catchingUpLocked(bestKnownBlock *uint64) bool {
 	return best-local > catchUpPinBlockThreshold
 }
 
+// observeLocalProgressLocked brings the stall clock read by
+// localTipStalledLocked up to date for one selection pass. SetLocalTip runs
+// only on the chain-sync recycler's tick, which by default is longer than
+// catchUpPinStallTimeout, so a block applied since its last call would
+// otherwise count as no progress until the next tick. And while no live peer
+// has delivered a header past the applied tip, the node has nothing to apply,
+// so it is not stalled however long the chain has been quiet: without
+// restarting the clock then, the first header after a quiet spell of catchUpPinStallTimeout
+// would release the pin to whichever peer delivered it first, away from an
+// incumbent that delivers the same block moments later. Must be called with
+// cs.mutex held for writing.
+func (cs *ChainSelector) observeLocalProgressLocked() {
+	applied := cs.localTip.BlockNumber
+	if cs.config.AppliedTip != nil {
+		if tip, ok := cs.config.AppliedTip(); ok {
+			applied = tip.BlockNumber
+			if applied > cs.localTipProgressBlock {
+				cs.localTipProgressAt = cs.now()
+			}
+			cs.localTipProgressBlock = applied
+		}
+	}
+	// A clock that never started stays unstarted, as localTipStalledLocked
+	// documents for a freshly started node.
+	if cs.localTipProgressAt.IsZero() {
+		return
+	}
+	if !cs.deliveredFrontierPastLocked(applied) {
+		cs.localTipProgressAt = cs.now()
+	}
+}
+
+// deliveredFrontierPastLocked reports whether any live, eligible, non-stale
+// peer has delivered a header past block. It deliberately ignores Genesis
+// corroboration: a challenger leading with headers no other peer has
+// delivered yet is uncorroborated, and it is exactly what a node with a
+// silent incumbent is waiting to apply, so the stall clock must keep running
+// for it. Must be called with cs.mutex held.
+func (cs *ChainSelector) deliveredFrontierPastLocked(block uint64) bool {
+	for connId, pt := range cs.peerTips {
+		if pt.SelectionTip().BlockNumber > block &&
+			cs.peerLiveEligibleNonStaleLocked(connId, pt) {
+			return true
+		}
+	}
+	return false
+}
+
 // localTipStalledLocked reports whether the applied local tip has stopped
 // advancing for at least catchUpPinStallTimeout. This is the progress-aware
 // escape: when true, the pin releases so the node can switch away from a
@@ -4559,6 +4615,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	// One frontier serves the whole pass: the mode check, every candidate,
 	// the incumbent re-check and the anti-flap pin.
 	bestKnownBlock := cs.prepareSelectionLocked()
+	cs.observeLocalProgressLocked()
 	// Compute Genesis corroboration status once per evaluation, independent of
 	// which peer (if any) is ultimately selected, so a stalled selection still
 	// reports why the densest fast source was denied.
@@ -4872,9 +4929,11 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 		return
 	}
 
+	pointBlock := cs.localPointBlockNumber(e.Point)
+
 	// Fast path: a tracked peer needs no liveness decision, so the rollback is
 	// applied in place under a single lock acquisition.
-	if cs.applyRollbackToTrackedPeer(e) {
+	if cs.applyRollbackToTrackedPeer(e, pointBlock) {
 		cs.EvaluateAndSwitch()
 		return
 	}
@@ -4914,12 +4973,14 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 		cs.rollbackEagernessDeliveryLocked(e.ConnectionId, e.Point)
 		if deliveredTip := cs.deliveredPeerTips[e.ConnectionId]; deliveredTip != nil {
 			deliveredTip.ApplyRollback(e.Point, e.Tip)
+			deliveredTip.restoreRollbackBlockNumber(e.Point, pointBlock)
 		}
 		cs.rebuildPendingAdmissionStateLocked()
 		// Re-check under the lock: a concurrent roll forward (or another
 		// rollback) may have created the entry while liveness was evaluated.
 		if peerTip, exists := cs.peerTips[e.ConnectionId]; exists {
 			peerTip.ApplyRollback(e.Point, e.Tip)
+			peerTip.restoreRollbackBlockNumber(e.Point, pointBlock)
 			cs.rebuildPendingAdmissionStateLocked()
 			shouldEvaluate = true
 			return
@@ -4948,10 +5009,29 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 	}
 }
 
+// localPointBlockNumber resolves point's block number on the node's own chain
+// through LocalPointBlockNumber, returning 0 when it is unknown. Must be called
+// without cs.mutex held.
+func (cs *ChainSelector) localPointBlockNumber(point ocommon.Point) uint64 {
+	if cs.config.LocalPointBlockNumber == nil ||
+		(point.Slot == 0 && len(point.Hash) == 0) {
+		return 0
+	}
+	blockNumber, ok := cs.config.LocalPointBlockNumber(point)
+	if !ok {
+		return 0
+	}
+	return blockNumber
+}
+
 // applyRollbackToTrackedPeer applies a rollback to an already-tracked peer and
-// reports whether it did. It takes cs.mutex itself and calls no configured
-// callback while holding it.
-func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
+// reports whether it did. pointBlock is the rollback point's block number on
+// the node's own chain, or 0 when unknown. It takes cs.mutex itself and calls
+// no configured callback while holding it.
+func (cs *ChainSelector) applyRollbackToTrackedPeer(
+	e PeerRollbackEvent,
+	pointBlock uint64,
+) bool {
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
 	peerTip, exists := cs.peerTips[e.ConnectionId]
@@ -4963,9 +5043,11 @@ func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
 	delete(cs.pendingPeerTipFrontiers, e.ConnectionId)
 	cs.prunePeerTipRejectionReportsLocked()
 	peerTip.ApplyRollback(e.Point, e.Tip)
+	peerTip.restoreRollbackBlockNumber(e.Point, pointBlock)
 	cs.rollbackEagernessDeliveryLocked(e.ConnectionId, e.Point)
 	if deliveredTip := cs.deliveredPeerTips[e.ConnectionId]; deliveredTip != nil {
 		deliveredTip.ApplyRollback(e.Point, e.Tip)
+		deliveredTip.restoreRollbackBlockNumber(e.Point, pointBlock)
 	}
 	cs.rebuildPendingAdmissionStateLocked()
 	cs.computeEagernessLimitLocked(nil, cs.localTip)

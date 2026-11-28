@@ -1246,6 +1246,8 @@ func TestBackfillFlushesByteBatchWithinTransactionLevel(t *testing.T) {
 			},
 		},
 		UtxoOffsets: utxoOffsets,
+		// The datum is not in a block: it names it in the test archive.
+		Payloads: testPayloads(t, db),
 	}
 
 	require.NoError(t, backfill.processBlockTxsBatched(

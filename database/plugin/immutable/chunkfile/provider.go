@@ -41,7 +41,36 @@ var ErrStoreOpen = errors.New("immutable chunk store is already open")
 
 // Config is the provider configuration. The provider has no settings of its
 // own: the directory derives from the data directory.
-type Config struct{}
+// Config configures the local chunk-file ImmutableDB.
+type Config struct {
+	// Compression is how chunks the store completes are kept: "none" (the
+	// default) as plain .chunk, .primary and .secondary files, or "mithril"
+	// as one zstd-compressed tar per chunk in the Mithril immutable archive
+	// layout. Chunks already on disk keep their form; both are read.
+	Compression string `yaml:"compression"`
+	// ArchiveCacheMB bounds, in MiB, the decompressed archived chunks kept in
+	// memory for block reads. Zero uses immutable.DefaultArchiveCacheBytes.
+	ArchiveCacheMB int `yaml:"archiveCacheMb"`
+}
+
+// Compression values.
+const (
+	CompressionNone    = "none"
+	CompressionMithril = "mithril"
+)
+
+func (c Config) compress() (bool, error) {
+	switch c.Compression {
+	case "", CompressionNone:
+		return false, nil
+	case CompressionMithril:
+		return true, nil
+	}
+	return false, fmt.Errorf(
+		"invalid ImmutableDB compression %q (want %q or %q)",
+		c.Compression, CompressionNone, CompressionMithril,
+	)
+}
 
 // RegisterProvider registers the chunk-file provider with host. It is
 // registered in every build.
@@ -57,13 +86,24 @@ func RegisterProvider(host *hostplugin.Host) error {
 		func() Config { return Config{} },
 		func(
 			_ context.Context,
-			_ Config,
+			cfg Config,
 			deps immplugin.ProviderDependencies,
 		) (immplugin.ImmutableDB, hostplugin.Instance, error) {
+			compress, err := cfg.compress()
+			if err != nil {
+				return nil, nil, err
+			}
+			if cfg.ArchiveCacheMB < 0 {
+				return nil, nil, fmt.Errorf(
+					"invalid ImmutableDB archiveCacheMb %d", cfg.ArchiveCacheMB,
+				)
+			}
+			if cfg.ArchiveCacheMB > 0 {
+				immutable.SetArchiveCacheBytes(int64(cfg.ArchiveCacheMB) << 20)
+			}
 			dataDir := deps.DataDir
 			var temporary string
 			if dataDir == "" {
-				var err error
 				temporary, err = os.MkdirTemp("", "dingo-immutable-")
 				if err != nil {
 					return nil, nil, fmt.Errorf("create ephemeral ImmutableDB: %w", err)
@@ -73,6 +113,7 @@ func RegisterProvider(host *hostplugin.Host) error {
 			svc := &service{
 				dir:       filepath.Join(dataDir, immplugin.DirName),
 				temporary: temporary,
+				compress:  compress,
 			}
 			return svc, hostplugin.Lifecycle{StopFunc: svc.stop}, nil
 		},
@@ -82,6 +123,7 @@ func RegisterProvider(host *hostplugin.Host) error {
 type service struct {
 	dir       string
 	temporary string
+	compress  bool
 
 	mu      sync.Mutex
 	open    *store
@@ -99,7 +141,9 @@ func (s *service) Open(geom immutable.Geometry) (immplugin.Store, error) {
 	if s.open != nil {
 		return nil, ErrStoreOpen
 	}
-	inner, err := immutable.OpenStore(s.dir, geom)
+	inner, err := immutable.OpenStoreWithOptions(
+		s.dir, geom, immutable.StoreOptions{Compress: s.compress},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -109,6 +153,16 @@ func (s *service) Open(geom immutable.Geometry) (immplugin.Store, error) {
 
 func (s *service) ReadBlockAt(loc immutable.Location) (uint, []byte, error) {
 	return immutable.ReadBlockAt(s.dir, loc)
+}
+
+// ArchiveChunk archives completed chunk num when the provider compresses.
+func (s *service) ArchiveChunk(num uint64) error {
+	if !s.compress {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return immutable.ArchiveCompletedChunk(s.dir, num)
 }
 
 func (s *service) ListFiles() ([]immutable.File, error) {

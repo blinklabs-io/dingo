@@ -1,8 +1,8 @@
 # Koios parity reference
 
-The parity tracker compares closed-epoch ledger results with Koios. The
-standalone command and the node's epoch-boundary observer share comparison
-logic. The observer reads consensus results from the LedgerDB and historical
+The parity tracker compares closed-epoch ledger results with Koios. It runs
+in the node as an epoch-boundary observer, enabled by `koiosParity` in the node
+configuration; there is no separate binary. The observer reads consensus results from the LedgerDB and historical
 reward-account outputs from the IndexerDB. An IndexerDB that has not reached
 the comparison point cannot establish a mismatch.
 
@@ -101,5 +101,4 @@ changed, and cancellation stops its workers.
 
 The comparison and epoch-selection contracts live on their declarations in
 `check.go`, `compare.go`, `cache.go` and `observer.go`. Configuration is
-specified in `dingo.yaml.example`; this reference does not duplicate defaults
-or command usage.
+specified in `dingo.yaml.example`; this reference does not duplicate defaults.

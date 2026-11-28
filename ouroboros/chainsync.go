@@ -1638,6 +1638,9 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 		// Wait for next block in a separate goroutine so we can
 		// also monitor the connection for errors. This avoids
 		// leaking the monitor goroutine when Next returns first.
+		if o.chainsyncServerAwaitNextHook != nil {
+			o.chainsyncServerAwaitNextHook()
+		}
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
@@ -2403,6 +2406,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ocommon.NewPoint(blockSlot, blockHash),
 			)
 		}
+		defer o.csjObserveHeaderSent(ctx.ConnectionId)()
 		_, span := tracing.StartHeader(
 			context.Background(),
 			tracing.StageHeaderReceived,
@@ -4277,7 +4281,11 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 						"connection_id",
 						connId.String(),
 					)
-					_ = o.connManager.CloseConnectionWithReason(conn, e.Reason)
+					_ = o.connManager.CloseConnectionWithReason(
+						context.WithoutCancel(ctx),
+						conn,
+						e.Reason,
+					)
 				}
 				return
 			}
@@ -4398,7 +4406,11 @@ func (o *Ouroboros) closeConnectionForChainsyncResync(
 		"connection_id", connId.String(),
 		"reason", reason,
 	)
-	_ = o.connManager.CloseConnectionWithReason(conn, reason)
+	_ = o.connManager.CloseConnectionWithReason(
+		context.Background(),
+		conn,
+		reason,
+	)
 }
 
 // chainsyncReintersectRun is one in-place re-intersect of a chainsync client.

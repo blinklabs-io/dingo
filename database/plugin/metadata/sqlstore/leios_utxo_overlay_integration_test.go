@@ -43,6 +43,7 @@ func testLeiosRetainedUtxoFallback(t *testing.T, store *Store) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewLeiosClosureBatchAccumulator()
+	bindTestPayloads(t, store, acc)
 	defer acc.Reset()
 	enabled, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
 	require.NoError(t, err)

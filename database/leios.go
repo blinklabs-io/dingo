@@ -39,6 +39,10 @@ type leiosStoreState struct {
 	owned bool
 	// closed is set by Close so a later read cannot reopen the store.
 	closed bool
+	// peer is the database whose LeiosDB this one reads, as the IndexerDB
+	// reads the ledger's: both open the same data directory, and one store
+	// cannot be opened twice.
+	peer *Database
 	// migrated caches a recorded MigrationDone so the read path stops
 	// consulting the shared blob store's legacy keys.
 	migrated atomic.Bool
@@ -51,6 +55,9 @@ type leiosStoreState struct {
 func (d *Database) LeiosDB() (leiosdb.Store, error) {
 	d.leiosMu.Lock()
 	defer d.leiosMu.Unlock()
+	if d.leios.store == nil && d.leios.peer != nil {
+		return d.leios.peer.LeiosDB()
+	}
 	return d.openLeiosDBLocked()
 }
 
@@ -363,6 +370,9 @@ func (d *Database) existingLeiosDB() (leiosdb.Store, error) {
 	defer d.leiosMu.Unlock()
 	if d.leios.store != nil {
 		return d.leios.store, nil
+	}
+	if d.leios.peer != nil {
+		return d.leios.peer.existingLeiosDB()
 	}
 	if d.leios.closed || d.config.DataDir == "" {
 		return nil, types.ErrBlobKeyNotFound

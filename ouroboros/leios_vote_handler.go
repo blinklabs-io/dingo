@@ -26,8 +26,12 @@ import (
 // nil-check it so the protocols stay functional (receive-and-log only)
 // when vote management is not wired.
 type LeiosVoteHandler interface {
-	// HandleVote validates and stores a vote received from a peer.
+	// HandleVote validates and stores a CIP-0164 vote received from a
+	// peer, resolving its election from the announcing ranking block.
 	HandleVote(connKey string, vote lcommon.LeiosVote) error
+	// HandleLegacyVote validates and stores a vote in the earlier draft
+	// shape that LeiosNotify offers may still carry.
+	HandleLegacyVote(connKey string, vote lcommon.LeiosLegacyVote) error
 	HandlePrototypeVote(connKey string, vote lcommon.LeiosPrototypeVote) error
 	ObserveAnnouncement(slot uint64, rbHash, ebHash lcommon.Blake2b256)
 	// NextVotes blocks until count votes not originating from connKey

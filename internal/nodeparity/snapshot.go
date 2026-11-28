@@ -384,7 +384,7 @@ func SnapshotAtTip(
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 	return QuerySnapshot(conn, nil)
 }
 

@@ -120,6 +120,7 @@ func runBabbageGuardProposals(
 	t.Cleanup(func() { _ = db.Close() })
 	for _, mode := range []string{"compute", "forecast", "apply"} {
 		txn := db.Transaction(context.Background(), true)
+		bindTestPayloads(t, db, txn)
 		for epoch, start := range map[uint64]uint64{
 			classicTestSubmissionEpoch - 1: classicTestEpochStart - 100,
 			classicTestSubmissionEpoch:     classicTestEpochStart,

@@ -57,9 +57,9 @@ func newHeldManifestOfferPeers(
 ) (*Ouroboros, *gouroboros.Connection, *gouroboros.Connection) {
 	t.Helper()
 	first, firstDone := newLeiosFetchConversation(t, leiosFetchHandshake())
-	t.Cleanup(func() { _ = first.Close() })
+	t.Cleanup(func() { _ = first.Close(context.Background()) })
 	second, secondDone := newLeiosFetchConversation(t, leiosFetchHandshake())
-	t.Cleanup(func() { _ = second.Close() })
+	t.Cleanup(func() { _ = second.Close(context.Background()) })
 	cm := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{},
 	)
@@ -351,7 +351,7 @@ func TestLeiosTxsOfferRetriesAfterAdmissionReleases(t *testing.T) {
 			},
 		},
 	))
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
 	require.True(t, cm.AddConnection(conn, false, "peer"))
 	t.Cleanup(func() {
@@ -857,7 +857,7 @@ func TestLeiosTxsOfferHandsOffAcrossMultipleFailingPeers(t *testing.T) {
 func TestLeiosTxsOfferCancellationBeforeWorkerLaunch(t *testing.T) {
 	t.Parallel()
 	conn, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
 	require.True(t, cm.AddConnection(conn, false, "peer"))
 	o := newOuroboros(OuroborosConfig{
@@ -1237,7 +1237,7 @@ func TestLeiosTxsOfferCacheMissIntentSurvivesOwnerCancellation(t *testing.T) {
 	require.NoError(t, err)
 	point := ocommon.NewPoint(471, lcommon.Blake2b256Hash(manifestRaw).Bytes())
 	conn, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
 	require.True(t, cm.AddConnection(conn, false, "cache-miss-owner"))
 	t.Cleanup(func() {
@@ -1517,8 +1517,8 @@ func TestLeiosTxsOfferDisconnectedWaiterIsRemoved(t *testing.T) {
 	t.Parallel()
 	first, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
 	second, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
-	t.Cleanup(func() { _ = first.Close() })
-	t.Cleanup(func() { _ = second.Close() })
+	t.Cleanup(func() { _ = first.Close(context.Background()) })
+	t.Cleanup(func() { _ = second.Close(context.Background()) })
 	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
 	require.True(t, cm.AddConnection(first, false, "first"))
 	require.True(t, cm.AddConnection(second, false, "second"))
@@ -1612,7 +1612,7 @@ func TestLeiosManifestOfferRechecksCacheAfterDispatch(t *testing.T) {
 			Messages: []protocol.Message{leiosfetch.NewMsgBlock(raw)},
 		},
 	))
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	cm := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{},
 	)
@@ -1677,7 +1677,7 @@ func TestLeiosManifestOfferReleasesClaimAfterSuccessfulFetch(t *testing.T) {
 			Messages: []protocol.Message{leiosfetch.NewMsgBlock(raw)},
 		},
 	))
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	cm := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{},
 	)

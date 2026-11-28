@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
@@ -136,6 +137,23 @@ type blockfetchSendDrainWaiter interface {
 	WaitSendQueueDrained(time.Duration) bool
 }
 
+// blockfetchPacedServer gives the gOuroboros block-fetch server the send-queue
+// wait that blockfetchServerWaitForSendDrain looks for. Server does not
+// promote the wait of its protocol instance, so without this wrapper that
+// function's type assertion fails and the sender runs ahead of the peer.
+type blockfetchPacedServer struct {
+	*blockfetch.Server
+}
+
+var _ blockfetchSendDrainWaiter = blockfetchPacedServer{}
+
+// WaitSendQueueDrained waits on the server's current protocol instance.
+func (s blockfetchPacedServer) WaitSendQueueDrained(
+	timeout time.Duration,
+) bool {
+	return s.ProtocolInstance().WaitSendQueueDrained(timeout)
+}
+
 // managedConnection is what a protocol handler may do with a connection the
 // connection manager owns: wait for its teardown and drop the transport. It
 // deliberately has no ErrorChan: the manager is the only receiver of that
@@ -156,7 +174,12 @@ type connWithDone struct {
 
 func (c connWithDone) Done() <-chan struct{} { return c.done }
 
-func (c connWithDone) Close() error { return c.conn.Close() }
+// Close waits, for a bounded time, until no callback of the connection is
+// still running. It is only used from goroutines the callbacks start, never
+// from a callback of the connection itself.
+func (c connWithDone) Close() error {
+	return connmanager.CloseOuroborosConn(context.Background(), c.conn)
+}
 
 func (c connWithDone) CloseError() error {
 	if c.closeErr == nil {
@@ -615,7 +638,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			start,
 			end,
 			chainIter,
-			ctx.Server,
+			blockfetchPacedServer{Server: ctx.Server},
 			conn,
 			maxBlocks,
 		)
@@ -976,7 +999,13 @@ func (o *Ouroboros) blockfetchRecordNoBlocksAndMaybeClose(
 	if conn == nil {
 		return
 	}
-	o.closeBlockfetchConnection(conn, connId.String(), closeReason)
+	// This runs inside the connection's blockfetch callback, so only begin
+	// the shutdown: waiting for the callback here would wait for ourselves.
+	o.closeBlockfetchConnection(
+		connmanager.OuroborosCloser{Conn: conn, Begin: true},
+		connId.String(),
+		closeReason,
+	)
 }
 
 // blockfetchRecordNoBlocks increments the failed-lookup counter for connId and

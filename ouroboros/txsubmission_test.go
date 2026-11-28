@@ -343,6 +343,52 @@ type txsubmissionCorruptingService struct {
 	consumers   map[ouroboros.ConnectionId]mempool.Consumer
 }
 
+// txsubmissionBlockingWaitService reports each blocking NextTx call that node
+// B's RequestTxIds callback makes on a consumer it found.
+type txsubmissionBlockingWaitService struct {
+	mempool.Service
+	onBlockingNextTx func()
+}
+
+type txsubmissionBlockingWaitConsumer struct {
+	mempool.Consumer
+	onBlockingNextTx func()
+}
+
+func (s *txsubmissionBlockingWaitService) FindConsumer(
+	connId ouroboros.ConnectionId,
+) mempool.Consumer {
+	consumer := s.Service.FindConsumer(connId)
+	if consumer == nil {
+		return nil
+	}
+	return &txsubmissionBlockingWaitConsumer{
+		Consumer:         consumer,
+		onBlockingNextTx: s.onBlockingNextTx,
+	}
+}
+
+func (c *txsubmissionBlockingWaitConsumer) NextTx(
+	blocking bool,
+) *mempool.MempoolTransaction {
+	if blocking {
+		c.onBlockingNextTx()
+	}
+	return c.Consumer.NextTx(blocking)
+}
+
+// NextTxUntil is the call the RequestTxIds callback makes for a blocking
+// wait, so it is the one reported.
+func (c *txsubmissionBlockingWaitConsumer) NextTxUntil(
+	blocking bool,
+	stop <-chan struct{},
+) *mempool.MempoolTransaction {
+	if blocking {
+		c.onBlockingNextTx()
+	}
+	return c.Consumer.NextTxUntil(blocking, stop)
+}
+
 // txsubmissionServiceWithoutHeadroom limits the wrapped service's method set
 // to mempool.Service so the relay pump uses its batched-request path.
 type txsubmissionServiceWithoutHeadroom struct {
@@ -719,6 +765,21 @@ func TestTxSubmissionClientRequestCallbacksMissingConsumer(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "no mempool consumer")
 	require.Nil(t, bodies)
+}
+
+// TestTxSubmissionClientBlockingRequestMissingConsumerStops verifies that a
+// blocking RequestTxIds with no mempool consumer, as after the connection
+// closes or the mempool stops, ends the protocol with MsgDone rather than
+// failing the connection.
+func TestTxSubmissionClientBlockingRequestMissingConsumerStops(t *testing.T) {
+	t.Parallel()
+
+	o, connId := newTxSubmissionTestOuroboros(t)
+	ctx := txsubmission.CallbackContext{ConnectionId: connId}
+
+	ids, err := o.txsubmissionClientRequestTxIds(ctx, true, 0, 1)
+	require.ErrorIs(t, err, txsubmission.ErrStopServerProcess)
+	require.Nil(t, ids)
 }
 
 // TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance verifies a
@@ -1238,6 +1299,9 @@ type txSubmissionRelayHarnessOpts struct {
 	// larger than node A can ever admit at its current capacity.
 	permanentFullBodyA   []byte
 	permanentFullTxSizeA int
+	// onBlockingNextTxB runs when node B's RequestTxIds callback starts a
+	// blocking NextTx on the consumer it found.
+	onBlockingNextTxB func()
 }
 
 func newTxSubmissionRelayHarnessWithOpts(
@@ -1340,6 +1404,12 @@ func newTxSubmissionRelayHarnessWithOpts(
 			consumers: make(
 				map[ouroboros.ConnectionId]mempool.Consumer,
 			),
+		}
+	}
+	if opts.onBlockingNextTxB != nil {
+		nodeBMempool = &txsubmissionBlockingWaitService{
+			Service:          nodeBMempool,
+			onBlockingNextTx: opts.onBlockingNextTxB,
 		}
 	}
 	nodeB.mempool = nodeBMempool
@@ -1476,8 +1546,8 @@ func newTxSubmissionRelayHarnessWithOpts(
 // so callers can reliably observe goroutine counts settling afterward.
 func (h *txSubmissionRelayHarness) close(t *testing.T) {
 	t.Helper()
-	_ = h.connA.Close()
-	_ = h.connB.Close()
+	_ = h.connA.Close(context.Background())
+	_ = h.connB.Close(context.Background())
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = h.cmA.Stop(stopCtx)
@@ -1828,6 +1898,61 @@ func TestTxSubmissionServerInitExitsCleanlyOnPeerDisconnect(t *testing.T) {
 		5*time.Second,
 		20*time.Millisecond,
 		"expected relay and connection goroutines to exit after peer disconnect",
+	)
+}
+
+// TestTxSubmissionClientEndsBlockingWaitWithDoneWhenMempoolStops stops node
+// B's mempool, as node shutdown does before it drains connections, while
+// node A's server asks B for transaction IDs. A blocking request may not be
+// answered with an empty list: the reference client answers a stop with
+// MsgDone, and gOuroboros refuses the empty list as a protocol violation,
+// which closes B's connection with a protocol error.
+func TestTxSubmissionClientEndsBlockingWaitWithDoneWhenMempoolStops(t *testing.T) {
+	t.Parallel()
+
+	// The first blocking wait returns the transaction; the second finds
+	// the mempool empty and parks. Stopping only after it has begun keeps
+	// the test on the stopped-wait path: a request that arrives after the
+	// stop finds no consumer, which is answered the same way.
+	var blockingWaits atomic.Int32
+	h := newTxSubmissionRelayHarnessWithOpts(
+		t,
+		txSubmissionRelayHarnessOpts{
+			onBlockingNextTxB: func() { blockingWaits.Add(1) },
+		},
+	)
+	defer h.close(t)
+
+	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
+	require.NoError(t, err)
+	require.NoError(t, h.mB.AddTransaction(context.Background(), txsubmissionRelayTestEraId, txBytes))
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+	require.Eventually(
+		t,
+		func() bool {
+			return len(h.mA.Transactions()) == 1 && blockingWaits.Load() >= 2
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected node B's transaction to be relayed and B to wait for another",
+	)
+
+	require.NoError(t, h.mB.Stop(context.Background()))
+
+	client := h.connB.TxSubmission().Client.ProtocolInstance()
+	require.Eventually(
+		t,
+		client.IsInTerminalOrIdleState,
+		5*time.Second,
+		10*time.Millisecond,
+		"expected node B's client to end the protocol",
+	)
+	require.Never(
+		t,
+		func() bool { return h.cmB.GetConnectionById(h.connB.Id()) == nil },
+		time.Second,
+		20*time.Millisecond,
+		"node B closed its connection: it refused its own empty reply to a blocking request",
 	)
 }
 

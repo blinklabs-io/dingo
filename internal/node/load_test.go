@@ -1125,6 +1125,7 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 	db := newTestDB(t)
 	rejected := errors.New("reject trusted replay batch")
 	noBatch := errors.New("trusted replay ended without a batch")
+	replayStarted := make(chan struct{})
 	firstBatchReceived := make(chan struct{})
 	rejectReplay := make(chan struct{})
 
@@ -1138,6 +1139,7 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 		ctx context.Context,
 		batches <-chan []gledger.Block,
 	) error {
+		close(replayStarted)
 		select {
 		case _, ok := <-batches:
 			if !ok {
@@ -1173,21 +1175,48 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 			db,
 		)
 	}()
-	testutil.RequireReceive(
-		t, firstBatchReceived, 5*time.Second, "first replay batch",
-	)
-	testutil.WaitForCondition(
-		t,
+	// Each wait also watches loadErr: a load that fails early reports its
+	// error at once rather than at the deadline with no cause.
+	waitWhileLoading := func(msg string, reached func() bool) {
+		t.Helper()
+		deadline := time.After(testutil.AsyncWait)
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for !reached() {
+			select {
+			case err := <-loadErr:
+				t.Fatalf("LoadWithDB returned before %s: %v", msg, err)
+			case <-deadline:
+				t.Fatalf("timeout waiting for %s", msg)
+			case <-tick.C:
+			}
+		}
+	}
+	closed := func(ch <-chan struct{}) func() bool {
+		return func() bool {
+			select {
+			case <-ch:
+				return true
+			default:
+				return false
+			}
+		}
+	}
+	// Wait for LoadWithDB to reach replay before timing the first batch:
+	// the setup before it is not the step under test, and is what stalls
+	// on a loaded host.
+	waitWhileLoading("trusted replay started", closed(replayStarted))
+	waitWhileLoading("first replay batch", closed(firstBatchReceived))
+	waitWhileLoading(
+		"the copier must persist a later batch before replay rejects the first",
 		func() bool {
 			return replayState.PrimaryChainTip().BlockNumber >
 				firstCopiedTip.BlockNumber
 		},
-		5*time.Second,
-		"the copier must persist a later batch before replay rejects the first",
 	)
 	close(rejectReplay)
 	err := testutil.RequireReceive(
-		t, loadErr, 5*time.Second, "load failure after replay rejection",
+		t, loadErr, testutil.AsyncWait, "load failure after replay rejection",
 	)
 	require.ErrorIs(t, err, rejected)
 	require.Greater(

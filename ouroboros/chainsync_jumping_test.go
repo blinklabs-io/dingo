@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -112,14 +113,19 @@ func (p *csjPeer) holds(point ocommon.Point) bool {
 }
 
 type csjHarness struct {
-	t          *testing.T
-	o          *Ouroboros
-	cm         *connmanager.ConnectionManager
-	active     atomic.Bool
-	fragment   atomic.Uint64 // dynamo fragment head block
-	agreements chan csjAgreement
-	rejections chan ouroboros.ConnectionId
-	stopped    chan ouroboros.ConnectionId
+	t        *testing.T
+	o        *Ouroboros
+	cm       *connmanager.ConnectionManager
+	active   atomic.Bool
+	fragment atomic.Uint64 // dynamo fragment head block
+	// deliveryEntered and deliveryGate let a test hold delivery immediately
+	// before CSJ observes it, then release it to exercise scheduling order.
+	deliveryEntered   chan struct{}
+	deliveryGate      chan struct{}
+	delayNextDelivery atomic.Bool
+	agreements        chan csjAgreement
+	rejections        chan ouroboros.ConnectionId
+	stopped           chan ouroboros.ConnectionId
 	// unidentified holds connections without a corroboration identity.
 	unidentified sync.Map // ouroboros.ConnectionId -> struct{}
 	peers        int
@@ -164,6 +170,10 @@ func newCsjHarness(t *testing.T, enabled bool) *csjHarness {
 	o.config.ChainsyncRecordDeliveredPeerTip = func(
 		chainselection.PeerTipUpdateEvent,
 	) {
+		if h.delayNextDelivery.CompareAndSwap(true, false) {
+			close(h.deliveryEntered)
+			<-h.deliveryGate
+		}
 	}
 	o.config.ChainsyncJumping = ChainsyncJumpingConfig{
 		Enabled: enabled,
@@ -289,12 +299,12 @@ func (h *csjHarness) addPeer(name string, tipBlock uint64) *csjPeer {
 		h.o.chainsyncConnectionConfigOption(t.Context(), true),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = clientConn.Close() })
+	t.Cleanup(func() { _ = clientConn.Close(context.Background()) })
 	select {
 	case err := <-serverErrCh:
 		t.Fatalf("peer connection setup failed: %v", err)
 	case serverConn := <-serverConnCh:
-		t.Cleanup(func() { _ = serverConn.Close() })
+		t.Cleanup(func() { _ = serverConn.Close(context.Background()) })
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for peer connection setup")
 	}
@@ -344,6 +354,34 @@ func (h *csjHarness) awaitRound() {
 		defer h.o.csj.mu.Unlock()
 		return !h.o.csj.roundInFlight
 	}, 5*time.Second, time.Millisecond)
+}
+
+// awaitJumps waits for every targeted jumper request to finish. A targeted
+// first jump does not set roundInFlight, and its agreement callback runs
+// before the request clears the jumper's jumping flag.
+func (h *csjHarness) awaitJumps() {
+	h.t.Helper()
+	require.Eventually(h.t, func() bool {
+		h.o.csj.mu.Lock()
+		defer h.o.csj.mu.Unlock()
+		for _, jumper := range h.o.csj.jumpers {
+			if jumper.jumping {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, time.Millisecond)
+}
+
+// awaitRoundStarted waits until a round started reading the candidate fragment
+// after reads was captured, then waits for that round to finish.
+func (h *csjHarness) awaitRoundStarted(reads int64) {
+	h.t.Helper()
+	require.Eventually(h.t, func() bool {
+		return h.fragmentReads.Load() > reads
+	}, 5*time.Second, time.Millisecond,
+		"jump round to read the candidate fragment")
+	h.awaitRound()
 }
 
 func (h *csjHarness) requireAgreement(
@@ -527,6 +565,7 @@ func TestChainsyncJumpingObjectorStreamsFromLastAgreedPoint(t *testing.T) {
 	t.Parallel()
 	h := newCsjHarness(t, true)
 	dynamo, jumpers := h.startDynamoAndJumpers(100, 100)
+	h.awaitJumps()
 	behind, forked := jumpers[0], jumpers[1]
 	behind.tipBlock.Store(17)
 	forked.forkBlock.Store(16)
@@ -1031,13 +1070,29 @@ func TestChainsyncJumpingDifferentHeaderAtSameBlockIsARestart(t *testing.T) {
 	h := newCsjHarness(t, true)
 	dynamo, _ := h.startDynamoAndJumpers(100)
 
-	h.fragment.Store(15)
-	h.deliver(dynamo.connId, 15)
-	h.awaitRound()
-	h.deliverPoint(dynamo.connId, 15, ocommon.NewPoint(151, []byte("forked")))
+	h.deliveryEntered = make(chan struct{})
+	h.deliveryGate = make(chan struct{})
+	h.delayNextDelivery.Store(true)
+	reads := h.fragmentReads.Load()
+	h.fragment.Store(20)
+	delivered := make(chan struct{})
+	go func() {
+		h.deliver(dynamo.connId, 20)
+		close(delivered)
+	}()
+	testutil.RequireReceive(t, h.deliveryEntered, 5*time.Second,
+		"first delivery before CSJ observation")
+	close(h.deliveryGate)
+	testutil.RequireReceive(t, delivered, 5*time.Second,
+		"first delivery after CSJ observation")
+	h.awaitRoundStarted(reads)
+	forked := ocommon.NewPoint(201, []byte("forked"))
+	h.deliverPoint(dynamo.connId, 20, forked)
 
 	h.o.csj.mu.Lock()
 	defer h.o.csj.mu.Unlock()
-	require.Equal(t, uint64(15), h.o.csj.restartBlock)
+	require.Equal(t, uint64(20), h.o.csj.restartBlock)
+	require.Equal(t, forked, h.o.csj.streamPoint,
+		"the restart header must follow the first round's delivery")
 	require.True(t, h.o.csj.roundInFlight)
 }

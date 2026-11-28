@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiready"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
@@ -122,7 +123,38 @@ func (n *Node) openIndexerWriter(ctx context.Context) error {
 	}
 	n.warnMainnetIndexerCapacity(store, localIndexerCapacity)
 	n.indexerDB, n.indexerWriter, n.indexerStore = db, writer, store
+	n.db.SetRolledBackBlockHold(rolledBackBlockHold(store))
 	return nil
+}
+
+// rolledBackBlockHold reports the IndexerDB's tip as the block the ledger's
+// rolled-back bodies are held for.
+func rolledBackBlockHold(store *indexerdb.Store) database.RolledBackBlockHold {
+	return func() (ocommon.Point, bool, error) {
+		tip, err := store.Tip(nil)
+		if err != nil {
+			return ocommon.Point{}, false, err
+		}
+		if tip.IsZero() {
+			return ocommon.Point{}, false, nil
+		}
+		return ocommon.NewPoint(tip.Slot, tip.Hash), true, nil
+	}
+}
+
+// releaseRolledBackBlocks lets the ledger delete the rolled-back bodies the
+// IndexerDB no longer needs. The writer calls it from its own goroutine, so
+// the release runs on one of its own, at most one at a time: a pass that
+// finds one running leaves its work to that run's successor.
+func (n *Node) releaseRolledBackBlocks() {
+	ledgerState := n.ledgerState
+	if ledgerState == nil || !n.releasingBlocks.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer n.releasingBlocks.Store(false)
+		ledgerState.ReleaseRolledBackBlocks(context.Background())
+	}()
 }
 
 // buildIndexerWriter opens an IndexerDB over consensus, with its metadata
@@ -150,6 +182,7 @@ func (n *Node) buildIndexerWriter(
 	if err != nil {
 		return nil, nil, err
 	}
+	db.SetLiveOutputs(nodeLiveOutputs{node: n})
 	var factRows metadata.LedgerFacts
 	if n.ledgerState != nil && consensus == n.db {
 		factRows = n.ledgerState
@@ -164,6 +197,7 @@ func (n *Node) buildIndexerWriter(
 		SlotTime:                   n.indexerSlotTime,
 		MaxReadyLagBlocks:          n.config.indexerMaxReadyLagBlocks,
 		DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
+		Moved:                      n.releaseRolledBackBlocks,
 	})
 	if err != nil {
 		return nil, nil, errors.Join(
@@ -172,6 +206,23 @@ func (n *Node) buildIndexerWriter(
 		)
 	}
 	return db, writer, nil
+}
+
+// nodeLiveOutputs is the IndexerDB's read-only view of the ledger's live UTxO
+// set, followed across a live close and reopen of the set.
+type nodeLiveOutputs struct{ node *Node }
+
+// LiveUtxoCbor implements types.LiveOutputReader.
+func (l nodeLiveOutputs) LiveUtxoCbor(
+	_ types.Txn,
+	txID []byte,
+	index uint32,
+) ([]byte, bool, error) {
+	set := l.node.anchoredUtxoSet.Load()
+	if set == nil {
+		return nil, false, nil
+	}
+	return set.Get(txID, index)
 }
 
 // rollbackIndexerForTruncate rolls the IndexerDB back to the block a ledger
@@ -268,6 +319,7 @@ func (n *Node) closeIndexerDatabase() error {
 	if n.indexerDB == nil {
 		return nil
 	}
+	n.db.SetRolledBackBlockHold(nil)
 	db := n.indexerDB
 	n.indexerDB = nil
 	n.indexerStore = nil

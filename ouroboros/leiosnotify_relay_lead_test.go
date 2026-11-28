@@ -47,7 +47,7 @@ func newRelayLeadFixture(
 	o := newOuroboros(OuroborosConfig{LeiosMinOfferLead: relayLeadTestLead})
 	o.leiosImmutableSlot = immutable
 	server := leiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
-	t.Cleanup(server.Stop)
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
 	done := make(chan any)
 	t.Cleanup(func() { close(done) })
 	ctx := leiosnotify.CallbackContext{

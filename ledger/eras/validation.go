@@ -869,13 +869,13 @@ func SafeAddExUnits(
 }
 
 // TxSizeForFee computes the transaction size used in the Cardano fee formula.
-// For Alonzo through Conway, toCBORForSizeComputation uses a canonical
-// three-element array [body, witnesses, auxiliary_data]. The retained
-// components keep their exact bytes while non-canonical outer framing and an
-// optional IsValid component do not contribute. Pre-Alonzo transactions use
-// their full CBOR length except when preAlonzoRebuiltWireSize reconstructs a
-// transaction assembled from block components. Dijkstra retains its own
-// three-component envelope behavior.
+// Shelley through Conway use the canonical three-element array
+// [body, witnesses, auxiliary_data] that toCBORForSizeComputation encodes:
+// the retained components keep their exact bytes while non-canonical outer
+// framing and an optional IsValid component do not contribute. A
+// preAlonzoRebuiltWireSize transaction assembled from block components is
+// sized from the same parts. Dijkstra retains its own three-component
+// envelope behavior.
 func TxSizeForFee(tx lcommon.Transaction) uint64 {
 	if size, ok := preAlonzoRebuiltWireSize(tx); ok {
 		return size

@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	fxcbor "github.com/fxamacker/cbor/v2"
 	"math/big"
 	"strings"
 	"sync"
@@ -249,13 +250,6 @@ func TestSharedStoreDeferredIndexLifecycle(t *testing.T) {
 	require.True(t, pending)
 	require.False(t, sqliteIndexExists(t, writeDB, "idx_utxo_payment_key"))
 	require.False(t, sqliteIndexExists(t, writeDB, "idx_datum_added_slot"))
-
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
-	require.True(t, sqliteIndexExists(t, writeDB, "idx_utxo_payment_key"))
-	require.False(t, sqliteIndexExists(t, writeDB, "idx_datum_added_slot"))
-	pending, err = store.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.True(t, pending)
 
 	require.NoError(t, store.BuildDeferredIndexes())
 	require.True(t, sqliteIndexExists(t, writeDB, "idx_datum_added_slot"))
@@ -818,13 +812,13 @@ func requireCascadeChildColumnsIndexed(
 	}
 }
 
-// TestCascadeChildColumnsIndexedAfterCriticalRebuild is the manifest
+// TestCascadeChildColumnsIndexedByCriticalEntries is the manifest
 // classification this file exists for.
 //
-// A rebuild stopped after the critical subset of the deferred-index manifest
-// leaves only that subset, and the rollback sweep deletes "transaction" rows
-// whose children cascade. A cascading child column left without an index at that
-// point turns each deleted parent row into a full scan of the child table:
+// The rollback sweep deletes "transaction" rows whose children cascade, so the
+// index on every cascading child column is one the rollback path needs and
+// must be marked Critical. A cascading child column without an index turns
+// each deleted parent row into a full scan of the child table:
 // measured on a preview relay, one 1,001-transaction rollback against a 3.2M
 // row utxo table took 556s with its transaction-id index absent and 0.095s
 // with it present.
@@ -832,7 +826,7 @@ func requireCascadeChildColumnsIndexed(
 // The invariant is asserted over the schema's own foreign keys rather than
 // over the one index that motivated it, so a new cascading foreign key whose
 // child index is classified lazy fails here instead of in production.
-func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
+func TestCascadeChildColumnsIndexedByCriticalEntries(t *testing.T) {
 	t.Parallel()
 	store, db := newCoreModeSQLStore(t)
 	fks := cascadeForeignKeys(t, db)
@@ -850,16 +844,16 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 	)
 	requireCascadeChildColumnsIndexed(t, db, fks, "before deferring indexes")
 
-	// Drop the manifest for a bulk load, then rebuild only the critical
-	// subset: whatever the rollback path needs has to be in it.
+	// Drop the manifest for a bulk load and create only the Critical
+	// entries: whatever the rollback path needs has to be among them.
 	require.NoError(t, store.DropDeferredIndexes())
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
+	createCriticalManifestIndexes(t, db)
 
 	requireCascadeChildColumnsIndexed(
 		t,
 		db,
 		fks,
-		"after BuildCriticalDeferredIndexes",
+		"with only the critical entries",
 	)
 }
 
@@ -868,7 +862,7 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 // checking one parent row never scans a child table: the foreign keys the
 // schema declares to "transaction"(id), and the columns that name one without
 // declaring it. The check holds again after the deferred-index drop and the
-// critical rebuild a bulk load performs.
+// rebuild a bulk load performs.
 func TestTransactionForeignKeyChildColumnsAreIndexed(t *testing.T) {
 	t.Parallel()
 	store, db := newCoreModeSQLStore(t)
@@ -929,8 +923,30 @@ ORDER BY m.name, fk."from"`)
 	}, "the schema must declare the utxo foreign keys to transaction(id)")
 	check("before deferring indexes")
 	require.NoError(t, store.DropDeferredIndexes())
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
-	check("after BuildCriticalDeferredIndexes")
+	createCriticalManifestIndexes(t, db)
+	check("with only the critical entries")
+}
+
+// createCriticalManifestIndexes creates the deferred-index manifest entries
+// marked Critical, so a test can check what that classification covers.
+func createCriticalManifestIndexes(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, index := range deferred.Manifest {
+		if !index.Critical {
+			continue
+		}
+		columns := make([]string, len(index.Columns))
+		for i, column := range index.Columns {
+			columns[i] = `"` + column + `"`
+		}
+		stmt := `CREATE INDEX IF NOT EXISTS "` + index.Name + `" ON "` +
+			index.Table + `" (` + strings.Join(columns, ", ") + `)`
+		if index.Where != "" {
+			stmt += " WHERE " + index.Where
+		}
+		_, err := db.Exec(stmt)
+		require.NoError(t, err, index.Name)
+	}
 }
 
 // consumeTx builds a transaction with the given hash byte that consumes the one
@@ -1939,15 +1955,6 @@ func TestBuildDeferredIndexesKeepsMarkerUntilRetainedIndexesExist(
 	require.NoError(t, err)
 	require.True(t, pending, "the seeded cycle must look interrupted")
 
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
-	pending, err = store.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.True(
-		t,
-		pending,
-		"the critical rebuild must leave the marker for the full rebuild",
-	)
-
 	require.NoError(t, store.BuildDeferredIndexes())
 	for _, index := range preChangeDeferredWitnessIndexes {
 		require.True(t, sqliteIndexExists(t, db, index))
@@ -2177,6 +2184,8 @@ func TestSharedSQLStoreTransactionMetadataCollisionIsNullable(t *testing.T) {
 		t.Cleanup(func() { require.NoError(t, store.Close()) })
 		return store, writeDB
 	}()
+	archive := testutil.NewPayloadArchive()
+	store.SetPayloadResolver(archive)
 	txHash := lcommon.Blake2b256{0xe7}
 	metadataValue := lcommon.MetaMap{Pairs: []lcommon.MetaPair{{
 		Key: lcommon.MetaInt{Value: big.NewInt(721)},
@@ -2185,10 +2194,14 @@ func TestSharedSQLStoreTransactionMetadataCollisionIsNullable(t *testing.T) {
 			{Key: lcommon.MetaText{Value: "1"}, Value: lcommon.MetaText{Value: "text"}},
 		}},
 	}}}
+	txn := store.Transaction(t.Context())
+	defer txn.Rollback() //nolint:errcheck
+	txn.(types.PayloadLocatorSetter).SetPayloadLocator(archive)
 	require.NoError(t, store.SetTransaction(
 		&mockTransaction{hash: txHash, metadata: metadataValue},
-		ocommon.Point{Slot: 7, Hash: bytes.Repeat([]byte{0xe8}, 32)}, 0, nil, false, nil, 0,
+		ocommon.Point{Slot: 7, Hash: bytes.Repeat([]byte{0xe8}, 32)}, 0, nil, false, txn, 0,
 	))
+	require.NoError(t, txn.Commit())
 	var jsonValue sql.NullString
 	var cborValue []byte
 	require.NoError(t, raw.QueryRow(`
@@ -2197,7 +2210,9 @@ FROM transaction_metadata_label AS l
 JOIN "transaction" AS tx ON tx.id = l.transaction_id
 WHERE tx.hash = ? AND l.label = ?`, txHash.Bytes(), "721").Scan(&jsonValue, &cborValue))
 	require.False(t, jsonValue.Valid)
-	require.Equal(t, "a20167696e746567657261316474657874", hex.EncodeToString(cborValue))
+	label, err := archive.ResolvePayload(cborValue)
+	require.NoError(t, err)
+	require.Equal(t, "a20167696e746567657261316474657874", hex.EncodeToString(label))
 }
 
 // TestSharedSQLStoreWithdrawalWitnessGate covers: the
@@ -3206,8 +3221,17 @@ func TestSharedSQLStorePoolRetirementAndDepositAtSlot(t *testing.T) {
 func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
+	archive := testutil.NewPayloadArchive()
+	store.SetPayloadResolver(archive)
+	candidates, err := fxcbor.Marshal([]struct {
+		TxHash      []byte `cbor:"1,keyasint"`
+		OutputIndex uint32 `cbor:"2,keyasint"`
+		Datum       []byte `cbor:"3,keyasint"`
+	}{{TxHash: []byte("candidate-a"), OutputIndex: 0, Datum: []byte("datum-c")}})
+	require.NoError(t, err)
 
 	txn := store.Transaction(t.Context())
+	txn.(types.PayloadLocatorSetter).SetPayloadLocator(archive)
 	for _, row := range []*models.MidnightAssetCreate{
 		{
 			Address: []byte("address-a"), Quantity: 10,
@@ -3289,7 +3313,7 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	require.NoError(t, store.UpsertMidnightEpochCandidates(
 		txn,
 		&models.MidnightEpochCandidates{
-			Epoch: 2, BlockNumber: 12, CandidatesCbor: []byte("candidates"),
+			Epoch: 2, BlockNumber: 12, CandidatesCbor: candidates,
 		},
 	))
 	require.NoError(t, store.InsertMidnightCommitteeCandidateRegistration(
@@ -3301,7 +3325,6 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	))
 	require.NoError(t, txn.Commit())
 
-	var err error
 	gotUnspentAssets, err := store.FindUnspentMidnightAssetCreates()
 	require.NoError(t, err)
 	gotUnspentRegistrations, err := store.FindUnspentMidnightRegistrations()
@@ -3344,8 +3367,22 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 		11,
 	)
 	require.NoError(t, err)
-	_, err = store.DeleteMidnightDeregistrationsByBlock(rollback, 12)
+	gotDeletedDeregistrations, err := store.DeleteMidnightDeregistrationsByBlock(
+		rollback,
+		12,
+	)
 	require.NoError(t, err)
+	require.Len(t, gotDeletedDeregistrations, 1)
+	require.Equal(
+		t, []byte("deregistration-a"), gotDeletedDeregistrations[0].FullDatum,
+		"a deleted row returns the datum, not its stored offset",
+	)
+	require.NotEmpty(t, gotDeletedDeregistrations[0].FullDatumOffset)
+	require.NotEmpty(t, gotDeletedRegistrations)
+	for _, registration := range gotDeletedRegistrations {
+		require.True(t, bytes.HasPrefix(registration.FullDatum, []byte("registration-")))
+		require.NotEmpty(t, registration.FullDatumOffset)
+	}
 	require.NoError(t, rollback.Commit())
 	assetTxHashes := make([]string, len(gotUnspentAssets))
 	for i, asset := range gotUnspentAssets {
@@ -3376,7 +3413,7 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	require.NotNil(t, gotCandidates)
 	require.Equal(t, uint64(2), gotCandidates.Epoch)
 	require.Equal(t, uint64(12), gotCandidates.BlockNumber)
-	require.Equal(t, []byte("candidates"), gotCandidates.CandidatesCbor)
+	require.Equal(t, candidates, gotCandidates.CandidatesCbor)
 	require.Len(t, gotRegistrations, 1)
 	deletedCreateTxHashes := make([]string, len(gotDeletedCreates))
 	for i, create := range gotDeletedCreates {

@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	"github.com/blinklabs-io/dingo/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 // IndexerService runs the IndexerDB's writer: a DatabaseSource over the
@@ -127,7 +128,12 @@ func newIndexerWriter(
 	).
 		WithFacts(facts).
 		WithGenesisSeed(bf.SeedGenesis).
-		WithProgress(metrics.Observe).
+		WithProgress(func(tip indexerdb.Tip, ledgerTip ochainsync.Tip) {
+			metrics.Observe(tip, ledgerTip)
+			if deps.Moved != nil {
+				deps.Moved()
+			}
+		}).
 		WithRollbackAncestorLost(metrics.NoRollbackAncestor).
 		WithFailureReport(metrics.RepeatedFailures).
 		WithDeferredIndexes(

@@ -51,7 +51,6 @@ func TestInMemoryStoreStartsFromMigratedSchema(t *testing.T) {
 	t.Parallel()
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	target := registry[len(registry)-1].Version
 
 	var logs syncBuffer
 	store, _, _, err := openSQLStore(
@@ -72,7 +71,7 @@ func TestInMemoryStoreStartsFromMigratedSchema(t *testing.T) {
 	}
 	require.NotEmpty(t, check, "migration runner never reported")
 	require.Contains(
-		t, check, "current_version="+strconv.Itoa(target),
+		t, check, "completed_migrations="+strconv.Itoa(len(registry)),
 		"in-memory store ran its own migrations",
 	)
 }

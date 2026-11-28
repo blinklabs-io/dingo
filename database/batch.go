@@ -431,6 +431,10 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	if setter, ok := acc.(withdrawalDebitSetter); ok {
 		setter.SetDebitWithdrawals(opts.DebitWithdrawals)
 	}
+	bindPayloadLocator(metadataTxn, offsets)
+	if setter, ok := acc.(types.PayloadLocatorSetter); ok && offsets != nil {
+		setter.SetPayloadLocator(offsets.Payloads)
+	}
 	var metadataErr error
 	if closureBatch {
 		if err := d.requireStore("SetTransactionBatchedWithOpts"); err != nil {

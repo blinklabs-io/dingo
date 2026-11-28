@@ -1,0 +1,8 @@
+{
+  "definition_format": 0,
+  "fields": [
+    { "name": "releaseMajor", "type": "integer", "bits": [16, 21] },
+    { "name": "releaseMinor", "type": "integer", "bits": [8, 15] },
+    { "name": "releasePatch", "type": "integer", "bits": [0, 7] }
+  ]
+}

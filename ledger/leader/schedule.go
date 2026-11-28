@@ -26,6 +26,7 @@ import (
 	"sync"
 
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
@@ -358,13 +359,9 @@ func vrfInputForMode(
 	}
 	switch mode {
 	case consensus.ConsensusModeTPraos:
-		return vrf.MkSeedTPraos(
-			int64(slot),
-			epochNonce,
-			vrf.SeedL(),
-		) //nolint:gosec
+		return eras.VRFSeedTPraos(slot, epochNonce, vrf.SeedL())
 	case consensus.ConsensusModeCPraos:
-		return vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+		return eras.VRFInputPraos(slot, epochNonce)
 	default:
 		return nil, fmt.Errorf("unknown consensus mode: %d", mode)
 	}

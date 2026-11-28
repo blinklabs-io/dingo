@@ -276,9 +276,10 @@ func buildValidatedConwayBlockBytes(
 	currentKesSk := kesSk
 	currentKesPeriod := uint64(0)
 
+	eta0 := lcommon.Nonce{Type: lcommon.NonceTypeNonce}
+	copy(eta0.Value[:], epochNonce)
 	for slot := slotRangeStart; slot < slotRangeStart+200; slot++ {
-		slotInt64 := int64(slot) //nolint:gosec // test slots are small
-		vrfInput, vrfInputErr := vrf.MkInputVrf(slotInt64, epochNonce)
+		vrfInput, vrfInputErr := vrf.MkInputVrfFromNonce(slot, eta0)
 		if vrfInputErr != nil {
 			continue
 		}

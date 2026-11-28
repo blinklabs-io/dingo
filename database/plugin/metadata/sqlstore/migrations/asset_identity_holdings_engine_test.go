@@ -243,11 +243,15 @@ FROM asset_holding h JOIN asset_identity i ON i.id = h.asset_id`)
 
 	// A crash between the contract phase and its completion replays every
 	// earlier phase against a database whose legacy table is already gone.
-	_, err := e.db.Exec(e.query(`
+	_, err := e.db.Exec(e.query(
+		`DELETE FROM schema_migrations WHERE version > ?`,
+	), assetSplitVersion)
+	require.NoError(t, err)
+	_, err = e.db.Exec(e.query(`
 UPDATE schema_migrations SET phase = 'expand', dirty = ?, completed_at = NULL
 WHERE version = ?`), true, assetSplitVersion)
 	require.NoError(t, err)
-	e.run(t, e.registry)
+	e.run(t, e.registry[:assetSplitVersion])
 	require.ElementsMatch(t, got, holdings())
 }
 

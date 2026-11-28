@@ -747,11 +747,10 @@ func TestPeerNetworkLeavesNoGoroutinesBehind(t *testing.T) {
 	build := func(cfg PeerConfig) *Stack {
 		cfg.ReconcileInterval = 10 * time.Millisecond
 		s, err := NewStack(StackConfig{
-			PromRegistry:   prometheus.NewRegistry(),
-			NetworkMagic:   testDMQMagic,
-			SocketPath:     shortSocketPath(t),
-			Authenticator:  newTestAuthenticator(),
-			MessageBodyMin: 1,
+			PromRegistry:  prometheus.NewRegistry(),
+			NetworkMagic:  testDMQMagic,
+			SocketPath:    shortSocketPath(t),
+			Authenticator: newTestAuthenticator(),
 			// Both messages share one fixture key and must cross together.
 			MinPoolMessageInterval: -1,
 			Peers:                  &cfg,

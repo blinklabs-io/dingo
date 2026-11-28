@@ -106,6 +106,12 @@ func (b *Backfill) indexClosure(
 	if err != nil {
 		return fmt.Errorf("compute endorser block offsets: %w", err)
 	}
+	// The closure's transactions are not in any chain block: their payloads
+	// live in the endorser block's transaction list.
+	offsets.Payloads, err = closure.PayloadLocator()
+	if err != nil {
+		return fmt.Errorf("locate endorser block payloads: %w", err)
+	}
 	selected := make([]lcommon.Transaction, len(keep))
 	var levels []lcommon.Transaction
 	for i, idx := range keep {

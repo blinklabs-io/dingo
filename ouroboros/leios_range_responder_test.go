@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -149,7 +150,7 @@ func TestLeiosFetchBlockRangeRequestTearsDownConnection(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 
 	timeout := time.After(5 * time.Second)
 	select {

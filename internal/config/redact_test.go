@@ -106,6 +106,7 @@ func TestConfigLogClassesAreUnambiguous(t *testing.T) {
 		logURLOrPathConfigFields,
 		logHostOnlyConfigFields,
 		logProviderConfigFields,
+		logEventSourcesConfigFields,
 	} {
 		for _, path := range paths {
 			seen[path]++
@@ -139,6 +140,7 @@ var sentinelSecrets = []string{
 	"SENTINEL-NESTED-PROVIDER-SECRET",
 	"SENTINEL-MEMPOOL-LIST-SECRET",
 	"SENTINEL-ARTIFACT-STORE-PASSWORD",
+	"SENTINEL-EVENT-SOURCE-PASSWORD",
 	// An AWS access key ID is half of a credential pair, and
 	// "accessKeyId" is exactly the spelling a left-anchored
 	// access[-_]?key pattern cannot reach past the "Id" suffix.
@@ -164,6 +166,12 @@ func sentinelSecretConfig() *Config {
 			APIKey:  "SENTINEL-KOIOS-API-KEY",
 		},
 		BarkBaseUrl: "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
+		BarkEventSources: []BarkEventSource{{
+			Name: "upstream-relay",
+			URL: "https://relay:SENTINEL-EVENT-SOURCE-PASSWORD@" +
+				"relay.example:9090",
+			EventTypes: []string{"chain.update"},
+		}},
 		BarkBlockDownloadHosts: []string{
 			"https://blocks:SENTINEL-BARK-HOST-PASSWORD@blocks.example",
 			"https://plain.example",
@@ -309,6 +317,9 @@ func TestConfigLogValueRedactsSentinelSecrets(t *testing.T) {
 				"snapshots/dingo",
 				"mesh.example:3306",
 				"1024",
+				"upstream-relay",
+				"relay.example:9090",
+				"chain.update",
 			} {
 				if !strings.Contains(rendered, want) {
 					t.Errorf(

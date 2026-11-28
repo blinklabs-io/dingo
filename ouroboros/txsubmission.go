@@ -842,6 +842,13 @@ func (o *Ouroboros) txsubmissionServerInit(
 	return nil
 }
 
+// txsubmissionClientRequestTxIds answers a peer's RequestTxIds from the
+// connection's mempool consumer. A blocking request waits for a transaction.
+// When that wait is released without one (shutdown stopping the mempool, or
+// connection cleanup cancelling the consumer), or the consumer is already
+// gone, it returns ErrStopServerProcess so the client answers with MsgDone:
+// the protocol forbids an empty reply to a blocking request. The metric for
+// this callback records that stop as a success, not an error.
 func (o *Ouroboros) txsubmissionClientRequestTxIds(
 	ctx txsubmission.CallbackContext,
 	blocking bool,
@@ -852,6 +859,13 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 	ret := []txsubmission.TxIdAndSize{}
 	consumer := o.mempool.FindConsumer(connId)
 	if consumer == nil {
+		// The consumer is gone once the connection closes or the mempool
+		// stops. A blocking request is then answered as a stop is: with
+		// MsgDone, since an error here is reported as the connection's
+		// protocol error.
+		if blocking {
+			return nil, txsubmission.ErrStopServerProcess
+		}
 		return nil, fmt.Errorf(
 			"no mempool consumer for connection: %s",
 			connId.String(),
@@ -874,10 +888,23 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 			break
 		}
 		if blocking && len(tmpTxs) == 0 {
-			// Wait until we see a TX
-			tmpTx := consumer.NextTx(true)
+			// Wait until we see a TX, or until the protocol stops: the
+			// connection's close waits for this callback, and the consumer
+			// is only cancelled after that close completes.
+			var stop <-chan struct{}
+			if ctx.Client != nil {
+				if proto := ctx.Client.ProtocolInstance(); proto != nil {
+					stop = proto.StopChan()
+				}
+			}
+			tmpTx := consumer.NextTxUntil(true, stop)
 			if tmpTx == nil {
-				break
+				// The wait ended without a transaction: the protocol, the
+				// connection's consumer or the mempool is stopping. A
+				// blocking request may not be answered with no IDs, and
+				// gOuroboros refuses such a reply as a protocol violation.
+				// The reference ends this wait with MsgDone.
+				return nil, txsubmission.ErrStopServerProcess
 			}
 			tmpTxs = append(tmpTxs, tmpTx)
 		} else {

@@ -26,6 +26,7 @@ import (
 	"math/big"
 	"slices"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -870,6 +871,14 @@ func newAdapterFixture(
 
 	raw, err := dbtest.RawSQLiteMetadata(t, indexerDB)
 	require.NoError(t, err)
+	archive := testutil.NewPayloadArchive()
+	// A test that wraps the metadata store with a narrower interface reads no
+	// payloads, so it keeps the store's own resolver.
+	if resolver, ok := indexerDB.Metadata().(types.PayloadResolverSetter); ok {
+		resolver.SetPayloadResolver(archive)
+		fixtureArchives.Store(raw, archive)
+		t.Cleanup(func() { fixtureArchives.Delete(raw) })
+	}
 
 	return &adapterFixture{
 		adapter:   adapter,
@@ -1039,6 +1048,24 @@ INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
 	}
 }
 
+// fixtureArchives maps each fixture's raw SQL handle to the archive its
+// IndexerDB resolves payload offsets from.
+var fixtureArchives sync.Map
+
+// payloadColumn returns what a payload column holds for payload: the offset of
+// its bytes in the fixture's archive, as the IndexerDB writer records it.
+func payloadColumn(t *testing.T, raw any, payload []byte) []byte {
+	t.Helper()
+	if len(payload) == 0 {
+		return nil
+	}
+	archive, ok := fixtureArchives.Load(raw)
+	require.True(t, ok, "no payload archive for this fixture")
+	offset, err := archive.(*testutil.PayloadArchive).LocatePayload(payload)
+	require.NoError(t, err)
+	return offset
+}
+
 func insertAdapterTransaction(
 	t *testing.T,
 	raw sqlExecer,
@@ -1058,7 +1085,7 @@ INSERT INTO "transaction" (
 		id,
 		tx.Hash,
 		tx.BlockHash,
-		tx.Metadata,
+		payloadColumn(t, raw, tx.Metadata),
 		tx.Slot,
 		tx.Type,
 		strconv.FormatUint(uint64(tx.Fee), 10),

@@ -19,12 +19,14 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/plutigo/builtin"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/stretchr/testify/require"
 )
@@ -327,24 +329,31 @@ func TestValidateGenesisConsistencyRejectsInvalidSecurityParameters(
 		},
 	)
 
-	t.Run("system start mismatch precedes nonce window error", func(t *testing.T) {
-		t.Parallel()
-		shelleyGenesis := validShelleyGenesisForSecurityParamTests()
-		shelleyGenesis.SystemStart = time.Unix(1666656001, 0).UTC()
-		shelleyGenesis.EpochLength = 1
-		c := &CardanoNodeConfig{
-			byronGenesis: &byron.ByronGenesis{
-				StartTime: 1666656000,
-				ProtocolConsts: byron.ByronGenesisProtocolConsts{
-					K: validByronK,
+	t.Run(
+		"system start mismatch precedes nonce window error",
+		func(t *testing.T) {
+			t.Parallel()
+			shelleyGenesis := validShelleyGenesisForSecurityParamTests()
+			shelleyGenesis.SystemStart = time.Unix(1666656001, 0).UTC()
+			shelleyGenesis.EpochLength = 1
+			c := &CardanoNodeConfig{
+				byronGenesis: &byron.ByronGenesis{
+					StartTime: 1666656000,
+					ProtocolConsts: byron.ByronGenesisProtocolConsts{
+						K: validByronK,
+					},
 				},
-			},
-			shelleyGenesis: shelleyGenesis,
-		}
-		err := c.validateGenesisConsistency()
-		require.ErrorContains(t, err, "genesis system start mismatch")
-		require.NotContains(t, err.Error(), "randomness stabilisation window")
-	})
+				shelleyGenesis: shelleyGenesis,
+			}
+			err := c.validateGenesisConsistency()
+			require.ErrorContains(t, err, "genesis system start mismatch")
+			require.NotContains(
+				t,
+				err.Error(),
+				"randomness stabilisation window",
+			)
+		},
+	)
 }
 
 // TestNewCardanoNodeConfigFromFileRejectsInvalidSecurityParam proves the
@@ -648,12 +657,36 @@ func TestDevnetGenesisIsUsable(t *testing.T) {
 	require.Equal(t, 1000, byronGenesis.BlockVersionData.SlotDuration)
 }
 
-// TestDevnetCostModelsCoverEveryPricedParameter checks that the devnet
-// genesis prices at least every cost model parameter the evaluator knows
-// about. The devnet declares protocol version 11 but shipped the original
-// Conway models (PlutusV1 166, PlutusV2 175, PlutusV3 251 entries), so
-// nothing added since Chang was priced and the script data hash a builder
-// computed from current cost models never matched the chain.
+// The library also knows parameters for later protocol versions. A missing
+// parameter is safe only when its builtin is unavailable on this network;
+// unknown and machine-cost parameters must remain priced.
+func unpricedProtocolCostParameters(
+	parameters []string,
+	version lang.LanguageVersion,
+	protocolMajor uint,
+	modelLength int,
+) []string {
+	availability := make(map[string]bool, builtin.TotalBuiltinCount)
+	for tag := builtin.MinDefaultFunction; tag <= builtin.MaxDefaultFunction; tag++ {
+		function := builtin.DefaultFunction(tag)
+		availability[function.String()] = function.IsAvailableInWithProto(
+			builtin.LanguageVersionToPlutusVersion(version), protocolMajor,
+		)
+	}
+	var missing []string
+	for index, parameter := range parameters {
+		if index < modelLength {
+			continue
+		}
+		name, _, _ := strings.Cut(parameter, "-")
+		available, known := availability[name]
+		if !known || available {
+			missing = append(missing, parameter)
+		}
+	}
+	return missing
+}
+
 func TestDevnetCostModelsCoverEveryPricedParameter(t *testing.T) {
 	t.Parallel()
 
@@ -707,15 +740,55 @@ func TestDevnetCostModelsCoverEveryPricedParameter(t *testing.T) {
 			// The absolute count is what mainnet, preprod and preview all
 			// publish at protocol version 11.
 			require.Len(t, testCase.model, testCase.wantCount)
-			// plutigo's parameter table is the set the evaluator can price.
-			// costModelFromList stops at len(data), so a model shorter than
-			// the table silently leaves builtins at their default cost.
-			require.GreaterOrEqual(
-				t,
+			protocolMajor := shelleyGenesis.ProtocolParameters.ProtocolVersion.Major
+			parameters := lang.GetParamNamesForVersion(testCase.langVer)
+			require.Empty(t, unpricedProtocolCostParameters(
+				parameters,
+				testCase.langVer,
+				protocolMajor,
 				len(testCase.model),
-				len(lang.GetParamNamesForVersion(testCase.langVer)),
-				"cost model must price every parameter plutigo knows",
+			), "cost model must price every parameter available at this protocol version")
+			require.NotEmpty(t, unpricedProtocolCostParameters(
+				parameters,
+				testCase.langVer,
+				protocolMajor,
+				len(testCase.model)-1,
+			), "dropping an active parameter must fail coverage")
+			require.NotEmpty(t, unpricedProtocolCostParameters(
+				parameters,
+				testCase.langVer,
+				builtin.DijkstraProtoVersion,
+				len(testCase.model),
+			), "the same models must not cover protocol-12 additions")
+		})
+	}
+}
+
+func TestProtocolCostModelCoverage(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name          string
+		parameter     string
+		protocolMajor uint
+		missing       bool
+	}{
+		{"active builtin", "addInteger-cpu-arguments-intercept", 11, true},
+		{"inactive builtin", "multiIndexArray-cpu-arguments-c0", 11, false},
+		{"activated builtin", "multiIndexArray-cpu-arguments-c0", 12, true},
+		{"machine cost", "cekApplyCost-exBudgetCPU", 11, true},
+		{"unknown cost", "unrecognized-cpu-arguments", 11, true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			missing := unpricedProtocolCostParameters(
+				[]string{testCase.parameter}, lang.LanguageVersionV3,
+				testCase.protocolMajor, 0,
 			)
+			if testCase.missing {
+				require.Equal(t, []string{testCase.parameter}, missing)
+			} else {
+				require.Empty(t, missing)
+			}
 		})
 	}
 }

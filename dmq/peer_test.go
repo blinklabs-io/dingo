@@ -99,7 +99,7 @@ func idedMessage(
 	expiresAt uint32,
 ) ocommon.DmqMessage {
 	t.Helper()
-	msg := newTestMessage([]byte(body), expiresAt)
+	msg := newTestMessage(testBody(body), expiresAt)
 	require.NoError(t, msg.SetComputedMessageID())
 	return msg
 }
@@ -320,7 +320,7 @@ func TestPeerSkipsMessagesAlreadyHeld(t *testing.T) {
 	t.Parallel()
 	a, regA := newTestStack(t, StackConfig{})
 	b, regB := newTestStack(t, StackConfig{})
-	shared := newTestMessage([]byte("shared"), soonExpiry())
+	shared := newTestMessage(testBody("shared"), soonExpiry())
 	for _, s := range []*Stack{a, b} {
 		_, err := s.pool.Add(shared)
 		require.NoError(t, err)
@@ -364,7 +364,7 @@ func TestPeerNeverAnnouncesBackWhatThePeerAnnounced(t *testing.T) {
 	require.Len(t, ids, 1)
 	got, ok := s.pool.Get(ids[0].MessageID)
 	require.True(t, ok)
-	require.Equal(t, []byte("fresh"), got.Payload.MessageBody)
+	require.Equal(t, testBody("fresh"), got.Payload.MessageBody)
 	require.NotZero(t, ids[0].SizeInBytes)
 }
 
@@ -381,9 +381,9 @@ func TestPeerIgnoresExpiredMessagesWhenAnnouncing(t *testing.T) {
 	t.Cleanup(func() { s.pool.RemovePeer(p.cursorKey) })
 	// #nosec G115 -- test fixture timestamps
 	soon := uint32(now.Add(time.Minute).Unix())
-	_, err := s.pool.Add(newTestMessage([]byte("soon"), soon))
+	_, err := s.pool.Add(newTestMessage(testBody("soon"), soon))
 	require.NoError(t, err)
-	_, err = s.pool.Add(newTestMessage([]byte("later"), soonExpiry()))
+	_, err = s.pool.Add(newTestMessage(testBody("later"), soonExpiry()))
 	require.NoError(t, err)
 
 	now = now.Add(2 * time.Minute)
@@ -391,7 +391,7 @@ func TestPeerIgnoresExpiredMessagesWhenAnnouncing(t *testing.T) {
 	require.Len(t, ids, 1)
 	got, ok := s.pool.Get(ids[0].MessageID)
 	require.True(t, ok)
-	require.Equal(t, []byte("later"), got.Payload.MessageBody)
+	require.Equal(t, testBody("later"), got.Payload.MessageBody)
 }
 
 // A message that fails validation is a protocol violation: the connection
@@ -404,7 +404,7 @@ func TestPeerInvalidMessageEndsTheConnection(t *testing.T) {
 	// a's admission refuses for expiring too far ahead.
 	// #nosec G115 -- test fixture timestamp
 	tooFar := uint32(time.Now().Add(2 * time.Hour).Unix())
-	_, err := b.pool.Add(newTestMessage([]byte("too-far"), tooFar))
+	_, err := b.pool.Add(newTestMessage(testBody("too-far"), tooFar))
 	require.NoError(t, err)
 
 	pa, pb := attachPair(t, a, b)
@@ -426,13 +426,12 @@ func TestPeerInvalidMessageEndsTheConnection(t *testing.T) {
 // would have refused to decode it, so this stack does not take it.
 func TestPeerMessageOutsideTheSizeLimitsEndsTheConnection(t *testing.T) {
 	t.Parallel()
-	a, regA := newTestStack(t, StackConfig{
-		MessageBodyMin: DefaultMessageBodyMin,
-		MessageBodyMax: DefaultMessageBodyMax,
-	})
+	a, regA := newTestStack(t, StackConfig{})
 	// b has no size limit of its own to speak of, so it holds a short message.
 	b, _ := newTestStack(t, StackConfig{})
-	addMessages(t, b, "short", 1)
+	added, err := b.pool.Add(newSizedTestMessage([]byte("short"), soonExpiry()))
+	require.NoError(t, err)
+	require.True(t, added)
 
 	pa, _ := attachPair(t, a, b)
 	requireClosed(t, "a ends the connection", pa.Done())

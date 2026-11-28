@@ -119,6 +119,7 @@ type Node struct {
 	db                     *database.Database
 	indexerDB              *database.Database
 	indexerStore           *indexerdb.Store
+	releasingBlocks        atomic.Bool
 	indexerWriter          IndexerWriter
 	indexerWakeSub         event.EventSubscriberId
 	indexerFactsSub        event.EventSubscriberId
@@ -156,6 +157,7 @@ type Node struct {
 	bark                    *bark.Bark
 	eventNodeIDOnce         sync.Once
 	eventNodeIDValue        string
+	remoteEvents            *bark.RemoteEvents
 	historyExpiry           *historyexpiry.Pruner
 	blockPromoter           *blockpromote.Promoter
 	committeeAuthSync       *committeeauth.Syncer
@@ -323,6 +325,18 @@ type Node struct {
 	chainSelectedNonePendingSet bool
 	chainSelectedNoneWake       chan struct{}
 	chainSelectedNoneWorkerDone chan struct{}
+
+	// Genesis disconnects queued by the chain-selector hooks for the
+	// node-owned worker (node_peer_disconnect.go), in report order.
+	peerDisconnectMu         sync.Mutex
+	peerDisconnectPending    map[string]func() func()
+	peerDisconnectOrder      []string
+	peerDisconnectWake       chan struct{}
+	peerDisconnectWorkerDone chan struct{}
+	// closePeerConnOverride, when set, replaces looking a disconnected peer's
+	// connection up and closing it, so a test can stand in a connection whose
+	// Close waits for one of its callbacks.
+	closePeerConnOverride func(ouroboros.ConnectionId, string)
 
 	// snapshotMu serializes Snapshot calls against each other and against
 	// a concurrent Restore/Truncate (which closes n.db out from under an
@@ -1527,6 +1541,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// deferral worker first so a contended one-shot transition is never lost.
 	n.startChainSelectedNoneWorker(n.ctx)
 	started = append(started, n.waitChainSelectedNoneWorker)
+	n.startPeerDisconnectWorker(n.ctx)
+	started = append(started, n.waitPeerDisconnectWorker)
 	n.subscribeChainSelectorEvents()
 	n.subscribeCaughtUpMarkerEvents()
 	n.subscribeLedgerStateEvents()
@@ -1807,6 +1823,28 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			if err := n.bark.Stop(context.Background()); err != nil {
 				n.config.logger.Error(
 					"failed to stop bark during cleanup",
+					"error",
+					err,
+				)
+			}
+		})
+	}
+
+	if err := n.startRemoteEvents(); err != nil { //nolint:contextcheck
+		return err
+	}
+	if n.remoteEvents != nil {
+		started = append(started, func() { //nolint:contextcheck
+			// Bounded: a source blocked publishing to a full subscriber
+			// would otherwise hold failed-startup cleanup forever.
+			ctx, cancel := context.WithTimeout(
+				context.Background(),
+				n.configuredShutdownTimeout(),
+			)
+			defer cancel()
+			if err := n.remoteEvents.Stop(ctx); err != nil {
+				n.config.logger.Error(
+					"failed to stop remote event subscriber during cleanup",
 					"error",
 					err,
 				)
@@ -2532,6 +2570,13 @@ func (n *Node) buildChainSelectorConfig(
 				context.Background(),
 				ledger.QueryPoint{Slot: point.Slot, Hash: point.Hash},
 			) == nil
+		},
+		LocalPointBlockNumber: func(point ocommon.Point) (uint64, bool) {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return 0, false
+			}
+			return ls.PrimaryChainPointBlockNumber(context.Background(), point)
 		},
 	}
 	// The running node publishes its started ledger before constructing the

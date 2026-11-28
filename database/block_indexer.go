@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -67,6 +68,11 @@ type BlockIngestionResult struct {
 
 	// ScriptOffsets maps script hash to its CborOffset within the block
 	ScriptOffsets map[[32]byte]CborOffset
+
+	// Payloads names payload bytes (datums, scripts, metadata, protocol
+	// parameter updates) by their position in the block. It is nil when the
+	// result was not computed from the block's CBOR.
+	Payloads types.PayloadLocator
 }
 
 // BlockIndexer computes byte offsets for all items within a block.
@@ -131,9 +137,16 @@ func (bi *BlockIndexer) ComputeOffsets(
 		return nil, bi.blockHashErr
 	}
 
+	payloads, err := types.NewBlockPayloadLocator(
+		bi.blockSlot, bi.blockHash[:], blockCbor,
+	)
+	if err != nil {
+		return nil, err
+	}
 	result := &BlockIngestionResult{
 		TxOffsets:   make(map[[32]byte]CborOffset),
 		UtxoOffsets: make(map[UtxoRef]CborOffset),
+		Payloads:    payloads,
 	}
 	// TxParts, DatumOffsets, RedeemerOffsets, and ScriptOffsets remain nil
 	// unless extended offsets are requested.

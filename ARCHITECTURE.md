@@ -274,6 +274,16 @@ expiry govern stored payload availability independently of ledger validity;
 pruning payloads must preserve live outputs, rollback requirements and the
 trust boundary from which the node can recover.
 
+The IndexerDB keeps no copy of the payloads its blocks carry: datum, script,
+metadata and similar columns hold offsets that readers resolve through the
+block stores. Block retention therefore follows the indexer. No block expires
+before the indexer has indexed it, a block stays while an active payload
+(one a live output, a pending parameter update or current Midnight state
+uses) names its bytes, and the ledger keeps the bodies a rollback abandoned
+until the indexer has rolled back past them. An active output whose block has
+expired still resolves through the ledger's live UTxO set; inactive history
+reports that it has expired.
+
 The operator selects the storage mode; consumers do not promote it. Every
 storage consumer, whether a plugin provider or a built-in service, declares the
 minimum ordered tier (`core` or `api`) and the named storage features it needs.
@@ -453,6 +463,12 @@ store generation that created their transaction and waits for old users
 before closing it. Request cancellation belongs to the serving instance so
 closing an old connection cannot cancel a replacement's requests.
 
+Closing an Ouroboros connection returns only after the callbacks running on it
+have returned, so a close has the same lock hazard as a publication. Code that
+is a callback of the connection, or holds a lock one takes, only begins the
+shutdown. Other code waits for it under a bounded timeout. A callback that
+blocks must end when the connection begins shutting down.
+
 Event delivery details are specified in [event/doc.go](event/doc.go). Local
 lock protocols, queue sizing, timers and worker scheduling are documented
 beside their implementation.
@@ -467,7 +483,10 @@ to the request, rather than redirecting validation through an API database.
 
 Bark exposes node management, database lifecycle and event services. Its
 remote event stream is a separate delivery boundary; slow remote clients
-must not hold the internal ledger's event consumers. MCP, Midnight and DMQ
+must not hold the internal ledger's event consumers. A node can also follow
+other nodes' event streams: Bark republishes their events on the local
+EventBus under a distinct type that its own event stream does not serve, so
+a followed event is never sent back out. MCP, Midnight and DMQ
 have dedicated adapters and lifecycle ownership. Off-chain metadata enriches
 API results without becoming consensus input.
 

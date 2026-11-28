@@ -30,7 +30,11 @@ func TestGetDatumsAlignsResultsAndReportsMissingAsNil(t *testing.T) {
 	t.Parallel()
 	db := newIndexerTestDB(t, nil).indexer
 	raw := []byte{0x01}
-	require.NoError(t, db.SetDatum(raw, 1, nil))
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Rollback() //nolint:errcheck
+	bindTestPayloads(t, db, txn)
+	require.NoError(t, db.SetDatum(raw, 1, txn))
+	require.NoError(t, txn.Commit())
 	stored := lcommon.Blake2b256Hash(raw).Bytes()
 	missing := bytes.Repeat([]byte{0xEE}, lcommon.Blake2b256Size)
 

@@ -105,6 +105,10 @@ func defaultPeerTuning() peerTuning {
 	}
 }
 
+// peerStopTimeout bounds how long teardown waits for each protocol and the
+// muxer to stop; shutdown still proceeds after it.
+const peerStopTimeout = 5 * time.Second
+
 // PeerConn is one node-to-node DMQ connection. Both sides can pull from and
 // serve the other, so a PeerConn announces this stack's messages to the remote
 // and admits the remote's messages into this stack's pool.
@@ -132,7 +136,7 @@ type PeerConn struct {
 	mux              *muxer.Muxer
 	puller           *sigPuller
 	server           *sigServer
-	stoppers         []func()
+	stoppers         []func(context.Context) error
 	version          uint16
 	remoteFullDuplex bool
 	finishedOnce     sync.Once
@@ -177,6 +181,7 @@ func (s *Stack) AttachPeer(
 		return nil, err
 	}
 	if err := p.connect(ctx); err != nil {
+		//nolint:contextcheck // teardown outlives the caller; it bounds its own stops
 		p.fail(err)
 		<-p.closed
 		return nil, err
@@ -251,6 +256,7 @@ func (s *Stack) closePeers(ctx context.Context) error {
 	open := slices.Collect(maps.Keys(s.peers))
 	s.peerMu.Unlock()
 	for _, p := range open {
+		//nolint:contextcheck // teardown outlives the caller; it bounds its own stops
 		p.fail(nil)
 	}
 	for _, p := range open {
@@ -344,11 +350,23 @@ func (p *PeerConn) teardown() {
 	stoppers := slices.Clone(p.stoppers)
 	mux := p.mux
 	p.protoMu.Unlock()
+	// teardown runs on its own goroutine, never in a protocol callback, so
+	// each Stop may wait for the protocol's goroutines; the bound keeps a
+	// callback that does not return from holding teardown forever.
+	stopCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(p.ctx),
+		peerStopTimeout,
+	)
+	defer cancel()
 	for _, stop := range stoppers {
-		stop()
+		if err := stop(stopCtx); err != nil {
+			p.logger.Debug("dmq peer: protocol stop", "error", err)
+		}
 	}
 	if mux != nil {
-		mux.Stop()
+		if err := mux.Stop(stopCtx); err != nil {
+			p.logger.Debug("dmq peer: muxer stop", "error", err)
+		}
 	}
 	// The muxer closes the connection when its read loop ends, but a loop
 	// that never started would leave it open.
@@ -392,6 +410,7 @@ func (p *PeerConn) connect(ctx context.Context) error {
 		Mode:               protocol.ProtocolModeNodeToNode,
 		Role:               role,
 	}
+	//nolint:contextcheck // teardown outlives the caller; it bounds its own stops
 	p.spawn(func() {
 		select {
 		case err, ok := <-mux.ErrorChan():
@@ -401,6 +420,7 @@ func (p *PeerConn) connect(ctx context.Context) error {
 		case <-p.doneChan:
 		}
 	})
+	//nolint:contextcheck // teardown outlives the caller; it bounds its own stops
 	p.spawn(func() {
 		select {
 		case err, ok := <-p.protoErr:

@@ -467,6 +467,11 @@ func TestNewInvalidConfigPreservesMetricsRegistry(t *testing.T) {
 		{"margin", WithMinPoolMargin(10001), "min pool margin"},
 		{"leverage", WithPledgeLeverage(true, 0), "pledge leverage"},
 		{
+			"bark event source",
+			WithBarkEventSources(BarkEventSource{Name: "a", URL: "ftp://x"}),
+			"barkEventSources[0]",
+		},
+		{
 			"bark event limit",
 			WithBarkEventService(true, false, 0, -1, 0),
 			"barkEventMaxSubscribers",
@@ -1372,10 +1377,10 @@ func newHandleConnManagerClosedOwnerConn(
 	)
 	t.Cleanup(func() {
 		if local.conn != nil {
-			_ = local.conn.Close()
+			_ = local.conn.Close(context.Background())
 		}
 		if peer.conn != nil {
-			_ = peer.conn.Close()
+			_ = peer.conn.Close(context.Background())
 		}
 	})
 	require.NoError(t, local.err)
@@ -1427,7 +1432,7 @@ func TestHandleConnManagerClosedOwnerLogsNtCCloseCause(t *testing.T) {
 	}}
 	conn, err := ouroboros.NewConnection()
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 
 	cause := errors.New("local client reset")
 	n.handleConnManagerClosedOwner(conn, true, cause)

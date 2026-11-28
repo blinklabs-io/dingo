@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/protocol/txsubmission"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -68,5 +69,47 @@ func TestRecordProtocolMessage_LabelsByOutcome(t *testing.T) {
 		t,
 		3,
 		testutil.CollectAndCount(o.protocolMetrics.messageDuration),
+	)
+}
+
+// A blocking txid wait that ends because this node stops is answered with
+// ErrStopServerProcess, which sends MsgDone. That is the protocol's normal
+// end, so it must not raise the error rate on every shutdown.
+func TestInstrumentTxsubmissionRequestTxIds_StopIsNotAnError(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+
+	stopped := o.instrumentTxsubmissionRequestTxIds(
+		func(
+			txsubmission.CallbackContext,
+			bool,
+			uint16,
+			uint16,
+		) ([]txsubmission.TxIdAndSize, error) {
+			return nil, txsubmission.ErrStopServerProcess
+		},
+	)
+	_, err := stopped(txsubmission.CallbackContext{}, true, 0, 1)
+	assert.ErrorIs(t, err, txsubmission.ErrStopServerProcess)
+
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(
+			o.protocolMetrics.messagesReceived.WithLabelValues(
+				"txsubmission", "error",
+			),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			o.protocolMetrics.messagesReceived.WithLabelValues(
+				"txsubmission", "success",
+			),
+		),
 	)
 }

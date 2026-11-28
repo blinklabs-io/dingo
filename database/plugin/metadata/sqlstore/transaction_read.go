@@ -72,7 +72,7 @@ func (s *Store) GetTransactionByHash(
 	if err != nil {
 		return nil, err
 	}
-	ret, err := transactionFromSQLite(transactionRow(row))
+	ret, err := s.transactionFromSQLite(transactionRow(row))
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,10 @@ func (s *Store) GetTransactionMetadataByHash(
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	return metadata, err
+	if err != nil {
+		return nil, err
+	}
+	return s.resolvePayload(metadata)
 }
 
 func (s *Store) SumTransactionFeesInSlotRange(
@@ -201,7 +204,7 @@ func (s *Store) GetTransactionsByBlockHash(
 	for i := range rows {
 		converted[i] = transactionRow(rows[i])
 	}
-	ret, err := transactionsFromSQLite(converted)
+	ret, err := s.transactionsFromSQLite(converted)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +250,7 @@ FROM `+appliedTransactionFrom+` WHERE t.hash IN (`+bindPlaceholders(len(chunk))+
 				rows.Close()
 				return nil, err
 			}
-			item, err := transactionFromSQLite(row)
+			item, err := s.transactionFromSQLite(row)
 			if err != nil {
 				rows.Close()
 				return nil, err
@@ -899,7 +902,7 @@ func (s *Store) queryTransactions(
 		if err != nil {
 			return nil, err
 		}
-		item, err := transactionFromSQLite(row)
+		item, err := s.transactionFromSQLite(row)
 		if err != nil {
 			return nil, err
 		}
@@ -939,12 +942,12 @@ func addressTransactionPredicate(
 	}
 }
 
-func transactionsFromSQLite(
+func (s *Store) transactionsFromSQLite(
 	rows []transactionRow,
 ) ([]models.Transaction, error) {
 	ret := make([]models.Transaction, len(rows))
 	for i := range rows {
-		item, err := transactionFromSQLite(rows[i])
+		item, err := s.transactionFromSQLite(rows[i])
 		if err != nil {
 			return nil, err
 		}
@@ -953,9 +956,13 @@ func transactionsFromSQLite(
 	return ret, nil
 }
 
-func transactionFromSQLite(
+func (s *Store) transactionFromSQLite(
 	row transactionRow,
 ) (*models.Transaction, error) {
+	metadata, err := s.resolvePayload(row.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf("transaction metadata: %w", err)
+	}
 	fee, err := parseNullUint64("transaction fee", row.Fee)
 	if err != nil {
 		return nil, err
@@ -983,7 +990,7 @@ func transactionFromSQLite(
 		Inputs:          []models.Utxo{},
 		Redeemers:       []models.Redeemer{},
 		ReferenceInputs: []models.Utxo{},
-		Metadata:        row.Metadata,
+		Metadata:        metadata,
 		Slot:            uint64(row.Slot.Int64),
 		Type:            int(row.Type.Int64),
 		ID:              uint(row.ID),

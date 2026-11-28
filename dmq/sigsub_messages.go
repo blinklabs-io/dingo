@@ -437,16 +437,9 @@ func checkMessageID(id []byte) error {
 	return nil
 }
 
-// The size limits CIP-0137's CDDL puts on a message, which dmq-node enforces
-// when it decodes one.
+// The key and signature sizes CIP-0137's CDDL fixes, which dmq-node enforces
+// when it decodes a message.
 const (
-	// DefaultMessageBodyMin and DefaultMessageBodyMax bound messageBody. The
-	// CIP's version 2 CDDL says 90 to 2000, and dmq-node's decoder uses the
-	// same limits (Policy.minSigBodySize and maxSigBodySize); the sig.cddl file
-	// in its repository says 360, which its decoder does not enforce.
-	DefaultMessageBodyMin = 90
-	DefaultMessageBodyMax = 2000
-
 	kesSignatureSize    = 448
 	kesVerificationSize = 32
 	coldSignatureSize   = 64
@@ -456,20 +449,22 @@ const (
 var errMessageShape = errors.New("message does not fit the CIP-0137 sizes")
 
 // checkMessageShape reports why msg breaks the sizes CIP-0137's CDDL fixes: a
-// body of bodyMin to bodyMax bytes, a 448-byte KES signature, and the key and
-// signature lengths of the operational certificate and cold key. A message
-// outside them is one dmq-node refuses to decode, so it is never accepted or
-// passed on.
-func checkMessageShape(
-	msg *ocommon.DmqMessage,
-	bodyMin, bodyMax int,
-) error {
+// body of ocommon.MinMessageBodySize to ocommon.MaxMessageBodySize bytes, a
+// 448-byte KES signature, and the key and signature lengths of the operational
+// certificate and cold key. A message outside them is one dmq-node refuses to
+// decode, so it is never accepted or passed on. gouroboros refuses such a body
+// when it decodes a local submission; a peer's message is decoded here, by
+// decodeWireMessage, which does not check sizes.
+func checkMessageShape(msg *ocommon.DmqMessage) error {
 	switch {
-	case len(msg.Payload.MessageBody) < bodyMin ||
-		len(msg.Payload.MessageBody) > bodyMax:
+	case len(msg.Payload.MessageBody) < ocommon.MinMessageBodySize ||
+		len(msg.Payload.MessageBody) > ocommon.MaxMessageBodySize:
 		return fmt.Errorf(
 			"%w: body is %d bytes, expected %d to %d",
-			errMessageShape, len(msg.Payload.MessageBody), bodyMin, bodyMax,
+			errMessageShape,
+			len(msg.Payload.MessageBody),
+			ocommon.MinMessageBodySize,
+			ocommon.MaxMessageBodySize,
 		)
 	case len(msg.KESSignature) != kesSignatureSize:
 		return fmt.Errorf(

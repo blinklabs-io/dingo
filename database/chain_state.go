@@ -64,7 +64,7 @@ var ErrBlockStoreChainState = errors.New(
 // sync_state key names.
 func blockStoreChainState(key string) bool {
 	switch key {
-	case DeferredHeaderFloorKey, HistoryExpiryCursorKey,
+	case DeferredHeaderFloorKey, HistoryExpiryCursorKey, HistoryExpiryHeldKey,
 		ConsensusProviderIdentityKey, ImmutableUtxoOffsetsTipKey,
 		RollbackHighWaterKey, PendingTruncateKey, RollbackIntentKey:
 		return true

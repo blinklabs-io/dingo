@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo"
+	"github.com/blinklabs-io/dingo/bark"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -55,6 +56,7 @@ func newDatabaseService(
 	logger *slog.Logger,
 ) *dblifecycle.Service {
 	svc := dblifecycle.NewService(cfg, registry, logger)
+	svc.SetArchiveStore(bark.ArchiveStore)
 	svc.SetIndexerRollbackFactory(func(
 		consensus, indexer *database.Database,
 	) (dblifecycle.IndexerRoller, error) {

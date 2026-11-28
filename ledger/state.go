@@ -3667,7 +3667,9 @@ func (ls *LedgerState) Close() (retErr error) {
 	if ls.blockPipeline != nil {
 		blockPipelineStopDone = make(chan error, 1)
 		go func() {
-			stopErr := ls.blockPipeline.Stop()
+			stopErr := ls.blockPipeline.Stop(
+				context.WithoutCancel(ls.lifecycleContext()),
+			)
 			// Stop closes errorsChan as one of its final steps, once every
 			// stage has fully drained -- see BlockPipeline.Stop. Waiting for
 			// drainBlockPipelineErrors here (it exits via range-over-channel
@@ -13200,6 +13202,34 @@ func (ls *LedgerState) primaryChainContainsPoint(
 		return false, err
 	}
 	return ls.primaryChainContainsBlock(block, point)
+}
+
+// PrimaryChainPointBlockNumber returns the block number of point when it is
+// on the primary chain: a header queued ahead of its block, or a stored block
+// the primary chain holds. It reports false for any other point, including
+// origin and a block retained only on an abandoned fork.
+func (ls *LedgerState) PrimaryChainPointBlockNumber(
+	ctx context.Context,
+	point ocommon.Point,
+) (uint64, bool) {
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		return 0, false
+	}
+	if blockNumber, ok := ls.chain.QueuedHeaderBlockNumber(point); ok {
+		return blockNumber, true
+	}
+	if ls.db == nil {
+		return 0, false
+	}
+	block, err := database.BlockByPoint(ctx, ls.db, point)
+	if err != nil {
+		return 0, false
+	}
+	onChain, err := ls.primaryChainContainsBlock(block, point)
+	if err != nil || !onChain {
+		return 0, false
+	}
+	return block.Number, true
 }
 
 // primaryChainContainsBlock checks whether block's internal ID currently maps

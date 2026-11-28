@@ -625,7 +625,7 @@ func TestStartListener_UnixSocket_InboundEventReportsPublishedAddr(
 		ouroboros.WithNodeToNode(false),
 	)
 	require.NoError(t, err)
-	defer client.Close()
+	defer client.Close(context.Background())
 
 	select {
 	case evt := <-events:

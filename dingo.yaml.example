@@ -65,6 +65,16 @@
         # VACUUM, which pauses SQLite writers for the whole rewrite; later
         # runs release free pages in short steps.
         # vacuumIntervalSeconds: 86400
+    # immutable:
+      # provider: "chunkfile"
+      # config:
+        # How chunks the ImmutableDB completes are kept: "none" (default) as
+        # plain chunk files, or "mithril" as one zstd-compressed tar per chunk
+        # in the Mithril immutable archive layout. Existing chunks keep their
+        # form; both are read. Not supported by the s3 and gcs providers.
+        # compression: "none"
+        # MiB of decompressed archived chunks kept in memory for block reads.
+        # archiveCacheMb: 256
     # PostgreSQL metadata alternative (replace the metadata block above):
     # metadata:
     #   provider: "postgres"
@@ -460,6 +470,24 @@
 # barkEventMaxSubscribers: 0
 # barkEventMaxSubscribersPerClient: 0
 
+# Optional: follow the EventService of other nodes. Each event received is
+# republished on this node's EventBus as a bark.remote_event carrying the
+# source name and the remote node's own envelope. A source reconnects with
+# backoff and resumes after the last event it handled; the position is kept in
+# memory, so a restart continues from the remote node's current position.
+# Independent of barkEventEnabled. Set in YAML or with
+# dingo.WithBarkEventSources; there is no flag or environment variable. Default:
+# none.
+#   name           label on republished events; unique per source
+#   url            base URL of the remote node's Bark server (http or https)
+#   eventTypes     optional event types or patterns such as "peergov.*"
+#   originNodeIds  optional: only events created on these nodes
+# barkEventSources:
+#   - name: relay-a
+#     url: http://relay-a.example:9090
+#     eventTypes: ["peergov.*", "epoch.transition"]
+#     originNodeIds: ["relay-a"]
+
 # Explicitly enable Bark's remote LifecycleService (Stop, Restart, GetStatus).
 # Disabled by default. Requires a non-zero barkPort.
 # Can be overridden with DINGO_BARK_LIFECYCLE_ENABLED
@@ -616,7 +644,7 @@
 # enabled, Dingo subscribes an observer to its own epoch.transition EventBus
 # event and validates each newly closed epoch's committed reward state
 # directly against Koios reference data as the node advances -- no separate
-# koios-parity CLI process or second synced copy of the database required.
+# process or second synced copy of the database required.
 # This is a one-off validation aid, not a permanent
 # subsystem; leave disabled for normal node operation. See
 # internal/koiosparity/README.md.

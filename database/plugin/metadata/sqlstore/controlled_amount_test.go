@@ -83,8 +83,9 @@ var rowCountStoreSequence atomic.Uint64
 
 // rowCounter counts the rows the driver hands to database/sql while armed.
 type rowCounter struct {
-	armed atomic.Bool
-	rows  atomic.Int64
+	armed   atomic.Bool
+	rows    atomic.Int64
+	queries atomic.Int64
 }
 
 type rowCountConnector struct {
@@ -147,6 +148,9 @@ func (c *rowCountConn) QueryContext(
 	query string,
 	args []driver.NamedValue,
 ) (driver.Rows, error) {
+	if c.counter.armed.Load() {
+		c.counter.queries.Add(1)
+	}
 	rows, err := c.Conn.(driver.QueryerContext).QueryContext(ctx, query, args)
 	if err != nil {
 		return nil, err

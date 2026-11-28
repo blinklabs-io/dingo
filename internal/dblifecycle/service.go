@@ -74,6 +74,7 @@ type Service struct {
 	destinationRegistry *lifecycle.DestinationRegistry
 	liveNode            LiveNode
 	rollbackFactory     IndexerRollbackFactory
+	archiveStore        storageadopt.ArchiveStoreFunc
 }
 
 // NewService creates a Service bound to cfg's database configuration
@@ -312,7 +313,7 @@ func (s *Service) RestoreStorageConfig() lifecycle.RestoreStorageConfig {
 		case "sqlite":
 			restoreStorage.AdoptLegacyAPI = func(ctx context.Context, stagingDir string) error {
 				return storageadopt.AdoptStagedAPI(
-					ctx, *s.cfg, s.logger, nil, stagingDir,
+					ctx, *s.cfg, s.logger, nil, stagingDir, s.archiveStore,
 				)
 			}
 		case "postgres", "mysql":

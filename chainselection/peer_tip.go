@@ -301,6 +301,26 @@ func (p *PeerChainTip) ApplyRollback(
 	}
 }
 
+// restoreRollbackBlockNumber gives a rollback point that ApplyRollback left
+// with an unknown block number the block number it has on the node's own
+// chain. Without it the peer's own reference reads 0, and its next header,
+// which continues from that point, is held to the catch-up ceiling instead of
+// to its own frontier: past the ceiling an honest header is then refused
+// rather than held until the ledger catches up. blockNumber 0 means unknown
+// and changes nothing.
+func (p *PeerChainTip) restoreRollbackBlockNumber(
+	point ocommon.Point,
+	blockNumber uint64,
+) {
+	if p == nil || blockNumber == 0 || p.ObservedTip.BlockNumber != 0 ||
+		p.ObservedTip.Point.Slot != point.Slot ||
+		!bytes.Equal(p.ObservedTip.Point.Hash, point.Hash) {
+		return
+	}
+	p.ObservedTip.BlockNumber = blockNumber
+	p.observedTipHistory = []ochainsync.Tip{cloneObservedTip(p.ObservedTip)}
+}
+
 func (p *PeerChainTip) resetObservedPoints() {
 	p.observedPoints = nil
 	p.observedPointsRef = windowRef[ocommon.Point]{}
