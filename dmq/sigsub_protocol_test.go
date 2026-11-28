@@ -15,6 +15,7 @@
 package dmq
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -253,10 +254,10 @@ func newSigPair(
 	pair.puller = newSigPuller(o1, pullerCfg)
 	pair.server = newSigServer(o2, serverCfg)
 	t.Cleanup(func() {
-		pair.puller.Stop()
-		pair.server.Stop()
-		m1.Stop()
-		m2.Stop()
+		_ = pair.puller.Stop(context.Background())
+		_ = pair.server.Stop(context.Background())
+		_ = m1.Stop(context.Background())
+		_ = m2.Stop(context.Background())
 		_ = c1.Close()
 		_ = c2.Close()
 	})

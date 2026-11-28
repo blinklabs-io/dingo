@@ -166,7 +166,7 @@ func currentEpochNo(
 	if conn == nil || lsq == nil || lsq.Client == nil {
 		return 0, errAcquireWithoutLocalStateQuery
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 	epochNo, err := lsq.Client.GetEpochNo()
 	if err != nil {
 		return 0, fmt.Errorf("GetEpochNo: %w", err)
@@ -350,8 +350,8 @@ func runProtocolParamsAndStake(
 		stakeMismatches, stakeErr = CheckStakeDistribution(
 			ctx, lsq.Client, koios, cache, network, epoch,
 		)
-		_ = lsq.Client.Release() //nolint:errcheck
-		conn.Close()             //nolint:errcheck
+		_ = lsq.Client.Release()               //nolint:errcheck
+		conn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 
 		if isRetryableDingoConnErr(ppErr) || isRetryableDingoConnErr(stakeErr) {
 			continue
@@ -423,13 +423,13 @@ func compareUTxOOnce(
 	}
 	if conn == nil || lsq == nil || lsq.Client == nil {
 		if conn != nil {
-			conn.Close() //nolint:errcheck
+			conn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 		}
 		return utxoComparison{}, errAcquireWithoutLocalStateQuery
 	}
 	defer func() {
-		_ = lsq.Client.Release() //nolint:errcheck
-		conn.Close()             //nolint:errcheck
+		_ = lsq.Client.Release()               //nolint:errcheck
+		conn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 	}()
 	utxos, err := lsq.Client.GetUTxOWhole()
 	if err != nil {
@@ -526,7 +526,7 @@ func acquireWithRetry(
 
 		dialLsq := dialConn.LocalStateQuery()
 		if dialLsq == nil || dialLsq.Client == nil {
-			dialConn.Close() //nolint:errcheck
+			dialConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 			lastErr = errors.New("LocalStateQuery client unavailable")
 			continue
 		}
@@ -535,7 +535,7 @@ func acquireWithRetry(
 		if acquireErr == nil {
 			return dialConn, dialLsq, nil
 		}
-		dialConn.Close() //nolint:errcheck
+		dialConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 		lastErr = fmt.Errorf("acquire: %w", acquireErr)
 		tooOld := errors.Is(acquireErr, localstatequery.ErrAcquireFailurePointTooOld)
 		if tooOld && retryTooOld {
@@ -587,7 +587,7 @@ func captureGenesisBaseline(
 	if conn == nil || lsq == nil || lsq.Client == nil {
 		return nil, errAcquireWithoutLocalStateQuery
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 	utxos, err := lsq.Client.GetUTxOWhole()
 	if err != nil {
 		return nil, fmt.Errorf("genesis GetUTxOWhole: %w", err)
@@ -1762,20 +1762,20 @@ func RunFromGenesis(
 		// single-shot predecessor: a ctx cancellation during cs.Client.Sync
 		// itself (not just during the final select below) must still close
 		// csConn to unblock it, not wait for Sync to return on its own.
-		stopOnCancel := context.AfterFunc(ctx, func() { csConn.Close() }) //nolint:errcheck
+		stopOnCancel := context.AfterFunc(ctx, func() { csConn.Close(context.WithoutCancel(ctx)) }) //nolint:errcheck
 
 		cs := csConn.ChainSync()
 		if cs == nil || cs.Client == nil {
 			endSession()
 			stopOnCancel()
-			csConn.Close() //nolint:errcheck
+			csConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 			retireSession()
 			return errors.New("ChainSync client unavailable")
 		}
 		if err := cs.Client.Sync([]pcommon.Point{lastPoint}); err != nil {
 			endSession()
 			stopOnCancel()
-			csConn.Close() //nolint:errcheck
+			csConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 			retireSession()
 			ok, retryErr := retryOrStop(
 				fmt.Sprintf(
@@ -1793,17 +1793,39 @@ func RunFromGenesis(
 		go keepNtCConnAlive(sessionCtx, csConn, ntcKeepaliveInterval)
 
 		var sessionErr error
+		var (
+			peerErr   error
+			peerErrOk bool
+		)
 		select {
 		case <-ctx.Done():
 			endSession()
 			stopOnCancel()
-			csConn.Close() //nolint:errcheck
+			csConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 			retireSession()
 			return ctx.Err()
-		case err, ok := <-csConn.ErrorChan():
+		case <-csConn.Muxer().DoneChan():
+			// The connection's error, or the close of ErrorChan, comes only
+			// once the callback running at this moment has returned, and
+			// that callback queries Dingo until the session ends. End the
+			// session first, so the callback stops and the shutdown can
+			// finish.
+			endSession()
+			select {
+			case peerErr, peerErrOk = <-csConn.ErrorChan():
+			case <-ctx.Done():
+				stopOnCancel()
+				csConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
+				retireSession()
+				return ctx.Err()
+			}
+		case peerErr, peerErrOk = <-csConn.ErrorChan():
+		}
+		{
+			err, ok := peerErr, peerErrOk
 			endSession()
 			stopOnCancel()
-			csConn.Close() //nolint:errcheck
+			csConn.Close(context.WithoutCancel(ctx)) //nolint:errcheck
 			retireSession()
 			// gouroboros closes ErrorChan without sending anything when the
 			// peer closes the connection while every protocol is idle,

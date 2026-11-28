@@ -70,7 +70,7 @@ func (s *dmqSigner) pool() ocommon.PoolKeyHash {
 func (s *dmqSigner) message(t *testing.T, body string) ocommon.DmqMessage {
 	t.Helper()
 	payload := ocommon.DmqMessagePayload{
-		MessageBody: []byte(body),
+		MessageBody: testBody(body),
 		ExpiresAt:   soonExpiry(),
 	}
 	payloadCbor, err := cbor.Encode(payload)
@@ -125,6 +125,8 @@ func (c *chainLookups) authenticator(
 	t.Helper()
 	auth, err := ocommon.NewMessageAuthenticator(
 		ocommon.MessageAuthenticatorConfig{
+			// Tests send one pool's messages back to back.
+			MinSigDelay:    -1,
 			StakeAuthority: c,
 			CurrentSlot: func() (uint64, error) {
 				c.slotLookups.Add(1)
@@ -164,7 +166,9 @@ func TestPeerAuthenticatesEachReplyAtOneSlot(t *testing.T) {
 		return a.pool.Len() == 3
 	})
 	require.NoError(t, pa.Err())
-	require.Equal(t, int64(1), lookups.slotLookups.Load())
+	// The authenticator checks each KES signature at the period the message
+	// claims, as dmq-node does, so it never asks for the node's slot.
+	require.Zero(t, lookups.slotLookups.Load())
 }
 
 func TestStackAcceptFromPeerAdmitsNoneOfAReplyWithAForgery(t *testing.T) {

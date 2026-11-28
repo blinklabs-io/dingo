@@ -121,12 +121,6 @@ type StackConfig struct {
 	// MaxKESEvolutions is the number of KES periods an operational
 	// certificate is valid for. Zero uses the Cardano mainnet value.
 	MaxKESEvolutions uint64
-	// MessageBodyMin and MessageBodyMax bound the size of a message body
-	// accepted from a local client or a peer. Zero uses CIP-0137's limits,
-	// DefaultMessageBodyMin and DefaultMessageBodyMax, which dmq-node
-	// enforces when it decodes a message.
-	MessageBodyMin int
-	MessageBodyMax int
 	// MinPoolMessageInterval is the shortest time between two messages of
 	// one pool that this stack announces to a peer. A message that arrives
 	// sooner is held until it has passed, because dmq-node ends the
@@ -235,12 +229,6 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 	}
 	if cfg.MaxKESEvolutions == 0 {
 		cfg.MaxKESEvolutions = ocommon.DefaultMaxKESEvolutions
-	}
-	if cfg.MessageBodyMin == 0 {
-		cfg.MessageBodyMin = DefaultMessageBodyMin
-	}
-	if cfg.MessageBodyMax == 0 {
-		cfg.MessageBodyMax = DefaultMessageBodyMax
 	}
 	factory := promauto.With(cfg.PromRegistry)
 	s := &Stack{
@@ -476,9 +464,7 @@ func (s *Stack) precheck(
 ) ocommon.RejectReason {
 	// A message that breaks CIP-0137's sizes is one dmq-node refuses to
 	// decode, so it is neither kept nor passed on.
-	if err := checkMessageShape(
-		msg, s.cfg.MessageBodyMin, s.cfg.MessageBodyMax,
-	); err != nil {
+	if err := checkMessageShape(msg); err != nil {
 		return ocommon.InvalidReason{Message: err.Error()}
 	}
 	if !msg.IsValidAt(s.cfg.Now()) {
@@ -613,8 +599,9 @@ func (s *Stack) handleClosed(id ouroboros.ConnectionId) {
 // feed moves every message the consumer has not yet seen from the pool into
 // its notification server's queue. A message the queue refused is held and
 // offered again, so a slow consumer delays messages but skips only those that
-// expire first. It returns once the consumer ends notification with
-// MsgClientDone, which leaves the connection open for submission.
+// expire first. It returns when ctx ends, which the connection closing does.
+// MsgClientDone does not end it: the server restarts for a new run on the same
+// connection, as dmq-node's does, and keeps its queue.
 func (s *Stack) feed(
 	ctx context.Context,
 	consumerID string,
@@ -623,11 +610,6 @@ func (s *Stack) feed(
 	var pending *ocommon.DmqMessage
 	wait := feedRetryInterval
 	for {
-		// The server's terminal state has no channel, so every wait below is
-		// bounded and this is checked on each wake.
-		if server.IsDone() {
-			return
-		}
 		// Take the signal before draining so an admission that lands
 		// between the drain and the wait still wakes this loop.
 		added := s.pool.AddedSignal()

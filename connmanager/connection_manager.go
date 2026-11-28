@@ -582,7 +582,7 @@ func (c *ConnectionManager) Stop(ctx context.Context) error {
 		var closeErr error
 		for _, conn := range conns {
 			if conn != nil {
-				if err := conn.Close(); err != nil {
+				if err := CloseOuroborosConn(ctx, conn); err != nil {
 					closeErr = errors.Join(closeErr, err)
 				}
 			}
@@ -815,7 +815,7 @@ func (c *ConnectionManager) addConnectionImplWithAdmission(
 		if conn != nil {
 			closeConnAndLog(
 				c.config.Logger,
-				conn,
+				OuroborosCloser{Conn: conn},
 				"error closing connection rejected during shutdown",
 				"peer_addr", peerAddr,
 			)
@@ -853,7 +853,7 @@ func (c *ConnectionManager) addConnectionImplWithAdmission(
 			)
 			closeConnAndLog(
 				c.config.Logger,
-				conn,
+				OuroborosCloser{Conn: conn},
 				"error closing colliding inbound connection",
 				"peer_addr", peerAddr,
 			)
@@ -892,7 +892,7 @@ func (c *ConnectionManager) addConnectionImplWithAdmission(
 			c.connectionsMutex.Unlock()
 			closeConnAndLog(
 				c.config.Logger,
-				existingConn,
+				OuroborosCloser{Conn: existingConn},
 				"error closing evicted inbound connection",
 				"peer_addr", existingPeerAddr,
 			)
@@ -943,7 +943,7 @@ func (c *ConnectionManager) addConnectionImplWithAdmission(
 			c.connectionsMutex.Unlock()
 			closeConnAndLog(
 				c.config.Logger,
-				existingConn,
+				OuroborosCloser{Conn: existingConn},
 				"error closing replaced connection",
 				"peer_addr", existingPeerAddr,
 			)
@@ -997,7 +997,7 @@ func (c *ConnectionManager) addConnectionImplWithAdmission(
 				c.unregisterTrustedNtCActivity(connId, conn)
 				closeConnAndLog(
 					c.config.Logger,
-					conn,
+					OuroborosCloser{Conn: conn},
 					"trusted NtC close failed",
 				)
 				c.forgetClosedTrustedNtCActivity(connId, conn)
@@ -1238,7 +1238,13 @@ func (c *ConnectionManager) GetConnectionWithDone(
 // owner. The reason is recorded before teardown and cannot leak to a new
 // connection that reuses the same ID. Callers must classify local intent;
 // an actual transport error remains separately available on the close event.
+//
+// ctx bounds the wait for conn's running callbacks, as for
+// CloseOuroborosConn. A caller that is one of conn's callbacks passes that
+// callback's Context; one that must not wait passes a done context, which
+// begins the shutdown and returns.
 func (c *ConnectionManager) CloseConnectionWithReason(
+	ctx context.Context,
 	conn *ouroboros.Connection,
 	reason string,
 ) error {
@@ -1261,7 +1267,7 @@ func (c *ConnectionManager) CloseConnectionWithReason(
 		info.localCloseReason = reason
 	}
 	c.connectionsMutex.Unlock()
-	return conn.Close()
+	return CloseOuroborosConn(ctx, conn)
 }
 
 // GetConnectionWithDoneAndError returns the connection, its teardown signal,
@@ -1328,9 +1334,13 @@ func (c *ConnectionManager) HandleConnectionRecycleRequestedEvent(
 		)
 		var err error
 		if e.LocalCloseReason != "" {
-			err = c.CloseConnectionWithReason(conn, e.LocalCloseReason)
+			err = c.CloseConnectionWithReason(
+				context.Background(),
+				conn,
+				e.LocalCloseReason,
+			)
 		} else {
-			err = conn.Close()
+			err = CloseOuroborosConn(context.Background(), conn)
 		}
 		if err != nil {
 			c.config.Logger.Debug(

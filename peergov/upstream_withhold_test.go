@@ -15,6 +15,7 @@
 package peergov
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -78,7 +79,7 @@ func newWithholdFixture(
 		ouroboros.WithFullDuplex(true),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close(context.Background()) })
 	var server result
 	select {
 	case server = <-serverCh:
@@ -86,7 +87,7 @@ func newWithholdFixture(
 		t.Fatal("timed out waiting for the inbound handshake")
 	}
 	require.NoError(t, server.err)
-	t.Cleanup(func() { _ = server.conn.Close() })
+	t.Cleanup(func() { _ = server.conn.Close(context.Background()) })
 
 	connMgr := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{

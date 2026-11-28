@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -298,12 +299,12 @@ func (h *csjHarness) addPeer(name string, tipBlock uint64) *csjPeer {
 		h.o.chainsyncConnectionConfigOption(t.Context(), true),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = clientConn.Close() })
+	t.Cleanup(func() { _ = clientConn.Close(context.Background()) })
 	select {
 	case err := <-serverErrCh:
 		t.Fatalf("peer connection setup failed: %v", err)
 	case serverConn := <-serverConnCh:
-		t.Cleanup(func() { _ = serverConn.Close() })
+		t.Cleanup(func() { _ = serverConn.Close(context.Background()) })
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for peer connection setup")
 	}

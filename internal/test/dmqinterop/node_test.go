@@ -155,7 +155,7 @@ func (n nodeEnvironment) consumerHolds(
 	)
 	require.NoError(t, err)
 	require.NoError(t, conn.Dial("unix", n.socket))
-	defer conn.Close()
+	defer conn.Close(context.Background())
 
 	client := conn.LocalMessageNotification().Client
 	deadline := time.After(within)

@@ -470,6 +470,12 @@ store generation that created their transaction and waits for old users
 before closing it. Request cancellation belongs to the serving instance so
 closing an old connection cannot cancel a replacement's requests.
 
+Closing an Ouroboros connection returns only after the callbacks running on it
+have returned, so a close has the same lock hazard as a publication. Code that
+is a callback of the connection, or holds a lock one takes, only begins the
+shutdown. Other code waits for it under a bounded timeout. A callback that
+blocks must end when the connection begins shutting down.
+
 Event delivery details are specified in [event/doc.go](event/doc.go). Local
 lock protocols, queue sizing, timers and worker scheduling are documented
 beside their implementation.

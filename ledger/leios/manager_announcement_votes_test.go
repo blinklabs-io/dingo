@@ -101,7 +101,7 @@ func TestVoteManagerAnnouncementVotesCountsLegacyVotes(t *testing.T) {
 	fixture.mgr.ObserveAnnouncement(slot, rbHash, ebHash)
 
 	for _, voter := range []uint64{0, 1} {
-		require.NoError(t, fixture.mgr.HandleVote(
+		require.NoError(t, fixture.mgr.HandleLegacyVote(
 			"conn-a",
 			fixture.makeVote(t, voter, slot, ebHash),
 		))

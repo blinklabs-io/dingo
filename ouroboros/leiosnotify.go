@@ -2178,7 +2178,7 @@ func (o *Ouroboros) handleLeiosNotifyMessage(
 			return err
 		}
 		for _, vote := range m.FullVotes {
-			if err := o.leiosVotes.HandleVote(connId, vote); err != nil {
+			if err := o.leiosVotes.HandleLegacyVote(connId, vote); err != nil {
 				if errors.Is(err, dingleios.ErrPeerMisbehavior) {
 					return err
 				}

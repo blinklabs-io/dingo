@@ -215,7 +215,7 @@ func (s *testChainSyncServer) serve(listener net.Listener, magic uint32) {
 					_ = conn.Close()
 					return
 				}
-				defer oconn.Close() //nolint:errcheck
+				defer oconn.Close(context.Background()) //nolint:errcheck
 				s.mu.Lock()
 				s.conns[conn.RemoteAddr().String()] = oconn
 				s.mu.Unlock()
@@ -463,7 +463,7 @@ func requireReconnectsQuicklyAfterEstablishedDrop(
 	// Force this specific session to end, and capture the log count so we
 	// can identify the *next* one below.
 	before := logCount()
-	require.NoError(t, conn.Close())
+	require.NoError(t, conn.Close(context.Background()))
 
 	testutil.WaitForCondition(t, func() bool {
 		return logCount() > before
@@ -639,7 +639,7 @@ func TestWatchBlocks_CloseStopsPromptlyAgainstUnresponsivePeer(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer oconn.Close() //nolint:errcheck
+		defer oconn.Close(context.Background()) //nolint:errcheck
 		<-oconn.ErrorChan()
 	}()
 

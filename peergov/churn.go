@@ -18,6 +18,8 @@ import (
 	"cmp"
 	"slices"
 	"time"
+
+	"github.com/blinklabs-io/dingo/connmanager"
 )
 
 // gossipChurn performs aggressive churn on gossip and ledger peers.
@@ -129,7 +131,7 @@ func (p *PeerGovernor) gossipChurn() {
 				if conn != nil {
 					closeConnAndLog(
 						p.config.Logger,
-						conn,
+						connmanager.OuroborosCloser{Conn: conn, Begin: true},
 						"gossip churn: error closing connection for demoted peer",
 						"address",
 						peer.Address,

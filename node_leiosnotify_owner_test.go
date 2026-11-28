@@ -184,11 +184,11 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 		// release the connection manager's error watchers.
 		t.Cleanup(func() {
 			if localResult.conn != nil {
-				_ = localResult.conn.Close()
+				_ = localResult.conn.Close(context.Background())
 				close(localErrors)
 			}
 			if peerResult.conn != nil {
-				_ = peerResult.conn.Close()
+				_ = peerResult.conn.Close(context.Background())
 				close(peerErrors)
 			}
 		})

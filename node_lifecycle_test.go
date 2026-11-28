@@ -955,7 +955,7 @@ func registerGenesisForkTestPeer(
 		t,
 		n.connManager.AddConnection(oConn, false, "127.0.0.1:33273"),
 	)
-	t.Cleanup(func() { _ = oConn.Close() })
+	t.Cleanup(func() { _ = oConn.Close(context.Background()) })
 	return oConn.Id()
 }
 

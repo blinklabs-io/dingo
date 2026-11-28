@@ -102,8 +102,10 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 	// signal cannot be used, as it closes only after this callback returns.
 	connDone := o.localTxSubmissionConnDone(ctx.ConnectionId)
 	var protoStop <-chan struct{}
-	if ctx.Server != nil && ctx.Server.Protocol != nil {
-		protoStop = ctx.Server.StopChan()
+	if ctx.Server != nil {
+		if proto := ctx.Server.ProtocolInstance(); proto != nil {
+			protoStop = proto.StopChan()
+		}
 	}
 	valCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()

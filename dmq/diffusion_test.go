@@ -188,7 +188,10 @@ func TestMempoolStaysBoundedAtMainnetSignerScale(t *testing.T) {
 	}
 	t.Logf("one message a minute at %d bytes: peak %d messages, %d bytes",
 		minBody, peak, pool.SizeBytes())
-	assert.Equal(t, signers*int(ttl/time.Minute), peak)
+	// A message expires once its expiry is reached (expiresAt <= now), as in
+	// dmq-node's mempool, so the round published a full TTL earlier is gone
+	// when the peak is taken.
+	assert.Equal(t, signers*(int(ttl/time.Minute)-1), peak)
 
 	advance(ttl + time.Minute)
 	pool.removeExpired()

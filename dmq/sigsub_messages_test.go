@@ -400,9 +400,7 @@ func TestCheckMessageShape(t *testing.T) {
 			t.Parallel()
 			msg := good()
 			tt.mutate(&msg)
-			err := checkMessageShape(
-				&msg, DefaultMessageBodyMin, DefaultMessageBodyMax,
-			)
+			err := checkMessageShape(&msg)
 			if tt.wantErr == "" {
 				require.NoError(t, err)
 				return

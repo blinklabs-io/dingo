@@ -171,16 +171,16 @@ func TestAssetReadsNeverScanAssetTables(t *testing.T) {
 	}
 
 	plan("asset quantity",
-		assetQuantityQuery("dingo_uint64_sum(h.amount)"),
+		assetQuantityQuery("sqlite", "dingo_uint64_sum(h.amount)"),
 		policy, name)
-	plan("live utxos by asset", liveUtxosByAssetQuery, policy, name)
-	plan("live utxos by asset policy", liveUtxosByAssetPolicyQuery, policy)
+	plan("live utxos by asset", liveUtxosByAssetQuery("sqlite"), policy, name)
+	plan("live utxos by asset policy", liveUtxosByAssetPolicyQuery("sqlite"), policy)
 	plan("asset holders count",
-		`SELECT COUNT(*) FROM (SELECT 1`+assetHolderGroups+`) AS holders`,
+		`SELECT COUNT(*) FROM (SELECT 1`+assetHolderGroups("sqlite")+`) AS holders`,
 		policy, name)
 	plan("asset holders page",
 		`SELECT ua.address, dingo_uint64_sum(a.amount) AS quantity`+
-			assetHolderGroups+` ORDER BY quantity DESC, ua.address DESC LIMIT ? OFFSET ?`,
+			assetHolderGroups("sqlite")+` ORDER BY quantity DESC, ua.address DESC LIMIT ? OFFSET ?`,
 		policy, name, 10, 0)
 	source, args, err := assetTransactionsQuery(hash, name, nil, nil)
 	require.NoError(t, err)
