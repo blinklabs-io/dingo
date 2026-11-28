@@ -1691,8 +1691,8 @@ func TestDiffBlockUtxoDelta_DedupesRepeatedProducedRef(t *testing.T) {
 // TestRunIncremental_RequiresPositiveFullCheckInterval and
 // TestRunIncremental_RequiresCursorFile cover RunIncremental's own
 // validation, ahead of ever dialing anything -- a caller that got past
-// cmd/node-parity's flag validation by constructing IncrementalConfig
-// directly (e.g. a future embedder of this package) must not be able to
+// its own configuration checks by constructing IncrementalConfig
+// directly must not be able to
 // start a loop that can never checkpoint or resume.
 func TestRunIncremental_RequiresPositiveFullCheckInterval(t *testing.T) {
 	t.Parallel()

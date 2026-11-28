@@ -418,24 +418,20 @@ type IncrementalConfig struct {
 	FullCheckTimeout time.Duration
 	Logger           *slog.Logger
 	// OnFullCheck is called with each full Check's outcome, including the
-	// startup baseline -- so a caller (cmd/node-parity) can log and record
-	// metrics for it exactly like watch's full mode already does, without
-	// this package depending on cmd/node-parity's logging/metrics types.
+	// startup baseline, so a caller can report it the same way as a
+	// full-mode watch check.
 	OnFullCheck func(reason FullCheckReason, result *CheckResult, err error)
 	// OnBlockCheck is called after every incrementally-validated block,
 	// matched or diverged, so a caller can log and record metrics per block.
 	OnBlockCheck func(tip Tip, diff Diff)
 	// OnBlockCheckError is called whenever incrementalSession ends with an
-	// error -- a per-block LocalStateQuery failure (the failure class this
-	// exists for: previously such errors reached only a log line, never any
-	// metric, so the NodeParityCheckErrors alert could not see them at all;
-	// incremental-mode audit finding), a dial
-	// failure, or any other reason the session dropped -- right before
-	// RunIncremental logs it and reconnects with backoff. Unlike OnBlockCheck
-	// (one call per successfully-validated block), this is one call per
-	// ended session, so a caller (cmd/node-parity) can record it via the same
-	// check-error metric runWatchCycle already uses for any other Check
-	// failure. Never called for a clean shutdown (ctx cancelled).
+	// error -- a per-block LocalStateQuery failure, a dial failure, or any
+	// other reason the session dropped -- right before RunIncremental logs it
+	// and reconnects with backoff. Without it such a failure reaches only a
+	// log line. Unlike OnBlockCheck (one call per successfully-validated
+	// block), this is one call per ended session, so a caller can count it
+	// like any other Check failure. Never called for a clean shutdown (ctx
+	// cancelled).
 	OnBlockCheckError func(err error)
 }
 
@@ -449,8 +445,8 @@ const blockCheckTimeout = 30 * time.Second
 // DefaultFullCheckTimeout is IncrementalConfig.FullCheckTimeout's default.
 // This bounds one entire full Check -- Dingo's whole-UTxO walk *and* the
 // follow-up cardano-node reference-batch query together, not either phase
-// on its own -- the same combined cost cmd/node-parity/watch.go's full-mode
-// defaultCheckTimeout (20m) bounds. 10 minutes was sized for an earlier
+// on its own -- the same combined cost the full-mode watch's check timeout
+// (20m by default) bounds. 10 minutes was sized for an earlier
 // measurement of Dingo's own walk alone (~5 minutes);
 // live validation later the same day this was raised found Preview's
 // continued growth had pushed that same walk to 9.6-10 minutes by itself,

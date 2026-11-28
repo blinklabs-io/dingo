@@ -363,11 +363,12 @@ type Cache struct {
 	// marker. Keyed by network because the root is resolved per network, so a
 	// claim on one says nothing about another.
 	//
-	// Written only by RecordKoiosSource and PinRecordedSource, which every
-	// caller runs before starting the goroutines that read it (Fetch before
-	// its epoch fetchers, Observer.Start before its run goroutine, Check
-	// before its workers). Claiming on a handle already in concurrent use
-	// would need a lock added here.
+	// Written only by RecordKoiosSource, PinRecordedSource and PinKoiosSource,
+	// which every caller runs before starting the goroutines that read it
+	// (Fetch before its epoch fetchers, Observer.Start before its run
+	// goroutine, Check before its workers, the live parity tests before their
+	// run). Claiming on a handle already in concurrent use would need a lock
+	// added here.
 	claimedSources map[string]string
 }
 
@@ -2658,6 +2659,34 @@ func (c *Cache) PinRecordedSource(network string) error {
 		network, recordedURL, recorded,
 	)
 	return nil
+}
+
+// PinKoiosSource pins baseURL as network's source when the cache is attributed
+// to it, and reports the attributed root either way. A cache attributed to a
+// different root pins nothing.
+//
+// It is for a run that queries baseURL but must not record it, because
+// recording would discard the cache. Comparing and pinning one read is the
+// point: checking with PendingKoiosSourceChange and then pinning with
+// PinRecordedSource reads the source twice, so a re-point between the reads
+// would pin the new root while the run still queries baseURL, and its writes
+// would land under a source its answers never came from.
+func (c *Cache) PinKoiosSource(
+	network, baseURL string,
+) (bool, string, error) {
+	recordedURL, recorded, err := c.GetKoiosSource(network)
+	if err != nil {
+		return false, "", err
+	}
+	attributed := attributedKoiosSource(network, recordedURL, recorded)
+	if attributed != baseURL {
+		return false, attributed, nil
+	}
+	if c.claimedSources == nil {
+		c.claimedSources = make(map[string]string, 1)
+	}
+	c.claimedSources[network] = baseURL
+	return true, attributed, nil
 }
 
 // KoiosSourceChange describes what RecordKoiosSource found and did.

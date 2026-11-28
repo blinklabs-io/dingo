@@ -14,9 +14,9 @@
 
 // Package nodeparity compares Dingo's and a reference cardano-node's ledger
 // state over their node-to-client (NtC) LocalStateQuery interfaces, for
-// cross-node validation. It is the shared logic behind cmd/node-parity;
-// see that command for the on-demand check / polling watch CLI built on
-// top of this package.
+// cross-node validation. The live parity tests in live_parity_test.go run
+// its check, watch and from-genesis comparisons against running nodes with
+// go test.
 package nodeparity
 
 import (
@@ -164,9 +164,9 @@ func Dial(
 	// against an unresponsive peer is interrupted rather than hanging.
 	// Released as soon as the connection closes on its own (the caller's
 	// normal conn.Close()) via the ErrorChan watch below, so a caller
-	// dialing repeatedly against one long-lived ctx (cmd/node-parity's
-	// watch loop, calling Check every cycle against cmd.Context(), which
-	// lives for the whole process) does not accumulate one of these per
+	// dialing repeatedly against one long-lived ctx (the full-mode watch
+	// loop, calling Check every cycle against a ctx that lives for the
+	// whole run) does not accumulate one of these per
 	// past cycle for the life of the process.
 	stop := context.AfterFunc(ctx, func() { conn.Close(context.WithoutCancel(ctx)) }) //nolint:errcheck
 	go func() {

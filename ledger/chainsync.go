@@ -8541,7 +8541,7 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		// would either duplicate an already-imported live UTxO or
 		// resurrect one genuinely spent long ago as live again --
 		// exactly the divergence found via
-		// cmd/node-parity against a real cardano-node. The synthetic
+		// node-parity against a real cardano-node. The synthetic
 		// genesis block CBOR above is still stored unconditionally: other
 		// code depends on it existing structurally (e.g. this function's
 		// own HasGenesisCbor short-circuit above, and the Shelley genesis

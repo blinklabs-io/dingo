@@ -25,12 +25,16 @@ import (
 // TestMain shortens the retry and reconnect waits for every test in the
 // package. They are set before any test starts, so no test races a write.
 // Tests assert on whether and how often a retry happens, never on the delay.
+// A live parity run against real nodes keeps the production waits, so a
+// flapping peer is not hammered with reconnects.
 func TestMain(m *testing.M) {
-	acquireRetryDelay = 10 * time.Millisecond
-	sessionRetryDelay = 20 * time.Millisecond
-	boundaryFollowerRetryDelay = 20 * time.Millisecond
-	watcherMinBackoff = 20 * time.Millisecond
-	watcherMaxBackoff = 500 * time.Millisecond
-	koiosparity.SetRetryBackoff5xxForTesting(time.Millisecond)
+	if os.Getenv(liveEnvDingoAddr) == "" {
+		acquireRetryDelay = 10 * time.Millisecond
+		sessionRetryDelay = 20 * time.Millisecond
+		boundaryFollowerRetryDelay = 20 * time.Millisecond
+		watcherMinBackoff = 20 * time.Millisecond
+		watcherMaxBackoff = 500 * time.Millisecond
+		koiosparity.SetRetryBackoff5xxForTesting(time.Millisecond)
+	}
 	os.Exit(m.Run())
 }

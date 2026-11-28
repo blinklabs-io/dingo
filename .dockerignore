@@ -18,6 +18,5 @@ internal/test/archive-demo/tmp/
 .devnet/
 .validation/
 .tools/
-node-parity
 *.prof
 *.test

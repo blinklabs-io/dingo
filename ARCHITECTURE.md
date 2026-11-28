@@ -524,4 +524,6 @@ Configuration-field precedence and certificate loading are specified in
   operator configuration.
 - [Koios parity](internal/koiosparity/README.md): epoch alignment and the
   validation coverage matrix.
+- [Node parity](internal/nodeparity/README.md): running the live comparison
+  tests against a reference node or Koios.
 - [MCP design](docs/mcp/architecture.md): the MCP adapter's internal structure.
