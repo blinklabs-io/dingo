@@ -100,7 +100,7 @@ func TestRemoteEventsRepublishWithSourceAndSurviveDisconnect(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, remote.Start(context.Background()))
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), eventTestWait)
 		defer cancel()
 		require.NoError(t, remote.Stop(ctx))
 	})
@@ -109,13 +109,13 @@ func TestRemoteEventsRepublishWithSourceAndSurviveDisconnect(t *testing.T) {
 	nodeA.publishChurn("a:1")
 	nodeA.publishChurn("b:1")
 	require.Eventually(t, func() bool { return collected.count() == 2 },
-		5*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 
 	nodeA.srv.CloseClientConnections()
 	nodeA.publishChurn("c:1")
 	nodeA.publishChurn("d:1")
 	require.Eventually(t, func() bool { return collected.count() == 4 },
-		10*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 
 	require.Equal(t,
 		[]string{"a:1", "b:1", "c:1", "d:1"}, collected.addresses(t))
@@ -268,7 +268,7 @@ func startRemote(
 	require.NoError(t, err)
 	require.NoError(t, remote.Start(context.Background()))
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), eventTestWait)
 		defer cancel()
 		require.NoError(t, remote.Stop(ctx))
 	})
@@ -299,17 +299,17 @@ func TestRemoteEventsResumeBufferedEventsAfterSourceRestart(t *testing.T) {
 
 	oldRun.publishChurn("old:1")
 	require.Eventually(t, func() bool { return collected.count() == 1 },
-		5*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 	newRun.publishChurn("new:1")
 	newRun.publishChurn("new:2")
 	require.Eventually(t, func() bool { return eventPosition(newRun.hub) == 2 },
-		5*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 
 	service.use(newRun)
 	oldRun.hub.close()
 	oldRun.srv.CloseClientConnections()
 	require.Eventually(t, func() bool { return collected.count() == 3 },
-		10*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 	require.Equal(t,
 		[]string{"old:1", "new:1", "new:2"},
 		collected.addresses(t),
@@ -334,11 +334,11 @@ func TestRemoteEventsKeepInitialPositionAcrossReconnect(t *testing.T) {
 	source.publishChurn("a:1")
 	source.publishChurn("b:1")
 	require.Eventually(t, func() bool { return eventPosition(source.hub) == 2 },
-		5*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 	gate.blocked.Store(false)
 
 	require.Eventually(t, func() bool { return collected.count() == 2 },
-		10*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 	require.Equal(t, []string{"a:1", "b:1"}, collected.addresses(t))
 }
 
@@ -363,7 +363,7 @@ func TestRemoteEventsCarryRunAcrossOuterRetry(t *testing.T) {
 	case cursor := <-service.resumed:
 		require.Equal(t, "run-1", cursor.runID)
 		require.Equal(t, uint64(1), cursor.sequence)
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventTestWait):
 		t.Fatal("remote source did not retry after the terminal response")
 	}
 }
@@ -387,7 +387,7 @@ func TestRemoteEventsRestartFromHeadWhenPositionIsGone(t *testing.T) {
 	nodeA.publishChurn("a:1")
 	nodeA.publishChurn("b:1")
 	require.Eventually(t, func() bool { return collected.count() == 2 },
-		5*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 
 	gate.blocked.Store(true)
 	nodeA.srv.CloseClientConnections()
@@ -397,7 +397,7 @@ func TestRemoteEventsRestartFromHeadWhenPositionIsGone(t *testing.T) {
 	}
 	require.Eventually(t, func() bool {
 		return eventPosition(nodeA.hub) == 6
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 	gate.blocked.Store(false)
 
 	// Published until one arrives: the subscription may still be
@@ -405,7 +405,7 @@ func TestRemoteEventsRestartFromHeadWhenPositionIsGone(t *testing.T) {
 	require.Eventually(t, func() bool {
 		nodeA.publishChurn("z:1")
 		return collected.has(t, "z:1")
-	}, 10*time.Second, 20*time.Millisecond)
+	}, eventTestWait, 20*time.Millisecond)
 	for _, lost := range []string{"c:1", "d:1", "e:1", "f:1"} {
 		require.False(t, collected.has(t, lost), lost)
 	}
@@ -425,7 +425,7 @@ func TestRemoteEventsKeepRetryingAfterTerminalError(t *testing.T) {
 	})
 	require.Eventually(t, func() bool {
 		return gate.calls.Load() >= 3
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 }
 
 // syncBuffer is a log sink the source goroutines can write while the test
@@ -470,14 +470,14 @@ func TestRemoteEventsLogUnreachableSourceOncePerOutage(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, remote.Start(context.Background()))
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), eventTestWait)
 		defer cancel()
 		require.NoError(t, remote.Stop(ctx))
 	})
 
 	require.Eventually(t, func() bool {
 		return gate.calls.Load() >= 3
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 	require.Equal(t, 1, logs.count("remote event source unreachable"))
 
 	gate.blocked.Store(false)
@@ -485,7 +485,7 @@ func TestRemoteEventsLogUnreachableSourceOncePerOutage(t *testing.T) {
 	require.Eventually(t, func() bool {
 		nodeA.publishChurn("a:1")
 		return logs.count("remote event source reachable again") == 1
-	}, 5*time.Second, 20*time.Millisecond)
+	}, eventTestWait, 20*time.Millisecond)
 	require.Equal(t, 1, logs.count("remote event source unreachable"))
 }
 
@@ -513,7 +513,7 @@ func TestRemoteEventsRefuseOversizedMessage(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, remote.Start(context.Background()))
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), eventTestWait)
 		defer cancel()
 		require.NoError(t, remote.Stop(ctx))
 	})
@@ -522,7 +522,7 @@ func TestRemoteEventsRefuseOversizedMessage(t *testing.T) {
 	nodeA.publishChurn(strings.Repeat("a", maxMessage+1))
 	require.Eventually(t, func() bool {
 		return logs.count("remote event source stream refused") == 1
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 	require.Zero(t, got.count())
 }
 

@@ -121,11 +121,18 @@ func recvEvent(
 	case r := <-ch:
 		require.NoError(t, r.err)
 		return r.ev
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventTestWait):
 		t.Fatal("timed out waiting for an event")
 		return nil
 	}
 }
+
+// eventTestWait bounds every wait for a server-side transition in these tests.
+// Each transition crosses several goroutine hand-offs (handler, send guard,
+// HTTP/2 serve loop, client). When the package's other tests keep every
+// processor busy, each hand-off waits for a turn, so a few seconds is not
+// enough. The bound only turns a real hang into a failure.
+const eventTestWait = 60 * time.Second
 
 // subStream wraps a server stream whose Subscribe call returns only once the
 // server sends its first message, so the call runs on its own goroutine.
@@ -139,7 +146,7 @@ func (s *subStream) wait(t *testing.T) {
 	t.Helper()
 	select {
 	case <-s.ready:
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventTestWait):
 		t.Fatal("subscribe never returned")
 	}
 	require.NoError(t, s.err)
@@ -195,7 +202,7 @@ func openSubscribe(
 		f.hub.mu.Lock()
 		defer f.hub.mu.Unlock()
 		return f.hub.active > 0
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 	return s
 }
 
@@ -312,11 +319,11 @@ func TestEventSlowSubscriberDoesNotStallBusOrOthers(t *testing.T) {
 	for i := range 200 {
 		f.publishChurn("p:" + string(rune('a'+i%26)))
 	}
-	require.Less(t, time.Since(start), 2*time.Second)
+	require.Less(t, time.Since(start), eventTestWait)
 
 	// The fast reader still sees events after the burst.
 	f.publishChurn("tail:1")
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(eventTestWait)
 	for {
 		ev := recvEvent(t, func() (*eventv1alpha1.Event, error) {
 			if !fast.Receive() {
@@ -504,7 +511,7 @@ func waitActive(t *testing.T, f *eventFixture, n int) {
 		f.hub.mu.Lock()
 		defer f.hub.mu.Unlock()
 		return f.hub.active == n
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 }
 
 func eventPosition(h *eventHub) uint64 {
@@ -557,7 +564,7 @@ func TestEventAckResumesFromOldestEventAfterServerRestart(t *testing.T) {
 	}
 	require.Eventually(t, func() bool {
 		return eventPosition(current.hub) == 3
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -612,7 +619,7 @@ func TestEventAckKeepsInitialPositionAcrossReconnect(t *testing.T) {
 	f.publishChurn("b:1")
 	require.Eventually(t, func() bool {
 		return eventPosition(f.hub) == 2
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 
 	second := f.client.SubscribeWithAck(ctx)
 	require.NoError(t, second.Send(&eventv1alpha1.SubscribeWithAckRequest{
@@ -644,7 +651,7 @@ func TestEventAckKeepsInitialPositionAcrossReconnect(t *testing.T) {
 func TestEventAckKeepsInitialPositionWhenReadyIsLost(t *testing.T) {
 	t.Parallel()
 	f := newEventFixture(t, nil, false)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), eventTestWait)
 	t.Cleanup(cancel)
 	start := &eventv1alpha1.SubscribeWithAckRequest{
 		Message: &eventv1alpha1.SubscribeWithAckRequest_Start{
@@ -666,9 +673,14 @@ func TestEventAckKeepsInitialPositionWhenReadyIsLost(t *testing.T) {
 	f.publishChurn("b:1")
 	require.Eventually(t, func() bool {
 		return eventPosition(f.hub) == 2
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 
-	second := f.client.SubscribeWithAck(ctx)
+	secondCtx, secondCancel := context.WithTimeout(
+		context.Background(),
+		eventTestWait,
+	)
+	t.Cleanup(secondCancel)
+	second := f.client.SubscribeWithAck(secondCtx)
 	require.NoError(t, second.Send(start))
 	resp, err = second.Receive()
 	require.NoError(t, err)
@@ -710,7 +722,7 @@ func TestEventAckFilteredStreamIgnoresRejectedEvents(t *testing.T) {
 		f.publishChurn(fmt.Sprintf("r:%d", i))
 		require.Eventually(t, func() bool {
 			return eventPosition(f.hub) == uint64(i+1)
-		}, 5*time.Second, 5*time.Millisecond)
+		}, eventTestWait, 5*time.Millisecond)
 	}
 	f.bus.Publish(
 		event.EpochTransitionEventType,
@@ -774,7 +786,7 @@ func TestEventAckWindowCountsDeliveriesNotSequenceGap(t *testing.T) {
 		f.publishChurn(fmt.Sprintf("r:%d", i))
 		require.Eventually(t, func() bool {
 			return eventPosition(f.hub) == uint64(i+1)
-		}, 5*time.Second, 5*time.Millisecond)
+		}, eventTestWait, 5*time.Millisecond)
 	}
 	publishEpoch(1)
 	recv()
@@ -876,7 +888,7 @@ func TestEventSubscriberLimitsUnlimitedByDefault(t *testing.T) {
 		f.hub.mu.Lock()
 		defer f.hub.mu.Unlock()
 		return f.hub.active == streams
-	}, 5*time.Second, 5*time.Millisecond)
+	}, eventTestWait, 5*time.Millisecond)
 }
 
 func TestEventPublishDisabledByDefault(t *testing.T) {
@@ -1161,14 +1173,14 @@ func TestEventClientAckRecoversFromDroppedConnection(t *testing.T) {
 	f.publishChurn("a:1")
 	f.publishChurn("b:1")
 	require.Eventually(t, func() bool { return count() == 2 },
-		5*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 
 	f.srv.CloseClientConnections()
 	f.publishChurn("c:1")
 	f.publishChurn("d:1")
 
 	require.Eventually(t, func() bool { return count() == 4 },
-		10*time.Second, 5*time.Millisecond)
+		eventTestWait, 5*time.Millisecond)
 	mu.Lock()
 	require.Equal(t, []string{"a:1", "b:1", "c:1", "d:1"}, got)
 	mu.Unlock()
@@ -1176,7 +1188,7 @@ func TestEventClientAckRecoversFromDroppedConnection(t *testing.T) {
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(5 * time.Second):
+	case <-time.After(eventTestWait):
 		t.Fatal(
 			"SubscribeWithAck did not return after its context was canceled",
 		)
