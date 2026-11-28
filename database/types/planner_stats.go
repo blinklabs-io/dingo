@@ -34,9 +34,6 @@ type PlannerStatsResult struct {
 	// Supported is false when the backend has no incremental statistics
 	// maintenance; nothing was run.
 	Supported bool
-	// Skipped is true when a supported backend declined to run, for example
-	// during a bulk load.
-	Skipped bool
 	// Changed is true when the stored statistics differ after the run.
 	Changed bool
 	// Stat1Rows is the number of rows in sqlite_stat1 after the run.

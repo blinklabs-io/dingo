@@ -18,7 +18,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"runtime"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -28,30 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
-
-// TestSQLiteBulkModeTunesAndRestoresConnectionPragmas guards the bulk-only
-// sorter limit and keeps the writer's automatic checkpoint disabled.
-func TestSQLiteBulkModeTunesAndRestoresConnectionPragmas(t *testing.T) {
-	t.Parallel()
-	db, err := sql.Open("sqlite", "file::memory:?cache=shared")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	db.SetMaxOpenConns(1)
-
-	dialect := SQLiteDialect()
-	ctx := context.Background()
-	require.NoError(t, dialect.SetBulkMode(ctx, db))
-	var workerThreads int
-	require.NoError(t, db.QueryRow("PRAGMA threads").Scan(&workerThreads))
-	require.Equal(t, min(4, max(0, runtime.GOMAXPROCS(0)-1)), workerThreads)
-	require.NoError(t, dialect.RestoreNormalMode(ctx, db))
-
-	var pages int
-	require.NoError(t, db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&pages))
-	require.Zero(t, pages)
-	require.NoError(t, db.QueryRow("PRAGMA threads").Scan(&workerThreads))
-	require.Equal(t, 4, workerThreads)
-}
 
 func TestPostgresRebind(t *testing.T) {
 	t.Parallel()

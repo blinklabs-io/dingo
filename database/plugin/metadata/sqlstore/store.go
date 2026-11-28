@@ -101,14 +101,12 @@ type Config struct {
 	// unset (or CheckpointInterval <= 0), this ticker never starts -- the
 	// same convention Maintenance/MaintenanceInterval already use.
 	Checkpoint func(context.Context) error
-	// BulkCheckpoint, when set, runs on the Checkpoint ticker in place of
-	// Checkpoint while bulk-load pragmas are active, which suppress
-	// Checkpoint, and on the same cadence while Start runs migrations, before
-	// the Checkpoint ticker starts. It must not take the writer lock: the
-	// import or migration keeps committing on the write connection
+	// BulkCheckpoint, when set, runs on the Checkpoint cadence while Start
+	// runs migrations, before the Checkpoint ticker starts. It must not take
+	// the writer lock: the migration keeps committing on the write connection
 	// throughout. SQLite uses it for a PASSIVE checkpoint, because its write
-	// connection never checkpoints at commit and an import or upgrade would
-	// otherwise leave its whole write set in the WAL.
+	// connection never checkpoints at commit and an upgrade would otherwise
+	// leave its whole write set in the WAL.
 	BulkCheckpoint     func(context.Context) error
 	CheckpointInterval time.Duration
 	// SyncCommits is an optional provider-owned hook that makes every commit
@@ -294,25 +292,8 @@ type Store struct {
 	ready            atomic.Bool
 	closed           atomic.Bool
 	startMu          sync.Mutex
-	bulkMu           sync.RWMutex
-	bulkConnMu       sync.Mutex
-	bulkConn         *sql.Conn
-	// scheduledWorkMu keeps a scheduled checkpoint from crossing the bulk-mode
-	// transition. bulkMode and bulkRestorePending are protected by it. A Mithril
-	// import can keep bulk mode active for hours; a writer-blocking checkpoint
-	// during that interval adds lock traffic without improving recovery,
-	// because the import is explicitly incomplete until its final ready-state
-	// transaction commits. Only bulkCheckpoint, which must not block the
-	// writer, runs then.
-	scheduledWorkMu    sync.Mutex
-	bulkMode           bool
-	bulkRestorePending bool
-	// plannerStatsMu is held for a whole planner-statistics pass, and bulk-mode
-	// transitions take it before scheduledWorkMu, so a pass never crosses a
-	// transition. A pass takes scheduledWorkMu only to read bulkMode: on a
-	// large store a pass runs for minutes, and holding scheduledWorkMu that
-	// long would keep every WAL checkpoint waiting, letting the WAL grow
-	// without bound.
+	// plannerStatsMu is held for a whole planner-statistics pass, so two
+	// passes never run at once.
 	plannerStatsMu sync.Mutex
 
 	closeOnce sync.Once
@@ -694,21 +675,19 @@ func (s *Store) transaction(
 		}
 	}
 	var (
-		tx      *sql.Tx
-		release func()
-		err     error
+		tx  *sql.Tx
+		err error
 	)
 	if readOnly {
 		tx, err = s.readDB.BeginTx(ctx, s.dialect.BeginOptions(true))
 	} else {
-		tx, release, err = s.beginWriteTx(ctx)
+		tx, err = s.beginWriteTx(ctx)
 	}
 	return &sqlTxn{
 		owner:    s,
 		tx:       tx,
 		ctx:      ctx,
 		readOnly: readOnly,
-		release:  release,
 		beginErr: err,
 	}
 }
@@ -744,12 +723,6 @@ func (s *Store) CloseContext(ctx context.Context) error {
 		// result, closing its own statement instead of caching it -- see
 		// prepared_stmt.go.
 		s.closePreparedStatements()
-		if s.bulkConn != nil {
-			// Restore session variables before releasing the dedicated
-			// connection; this is especially important for pooled PostgreSQL
-			// sessions where session_replication_role is connection-scoped.
-			_ = s.restoreNormalPragmas(ctx)
-		}
 		// Cancel every ticker up front, before waiting on any. Cancelling
 		// stops each ticker's select loop from admitting a new tick, but it
 		// does not interrupt a tick already in flight when its callback is
@@ -856,7 +829,7 @@ const postponeWarnEvery = 10
 
 // waitForTick blocks until a periodic job is due and the shared pool is
 // quiet, and returns false once ctx ends. Any checked-out connection delays
-// the job, including read and bulk-load connections on shared pools.
+// the job, including read connections on shared pools.
 func (s *Store) waitForTick(
 	ctx context.Context,
 	job string,
@@ -993,7 +966,7 @@ func (s *Store) startCheckpointTicker() {
 					return
 				}
 				started := time.Now()
-				err := s.runCheckpoint(ctx)
+				err := s.checkpoint(ctx)
 				s.checkpointState.CompareAndSwap(1, 0)
 				if err != nil {
 					if ctx.Err() == nil {
@@ -1064,25 +1037,6 @@ func (s *Store) SyncCommits(ctx context.Context) error {
 		return nil
 	}
 	return s.syncCommits(ctx)
-}
-
-func (s *Store) runCheckpoint(ctx context.Context) error {
-	s.scheduledWorkMu.Lock()
-	defer s.scheduledWorkMu.Unlock()
-	if s.bulkMode {
-		if !s.bulkRestorePending {
-			if s.bulkCheckpoint == nil {
-				return nil
-			}
-			return s.bulkCheckpoint(ctx)
-		}
-		if err := s.restoreNormalPragmas(ctx); err != nil {
-			return fmt.Errorf("restoring normal pragmas: %w", err)
-		}
-		s.bulkMode = false
-		s.bulkRestorePending = false
-	}
-	return s.checkpoint(ctx)
 }
 
 func (s *Store) closeCheckpointAdmission() {
@@ -1205,15 +1159,14 @@ func (s *Store) withWriteTransactionContext(
 		//nolint:contextcheck // txnCtx is the caller transaction's own context
 		return fn(db, txnCtx)
 	}
-	sqlTransaction, release, err := s.beginWriteTx(ctx)
+	sqlTransaction, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
 	sqlTxnState := &sqlTxn{
-		owner:   s,
-		tx:      sqlTransaction,
-		ctx:     ctx,
-		release: release,
+		owner: s,
+		tx:    sqlTransaction,
+		ctx:   ctx,
 	}
 	fnErr := fn(s.instrumentedQueryer(sqlTransaction), ctx)
 	if fnErr != nil {
@@ -1222,25 +1175,8 @@ func (s *Store) withWriteTransactionContext(
 	return sqlTxnState.Commit()
 }
 
-func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, func(), error) {
-	s.bulkMu.RLock()
-	conn := s.bulkConn
-	if conn != nil {
-		s.bulkConnMu.Lock()
-		tx, err := conn.BeginTx(ctx, s.dialect.BeginOptions(false))
-		if err != nil {
-			s.bulkConnMu.Unlock()
-			s.bulkMu.RUnlock()
-			return nil, nil, err
-		}
-		return tx, func() {
-			s.bulkConnMu.Unlock()
-			s.bulkMu.RUnlock()
-		}, nil
-	}
-	tx, err := s.writeDB.BeginTx(ctx, s.dialect.BeginOptions(false))
-	s.bulkMu.RUnlock()
-	return tx, nil, err
+func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, error) {
+	return s.writeDB.BeginTx(ctx, s.dialect.BeginOptions(false))
 }
 
 // ReserveRead takes one read-pool connection without beginning a
@@ -1527,84 +1463,6 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 	return nil
 }
 
-// SetBulkLoadPragmas enables backend-specific session tuning.
-func (s *Store) SetBulkLoadPragmas() error {
-	// Take these gates before startMu. CloseContext needs startMu to cancel an
-	// in-flight checkpoint, which lets that callback release this gate instead
-	// of deadlocking a concurrent bulk-mode transition.
-	s.plannerStatsMu.Lock()
-	defer s.plannerStatsMu.Unlock()
-	s.scheduledWorkMu.Lock()
-	defer s.scheduledWorkMu.Unlock()
-	s.startMu.Lock()
-	defer s.startMu.Unlock()
-	if s.closed.Load() {
-		return errors.New("sqlstore: store is closed")
-	}
-	s.bulkMu.Lock()
-	defer s.bulkMu.Unlock()
-	if s.bulkConn != nil {
-		s.bulkMode = true
-		s.bulkRestorePending = false
-		return nil
-	}
-	if s.dialect.Name() == "sqlite" {
-		if err := s.dialect.SetBulkMode(context.Background(), s.writeDB); err != nil {
-			return err
-		}
-		s.bulkMode = true
-		s.bulkRestorePending = false
-		return nil
-	}
-	conn, err := s.writeDB.Conn(context.Background())
-	if err != nil {
-		return err
-	}
-	if err := s.dialect.SetBulkMode(context.Background(), conn); err != nil {
-		// A backend may apply some session settings before a later setup
-		// statement fails. Restore before releasing the connection so a
-		// pooled session cannot leak partial bulk-load state.
-		restoreErr := s.dialect.RestoreNormalMode(context.Background(), conn)
-		closeErr := conn.Close()
-		return errors.Join(err, restoreErr, closeErr)
-	}
-	s.bulkConn = conn
-	s.bulkMode = true
-	s.bulkRestorePending = false
-	return nil
-}
-
-// RestoreNormalPragmas restores safe backend defaults.
-func (s *Store) RestoreNormalPragmas() error {
-	s.plannerStatsMu.Lock()
-	defer s.plannerStatsMu.Unlock()
-	s.scheduledWorkMu.Lock()
-	defer s.scheduledWorkMu.Unlock()
-	s.startMu.Lock()
-	defer s.startMu.Unlock()
-	err := s.restoreNormalPragmas(context.Background())
-	if err == nil {
-		s.bulkMode = false
-		s.bulkRestorePending = false
-	} else {
-		s.bulkRestorePending = true
-	}
-	return err
-}
-
-func (s *Store) restoreNormalPragmas(ctx context.Context) error {
-	s.bulkMu.Lock()
-	defer s.bulkMu.Unlock()
-	if s.bulkConn == nil {
-		return s.dialect.RestoreNormalMode(ctx, s.writeDB)
-	}
-	conn := s.bulkConn
-	restoreErr := s.dialect.RestoreNormalMode(ctx, conn)
-	closeErr := conn.Close()
-	s.bulkConn = nil
-	return errors.Join(restoreErr, closeErr)
-}
-
 // UpdatePlannerStats refreshes backend planner statistics.
 func (s *Store) UpdatePlannerStats() error {
 	return s.UpdatePlannerStatsContext(context.Background())
@@ -1612,14 +1470,7 @@ func (s *Store) UpdatePlannerStats() error {
 
 // UpdatePlannerStatsContext refreshes backend planner statistics until canceled.
 func (s *Store) UpdatePlannerStatsContext(ctx context.Context) error {
-	s.bulkMu.RLock()
-	defer s.bulkMu.RUnlock()
-	if s.bulkConn == nil {
-		return s.dialect.UpdatePlannerStats(ctx, s.writeDB)
-	}
-	s.bulkConnMu.Lock()
-	defer s.bulkConnMu.Unlock()
-	return s.dialect.UpdatePlannerStats(ctx, s.bulkConn)
+	return s.dialect.UpdatePlannerStats(ctx, s.writeDB)
 }
 
 func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {

@@ -22,7 +22,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/prometheus/client_golang/prometheus"
@@ -394,22 +393,6 @@ func TestPreparedStatementReplansAfterOptimizeOnSameConnection(t *testing.T) {
 	require.Equal(t, int64(2), run(), "prepared statement must re-plan")
 }
 
-func TestOptimizePlannerStatsSkipsDuringBulkLoad(t *testing.T) {
-	t.Parallel()
-	store := newFilePlannerStatsStore(t, nil)
-	seedStakeRefLookupUtxos(t, store, 300, 16)
-	require.NoError(t, store.SetBulkLoadPragmas())
-	result, err := store.OptimizePlannerStatsContext(
-		context.Background(), PlannerStatsTriggerEpoch,
-	)
-	require.NoError(t, err)
-	require.True(t, result.Skipped)
-	require.False(t, result.Changed)
-	_, exists := stat1Rows(t, store.writeDB)
-	require.False(t, exists)
-	require.NoError(t, store.RestoreNormalPragmas())
-}
-
 func TestOptimizePlannerStatsMetrics(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
@@ -559,31 +542,24 @@ func TestRetiringCacheKeepsBorrowedStatementOpen(t *testing.T) {
 }
 
 // A backend without incremental statistics must take the unsupported path
-// without issuing any statement, including the SQLite-only fingerprint and
-// during a bulk load. The closed handle fails any statement that is issued.
+// without issuing any statement, including the SQLite-only fingerprint. The
+// closed handle fails any statement that is issued.
 func TestOptimizePlannerStatsUnsupportedDialectIssuesNoStatement(t *testing.T) {
 	t.Parallel()
-	for _, bulk := range []bool{false, true} {
-		t.Run(fmt.Sprintf("bulk=%v", bulk), func(t *testing.T) {
-			t.Parallel()
-			db, err := sql.Open("sqlite", ":memory:")
-			require.NoError(t, err)
-			require.NoError(t, db.Close())
-			store := &Store{
-				dialect:  PostgresDialect(),
-				writeDB:  db,
-				readDB:   db,
-				bulkMode: bulk,
-			}
-			store.ready.Store(true)
-			result, err := store.OptimizePlannerStatsContext(
-				context.Background(), PlannerStatsTriggerEpoch,
-			)
-			require.NoError(t, err)
-			require.False(t, result.Supported)
-			require.False(t, result.Skipped)
-		})
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	store := &Store{
+		dialect: PostgresDialect(),
+		writeDB: db,
+		readDB:  db,
 	}
+	store.ready.Store(true)
+	result, err := store.OptimizePlannerStatsContext(
+		context.Background(), PlannerStatsTriggerEpoch,
+	)
+	require.NoError(t, err)
+	require.False(t, result.Supported)
 }
 
 // Every trigger and result series exists from the start, so a scrape before
@@ -679,7 +655,6 @@ SELECT tx_id, output_idx + ?, staking_key, credential_tag,
 	)
 	require.NoError(t, err)
 	require.True(t, result.Supported)
-	require.False(t, result.Skipped)
 	require.True(t, result.Changed, "the optimizer must re-analyze utxo")
 	resumed := poolPlans(t, store.writeDB, 1)[0]
 
@@ -687,43 +662,4 @@ SELECT tx_id, output_idx + ?, staking_key, credential_tag,
 	full := poolPlans(t, store.writeDB, 1)[0]
 	require.Contains(t, full, "idx_utxo_tx_id_output_idx")
 	require.Equal(t, full, resumed)
-}
-
-// TestCheckpointRunsDuringPlannerStatsPass holds a planner-statistics pass
-// open. On a large store a pass runs for minutes, so a WAL checkpoint must not
-// wait for it, or the WAL grows for as long as passes keep running. A bulk-mode
-// transition still waits for the pass, which must never cross one.
-func TestCheckpointRunsDuringPlannerStatsPass(t *testing.T) {
-	t.Parallel()
-	store := newFilePlannerStatsStore(t, nil)
-	var checkpoints atomic.Int64
-	store.checkpoint = func(context.Context) error {
-		checkpoints.Add(1)
-		return nil
-	}
-
-	bulk, unlock := store.lockPlannerStatsPass()
-	require.False(t, bulk)
-	checkpointed := make(chan error, 1)
-	go func() { checkpointed <- store.runCheckpoint(t.Context()) }()
-	select {
-	case err := <-checkpointed:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		unlock()
-		t.Fatal("a WAL checkpoint waited for the planner-statistics pass")
-	}
-	require.Equal(t, int64(1), checkpoints.Load())
-
-	transitioned := make(chan error, 1)
-	go func() { transitioned <- store.SetBulkLoadPragmas() }()
-	select {
-	case <-transitioned:
-		unlock()
-		t.Fatal("bulk mode started during a planner-statistics pass")
-	case <-time.After(50 * time.Millisecond):
-	}
-	unlock()
-	require.NoError(t, <-transitioned)
-	require.NoError(t, store.RestoreNormalPragmas())
 }

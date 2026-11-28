@@ -293,8 +293,7 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 // wal_autocheckpoint(0) keeps SQLite from running an automatic checkpoint
 // inside COMMIT on the write connection, where the copy of WAL frames into the
 // database file and its fsync would stall the single writer. checkpointWAL
-// drains the WAL from its own connection instead. Bulk and restore pragmas in
-// sqlstore.SQLiteDialect keep this value.
+// drains the WAL from its own connection instead.
 //
 // temp_store(MEMORY) keeps SQLite's statement journals off disk. A multi-row
 // INSERT ... RETURNING inside a write transaction saves every page it
@@ -399,7 +398,8 @@ func checkpointWAL(
 
 // passiveCheckpointWAL returns the Store.BulkCheckpoint callback: a PASSIVE
 // checkpoint on its own connection, which never takes the writer lock, so the
-// WAL is still backfilled while bulk mode suspends checkpointWAL.
+// WAL is still backfilled while startup migrations commit, before the
+// checkpointWAL ticker starts.
 func passiveCheckpointWAL(
 	databaseURI string,
 	logger *slog.Logger,
