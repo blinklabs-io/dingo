@@ -2062,8 +2062,11 @@ func TestMempool_TTL_ExpiredTransactionsRemoved(t *testing.T) {
 		"current size should be 0",
 	)
 	m.RUnlock()
-	assert.Equal(
-		t, float64(3), testutil.ToFloat64(m.metrics.txsExpired),
+	// The cleanup goroutine increments the counter after it releases the
+	// mempool lock, so the counter can trail the emptied transaction list.
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(m.metrics.txsExpired) == 3
+	}, 2*time.Second, 10*time.Millisecond,
 		"expired counter should be 3",
 	)
 }
